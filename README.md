@@ -19,74 +19,6 @@ A comprehensive Go-based diagnostic tool for ClickHouse databases that collects 
 - Access to a ClickHouse server
 - Read access to ClickHouse configuration directory (optional)
 
-### Build from Source
-
-```bash
-git clone <repository-url>
-cd clickhouse-diagnostic
-go mod download
-go build -o clickhouse-diagnostic .
-```
-
-### Using Make (Recommended)
-
-```bash
-git clone <repository-url>
-cd clickhouse-diagnostic
-make deps    # Download dependencies
-make build   # Build the application
-make run     # Build and run
-```
-
-### Quick Setup
-
-1. **Clone and build**:
-   ```bash
-   git clone <repository-url>
-   cd clickhouse-diagnostic
-   make build
-   ```
-
-2. **Set up queries**:
-   ```bash
-   cp -r example-queries queries
-   ```
-
-3. **Run the tool**:
-   ```bash
-   ./bin/clickhouse-diagnostic
-   ```
-
-## Directory Structure
-
-```
-clickhouse-diagnostic/
-├── main.go              # Main application and CLI handling
-├── types.go             # Data structures and types
-├── version.go           # Version parsing and comparison
-├── clickhouse.go        # ClickHouse server communication
-├── query.go             # Query file management and filtering
-├── config.go            # Configuration file collection and sanitization
-├── archive.go           # Archive creation functionality
-├── go.mod               # Go module dependencies
-├── Makefile             # Build automation
-├── .gitignore           # Git ignore rules
-└── README.md            # This file
-
-example-queries/         # Example query files (copy to queries/ directory)
-├── basic_info.sql       # Root level queries (always executed)
-├── system_tables.sql    # Database and table information
-├── 21.8.0.0/           # Version-specific queries (ClickHouse 21.8+)
-│   └── async_metrics.sql
-└── 22.8.0.0/           # Newer version queries (ClickHouse 22.8+)
-    └── query_cache.sql
-
-queries/                 # Your actual query files directory (copy from example-queries/)
-configuration/           # Generated configuration backup (created during execution)
-clickhouse_results/      # Generated results directory (created during execution)
-bin/                     # Build output directory (created by make)
-```
-
 ## Usage
 
 ### Basic Usage
@@ -131,8 +63,6 @@ Options:
         Skip collecting configuration files
   -skip-archive
         Skip creating archive of results and configuration
-  -archive-name string
-        Name for the archive file (default: clickhouse_backup_TIMESTAMP.tar.gz)
 ```
 
 ### Example Usage
@@ -162,24 +92,11 @@ SELECT
     formatReadableSize(total_memory_usage) as memory_usage,
     formatReadableSize(total_bytes) as disk_usage
 FROM system.metrics
-CROSS JOIN (SELECT sum(bytes_on_disk) as total_bytes FROM system.parts);
 ```
 
 ### Version-Specific Queries
 
 Create subdirectories named with ClickHouse version numbers (format: `MAJOR.MINOR.PATCH.BUILD`) for version-specific queries.
-
-Example structure:
-```
-queries/
-├── basic_info.sql           # Always executed
-├── 21.8.0.0/
-│   └── async_metrics.sql    # Executed only if server version >= 21.8.0.0
-├── 22.3.0.0/
-│   └── new_features.sql     # Executed only if server version >= 22.3.0.0
-└── 23.1.0.0/
-    └── latest_checks.sql    # Executed only if server version >= 23.1.0.0
-```
 
 ### Query Priority System
 
@@ -298,24 +215,3 @@ The tool handles various error conditions gracefully:
 - Ensure read access to configuration directories
 - Check write permissions for output directory
 
-### Debug Mode
-
-For detailed troubleshooting, you can modify the source code to add debug logging or run with verbose error reporting.
-
-## Contributing
-
-When contributing to this project:
-
-1. Maintain the modular file structure
-2. Add appropriate error handling
-3. Follow Go naming conventions
-4. Update this README for new features
-5. Test with different ClickHouse versions
-
-## License
-
-[Add your license information here]
-
-## Support
-
-[Add support contact information or issue reporting instructions here]
