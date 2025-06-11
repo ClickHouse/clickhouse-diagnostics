@@ -1,6 +1,6 @@
 # ClickHouse Diagnostic Tool
 
-A comprehensive Go-based diagnostic tool for ClickHouse databases that collects system information, executes diagnostic queries, and packages everything into a convenient archive for analysis.
+A simplified Go-based diagnostic tool for ClickHouse databases that collects system information, executes diagnostic queries, and packages everything into a convenient archive for analysis.
 
 ## Features
 
