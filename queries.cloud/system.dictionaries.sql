@@ -1,0 +1,24 @@
+SELECT 
+  database,
+  name,
+  uuid,
+  status,
+  origin,
+  type,
+  bytes_allocated,
+  query_count,
+  hit_rate,
+  found_rate,
+  element_count,
+  load_factor,
+  source,
+  lifetime_min,
+  lifetime_max,
+  loading_start_time,
+  last_successful_update_time,
+  --error_count,
+  loading_duration,
+  last_exception,
+  comment
+FROM clusterAllReplicas(default, system.dictionaries)
+FORMAT Native

@@ -22,20 +22,21 @@ func NewManager() *Manager {
 }
 
 // ExecuteQueries finds, selects, and executes queries for the given ClickHouse instance
-func (m *Manager) ExecuteQueries(client *pkg.ClickHouseClient, queriesDir string, serverVersion internal.Version, outputDir string) error {
+// Returns the path to the specific folder where results were saved
+func (m *Manager) ExecuteQueries(client *pkg.ClickHouseClient, queriesDir string, serverVersion internal.Version, outputDir string) (string, error) {
 	// Validate query directory
 	if err := m.finder.ValidateQueryDirectory(queriesDir); err != nil {
-		return fmt.Errorf("query directory validation failed: %w", err)
+		return "", fmt.Errorf("query directory validation failed: %w", err)
 	}
 
 	// Find all compatible queries
 	allQueries, err := m.finder.FindCompatibleQueries(queriesDir, serverVersion)
 	if err != nil {
-		return fmt.Errorf("error finding query files: %w", err)
+		return "", fmt.Errorf("error finding query files: %w", err)
 	}
 
 	if len(allQueries) == 0 {
-		return fmt.Errorf("no suitable query files found in '%s' or its subdirectories", queriesDir)
+		return "", fmt.Errorf("no suitable query files found in '%s' or its subdirectories", queriesDir)
 	}
 
 	// Select highest priority queries
@@ -43,13 +44,14 @@ func (m *Manager) ExecuteQueries(client *pkg.ClickHouseClient, queriesDir string
 
 	fmt.Printf("Found %d unique query files to execute\n", len(selectedQueries))
 
-	// Execute the selected queries
+	// Execute the selected queries and get the specific output directory
 	executor := NewExecutor(client)
-	if err := executor.ExecuteQueries(selectedQueries, outputDir); err != nil {
-		return fmt.Errorf("error executing queries: %w", err)
+	finalOutputDir, err := executor.ExecuteQueries(selectedQueries, outputDir)
+	if err != nil {
+		return "", fmt.Errorf("error executing queries: %w", err)
 	}
 
-	return nil
+	return finalOutputDir, nil
 }
 
 // GetQuerySummary returns a summary of available queries

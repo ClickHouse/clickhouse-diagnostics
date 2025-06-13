@@ -5,7 +5,7 @@ SELECT
   command,
   create_time,
   parts_to_do_names,
-  parts_to_do
-  --is_killed
-FROM system.mutations
+  parts_to_do,
+  is_killed
+FROM clusterAllReplicas(default, system.mutations)
 FORMAT Native

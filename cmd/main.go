@@ -5,9 +5,9 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
-	"time"
 
 	"clickhouse-diagnostic/internal"
 	"clickhouse-diagnostic/internal/config"
@@ -25,7 +25,7 @@ func main() {
 	userFlag := flag.String("user", "", "Username")
 	passwordFlag := flag.String("password", "", "Password (not recommended for security reasons)")
 	protocolFlag := flag.String("protocol", "", "Protocol (http or https)")
-	queriesDirFlag := flag.String("queries-dir", "./queries", "Directory containing query files")
+	modeFlag := flag.String("mode", "onprem", "Query mode (cloud, onprem, gouv)")
 	outputDirFlag := flag.String("output-dir", "./clickhouse_results", "Directory for results output")
 	configDirFlag := flag.String("config-dir", "", "ClickHouse config directory to collect (default: /etc/clickhouse-server/config.d/)")
 	skipConfigFlag := flag.Bool("skip-config", false, "Skip collecting configuration files")
@@ -41,7 +41,7 @@ func main() {
 		username    = *userFlag
 		password    = *passwordFlag
 		protocol    = *protocolFlag
-		queriesDir  = *queriesDirFlag
+		mode        = *modeFlag
 		outputDir   = *outputDirFlag
 		configDir   = *configDirFlag
 		skipConfig  = *skipConfigFlag
@@ -49,10 +49,13 @@ func main() {
 	)
 
 	// Get user input for missing parameters
-	if err := getUserInput(&protocol, &host, &port, &username, &password, &configDir, skipConfig); err != nil {
+	if err := getUserInput(&protocol, &host, &port, &username, &password, &mode, &configDir, skipConfig); err != nil {
 		fmt.Printf("Error getting user input: %v\n", err)
 		return
 	}
+
+	// Map mode to queries directory
+	queriesDir := getQueriesDir(mode)
 
 	// Create the output folder if it doesn't exist
 	if err := os.MkdirAll(outputDir, 0755); err != nil {
@@ -71,6 +74,7 @@ func main() {
 	if username != "" {
 		fmt.Printf("Using authentication with user: %s\n", username)
 	}
+	fmt.Printf("Using query mode: %s (queries from: %s)\n", mode, queriesDir)
 
 	// Collect configuration files if not skipped
 	if !skipConfig {
@@ -100,23 +104,24 @@ func main() {
 	fmt.Printf("ClickHouse server version: %d.%d.%d.%d\n",
 		serverVersion.Major, serverVersion.Minor, serverVersion.Patch, serverVersion.Build)
 
-	// Find and execute queries
+	// Find and execute queries - get the specific folder path
 	queryManager := query.NewManager()
-	if err := queryManager.ExecuteQueries(client, queriesDir, serverVersion, outputDir); err != nil {
+	finalOutputDir, err := queryManager.ExecuteQueries(client, queriesDir, serverVersion, outputDir)
+	if err != nil {
 		fmt.Printf("Error executing queries: %v\n", err)
 		return
 	}
 
-	// Create archive if not skipped
+	// Create archive if not skipped - use the specific folder that was created
 	if !skipArchive {
-		if err := createArchiveWithTimestamp(outputDir); err != nil {
+		if err := createArchiveWithTimestamp(finalOutputDir); err != nil {
 			fmt.Printf("Error creating archive: %v\n", err)
 			return
 		}
 	}
 }
 
-func getUserInput(protocol, host, port, username, password, configDir *string, skipConfig bool) error {
+func getUserInput(protocol, host, port, username, password, mode, configDir *string, skipConfig bool) error {
 	reader := bufio.NewReader(os.Stdin)
 
 	// Get protocol if not provided
@@ -174,6 +179,25 @@ func getUserInput(protocol, host, port, username, password, configDir *string, s
 		fmt.Println() // Add a newline after password input
 	}
 
+	// Get mode if not provided or validate provided mode
+	validModes := []string{"cloud", "onprem", "gouv"}
+	*mode = strings.ToLower(*mode)
+	if !isValidMode(*mode) {
+		fmt.Printf("Select query mode (cloud/onprem/gouv) [default: onprem]: ")
+		input, _ := reader.ReadString('\n')
+		*mode = strings.TrimSpace(strings.ToLower(input))
+		if *mode == "" {
+			*mode = "onprem"
+		}
+		if !isValidMode(*mode) {
+			fmt.Printf("Invalid mode '%s'. Using onprem instead.\n", *mode)
+			*mode = "onprem"
+		}
+	}
+
+	// Display available modes for user reference
+	fmt.Printf("Available modes: %s\n", strings.Join(validModes, ", "))
+
 	// Get config directory if not provided and not skipping config collection
 	if *configDir == "" && !skipConfig {
 		fmt.Print("Enter ClickHouse config directory to collect [default: /etc/clickhouse-server/config.d/]: ")
@@ -187,16 +211,44 @@ func getUserInput(protocol, host, port, username, password, configDir *string, s
 	return nil
 }
 
-func createArchiveWithTimestamp(outputDir string) error {
-	// Generate archive name if not provided
-	timestamp := time.Now().Format("20060102_150405")
-	archiveName := fmt.Sprintf("clickhouse_backup_%s.tar.gz", timestamp)
+// getQueriesDir maps the mode to the corresponding queries directory
+func getQueriesDir(mode string) string {
+	switch strings.ToLower(mode) {
+	case "cloud":
+		return "./queries.cloud"
+	case "onprem":
+		return "./queries.onprem"
+	case "gouv":
+		return "./queries.gouv"
+	default:
+		return "./queries.onprem" // fallback to onprem
+	}
+}
+
+// isValidMode checks if the provided mode is valid
+func isValidMode(mode string) bool {
+	validModes := []string{"cloud", "onprem", "gouv"}
+	for _, validMode := range validModes {
+		if mode == validMode {
+			return true
+		}
+	}
+	return false
+}
+
+// createArchiveWithTimestamp creates an archive of the specific results directory
+func createArchiveWithTimestamp(specificDir string) error {
+	// Extract timestamp from the directory name for archive naming
+	dirName := filepath.Base(specificDir)
+
+	// Generate archive name based on the directory name
+	archiveName := fmt.Sprintf("%s.tar.gz", dirName)
 
 	// Ensure archive name has .tar.gz extension
 	if !strings.HasSuffix(archiveName, ".tar.gz") {
 		archiveName += ".tar.gz"
 	}
 
-	// Create the archive with results and configuration
-	return internal.CreateArchive(archiveName, outputDir, "./configuration")
+	// Create the archive with the specific results directory and configuration
+	return internal.CreateArchive(archiveName, specificDir, "./configuration")
 }

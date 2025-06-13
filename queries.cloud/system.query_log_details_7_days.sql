@@ -2,6 +2,8 @@ SELECT
     toStartOfInterval(event_time, toIntervalHour(1)) AS time,
     query_kind,
     tables,
+    splitByChar('.', tables)[1] as database,
+    splitByChar('.', tables)[2] as table,
     type,
     user,
     sum(memory_usage) as memory_usage,
@@ -19,7 +21,7 @@ SELECT
     max(event_time) as maxDate,
     exception_code,
     any(exception) as exception
-FROM system.query_log
+FROM clusterAllReplicas(default, system.query_log)
 ARRAY JOIN tables
 WHERE (event_time > (now() - toIntervalDay(15)))
 GROUP BY ALL

@@ -24,14 +24,15 @@ func NewExecutor(client *pkg.ClickHouseClient) *Executor {
 }
 
 // ExecuteQueries executes a map of selected queries and saves results
-func (e *Executor) ExecuteQueries(queries map[string]internal.QueryFile, outputDir string) error {
+// Returns the path to the specific folder where results were saved
+func (e *Executor) ExecuteQueries(queries map[string]internal.QueryFile, outputDir string) (string, error) {
 	timestamp := time.Now().Format("20060102_150405")
 	outputFolderName := fmt.Sprintf("clickhouse_backup_%s", timestamp)
 	finalOutputDir := filepath.Join(outputDir, outputFolderName)
 
 	// Create output directory
 	if err := os.MkdirAll(finalOutputDir, 0755); err != nil {
-		return fmt.Errorf("error creating output directory: %w", err)
+		return "", fmt.Errorf("error creating output directory: %w", err)
 	}
 
 	fmt.Printf("Executing %d unique queries...\n\n", len(queries))
@@ -52,7 +53,7 @@ func (e *Executor) ExecuteQueries(queries map[string]internal.QueryFile, outputD
 	fmt.Printf("\nQuery execution completed: %d successful, %d failed\n", successCount, errorCount)
 	fmt.Printf("Results saved to: %s\n", finalOutputDir)
 
-	return nil
+	return finalOutputDir, nil
 }
 
 // executeQuery executes a single query and saves the result
