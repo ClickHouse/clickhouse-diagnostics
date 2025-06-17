@@ -7,6 +7,7 @@ SELECT
   data_paths,
   metadata_path,
   metadata_modification_time,
+  metadata_version,
   dependencies_database,
   dependencies_table,
   create_table_query,

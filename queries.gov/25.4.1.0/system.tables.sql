@@ -7,6 +7,7 @@ SELECT
   data_paths,
   metadata_path,
   metadata_modification_time,
+  metadata_version,
   dependencies_database,
   dependencies_table,
   create_table_query,
@@ -22,6 +23,7 @@ SELECT
   loading_dependencies_database,
   loading_dependencies_table,
   loading_dependent_database,
-  loading_dependent_table
+  loading_dependent_table,
+  parameterized_view_parameters
 FROM system.tables
 FORMAT Native

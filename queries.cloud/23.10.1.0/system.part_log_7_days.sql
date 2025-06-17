@@ -4,6 +4,7 @@ SELECT
     merge_reason,
     part_name,
     partition_id,
+    hostname,
     concat(database, '.', table) AS table_name,
     part_name,
     error,
@@ -12,7 +13,7 @@ SELECT
     sum(duration_ms) AS duration_ms,
     sum(size_in_bytes) AS size_in_bytes,
     count() as count
-FROM system.part_log
+FROM clusterAllReplicas(default, system.part_log)
 WHERE (event_time > (now() - toIntervalDay(7)))
 GROUP BY ALL
 FORMAT Native

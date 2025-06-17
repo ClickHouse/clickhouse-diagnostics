@@ -1,11 +1,9 @@
 SELECT
-  database,
-  table,
+  hex(SHA256(concat(database, '%salt%'))) AS database,
+  hex(SHA256(concat(table, '%salt%'))) AS table,
   partition_id,
   bytes_on_disk,
-  disk,
-  path,
-  reason,
+  modification_time,
   min_block_number,
   max_block_number,
   level

@@ -13,6 +13,7 @@ SELECT
     sum(written_rows) as written_rows,
     sum(read_rows) as read_rows,
     sum(read_bytes) as read_bytes,
+    sum(query_duration_ms) as query_duration_ms,
     interface,
     normalized_query_hash,
     count(*) as count,

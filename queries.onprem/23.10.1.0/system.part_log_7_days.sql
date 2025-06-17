@@ -4,6 +4,7 @@ SELECT
     merge_reason,
     part_name,
     partition_id,
+    hostname,
     concat(database, '.', table) AS table_name,
     part_name,
     error,

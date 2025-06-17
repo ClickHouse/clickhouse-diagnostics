@@ -1,8 +1,9 @@
-SELECT 
+SELECT
   database,
   table,
   partition_id,
   bytes_on_disk,
+  modification_time,
   disk,
   path,
   reason,

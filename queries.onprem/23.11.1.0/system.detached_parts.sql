@@ -1,13 +1,14 @@
-SELECT 
+SELECT
   database,
   table,
   partition_id,
   bytes_on_disk,
+  modification_time,
   disk,
   path,
   reason,
   min_block_number,
   max_block_number,
   level
-FROM clusterAllReplicas(default, system.detached_parts)
+FROM system.detached_parts
 FORMAT Native
