@@ -1,5 +1,5 @@
 SELECT
-    toStartOfInterval(event_time, toIntervalHour(1)) AS time,
+    toStartOfInterval(event_time, toIntervalHour(12)) AS time,
     event_type,
     merge_reason,
     part_name,
