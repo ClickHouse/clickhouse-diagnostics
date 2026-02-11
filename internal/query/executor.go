@@ -31,7 +31,7 @@ func (e *Executor) ExecuteQueries(queries map[string]internal.QueryFile, outputD
 	finalOutputDir := filepath.Join(outputDir, outputFolderName)
 
 	// Create output directory
-	if err := os.MkdirAll(finalOutputDir, 0755); err != nil {
+	if err := os.MkdirAll(finalOutputDir, 0750); err != nil {
 		return "", fmt.Errorf("error creating output directory: %w", err)
 	}
 
@@ -88,7 +88,7 @@ func (e *Executor) executeQuery(query internal.QueryFile, outputDir, timestamp s
 	outputPath := filepath.Join(outputDir, outputFileName)
 
 	// Save the result to a file
-	if err := os.WriteFile(outputPath, []byte(result), 0644); err != nil {
+	if err := os.WriteFile(outputPath, []byte(result), 0600); err != nil {
 		return fmt.Errorf("error saving result: %w", err)
 	}
 

@@ -33,7 +33,7 @@ func (c *Collector) Collect(configDir string, keepPasswords bool) error {
 
 	// Create the destination directory
 	destDir := "./configuration"
-	if err := os.MkdirAll(destDir, 0755); err != nil {
+	if err := os.MkdirAll(destDir, 0750); err != nil {
 		return fmt.Errorf("error creating configuration directory: %w", err)
 	}
 
@@ -63,9 +63,13 @@ func (c *Collector) Collect(configDir string, keepPasswords bool) error {
 		var passwordsFound int
 
 		if c.sanitizer.ShouldSanitize(path, content, keepPasswords) {
-			sanitizedContent, passwordsFound = c.sanitizer.SanitizeContent(content)
+			if c.sanitizer.IsYAMLFile(path) {
+				sanitizedContent, passwordsFound = c.sanitizer.SanitizeYAMLContent(content)
+			} else {
+				sanitizedContent, passwordsFound = c.sanitizer.SanitizeXMLContent(content)
+			}
 			if passwordsFound > 0 {
-				fmt.Printf("Found and removed %d passwords in file '%s'\n", passwordsFound, filepath.Base(path))
+				fmt.Printf("Found and removed %d credentials in file '%s'\n", passwordsFound, filepath.Base(path))
 				passwordCount += passwordsFound
 			}
 		} else {
@@ -77,7 +81,7 @@ func (c *Collector) Collect(configDir string, keepPasswords bool) error {
 		destPath := filepath.Join(destDir, fileName)
 
 		// Write the file to the destination
-		if err := os.WriteFile(destPath, sanitizedContent, 0644); err != nil {
+		if err := os.WriteFile(destPath, sanitizedContent, 0600); err != nil {
 			fmt.Printf("Error saving config file '%s': %v\n", fileName, err)
 			return nil
 		}
