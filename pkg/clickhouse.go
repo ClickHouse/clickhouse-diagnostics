@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 )
 
 // ClickHouseClient represents a ClickHouse HTTP client
@@ -25,14 +26,14 @@ func NewClickHouseClient(protocol, host, port, username, password string) *Click
 		port:       port,
 		username:   username,
 		password:   password,
-		httpClient: &http.Client{},
+		httpClient: &http.Client{Timeout: 5 * time.Minute},
 	}
 }
 
 // ExecuteQuery executes a query against ClickHouse server
 func (c *ClickHouseClient) ExecuteQuery(query string) (string, error) {
-	// Build the URL
-	url := fmt.Sprintf("%s://%s:%s", c.protocol, c.host, c.port)
+	// Build the URL with readonly setting to prevent write operations
+	url := fmt.Sprintf("%s://%s:%s/?readonly=1", c.protocol, c.host, c.port)
 
 	// Create the request
 	req, err := http.NewRequest("POST", url, bytes.NewBufferString(query))

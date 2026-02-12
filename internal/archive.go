@@ -22,7 +22,7 @@ func CreateArchive(archiveName string, dirs ...string) error {
 	}
 
 	// Create the archive file
-	file, err := os.Create(archiveName)
+	file, err := os.OpenFile(archiveName, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
 	if err != nil {
 		return fmt.Errorf("error creating archive file: %w", err)
 	}

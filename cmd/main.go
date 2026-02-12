@@ -58,7 +58,7 @@ func main() {
 	queriesDir := getQueriesDir(mode)
 
 	// Create the output folder if it doesn't exist
-	if err := os.MkdirAll(outputDir, 0755); err != nil {
+	if err := os.MkdirAll(outputDir, 0750); err != nil {
 		fmt.Printf("Error creating output folder: %v\n", err)
 		return
 	}
