@@ -27,7 +27,7 @@ func main() {
 	userFlag := flag.String("user", "", "Username")
 	passwordFlag := flag.String("password", "", "Password (not recommended for security reasons)")
 	protocolFlag := flag.String("protocol", "", "Protocol (http or https)")
-	modeFlag := flag.String("mode", "onprem", "Query mode (cloud, onprem, gouv)")
+	modeFlag := flag.String("mode", "onprem", "Query mode (cloud, onprem, gov)")
 	outputDirFlag := flag.String("output-dir", "./clickhouse_results", "Directory for results output")
 	configDirFlag := flag.String("config-dir", "", "ClickHouse config directory to collect (default: /etc/clickhouse-server/config.d/)")
 	skipConfigFlag    := flag.Bool("skip-config", false, "Skip collecting configuration files")
@@ -210,10 +210,10 @@ func getUserInput(protocol, host, port, username, password, mode, configDir *str
 	}
 
 	// Get mode if not provided or validate provided mode
-	validModes := []string{"cloud", "onprem", "gouv"}
+	validModes := []string{"cloud", "onprem", "gov"}
 	*mode = strings.ToLower(*mode)
 	if !isValidMode(*mode) {
-		fmt.Printf("Select query mode (cloud/onprem/gouv) [default: onprem]: ")
+		fmt.Printf("Select query mode (cloud/onprem/gov) [default: onprem]: ")
 		input, _ := reader.ReadString('\n')
 		*mode = strings.TrimSpace(strings.ToLower(input))
 		if *mode == "" {
@@ -248,8 +248,8 @@ func getQueriesDir(mode string) string {
 		return "./queries.cloud"
 	case "onprem":
 		return "./queries.onprem"
-	case "gouv":
-		return "./queries.gouv"
+	case "gov":
+		return "./queries.gov"
 	default:
 		return "./queries.onprem" // fallback to onprem
 	}
@@ -257,7 +257,7 @@ func getQueriesDir(mode string) string {
 
 // isValidMode checks if the provided mode is valid
 func isValidMode(mode string) bool {
-	validModes := []string{"cloud", "onprem", "gouv"}
+	validModes := []string{"cloud", "onprem", "gov"}
 	for _, validMode := range validModes {
 		if mode == validMode {
 			return true

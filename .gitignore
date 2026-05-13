@@ -30,11 +30,17 @@ testdata/*
 go.work
 
 .idea
-clickhouse-diagnostics
 TODO.md
 output
 vendor
 dist/
+
+# Built binaries (do not commit — produced by `make build` / `go build`)
+/bin/
+clickhouse-diagnostic
+clickhouse-diagnostics
+clickhouse_diagnostic
+clickhouse-diagnostic-*
 
 # Local scripts (connect to private repos — not for public commit)
 local/
