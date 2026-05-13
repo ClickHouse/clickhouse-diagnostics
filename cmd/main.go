@@ -10,7 +10,9 @@ import (
 	"syscall"
 
 	"clickhouse-diagnostic/internal"
+	"clickhouse-diagnostic/internal/alert"
 	"clickhouse-diagnostic/internal/config"
+	"clickhouse-diagnostic/internal/dashboard"
 	"clickhouse-diagnostic/internal/query"
 	"clickhouse-diagnostic/internal/version"
 	"clickhouse-diagnostic/pkg"
@@ -28,8 +30,11 @@ func main() {
 	modeFlag := flag.String("mode", "onprem", "Query mode (cloud, onprem, gouv)")
 	outputDirFlag := flag.String("output-dir", "./clickhouse_results", "Directory for results output")
 	configDirFlag := flag.String("config-dir", "", "ClickHouse config directory to collect (default: /etc/clickhouse-server/config.d/)")
-	skipConfigFlag := flag.Bool("skip-config", false, "Skip collecting configuration files")
-	skipArchiveFlag := flag.Bool("skip-archive", false, "Skip creating archive of results and configuration")
+	skipConfigFlag    := flag.Bool("skip-config", false, "Skip collecting configuration files")
+	skipArchiveFlag   := flag.Bool("skip-archive", false, "Skip creating archive of results and configuration")
+	skipDashboardFlag := flag.Bool("skip-dashboard", false, "Skip generating HTML dashboard")
+	skipAlertsFlag    := flag.Bool("skip-alerts", false, "Skip evaluating alert rules")
+	alertsDirFlag     := flag.String("alerts-dir", "./alerts", "Directory containing alert YAML rule files")
 
 	// Parse command line flags
 	flag.Parse()
@@ -44,8 +49,11 @@ func main() {
 		mode        = *modeFlag
 		outputDir   = *outputDirFlag
 		configDir   = *configDirFlag
-		skipConfig  = *skipConfigFlag
-		skipArchive = *skipArchiveFlag
+		skipConfig    = *skipConfigFlag
+		skipArchive   = *skipArchiveFlag
+		skipDashboard = *skipDashboardFlag
+		skipAlerts    = *skipAlertsFlag
+		alertsDir     = *alertsDirFlag
 	)
 
 	// Get user input for missing parameters
@@ -110,6 +118,28 @@ func main() {
 	if err != nil {
 		fmt.Printf("Error executing queries: %v\n", err)
 		return
+	}
+
+	// Evaluate alert rules if not skipped
+	var alertResults []alert.Result
+	if !skipAlerts {
+		fmt.Println("Evaluating alert rules...")
+		alertResults = alert.NewEvaluator(client, mode).RunAll(alertsDir)
+		fired := 0
+		for _, r := range alertResults {
+			if r.Fired() {
+				fired++
+			}
+		}
+		fmt.Printf("Alert evaluation complete: %d rule(s) checked, %d fired\n", len(alertResults), fired)
+	}
+
+	// Generate HTML dashboard if not skipped
+	if !skipDashboard {
+		gen := dashboard.NewGenerator(client, mode)
+		if err := gen.Generate(finalOutputDir, alertResults); err != nil {
+			fmt.Printf("Warning: dashboard generation failed: %v\n", err)
+		}
 	}
 
 	// Create archive if not skipped - use the specific folder that was created

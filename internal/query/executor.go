@@ -56,7 +56,7 @@ func (e *Executor) ExecuteQueries(queries map[string]internal.QueryFile, outputD
 	return finalOutputDir, nil
 }
 
-// executeQuery executes a single query and saves the result
+// executeQuery validates, executes a single query and saves the result.
 func (e *Executor) executeQuery(query internal.QueryFile, outputDir, timestamp string) error {
 	// Read query from file
 	queryContent, err := os.ReadFile(query.FullPath)
@@ -67,6 +67,11 @@ func (e *Executor) executeQuery(query internal.QueryFile, outputDir, timestamp s
 	if len(queryContent) == 0 {
 		fmt.Printf("Query file '%s' is empty, skipping\n", query.FullPath)
 		return nil
+	}
+
+	// Security: enforce read-only SELECT before execution.
+	if err := ValidateQueryContent(string(queryContent)); err != nil {
+		return fmt.Errorf("security validation failed for '%s': %w", query.Name, err)
 	}
 
 	// Show source information
@@ -96,26 +101,11 @@ func (e *Executor) executeQuery(query internal.QueryFile, outputDir, timestamp s
 	return nil
 }
 
-// ValidateQuery performs basic validation on a query before execution
+// ValidateQuery reads a query file and validates it with ValidateQueryContent.
 func (e *Executor) ValidateQuery(queryPath string) error {
 	content, err := os.ReadFile(queryPath)
 	if err != nil {
 		return fmt.Errorf("cannot read query file: %w", err)
 	}
-
-	if len(content) == 0 {
-		return fmt.Errorf("query file is empty")
-	}
-
-	// Basic SQL validation - check for potentially dangerous commands
-	queryStr := strings.ToLower(strings.TrimSpace(string(content)))
-	dangerousCommands := []string{"drop", "delete", "truncate", "alter", "create", "insert", "update"}
-
-	for _, cmd := range dangerousCommands {
-		if strings.HasPrefix(queryStr, cmd) {
-			return fmt.Errorf("potentially dangerous query detected: starts with %s", cmd)
-		}
-	}
-
-	return nil
+	return ValidateQueryContent(string(content))
 }

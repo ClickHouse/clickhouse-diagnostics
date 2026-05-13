@@ -1,0 +1,26 @@
+name: detached_parts_exist
+title: "Detached parts found"
+severity: info
+description: |
+  There are parts in the detached/ folder of one or more tables.
+  Parts end up detached after failed merges, manual detach operations,
+  or replication conflicts. They consume disk space but are not served
+  to queries. Review the 'reason' column to decide whether each part can
+  be safely dropped (ALTER TABLE … DROP DETACHED PART) or re-attached.
+tags:
+  - storage
+  - parts
+  - maintenance
+
+query: |
+  SELECT
+    database,
+    table,
+    count()                                  AS detached_count,
+    formatReadableSize(sum(bytes_on_disk))   AS total_size,
+    groupArray(reason)                       AS reasons
+  FROM {sys.detached_parts}
+  GROUP BY database, table
+  ORDER BY sum(bytes_on_disk) DESC
+
+message: "{database}.{table} has {detached_count} detached part(s) totalling {total_size} (reason(s): {reasons})"

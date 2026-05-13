@@ -1,0 +1,28 @@
+name: replication_queue_errors
+title: "Replication queue entries with errors"
+severity: critical
+description: |
+  One or more entries in the replication queue have a non-empty last_exception.
+  This usually means a replica is unable to apply a replication log entry —
+  common causes include network issues, disk full, schema mismatches, or
+  corrupt data parts. Left unresolved, the replica will fall behind and may
+  require manual intervention to recover.
+tags:
+  - replication
+  - reliability
+
+query: |
+  SELECT
+    database,
+    table,
+    replica_name,
+    type,
+    toString(create_time)  AS create_time,
+    num_tries,
+    last_exception
+  FROM {sys.replication_queue}
+  WHERE last_exception != ''
+  ORDER BY create_time DESC
+  LIMIT 50
+
+message: "{database}.{table} (replica {replica_name}): {type} failed after {num_tries} tries — {last_exception}"

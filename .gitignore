@@ -35,3 +35,11 @@ TODO.md
 output
 vendor
 dist/
+
+# Local scripts (connect to private repos — not for public commit)
+local/
+
+# Node.js (used by local scripts)
+node_modules/
+package.json
+package-lock.json
