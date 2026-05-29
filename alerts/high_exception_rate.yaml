@@ -1,0 +1,29 @@
+name: high_exception_rate
+title: "High query exception rate in the last hour"
+severity: warning
+description: |
+  More than 50 query exceptions occurred within the last hour for a single
+  exception code. A sudden spike in exceptions can indicate application bugs,
+  schema changes, memory pressure (code 241), or resource exhaustion.
+  Investigate the most frequent exception code and the queries producing it.
+
+  Adjust the HAVING threshold to suit your workload.
+tags:
+  - exceptions
+  - reliability
+  - query-log
+
+query: |
+  SELECT
+    exception_code,
+    count()          AS error_count,
+    any(exception)   AS example_message
+  FROM {sys.query_log}
+  WHERE event_time > now() - INTERVAL 1 HOUR
+    AND exception_code != 0
+    AND type = 'ExceptionWhileProcessing'
+  GROUP BY exception_code
+  HAVING error_count > 50
+  ORDER BY error_count DESC
+
+message: "Exception code {exception_code} fired {error_count} times in the last hour — example: {example_message}"

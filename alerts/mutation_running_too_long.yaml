@@ -1,0 +1,32 @@
+name: mutation_running_too_long
+title: "Long-running mutation detected"
+severity: warning
+description: |
+  A mutation has been running for more than 3 hours.
+  Long-running mutations can block merges, consume extra disk space during
+  execution, and degrade write performance. Consider killing the mutation
+  if it is no longer needed or investigate the root cause.
+tags:
+  - mutations
+  - performance
+
+# {sys.mutations} is replaced at runtime:
+#   onprem / gov  →  system.mutations
+#   cloud         →  clusterAllReplicas(default, system.mutations)
+query: |
+  SELECT
+    database,
+    table,
+    mutation_id,
+    command,
+    toString(create_time)                          AS create_time,
+    dateDiff('hour', create_time, now())           AS hours_running,
+    parts_to_do
+  FROM {sys.mutations}
+  WHERE parts_to_do > 0
+    AND is_killed = 0
+    AND dateDiff('hour', create_time, now()) > 3
+  ORDER BY hours_running DESC
+
+# {column_name} placeholders are filled from each result row.
+message: "Mutation {mutation_id} on {database}.{table} has been running for {hours_running}h with {parts_to_do} part(s) remaining — started {create_time}"
