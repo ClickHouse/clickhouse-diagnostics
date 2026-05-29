@@ -32,8 +32,14 @@
 //   Use {sys.<table>} in your query instead of a hard-coded table path.
 //   The evaluator substitutes the right reference based on the run mode:
 //
-//     {sys.mutations}  →  system.mutations               (onprem / gov)
-//                      →  clusterAllReplicas(default, system.mutations)  (cloud)
+//     {sys.query_log}  →  system.query_log                                  (onprem / gov)
+//                      →  clusterAllReplicas(default, system.query_log)     (cloud, per-replica)
+//     {sys.parts}      →  system.parts                                      (all modes)
+//
+//   Tables whose contents are shared across replicas (parts, tables,
+//   replicas, replication_queue, mutations, dictionaries, detached_parts,
+//   columns, databases) are queried directly even in cloud mode: each
+//   replica sees the same rows, so clusterAllReplicas would duplicate them.
 //
 // Message template
 // ────────────────
@@ -122,9 +128,27 @@ func NewEvaluator(client *pkg.ClickHouseClient, mode string) *Evaluator {
 	return &Evaluator{client: client, mode: strings.ToLower(mode)}
 }
 
+// sharedSystemTables lists system.* tables whose contents are the same on
+// every replica. Wrapping these with clusterAllReplicas in cloud mode would
+// duplicate every row once per replica and produce repeat alerts (e.g. the
+// large_parts alert firing N times for the same part).
+var sharedSystemTables = map[string]bool{
+	"columns":           true,
+	"databases":         true,
+	"detached_parts":    true,
+	"dictionaries":      true,
+	"mutations":         true,
+	"parts":             true,
+	"replicas":          true,
+	"replication_queue": true,
+	"tables":            true,
+}
+
 // sysTable returns the mode-appropriate system table reference.
+// In cloud mode, only per-replica tables (query_log, part_log, errors, …)
+// are wrapped with clusterAllReplicas. Shared tables are queried directly.
 func (ev *Evaluator) sysTable(table string) string {
-	if ev.mode == "cloud" {
+	if ev.mode == "cloud" && !sharedSystemTables[table] {
 		return fmt.Sprintf("clusterAllReplicas(default, system.%s)", table)
 	}
 	return "system." + table

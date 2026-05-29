@@ -21,9 +21,11 @@ func NewManager() *Manager {
 	}
 }
 
-// ExecuteQueries finds, selects, and executes queries for the given ClickHouse instance
-// Returns the path to the specific folder where results were saved
-func (m *Manager) ExecuteQueries(client *pkg.ClickHouseClient, queriesDir string, serverVersion internal.Version, outputDir string) (string, error) {
+// ExecuteQueries finds, selects, and executes queries for the given ClickHouse instance.
+// salt, when non-empty (gov mode), is substituted into the '%salt%' placeholder
+// of .sql files just before they are sent to ClickHouse.
+// Returns the path to the specific folder where results were saved.
+func (m *Manager) ExecuteQueries(client *pkg.ClickHouseClient, queriesDir string, serverVersion internal.Version, outputDir, salt string) (string, error) {
 	// Validate query directory
 	if err := m.finder.ValidateQueryDirectory(queriesDir); err != nil {
 		return "", fmt.Errorf("query directory validation failed: %w", err)
@@ -45,7 +47,7 @@ func (m *Manager) ExecuteQueries(client *pkg.ClickHouseClient, queriesDir string
 	fmt.Printf("Found %d unique query files to execute\n", len(selectedQueries))
 
 	// Execute the selected queries and get the specific output directory
-	executor := NewExecutor(client)
+	executor := NewExecutor(client).WithSalt(salt)
 	finalOutputDir, err := executor.ExecuteQueries(selectedQueries, outputDir)
 	if err != nil {
 		return "", fmt.Errorf("error executing queries: %w", err)

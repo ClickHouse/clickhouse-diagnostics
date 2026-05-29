@@ -14,6 +14,11 @@ import (
 // Executor handles query execution and result management
 type Executor struct {
 	client *pkg.ClickHouseClient
+	// salt, when non-empty, replaces the literal '%salt%' placeholder
+	// inside .sql query bodies just before execution. Used only in
+	// gov mode so the hash of database/table names is unique to the
+	// customer's run instead of a publicly known constant.
+	salt string
 }
 
 // NewExecutor creates a new query executor
@@ -21,6 +26,14 @@ func NewExecutor(client *pkg.ClickHouseClient) *Executor {
 	return &Executor{
 		client: client,
 	}
+}
+
+// WithSalt sets the gov-mode salt used for runtime substitution of the
+// '%salt%' placeholder in .sql files. The salt must already be sanitised
+// (alphanumeric); the caller is responsible for validation.
+func (e *Executor) WithSalt(salt string) *Executor {
+	e.salt = salt
+	return e
 }
 
 // ExecuteQueries executes a map of selected queries and saves results
@@ -69,8 +82,16 @@ func (e *Executor) executeQuery(query internal.QueryFile, outputDir, timestamp s
 		return nil
 	}
 
+	// Gov mode: replace the public '%salt%' placeholder in .sql files
+	// with the customer-supplied salt. Salt format is validated upstream
+	// (alphanumeric only), so it cannot break out of the SQL string literal.
+	sqlText := string(queryContent)
+	if e.salt != "" {
+		sqlText = strings.ReplaceAll(sqlText, "'%salt%'", "'"+e.salt+"'")
+	}
+
 	// Security: enforce read-only SELECT before execution.
-	if err := ValidateQueryContent(string(queryContent)); err != nil {
+	if err := ValidateQueryContent(sqlText); err != nil {
 		return fmt.Errorf("security validation failed for '%s': %w", query.Name, err)
 	}
 
@@ -82,7 +103,7 @@ func (e *Executor) executeQuery(query internal.QueryFile, outputDir, timestamp s
 	}
 
 	// Execute the query
-	result, err := e.client.ExecuteQuery(string(queryContent))
+	result, err := e.client.ExecuteQuery(sqlText)
 	if err != nil {
 		return fmt.Errorf("error executing query: %w", err)
 	}

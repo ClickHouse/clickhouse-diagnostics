@@ -22,8 +22,8 @@ func TestBuildHTML_SampleData(t *testing.T) {
 		"total_size":      "18.50 GiB",
 
 		"storage_by_db": []map[string]interface{}{
-			{"database": "production", "parts": 800, "rows": 1e9, "bytes_on_disk": 12e9, "size_human": "12.00 GiB", "compression_ratio": 3.2},
-			{"database": "analytics", "parts": 350, "rows": 5e8, "bytes_on_disk": 5e9, "size_human": "5.00 GiB", "compression_ratio": 4.1},
+			{"database": "production", "parts": 800, "rows": 1e9, "bytes_total": 12e9, "size_human": "12.00 GiB", "compression_ratio": 3.2},
+			{"database": "analytics", "parts": 350, "rows": 5e8, "bytes_total": 5e9, "size_human": "5.00 GiB", "compression_ratio": 4.1},
 		},
 		"engines_dist": []map[string]interface{}{
 			{"engine": "MergeTree", "count": 28},
@@ -178,18 +178,32 @@ func TestBuildHTML_SampleData(t *testing.T) {
 }
 
 func TestTablesListSQL_Modes(t *testing.T) {
+	// system.tables and system.parts are shared across replicas in cloud,
+	// so no mode should wrap them with clusterAllReplicas.
 	for _, mode := range []string{"cloud", "onprem", "gov"} {
 		g := &Generator{mode: mode}
 		sql := g.tablesListSQL()
 		if sql == "" {
 			t.Errorf("mode %q returned empty tablesListSQL", mode)
 		}
-		if mode == "cloud" && !strings.Contains(sql, "clusterAllReplicas") {
-			t.Errorf("cloud mode should use clusterAllReplicas")
+		if strings.Contains(sql, "clusterAllReplicas") {
+			t.Errorf("mode %q should not use clusterAllReplicas for shared tables", mode)
 		}
-		if mode != "cloud" && strings.Contains(sql, "clusterAllReplicas") {
-			t.Errorf("mode %q should not use clusterAllReplicas", mode)
-		}
+	}
+}
+
+func TestSysTable_CloudSharedVsPerReplica(t *testing.T) {
+	g := &Generator{mode: "cloud"}
+	// per-replica tables → wrapped
+	if got := g.sysTable("query_log"); got != "clusterAllReplicas(default, system.query_log)" {
+		t.Errorf("query_log: got %q", got)
+	}
+	// shared tables → plain
+	if got := g.sysTable("parts"); got != "system.parts" {
+		t.Errorf("parts: got %q", got)
+	}
+	if got := g.sysTable("tables"); got != "system.tables" {
+		t.Errorf("tables: got %q", got)
 	}
 }
 

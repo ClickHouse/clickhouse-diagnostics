@@ -94,25 +94,32 @@ You will be prompted for any value not supplied on the command line:
 | Password (hidden) | _empty_ |
 | Mode (cloud/onprem/gov) | `onprem` |
 | Config directory | `/etc/clickhouse-server/config.d/` |
+| Gov-mode salt (hidden, `gov` mode only) | _empty_ |
 
 ### Command-line flags
 
+Run `./clickhouse-diagnostic -help` to see the full list. Current flags:
+
 ```
--host string           ClickHouse host
--port string           ClickHouse port
+-host string           ClickHouse Host
+-port string           ClickHouse Port
 -user string           Username
--password string       Password (prefer the interactive prompt)
--protocol string       http or https
--mode string           Query mode: cloud, onprem, or gov (default "onprem")
--output-dir string     Where to write results (default "./clickhouse_results")
+-password string       Password (not recommended for security reasons)
+-protocol string       Protocol (http or https)
+-mode string           Query mode (cloud, onprem, gov) (default "onprem")
+-output-dir string     Directory for results output (default "./clickhouse_results")
 -config-dir string     ClickHouse config directory to collect
-                       (default "/etc/clickhouse-server/config.d/")
--alerts-dir string     Directory with alert YAML rule files (default "./alerts")
--skip-config           Do not collect configuration files
--skip-alerts           Do not evaluate alert rules
--skip-dashboard        Do not generate dashboard.html
--skip-archive          Do not create the tar.gz archive
+                       (default: /etc/clickhouse-server/config.d/)
+-alerts-dir string     Directory containing alert YAML rule files (default "./alerts")
+-salt string           Gov-mode hashing salt (8–64 alphanumeric chars;
+                       prompts interactively if empty; gov mode only)
+-skip-config           Skip collecting configuration files
+-skip-alerts           Skip evaluating alert rules
+-skip-dashboard        Skip generating HTML dashboard
+-skip-archive          Skip creating archive of results and configuration
 ```
+
+Any flag left empty on the command line is prompted for interactively (except the `-skip-*` toggles and `-output-dir` / `-alerts-dir`, which use their defaults silently).
 
 ### Examples
 
@@ -140,9 +147,12 @@ Run a quick check with only queries (no alerts, no dashboard, no archive):
 Government / hashed-PII mode with a non-default alerts directory:
 
 ```bash
+# Salt is prompted interactively (hidden input). To pass it explicitly:
 ./clickhouse-diagnostic -mode gov -host gov-ch-01 \
-  -alerts-dir ./alerts.gov
+  -alerts-dir ./alerts.gov -salt myDeployment2026
 ```
+
+> **Gov mode requires a salt** — see [Gov mode and hashed names](#gov-mode-and-hashed-names) for what it does and why you need it.
 
 Fully non-interactive (CI / automation):
 
@@ -166,6 +176,38 @@ Fully non-interactive (CI / automation):
 | `gov` | `queries.gov/` | Same shape as on-prem but PII columns are hashed |
 
 Alert queries use the same mode — see [Alerts](#alerts).
+
+### Gov mode and hashed names
+
+In `gov` mode, every database and table name written to the support-bound output is replaced with `hex(SHA256(name + salt))`. The salt is supplied by **you** at runtime (via `-salt` or the interactive prompt) — the tool does **not** ship with a default. This is what makes the hashes meaningful: without a per-customer salt, anyone with the source could pre-compute hashes for common names like `users`, `events`, or `orders` and reverse the obfuscation.
+
+**Salt requirements:**
+
+- 8–64 ASCII alphanumeric characters (`A–Z`, `a–z`, `0–9`)
+- No spaces, no punctuation, no quotes — keeps the value safe inside SQL string literals
+- Pick something **not guessable from public information** (avoid your company name, deployment ID, or anything in your support tickets)
+- **Re-use the same salt across runs** if you want hashes to be comparable over time
+
+**What the tool produces in gov mode:**
+
+```
+clickhouse_results/
+├── clickhouse_backup_YYYYMMDD_HHMMSS/                       # → goes into the archive
+│   └── *.native                                             # hashed names inside
+└── clickhouse_backup_YYYYMMDD_HHMMSS_gov_name_mapping.csv   # → stays LOCAL
+```
+
+The mapping CSV (real_name → hashed_name) is written **outside** the timestamped backup folder, so it is **never** picked up by `tar` when the archive is built. Keep it on your machine for your own correlation work — and confirm before sending the archive that the salt and the CSV did not accidentally land inside it.
+
+**What to share with support:**
+
+| File | Share with support? |
+|---|---|
+| `clickhouse_backup_*.tar.gz` | Yes |
+| `clickhouse_backup_*_gov_name_mapping.csv` | **No — keep local** |
+| The salt value itself | **No — keep local** |
+
+If you lose the salt, the hashes in past archives are no longer reversible (you can still run a new diagnostic with a fresh salt — but old and new hashes won't compare).
 
 ### Version-specific queries
 
@@ -235,16 +277,84 @@ In `message:`, `{column_name}` is replaced with the value from each result row. 
 3. Keep the query strictly read-only — the security validator will block anything else.
 4. Run the tool with `-skip-archive -skip-config` for a fast feedback loop.
 
+### Bundled alert rules
+
+The repo ships with 11 alert rules in `alerts/`. They are intended as a starting point — adjust thresholds to match your workload.
+
+| Rule | Severity | Fires when |
+|---|---|---|
+| `crash_log_entries` | critical | `system.crash_log` is non-empty (server crashed at least once) |
+| `replica_readonly` | critical | A replicated table is in read-only mode (lost Keeper session, disk full, network partition) |
+| `replication_queue_errors` | critical | Replication queue entries have a non-empty `last_exception` |
+| `disk_space_low` | critical | Any disk has less than 15% free space |
+| `keeper_exception_spike` | warning | More than 20 KEEPER_EXCEPTION (code 999) errors in the last hour |
+| `high_exception_rate` | warning | More than 50 query exceptions for a single exception code in the last hour |
+| `too_many_simultaneous_queries` | warning | More than 10 code-252 errors in the last hour (`max_concurrent_queries` hit) |
+| `too_many_parts` | warning | A partition has more than 300 active parts (CH throttles at 1000) |
+| `large_parts` | warning | A single active part is larger than 150 GB |
+| `mutation_running_too_long` | warning | A mutation has been running for more than 3 hours |
+| `detached_parts_exist` | info | Parts exist in the `detached/` folder (failed merges, manual detach, replication conflicts) |
+
+Every rule is a single `SELECT` against system tables; rows returned become alert instances in the dashboard. Open the YAML files directly to see the exact thresholds and tweak them.
+
+## Dashboard
+
+When `-skip-dashboard` is not set, the tool generates a single self-contained `dashboard.html` inside the per-run results folder. The dashboard embeds all query results inline as JSON and loads only Chart.js from a CDN, so it can be opened from disk (`file://`) on any machine with internet access.
+
+### Sections
+
+| # | Section | What it shows |
+|---|---|---|
+| 1 | 🚨 **Alert Summary** | Fired alerts grouped by severity (critical / warning / info), with the row-level message template expanded per instance. A green "no issues" banner appears when nothing fired. |
+| 2 | 📈 **Overview** | Top-level counters: server version, uptime, total databases, total tables, active parts, total size |
+| 3 | 📦 **Storage** | Size by database (horizontal bar), table-engine distribution (doughnut), and a top-20-by-size table list |
+| 4 | 📋 **Tables Explorer** | Searchable / paginated table of every user table with engine, parts, rows, size, partition / sorting keys, and storage policy |
+| 5 | 📊 **Query Activity** (last 7 days) | Queries per hour by kind (stacked bar), count by kind, average duration & memory by kind |
+| 6 | 🔍 **Query Deep Dive** (last 7 days) | Top 20 slowest query patterns (by avg duration), top 20 heaviest reads (avg MB/query), per-user executions & errors, slow-query details and per-user summary tables |
+| 7 | ⚠️ **Exceptions** (last 7 days) | Top exception codes by count, plus an exception-details table with the most recent message per code |
+| 8 | 🔧 **Part Log Events** (last 7 days) | Part events per day by event type (stacked bar) and event-type distribution |
+| 9 | 📖 **Dictionaries** | Status distribution (LOADED / FAILED / LOADING), bytes allocated per dictionary, lifetime configuration (min/max), and a details table including `last_exception` (gov mode emits an empty value here) |
+| 10 | 💥 **Crash Log** | Recent entries from `system.crash_log` — section is hidden when the table is empty |
+| 11 | ⏳ **Pending Operations** | Pending mutations and detached-parts tables side by side |
+| 12 | 🔄 **Replication Queue** | Current entries in `system.replication_queue` with type, table, and last exception |
+| 13 | 🌐 **Cluster Nodes** (cloud mode only) | Hosts in the `default` cluster with shard / replica / active status |
+| 14 | 🔁 **Replicas Health** | Replication-delay distribution, queue-size by table, per-replica details (only shown when replicated tables exist) |
+| 15 | 💾 **Disk Usage** | Free vs used space per disk plus a disk-details table |
+| 16 | 🛑 **Server Error Counters** | Top 20 cumulative error codes from `system.errors`, high-part-count partitions (>100 parts → potential code-497 risk), and TTL activity from `part_log` |
+| 17 | ⚡ **Async Insert Activity** (last 24 h) | Flush count per hour by status — section is hidden when `system.asynchronous_insert_log` is empty or in gov mode |
+
+A sticky top nav at the page header lets you jump straight to any section. Sections that depend on cluster-specific or version-specific data (Crash Log, Cluster Nodes, Replicas Health, Async Inserts) are hidden when there is nothing to show.
+
+### What's interactive vs static
+
+- **Interactive**: Tables Explorer (full text search, database/engine filters, pagination); all charts (hover tooltips, legend toggling).
+- **Static**: every other table — they render in a fixed order, but their underlying JSON is embedded in the page so you can `grep DATA dashboard.html | head` if you want raw values.
+
 ## Configuration Collection
 
 When `-skip-config` is not set, the tool reads files from `-config-dir` (default `/etc/clickhouse-server/config.d/`) and writes sanitised copies into `./configuration/`.
 
+Sanitisation runs in two layers — proper XML / YAML parsing first, then a heuristic byte-pattern pass over the result. If a file cannot be parsed, the tool **fails closed**: a warning is logged and the file is skipped from `./configuration/` rather than shipped un-sanitised.
+
 ### What gets sanitised
 
-- `<password>`, `<password_sha256_hex>`, `<password_double_sha1_hex>`, `<password_sha1_hex>`
-- `<secret>`, `<token>`
-- XML attributes: `password="..."`, `secret="..."`, `token="..."`
-- Credentials embedded in connection URLs
+**Structural** (driven by tag / attribute / YAML-key name, case-insensitive):
+
+- Any name matching the exact list: `client_id`, `tenant_id`, `account_name`, `account_key`, `storage_account_url`, `role_arn`, `role_session_name`, `session_token`, `connection_string`
+- Any name **containing** one of: `password`, `passwd`, `secret`, `credential`, `token`, `private_key`, `api_key`, `access_key`, `service_account` — so future or custom tags like `<my_db_password>`, `<gcp_service_account_credentials>`, `<legacy_api_token>` are caught without code changes
+- XML attribute values with the same naming rules: `password="..."`, `aws_access_key_id="..."`, etc.
+- Multi-line values inside the above tags (the previous regex-only implementation missed these)
+
+**Heuristic** (byte-shape signatures, applied to the whole file including comments and free text):
+
+- PEM-encapsulated private keys (`-----BEGIN ... PRIVATE KEY-----` blocks)
+- AWS access key IDs (`AKIA…`, `ASIA…`)
+- JWT tokens (`eyJ…` three-segment shape)
+- Bcrypt password hashes (`$2[abxy]$…`)
+- Long hex strings (40+ chars — SHA-1, SHA-256, longer)
+- Long base64 blobs (128+ chars — GCP service-account payloads etc.)
+- Credentials embedded in URLs (`proto://user:pw@host` — only the password is redacted, host stays)
+- `keyword: value` / `keyword = value` / `keyword "value"` disclosures in prose, where keyword contains `password`, `secret`, `token`, `api_key`, `access_key`, `private_key`, or `credential` — catches values pasted into XML comments or YAML `# notes`
 
 ### What does **not** get sanitised
 
@@ -252,8 +362,9 @@ When `-skip-config` is not set, the tool reads files from `-config-dir` (default
 - Database and table names
 - Performance / resource settings
 - Non-security configuration
+- Prose mentioning credential keywords without an actual value (e.g. `password requirements are documented elsewhere`)
 
-Always review the contents of `./configuration/` before sharing the archive.
+The heuristic intentionally favours over-redaction over under-redaction — a stray flagged hash in the output is harmless, a leaked credential is not. Always review the contents of `./configuration/` before sharing the archive.
 
 ## Output Layout
 
@@ -261,19 +372,21 @@ A single run produces:
 
 ```
 clickhouse_results/
-└── clickhouse_backup_YYYYMMDD_HHMMSS/
-    ├── system.parts_YYYYMMDD_HHMMSS.native        # one file per query
-    ├── system.mutations_YYYYMMDD_HHMMSS.native
-    ├── ...
-    └── dashboard.html                              # unless -skip-dashboard
-configuration/                                      # unless -skip-config
-└── *.xml                                           # sanitised configs
-clickhouse_backup_YYYYMMDD_HHMMSS.tar.gz            # unless -skip-archive
+├── clickhouse_backup_YYYYMMDD_HHMMSS/                       # → archived
+│   ├── system.parts_YYYYMMDD_HHMMSS.native                  #   one file per query
+│   ├── system.mutations_YYYYMMDD_HHMMSS.native
+│   ├── ...
+│   └── dashboard.html                                       #   unless -skip-dashboard
+└── clickhouse_backup_YYYYMMDD_HHMMSS_gov_name_mapping.csv   # → LOCAL only (gov mode)
+configuration/                                               # → archived (unless -skip-config)
+└── *.xml                                                    #   sanitised configs
+clickhouse_backup_YYYYMMDD_HHMMSS.tar.gz                     # unless -skip-archive
 ```
 
 - **Query results**: ClickHouse `Native` format (`.native`)
 - **Dashboard**: standalone `dashboard.html`, loads Chart.js from CDN
 - **Archive**: `tar.gz` containing the per-run results directory and the `configuration/` directory
+- **Gov-mode mapping CSV** (gov mode only): sits next to the backup folder, **not inside it** — never goes into the archive. See [Gov mode and hashed names](#gov-mode-and-hashed-names).
 
 ## Troubleshooting
 
@@ -288,6 +401,9 @@ Verify the server is reachable on the chosen `-protocol` + `-host` + `-port`. Th
 
 **"security: query must be SELECT or WITH" (alert blocked)**
 An alert YAML has a non-read-only statement. Alert queries are restricted to `SELECT` / `WITH`; rewrite the query or remove the rule.
+
+**"Invalid gov-mode salt: must be 8–64 ASCII alphanumeric characters"**
+The `-salt` value (or interactive prompt input) contains spaces, punctuation, or is the wrong length. Pick a value that matches `[A-Za-z0-9]{8,64}` — see [Gov mode and hashed names](#gov-mode-and-hashed-names).
 
 **Dashboard charts blank**
 The generated `dashboard.html` loads Chart.js from a public CDN. Open it in an environment with internet access, or pre-fetch the script and inline it for offline use.

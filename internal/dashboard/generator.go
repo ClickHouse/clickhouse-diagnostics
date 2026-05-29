@@ -5,12 +5,30 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	"clickhouse-diagnostic/internal/alert"
 	"clickhouse-diagnostic/pkg"
 )
+
+// sharedSystemTables lists system.* tables whose contents are the same on
+// every replica — in ClickHouse Cloud (SharedMergeTree, shared storage) and
+// in self-managed ReplicatedMergeTree clusters. Wrapping these with
+// clusterAllReplicas duplicates every row once per replica, inflating
+// counts and producing repeat alerts.
+var sharedSystemTables = map[string]bool{
+	"columns":           true,
+	"databases":         true,
+	"detached_parts":    true,
+	"dictionaries":      true,
+	"mutations":         true,
+	"parts":             true,
+	"replicas":          true,
+	"replication_queue": true,
+	"tables":            true,
+}
 
 // Generator creates offline HTML diagnostic dashboards from ClickHouse data.
 type Generator struct {
@@ -54,11 +72,31 @@ func (r *chResult) records() []map[string]interface{} {
 }
 
 // sysTable returns the correct system table reference for the current mode.
+// In cloud mode, per-replica tables (query_log, part_log, errors, …) are
+// wrapped with clusterAllReplicas to cover the whole cluster. Tables whose
+// contents are shared across replicas (parts, tables, replicas, …) are
+// queried directly to avoid N× row duplication.
 func (g *Generator) sysTable(table string) string {
-	if g.mode == "cloud" {
+	if g.mode == "cloud" && !sharedSystemTables[table] {
 		return fmt.Sprintf("clusterAllReplicas(default, system.%s)", table)
 	}
 	return "system." + table
+}
+
+// parseUInt64 extracts an integer from a JSONCompact cell. ClickHouse
+// serialises UInt64/Int64 as JSON strings by default
+// (output_format_json_quote_64bit_integers=1), so a direct unmarshal into
+// float64 fails silently. This helper accepts both forms.
+func parseUInt64(raw json.RawMessage) int64 {
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		if n, err := strconv.ParseInt(s, 10, 64); err == nil {
+			return n
+		}
+	}
+	var n float64
+	_ = json.Unmarshal(raw, &n)
+	return int64(n)
 }
 
 // execJSON runs a SQL statement (no FORMAT clause) and parses the JSONCompact response.
@@ -102,34 +140,11 @@ func (g *Generator) Generate(outputDir string, alertResults []alert.Result) erro
 	return nil
 }
 
-// tablesListSQL builds the all-tables query (with size) for the current mode.
+// tablesListSQL builds the all-tables query (with size). system.tables and
+// system.parts are shared across replicas, so the same query works for
+// cloud, onprem, and gov.
 func (g *Generator) tablesListSQL() string {
 	notSystem := "database NOT IN ('system','information_schema','INFORMATION_SCHEMA')"
-	if g.mode == "cloud" {
-		return fmt.Sprintf(`
-			WITH t AS (
-				SELECT database, name AS table_name, engine, partition_key, sorting_key, storage_policy
-				FROM clusterAllReplicas(default, system.tables)
-				WHERE %s
-				GROUP BY database, name, engine, partition_key, sorting_key, storage_policy
-			),
-			p AS (
-				SELECT database, table, count() AS parts,
-					sum(rows) AS total_rows, sum(bytes_on_disk) AS bytes_on_disk
-				FROM clusterAllReplicas(default, system.parts)
-				WHERE active = 1
-				GROUP BY database, table
-			)
-			SELECT t.database, t.table_name, t.engine,
-				coalesce(p.parts, 0) AS parts,
-				formatReadableSize(coalesce(p.total_rows, 0)) AS total_rows,
-				formatReadableSize(coalesce(p.bytes_on_disk, 0)) AS size,
-				coalesce(p.bytes_on_disk, 0) AS bytes_on_disk,
-				t.partition_key, t.sorting_key, t.storage_policy
-			FROM t LEFT JOIN p ON t.database = p.database AND t.table_name = p.table
-			ORDER BY bytes_on_disk DESC
-			LIMIT 2000`, notSystem)
-	}
 	return fmt.Sprintf(`
 		SELECT t.database, t.name AS table_name, t.engine,
 			coalesce(p.parts, 0) AS parts,
@@ -137,16 +152,16 @@ func (g *Generator) tablesListSQL() string {
 			formatReadableSize(coalesce(p.bytes_on_disk, 0)) AS size,
 			coalesce(p.bytes_on_disk, 0) AS bytes_on_disk,
 			t.partition_key, t.sorting_key, t.storage_policy
-		FROM system.tables AS t
+		FROM %s AS t
 		LEFT JOIN (
 			SELECT database, table, count() AS parts,
 				sum(rows) AS total_rows, sum(bytes_on_disk) AS bytes_on_disk
-			FROM system.parts WHERE active = 1
+			FROM %s WHERE active = 1
 			GROUP BY database, table
 		) AS p ON t.database = p.database AND t.name = p.table
 		WHERE t.%s
 		ORDER BY bytes_on_disk DESC
-		LIMIT 2000`, notSystem)
+		LIMIT 2000`, g.sysTable("tables"), g.sysTable("parts"), notSystem)
 }
 
 // dictionariesSQL builds the dictionaries query, omitting last_exception for gov.
@@ -205,11 +220,8 @@ func (g *Generator) collect() map[string]interface{} {
 		 WHERE database NOT IN ('system','information_schema','INFORMATION_SCHEMA')`,
 		g.sysTable("tables"),
 	)); err == nil && r.Rows > 0 {
-		var dbs, tbls float64
-		_ = json.Unmarshal(r.Data[0][0], &dbs)
-		_ = json.Unmarshal(r.Data[0][1], &tbls)
-		p["total_databases"] = int(dbs)
-		p["total_tables"] = int(tbls)
+		p["total_databases"] = parseUInt64(r.Data[0][0])
+		p["total_tables"] = parseUInt64(r.Data[0][1])
 	}
 
 	// active parts summary
@@ -220,9 +232,7 @@ func (g *Generator) collect() map[string]interface{} {
 		   AND database NOT IN ('system','information_schema','INFORMATION_SCHEMA')`,
 		g.sysTable("parts"),
 	)); err == nil && r.Rows > 0 {
-		var parts float64
-		_ = json.Unmarshal(r.Data[0][0], &parts)
-		p["active_parts"] = int64(parts)
+		p["active_parts"] = parseUInt64(r.Data[0][0])
 		var sz string
 		_ = json.Unmarshal(r.Data[0][1], &sz)
 		p["total_size"] = sz
@@ -230,16 +240,20 @@ func (g *Generator) collect() map[string]interface{} {
 
 	// ── Storage ──────────────────────────────────────────────────────────────
 
+	// Compute each aggregate once and reference its alias in derived columns:
+	// CH 25.12's analyzer rejects repeated sum(bytes_on_disk) in the same
+	// SELECT — the second occurrence is treated as a nested aggregate,
+	// raising ILLEGAL_AGGREGATION.
 	p["storage_by_db"] = g.safeQuery("storage_by_db", fmt.Sprintf(
 		`SELECT database, count() AS parts, sum(rows) AS rows,
-			sum(bytes_on_disk) AS bytes_on_disk,
-			formatReadableSize(sum(bytes_on_disk)) AS size_human,
+			sum(bytes_on_disk) AS bytes_total,
+			formatReadableSize(bytes_total) AS size_human,
 			round(if(sum(data_compressed_bytes)>0,
 				sum(data_uncompressed_bytes)/sum(data_compressed_bytes), 0), 2) AS compression_ratio
 		 FROM %s
 		 WHERE active = 1
 		   AND database NOT IN ('system','information_schema','INFORMATION_SCHEMA')
-		 GROUP BY database ORDER BY bytes_on_disk DESC LIMIT 20`,
+		 GROUP BY database ORDER BY bytes_total DESC LIMIT 20`,
 		g.sysTable("parts"),
 	))
 
@@ -323,9 +337,12 @@ func (g *Generator) collect() map[string]interface{} {
 		g.sysTable("query_log"),
 	))
 
-	// exceptions
+	// exceptions — return exception_code as the raw integer. In CH 25.12 the
+	// analyzer resolves WHERE-clause identifiers against SELECT aliases, so
+	// aliasing toString(exception_code) AS exception_code makes
+	// `WHERE exception_code != 0` compare a String to a UInt8 → NO_COMMON_TYPE.
 	p["exceptions"] = g.safeQuery("exceptions", fmt.Sprintf(
-		`SELECT toString(exception_code) AS exception_code,
+		`SELECT exception_code,
 				any(exception) AS msg, count() AS count
 		 FROM %s
 		 WHERE event_time > now() - INTERVAL 7 DAY AND exception_code != 0
@@ -496,11 +513,14 @@ func (g *Generator) collect() map[string]interface{} {
 		if g.mode == "cloud" {
 			asyncTable = "clusterAllReplicas(default, merge(system, '^asynchronous_insert_log'))"
 		}
+		// flush_time_microseconds is DateTime64(6) in CH 25.x and can't be
+		// passed to avg() directly (ILLEGAL_TYPE_OF_ARGUMENT). Compute the
+		// queue→flush latency in milliseconds via dateDiff instead.
 		p["async_inserts"] = g.safeQuery("async_inserts", fmt.Sprintf(
 			`SELECT toString(toStartOfHour(event_time)) AS hour,
 				 status, count() AS flushes,
 				 sum(rows) AS total_rows,
-				 round(avg(flush_time_microseconds)/1000, 0) AS avg_flush_ms
+				 round(avg(dateDiff('millisecond', event_time, flush_time)), 0) AS avg_flush_ms
 			 FROM %s
 			 WHERE event_time > now() - INTERVAL 24 HOUR
 			 GROUP BY hour, status ORDER BY hour`,
@@ -1129,7 +1149,7 @@ document.addEventListener('DOMContentLoaded',function(){
         labels:rows.map(r=>r.database),
         datasets:[{
           label:'Compressed (bytes)',
-          data:rows.map(r=>r.bytes_on_disk),
+          data:rows.map(r=>r.bytes_total),
           backgroundColor:rows.map((_,i)=>alpha(C[i%C.length],.8)),
           borderColor:rows.map((_,i)=>C[i%C.length]),
           borderWidth:1

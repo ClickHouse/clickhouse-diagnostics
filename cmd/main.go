@@ -35,6 +35,7 @@ func main() {
 	skipDashboardFlag := flag.Bool("skip-dashboard", false, "Skip generating HTML dashboard")
 	skipAlertsFlag    := flag.Bool("skip-alerts", false, "Skip evaluating alert rules")
 	alertsDirFlag     := flag.String("alerts-dir", "./alerts", "Directory containing alert YAML rule files")
+	saltFlag          := flag.String("salt", "", "Gov-mode hashing salt (8–64 alphanumeric chars; prompts interactively if empty)")
 
 	// Parse command line flags
 	flag.Parse()
@@ -54,6 +55,7 @@ func main() {
 		skipDashboard = *skipDashboardFlag
 		skipAlerts    = *skipAlertsFlag
 		alertsDir     = *alertsDirFlag
+		govSalt       = *saltFlag
 	)
 
 	// Get user input for missing parameters
@@ -112,12 +114,40 @@ func main() {
 	fmt.Printf("ClickHouse server version: %d.%d.%d.%d\n",
 		serverVersion.Major, serverVersion.Minor, serverVersion.Patch, serverVersion.Build)
 
+	// Gov mode requires a customer-supplied salt so hashes in the
+	// support-bound artifacts cannot be reversed by a public rainbow
+	// table. Prompt for it now (with no echo) if it wasn't passed via
+	// --salt. Salt never leaves the operator's machine.
+	if mode == "gov" {
+		if govSalt == "" {
+			s, err := promptForGovSalt()
+			if err != nil {
+				fmt.Printf("Error reading gov-mode salt: %v\n", err)
+				return
+			}
+			govSalt = s
+		}
+		if err := internal.ValidateGovSalt(govSalt); err != nil {
+			fmt.Printf("Invalid gov-mode salt: %v\n", err)
+			return
+		}
+	}
+
 	// Find and execute queries - get the specific folder path
 	queryManager := query.NewManager()
-	finalOutputDir, err := queryManager.ExecuteQueries(client, queriesDir, serverVersion, outputDir)
+	finalOutputDir, err := queryManager.ExecuteQueries(client, queriesDir, serverVersion, outputDir, govSalt)
 	if err != nil {
 		fmt.Printf("Error executing queries: %v\n", err)
 		return
+	}
+
+	// Gov mode: print + save a local mapping from real database/table
+	// names to the hex(SHA256(name+salt)) form that appears in the
+	// support-bound output files. Saved outside the archive folder.
+	if mode == "gov" {
+		if err := internal.PrintGovNameMapping(client, outputDir, finalOutputDir, govSalt); err != nil {
+			fmt.Printf("Warning: gov-mode name mapping failed: %v\n", err)
+		}
 	}
 
 	// Evaluate alert rules if not skipped
@@ -239,6 +269,25 @@ func getUserInput(protocol, host, port, username, password, mode, configDir *str
 	}
 
 	return nil
+}
+
+// promptForGovSalt asks the operator for the gov-mode salt without
+// echoing it to the terminal. The salt is the customer's local secret
+// — keeping it off the screen avoids accidental capture in screen-share
+// recordings, ticket attachments, or terminal scrollback.
+func promptForGovSalt() (string, error) {
+	fmt.Println()
+	fmt.Println("Gov mode: enter a salt used to hash database / table names in the output.")
+	fmt.Println("  - 8–64 alphanumeric characters (A–Z, a–z, 0–9)")
+	fmt.Println("  - Keep this value local; do NOT share it with ClickHouse support.")
+	fmt.Println("  - Use the same salt across runs if you want hashes to be comparable.")
+	fmt.Print("Salt: ")
+	saltBytes, err := term.ReadPassword(int(syscall.Stdin))
+	fmt.Println()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(saltBytes)), nil
 }
 
 // getQueriesDir maps the mode to the corresponding queries directory

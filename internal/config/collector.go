@@ -58,15 +58,24 @@ func (c *Collector) Collect(configDir string, keepPasswords bool) error {
 			return nil
 		}
 
-		// Sanitize content if needed
+		// Sanitize content if needed. Fail closed: if the sanitizer
+		// can't parse the file we skip it entirely — sending an
+		// un-parsable config to support is safer than potentially
+		// leaking a credential that survived a regex-only fallback.
 		var sanitizedContent []byte
 		var passwordsFound int
 
 		if c.sanitizer.ShouldSanitize(path, content, keepPasswords) {
+			var err error
 			if c.sanitizer.IsYAMLFile(path) {
-				sanitizedContent, passwordsFound = c.sanitizer.SanitizeYAMLContent(content)
+				sanitizedContent, passwordsFound, err = c.sanitizer.SanitizeYAMLContent(content)
 			} else {
-				sanitizedContent, passwordsFound = c.sanitizer.SanitizeXMLContent(content)
+				sanitizedContent, passwordsFound, err = c.sanitizer.SanitizeXMLContent(content)
+			}
+			if err != nil {
+				fmt.Printf("WARNING: could not sanitise '%s' (%v) — file SKIPPED from configuration archive\n",
+					filepath.Base(path), err)
+				return nil
 			}
 			if passwordsFound > 0 {
 				fmt.Printf("Found and removed %d credentials in file '%s'\n", passwordsFound, filepath.Base(path))
