@@ -21,12 +21,25 @@ func TestExpandQuery_OnPrem(t *testing.T) {
 	}
 }
 
-func TestExpandQuery_Cloud(t *testing.T) {
+func TestExpandQuery_Cloud_PerReplicaTable(t *testing.T) {
 	ev := &Evaluator{mode: "cloud"}
-	got := ev.expandQuery("SELECT * FROM {sys.mutations}")
-	want := "SELECT * FROM clusterAllReplicas(default, system.mutations)"
+	got := ev.expandQuery("SELECT * FROM {sys.query_log}")
+	want := "SELECT * FROM clusterAllReplicas(default, system.query_log)"
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestExpandQuery_Cloud_SharedTable(t *testing.T) {
+	// Shared tables (parts, tables, replicas, …) are queried plain in cloud
+	// because every replica sees the same rows.
+	ev := &Evaluator{mode: "cloud"}
+	for _, table := range []string{"parts", "tables", "replicas", "replication_queue", "mutations", "detached_parts"} {
+		got := ev.expandQuery("SELECT * FROM {sys." + table + "}")
+		want := "SELECT * FROM system." + table
+		if got != want {
+			t.Errorf("table %q: got %q, want %q", table, got, want)
+		}
 	}
 }
 
