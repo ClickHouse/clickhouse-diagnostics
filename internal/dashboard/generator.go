@@ -10,35 +10,31 @@ import (
 	"time"
 
 	"clickhouse-diagnostic/internal/alert"
+	"clickhouse-diagnostic/internal/query"
 	"clickhouse-diagnostic/pkg"
 )
 
-// sharedSystemTables lists system.* tables whose contents are the same on
-// every replica — in ClickHouse Cloud (SharedMergeTree, shared storage) and
-// in self-managed ReplicatedMergeTree clusters. Wrapping these with
-// clusterAllReplicas duplicates every row once per replica, inflating
-// counts and producing repeat alerts.
-var sharedSystemTables = map[string]bool{
-	"columns":           true,
-	"databases":         true,
-	"detached_parts":    true,
-	"dictionaries":      true,
-	"mutations":         true,
-	"parts":             true,
-	"replicas":          true,
-	"replication_queue": true,
-	"tables":            true,
-}
-
 // Generator creates offline HTML diagnostic dashboards from ClickHouse data.
 type Generator struct {
-	client *pkg.ClickHouseClient
-	mode   string
+	client      *pkg.ClickHouseClient
+	mode        string
+	analysis    query.AnalysisOpts
+	analysisDir string
 }
 
 // NewGenerator creates a new Generator.
 func NewGenerator(client *pkg.ClickHouseClient, mode string) *Generator {
 	return &Generator{client: client, mode: strings.ToLower(mode)}
+}
+
+// WithAnalysis attaches query-analysis options + the directory holding
+// the .sql files. When opts is enabled, Generate adds a "Query
+// Analysis" section to the dashboard, rendered from the same SQL the
+// AnalysisCollector writes to disk. Returns the receiver for chaining.
+func (g *Generator) WithAnalysis(opts query.AnalysisOpts, dir string) *Generator {
+	g.analysis = opts
+	g.analysisDir = dir
+	return g
 }
 
 // chResult is the JSONCompact response envelope from ClickHouse.
@@ -72,15 +68,10 @@ func (r *chResult) records() []map[string]interface{} {
 }
 
 // sysTable returns the correct system table reference for the current mode.
-// In cloud mode, per-replica tables (query_log, part_log, errors, …) are
-// wrapped with clusterAllReplicas to cover the whole cluster. Tables whose
-// contents are shared across replicas (parts, tables, replicas, …) are
-// queried directly to avoid N× row duplication.
+// Delegated to the shared template helper — see internal/query/template.go
+// for the cloud-shared-tables allowlist (single source of truth).
 func (g *Generator) sysTable(table string) string {
-	if g.mode == "cloud" && !sharedSystemTables[table] {
-		return fmt.Sprintf("clusterAllReplicas(default, system.%s)", table)
-	}
-	return "system." + table
+	return query.SysTable(g.mode, table)
 }
 
 // parseUInt64 extracts an integer from a JSONCompact cell. ClickHouse
@@ -530,7 +521,88 @@ func (g *Generator) collect() map[string]interface{} {
 		p["async_inserts"] = []map[string]interface{}{}
 	}
 
+	// ── Query analysis (optional) ──────────────────────────────────────────
+	g.collectAnalysis(p)
+
 	return p
+}
+
+// collectAnalysis runs the query-analysis SQL files (same set the
+// AnalysisCollector writes to disk), embedding the JSONCompact output
+// into the dashboard payload so the front-end can render the "Query
+// Analysis" section. No-op when WithAnalysis was not called or when
+// opts.Enabled() is false.
+//
+// Each file's content is template-substituted in memory, the trailing
+// `FORMAT Native` clause stripped, then sent to ClickHouse with
+// `FORMAT JSONCompact` (via safeQuery). If a file still has unbound
+// placeholders after substitution (e.g. single-id files when only
+// --normalized-query-hash was given), it is silently skipped — the
+// missing key is then absent from the payload and the front-end hides
+// the corresponding card.
+func (g *Generator) collectAnalysis(p map[string]interface{}) {
+	if !g.analysis.Enabled() || g.analysisDir == "" {
+		return
+	}
+	vars := query.Vars{
+		Mode:                g.mode,
+		QueryID:             g.analysis.QueryID,
+		NormalizedQueryHash: g.analysis.NormalizedQueryHash,
+		From:                g.analysis.From,
+		To:                  g.analysis.To,
+	}
+
+	// Map of payload key → .sql filename. Keys match the JS fetches
+	// in the dashboard template (DATA.qa_*).
+	files := map[string]string{
+		"qa_details":     "query_details.sql",
+		"qa_profile":     "profile_events.sql",
+		"qa_text_parts":  "text_log_parts.sql",
+		"qa_text_logger": "text_log_by_logger.sql",
+		"qa_processors":  "processors_profile_log.sql",
+		"qa_tables":      "tables_for_query.sql",
+		"qa_fast_slow":   "fast_slow_query_ids.sql",
+		"qa_pe_compare":  "profile_events_compare.sql",
+		"qa_by_host":     "hash_by_host.sql",
+		"qa_summary":     "hash_summary.sql",
+	}
+	for key, fname := range files {
+		raw, err := os.ReadFile(filepath.Join(g.analysisDir, fname))
+		if err != nil {
+			continue
+		}
+		sql := query.Apply(string(raw), vars)
+		if len(query.UnboundPlaceholders(sql)) > 0 {
+			continue
+		}
+		// Strip trailing `FORMAT Native` so safeQuery can append
+		// JSONCompact via the standard execJSON path.
+		sql = stripTrailingFormat(sql)
+		p[key] = g.safeQuery(key, sql)
+	}
+
+	p["qa_enabled"] = true
+	p["qa_query_id"] = g.analysis.QueryID
+	p["qa_hash"] = g.analysis.NormalizedQueryHash
+	p["qa_from"] = g.analysis.From.UTC().Format(time.RFC3339)
+	p["qa_to"] = g.analysis.To.UTC().Format(time.RFC3339)
+}
+
+// stripTrailingFormat removes a trailing `FORMAT <name>` clause (and
+// any whitespace / semicolons after it). The dashboard always wants
+// JSONCompact, which the underlying execJSON wrapper appends.
+func stripTrailingFormat(sql string) string {
+	t := strings.TrimRight(sql, " \t\r\n;")
+	idx := strings.LastIndex(strings.ToUpper(t), "FORMAT")
+	if idx == -1 {
+		return t
+	}
+	tail := strings.TrimSpace(t[idx:])
+	parts := strings.Fields(tail)
+	if len(parts) == 2 && strings.EqualFold(parts[0], "FORMAT") {
+		return strings.TrimRight(t[:idx], " \t\r\n")
+	}
+	return t
 }
 
 // buildHTML serialises the payload into the HTML template.
@@ -642,6 +714,7 @@ footer{text-align:center;color:#aaa;font-size:12px;padding:20px;margin-top:8px}
 
 <nav id="main-nav">
   <a href="#sec-alerts" id="nav-alerts">Alerts</a>
+  <a href="#sec-qa" id="nav-qa" style="display:none">Query Analysis</a>
   <a href="#sec-overview">Overview</a>
   <a href="#sec-storage">Storage</a>
   <a href="#sec-tables">Tables</a>
@@ -667,6 +740,36 @@ footer{text-align:center;color:#aaa;font-size:12px;padding:20px;margin-top:8px}
   <h2>🚨 Alert Summary</h2>
   <div id="alerts-summary-bar"></div>
   <div id="alerts-panel"></div>
+</section>
+
+<!-- ── QUERY ANALYSIS ── -->
+<section id="sec-qa" style="display:none">
+  <h2>🔍 Query Analysis</h2>
+  <div id="qa-focus" class="alert-item" style="border-left-color:#FC4F05;margin-bottom:18px"></div>
+  <div class="charts-grid">
+    <div class="chart-card">
+      <h3>Top 30 ProfileEvents (one execution)</h3>
+      <div class="chart-wrap h420"><canvas id="chart-qa-profile"></canvas></div>
+    </div>
+    <div class="chart-card">
+      <h3>Fast vs Slow — ProfileEvents diff (top 30 by delta)</h3>
+      <div class="chart-wrap h420"><canvas id="chart-qa-compare"></canvas></div>
+    </div>
+    <div class="chart-card" style="grid-column:1/-1">
+      <h3>Executions over time (hash)</h3>
+      <div class="chart-wrap h260"><canvas id="chart-qa-summary"></canvas></div>
+    </div>
+  </div>
+  <div class="sub-title">Plan-step timings (processors_profile_log)</div>
+  <div class="tbl-wrap"><div id="tbl-qa-processors"></div></div>
+  <div class="sub-title" style="margin-top:18px">Time spent by logger (text_log)</div>
+  <div class="tbl-wrap"><div id="tbl-qa-logger"></div></div>
+  <div class="sub-title" style="margin-top:18px">Per-host distribution (hash)</div>
+  <div class="tbl-wrap"><div id="tbl-qa-host"></div></div>
+  <div class="sub-title" style="margin-top:18px">Tables referenced by the query</div>
+  <div class="tbl-wrap"><div id="tbl-qa-tables"></div></div>
+  <div class="sub-title" style="margin-top:18px">Parts / marks / streams scanned (text_log)</div>
+  <div class="tbl-wrap"><div id="tbl-qa-parts"></div></div>
 </section>
 
 <!-- ── OVERVIEW ── -->
@@ -1106,10 +1209,123 @@ function renderAlerts(){
 }
 
 // ── main init ─────────────────────────────────────────────────────────────────
+// ── query analysis renderer ───────────────────────────────────────────────────
+function renderQueryAnalysis(){
+  if(!DATA.qa_enabled) return;
+  document.getElementById('sec-qa').style.display='';
+  document.getElementById('nav-qa').style.display='';
+
+  // Focus card — what the analysis is scoped to.
+  const det=(DATA.qa_details||[])[0]||{};
+  const fast=(DATA.qa_fast_slow||[])[0]||{};
+  const focus=document.getElementById('qa-focus');
+  let h='<div class="alert-header">';
+  h+='<span class="alert-title">Focus: '+(DATA.qa_query_id||'(hash only)')+'</span>';
+  h+='<span class="alert-tags"><span class="alert-tag">hash '+(DATA.qa_hash||'')+'</span>';
+  h+='<span class="alert-tag">window '+(DATA.qa_from||'')+' → '+(DATA.qa_to||'')+'</span></span>';
+  h+='</div>';
+  if(det.query_kind){
+    h+='<div class="alert-desc">';
+    h+='kind: <b>'+det.query_kind+'</b> · user: <b>'+(det.user||'?')+'</b> · duration: <b>'+fmt(det.query_duration_ms)+' ms</b>';
+    h+=' · read: <b>'+fmt(det.read_rows)+' rows / '+(det.memory_usage_human||'?')+'</b>';
+    if(det.exception_code && Number(det.exception_code)!==0){
+      h+=' · <span style="color:#c62828">exception '+det.exception_code+'</span>';
+    }
+    h+='</div>';
+  }
+  if(fast.slow_query_id){
+    h+='<div class="alert-desc">';
+    h+='hash executions: <b>'+fmt(fast.executions)+'</b> · ';
+    h+='slowest: <b>'+fmt(fast.slow_duration_ms)+' ms</b> ('+fast.slow_query_id+') · ';
+    h+='fastest: <b>'+fmt(fast.fast_duration_ms)+' ms</b> ('+fast.fast_query_id+')';
+    h+='</div>';
+  }
+  focus.innerHTML=h;
+
+  // Top ProfileEvents — horizontal bar of the 30 highest values.
+  const pe=(DATA.qa_profile||[]).slice(0,30);
+  if(pe.length){
+    new Chart(document.getElementById('chart-qa-profile'),{
+      type:'bar',
+      data:{
+        labels:pe.map(r=>r.metric),
+        datasets:[{label:'value',data:pe.map(r=>Number(r.value)),
+          backgroundColor:alpha('#FC4F05',.75),borderColor:'#FC4F05',borderWidth:1}]
+      },
+      options:{indexAxis:'y',responsive:true,maintainAspectRatio:false,
+        plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>' '+fmt(c.raw)}}},
+        scales:{x:{beginAtZero:true,ticks:{callback:v=>fmt(v)}}}}
+    });
+  }
+
+  // Fast vs Slow comparison — top 30 by |delta|.
+  const cmp=(DATA.qa_pe_compare||[]).slice(0,30);
+  if(cmp.length){
+    new Chart(document.getElementById('chart-qa-compare'),{
+      type:'bar',
+      data:{
+        labels:cmp.map(r=>r.metric),
+        datasets:[
+          {label:'slow',data:cmp.map(r=>Number(r.slow_value)),
+            backgroundColor:alpha('#E91E63',.75),borderColor:'#E91E63',borderWidth:1},
+          {label:'fast',data:cmp.map(r=>Number(r.fast_value)),
+            backgroundColor:alpha('#4CAF50',.75),borderColor:'#4CAF50',borderWidth:1}
+        ]
+      },
+      options:{indexAxis:'y',responsive:true,maintainAspectRatio:false,
+        plugins:{legend:{position:'top'},tooltip:{callbacks:{
+          label:c=>c.dataset.label+': '+fmt(c.raw)
+        }}},
+        scales:{x:{beginAtZero:true,ticks:{callback:v=>fmt(v)}}}}
+    });
+  }
+
+  // Executions over time for the hash.
+  const sum=DATA.qa_summary||[];
+  if(sum.length){
+    new Chart(document.getElementById('chart-qa-summary'),{
+      type:'line',
+      data:{
+        labels:sum.map(r=>r.hour),
+        datasets:[
+          {label:'executions',data:sum.map(r=>Number(r.executions)),
+            borderColor:'#2196F3',backgroundColor:alpha('#2196F3',.2),tension:.2,yAxisID:'y'},
+          {label:'avg ms',data:sum.map(r=>Number(r.avg_duration_ms)),
+            borderColor:'#FC4F05',backgroundColor:alpha('#FC4F05',.2),tension:.2,yAxisID:'y1'},
+          {label:'p95 ms',data:sum.map(r=>Number(r.p95_duration_ms)),
+            borderColor:'#9C27B0',backgroundColor:alpha('#9C27B0',.2),tension:.2,yAxisID:'y1'}
+        ]
+      },
+      options:{responsive:true,maintainAspectRatio:false,
+        interaction:{mode:'index',intersect:false},
+        plugins:{legend:{position:'top'}},
+        scales:{
+          y:{position:'left',beginAtZero:true,title:{display:true,text:'count'}},
+          y1:{position:'right',beginAtZero:true,grid:{drawOnChartArea:false},title:{display:true,text:'ms'}}
+        }}
+    });
+  }
+
+  // Tables
+  renderTable('tbl-qa-processors',DATA.qa_processors||[],
+    ['name','plan_step','elapsed_ms','wait_ms','input_rows','output_rows','input_bytes','output_bytes','processor_count'],
+    r=>Number(r.wait_ms||0)>Number(r.elapsed_ms||0)?'alert-row':'');
+  renderTable('tbl-qa-logger',DATA.qa_text_logger||[],
+    ['logger_name','message_count','time_spent_by_action_ms','time_since_query_started_ms','any_level','sample_message']);
+  renderTable('tbl-qa-host',DATA.qa_by_host||[],
+    ['hostname','executions','avg_duration_ms','p95_duration_ms','max_duration_ms','min_duration_ms','avg_memory','max_memory','errors'],
+    r=>Number(r.errors||0)>0?'error-row':'');
+  renderTable('tbl-qa-tables',DATA.qa_tables||[],
+    ['database','table_name','engine','total_rows','size','size_uncompressed','partition_key','sorting_key','storage_policy']);
+  renderTable('tbl-qa-parts',DATA.qa_text_parts||[],
+    ['ts','level','logger_name','message']);
+}
+
 document.addEventListener('DOMContentLoaded',function(){
   if(!DATA){document.body.innerHTML='<p style="padding:40px;color:red">No embedded data.</p>';return;}
 
   renderAlerts();
+  renderQueryAnalysis();
 
   // nav active highlight on scroll
   const secs=[...document.querySelectorAll('section[id]')];
