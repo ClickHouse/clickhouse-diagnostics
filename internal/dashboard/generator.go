@@ -155,7 +155,14 @@ func (g *Generator) tablesListSQL() string {
 		LIMIT 2000`, g.sysTable("tables"), g.sysTable("parts"), notSystem)
 }
 
-// dictionariesSQL builds the dictionaries query, omitting last_exception for gov.
+// dictionariesSQL builds the dictionaries query, omitting last_exception
+// for gov. In cloud mode the query goes through clusterAllReplicas so
+// we get one row per (dictionary, replica) — dictionary RUNTIME state
+// (status, bytes_allocated, hit_rate, query_count) is per-pod even
+// though the definition is shared via Keeper, and a dict that's been
+// queried on pod A but not on pod B will appear LOADED on A and
+// NOT_LOADED on B. hostname() is evaluated remotely on each replica so
+// we can label each row with the pod that produced it.
 func (g *Generator) dictionariesSQL() string {
 	exceptionCol := "last_exception"
 	if g.mode == "gov" {
@@ -163,18 +170,19 @@ func (g *Generator) dictionariesSQL() string {
 	}
 	return fmt.Sprintf(`
 		SELECT
+			hostname()                                          AS hostname,
 			database, name, status, type,
 			bytes_allocated,
-			formatReadableSize(bytes_allocated) AS bytes_allocated_human,
+			formatReadableSize(bytes_allocated)                 AS bytes_allocated_human,
 			element_count, query_count,
-			round(hit_rate * 100, 2) AS hit_rate_pct,
-			round(found_rate * 100, 2) AS found_rate_pct,
+			round(hit_rate * 100, 2)                            AS hit_rate_pct,
+			round(found_rate * 100, 2)                          AS found_rate_pct,
 			lifetime_min, lifetime_max,
-			toString(last_successful_update_time) AS last_update,
-			round(loading_duration, 2) AS loading_duration_s,
+			toString(last_successful_update_time)               AS last_update,
+			round(loading_duration, 2)                          AS loading_duration_s,
 			%s
 		FROM %s
-		ORDER BY bytes_allocated DESC`, exceptionCol, g.sysTable("dictionaries"))
+		ORDER BY database, name, hostname`, exceptionCol, g.sysTable("dictionaries"))
 }
 
 // collect gathers all metrics from ClickHouse and returns a JSON-ready map.
@@ -1820,50 +1828,79 @@ document.addEventListener('DOMContentLoaded',function(){
       return;
     }
 
-    // status distribution (pie)
+    // Rows are now per-(dict, pod) — cloud mode uses clusterAllReplicas
+    // so a dict loaded on 3 replicas shows 3 rows. Aggregate to per-dict
+    // for the charts where rendering N copies would be misleading, but
+    // keep the raw per-pod rows for the table.
+    const byDict={};
+    rows.forEach(r=>{
+      const k=r.database+'.'+r.name;
+      const entry=byDict[k]||(byDict[k]={
+        key:k, database:r.database, name:r.name, type:r.type,
+        bytes_max:0, bytes_max_human:'',
+        lifetime_min:Number(r.lifetime_min||0), lifetime_max:Number(r.lifetime_max||0),
+        statuses:{}, loaded_pods:0, total_pods:0
+      });
+      entry.total_pods++;
+      entry.statuses[r.status]=(entry.statuses[r.status]||0)+1;
+      if(r.status==='LOADED') entry.loaded_pods++;
+      const b=Number(r.bytes_allocated||0);
+      if(b>entry.bytes_max){ entry.bytes_max=b; entry.bytes_max_human=r.bytes_allocated_human||''; }
+    });
+    const dicts=Object.values(byDict);
+
+    // Status pie — count of (dict × pod) slots per status. A dict
+    // LOADED on 3 pods and NOT_LOADED on 1 contributes 3+1 slots, so
+    // operators can see the cluster-wide loading coverage.
     const statusMap={};
     rows.forEach(r=>{statusMap[r.status]=(statusMap[r.status]||0)+1;});
     const statLabels=Object.keys(statusMap);
     new Chart(document.getElementById('chart-dict-status'),{
       type:'pie',
       data:{
-        labels:statLabels,
+        labels:statLabels.map(s=>s+' ('+statusMap[s]+' pod-slots)'),
         datasets:[{data:statLabels.map(s=>statusMap[s]),
           backgroundColor:statLabels.map(s=>DICT_STATUS_COLOR[s]||'#607D8B'),borderWidth:2}]
       },
       options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{position:'right'}}}
     });
 
-    // bytes allocated (horizontal bar)
-    const topDicts=rows.slice(0,15);
+    // Bytes allocated — max across pods per dict (same dict has very
+    // similar bytes on every pod that loaded it; using max avoids
+    // visually shrinking a dict that's NOT_LOADED on one replica).
+    const topDicts=[...dicts].sort((a,b)=>b.bytes_max-a.bytes_max).slice(0,15);
     new Chart(document.getElementById('chart-dict-bytes'),{
       type:'bar',
       data:{
-        labels:topDicts.map(r=>r.database+'.'+r.name),
+        labels:topDicts.map(d=>d.key),
         datasets:[{
-          label:'Bytes Allocated',
-          data:topDicts.map(r=>r.bytes_allocated),
+          label:'max bytes_allocated across pods',
+          data:topDicts.map(d=>d.bytes_max),
           backgroundColor:topDicts.map((_,i)=>alpha(C[i%C.length],.8)),
           borderColor:topDicts.map((_,i)=>C[i%C.length]),borderWidth:1
         }]
       },
       options:{
         indexAxis:'y',responsive:true,maintainAspectRatio:false,
-        plugins:{legend:{display:false},tooltip:{callbacks:{label:ctx=>' '+topDicts[ctx.dataIndex].bytes_allocated_human}}},
+        plugins:{legend:{display:false},tooltip:{callbacks:{label:ctx=>{
+          const d=topDicts[ctx.dataIndex];
+          return [' '+d.bytes_max_human, ' loaded on '+d.loaded_pods+' / '+d.total_pods+' pods'];
+        }}}},
         scales:{x:{ticks:{callback:v=>v>=1e9?(v/1e9).toFixed(1)+'G':v>=1e6?(v/1e6).toFixed(1)+'M':v>=1e3?(v/1e3).toFixed(0)+'K':v}}}
       }
     });
 
-    // lifetime range (grouped bar)
-    const lifeRows=rows.filter(r=>r.lifetime_max>0||r.lifetime_min>0).slice(0,20);
+    // Lifetime is per-definition (same value on every pod), so use the
+    // deduped per-dict view.
+    const lifeRows=dicts.filter(d=>d.lifetime_max>0||d.lifetime_min>0).slice(0,20);
     if(lifeRows.length){
       new Chart(document.getElementById('chart-dict-lifetime'),{
         type:'bar',
         data:{
-          labels:lifeRows.map(r=>r.name),
+          labels:lifeRows.map(d=>d.name),
           datasets:[
-            {label:'Lifetime Min (s)',data:lifeRows.map(r=>r.lifetime_min),backgroundColor:alpha('#2196F3',.75),borderColor:'#2196F3',borderWidth:1},
-            {label:'Lifetime Max (s)',data:lifeRows.map(r=>r.lifetime_max),backgroundColor:alpha('#FF9800',.75),borderColor:'#FF9800',borderWidth:1}
+            {label:'Lifetime Min (s)',data:lifeRows.map(d=>d.lifetime_min),backgroundColor:alpha('#2196F3',.75),borderColor:'#2196F3',borderWidth:1},
+            {label:'Lifetime Max (s)',data:lifeRows.map(d=>d.lifetime_max),backgroundColor:alpha('#FF9800',.75),borderColor:'#FF9800',borderWidth:1}
           ]
         },
         options:{
@@ -1877,9 +1914,10 @@ document.addEventListener('DOMContentLoaded',function(){
       document.getElementById('chart-dict-lifetime').parentElement.innerHTML='<p class="no-data">No lifetime data</p>';
     }
 
-    // dictionary detail table — render status as badge inline
+    // Dictionary detail table — per-(dict, pod) rows so the operator
+    // can see which pod each runtime stat came from.
     const el=document.getElementById('tbl-dicts');
-    const cols=['database','name','status','type','bytes_allocated_human','element_count',
+    const cols=['hostname','database','name','status','type','bytes_allocated_human','element_count',
                 'hit_rate_pct','found_rate_pct','lifetime_min','lifetime_max',
                 'last_update','loading_duration_s','last_exception'];
     let h='<table class="dt"><thead><tr>'+cols.map(k=>'<th>'+k+'</th>').join('')+'</tr></thead><tbody>';

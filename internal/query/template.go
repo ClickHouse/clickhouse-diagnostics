@@ -16,11 +16,19 @@ import (
 // This is the single source of truth used by the alert evaluator, the
 // dashboard generator, and the new query-analysis collector. If you
 // add a system table to one of those code paths, update this map.
+//
+// Notable exception: system.dictionaries is NOT in this list even
+// though the dictionary DEFINITIONS are shared via Keeper in CH Cloud.
+// The reason is the runtime state columns (status, bytes_allocated,
+// query_count, hit_rate) are per-replica — a dict that's been queried
+// on replica A but not yet on replica B shows different status on
+// each. We want to see per-pod loading state, so we let cloud mode
+// wrap with clusterAllReplicas; callers add hostname() to the SELECT
+// to label each row with its pod.
 var SharedSystemTables = map[string]bool{
 	"columns":           true,
 	"databases":         true,
 	"detached_parts":    true,
-	"dictionaries":      true,
 	"mutations":         true,
 	"parts":             true,
 	"replicas":          true,

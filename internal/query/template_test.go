@@ -17,6 +17,9 @@ func TestSysTable_CloudWrapping(t *testing.T) {
 		{"cloud", "parts", "system.parts"},     // shared — no wrapping
 		{"cloud", "tables", "system.tables"},   // shared
 		{"cloud", "replicas", "system.replicas"},
+		// system.dictionaries is per-replica (runtime state differs
+		// even when the definition is shared), so cloud must wrap.
+		{"cloud", "dictionaries", "clusterAllReplicas(default, system.dictionaries)"},
 		{"onprem", "query_log", "system.query_log"},
 		{"gov", "text_log", "system.text_log"},
 		{"CLOUD", "query_log", "clusterAllReplicas(default, system.query_log)"}, // case insens
