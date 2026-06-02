@@ -1535,7 +1535,7 @@ function renderQueryAnalysis(){
   renderTable('tbl-qa-parts',DATA.qa_text_parts||[],
     ['ts','level','logger_name','message']);
   renderTable('tbl-qa-textlog',DATA.qa_text_full||[],
-    ['ts','level','logger_name','message','message_format_string']);
+    ['ts','level','logger_name','message']);
 }
 
 document.addEventListener('DOMContentLoaded',function(){
