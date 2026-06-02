@@ -318,8 +318,8 @@ When you already know **which** query is the problem — a specific `query_id` f
 | You have | Pass | What you get |
 |---|---|---|
 | A specific `query_id` (from a ticket) | `--query-id <uuid>` | Tool auto-derives the `normalized_query_hash` from `system.query_log`, centres the time window on the query's `event_time`, and runs both single-id and group queries |
-| A `normalized_query_hash` (from a dashboard) | `--normalized-query-hash <uint64>` | Group-only queries over the last 7 days (skips queries that need a specific `query_id`) |
-| Both | both flags | Skips the pre-flight derivation; otherwise identical to passing `--query-id` alone |
+| A `normalized_query_hash` (from a dashboard) | `--normalized-query-hash <uint64>` | Tool auto-derives the **slowest** `query_id` for that hash within the window (so the single-id files — ProfileEvents, text_log, tables-referenced — are populated) and runs the full bundle |
+| Both | both flags | Skips both pre-flight derivations; otherwise identical to passing either alone |
 | A specific time window | `--from <RFC3339>` / `--to <RFC3339>` | Overrides the auto-derived window (RFC3339 or `YYYY-MM-DD` accepted) |
 
 Works in all three modes (`cloud`, `onprem`, `gov`) — table references adapt the same way as the alert evaluator (`clusterAllReplicas(...)` in cloud, plain `system.*` elsewhere).
@@ -330,16 +330,14 @@ Works in all three modes (`cloud`, `onprem`, `gov`) — table references adapt t
 
 Eleven `.sql` files under `queries.query_analysis/`, each written to `<backup>/query_analysis/<name>_<ts>.native`:
 
-**Single-query-id (need `--query-id`)**
+**Single-query-id (need `--query-id` or one auto-derived from `--normalized-query-hash`)**
 
 | File | What it answers |
 |---|---|
 | `query_details.sql` | The full `query_log` row — duration, memory, read rows, query text, exception, profile events |
 | `profile_events.sql` | All `ProfileEvents` for this execution, sorted by value descending. *Most useful single artifact.* |
 | `text_log_parts.sql` | Just the "Selected X/Y parts by partition key, Z marks…" and "Reading approx. N rows with M streams" log lines — answers "did we full-scan?" |
-| `text_log_by_logger.sql` | Per-logger time accounting — which subsystem (Aggregator / ReadFromMergeTree / FilesystemCache / S3Client / …) the query was waiting on the longest |
 | `text_log_full.sql` | Every `text_log` row for the query (up to 5000) — fallback when the targeted slices don't show the issue |
-| `processors_profile_log.sql` | Plan-step level timings — `elapsed_us`, `wait_us`, `input_rows`, `output_rows` per processor. Find the pipeline bottleneck. |
 | `tables_for_query.sql` | Current DDL + size for the tables the query touched (joined from `query_log.tables`) |
 
 **Hash-group (need `--normalized-query-hash`, auto-derived from `--query-id`)**
@@ -349,17 +347,40 @@ Eleven `.sql` files under `queries.query_analysis/`, each written to `<backup>/q
 | `fast_slow_query_ids.sql` | The slowest and fastest `query_id` for this hash in the window — defines the comparison pair |
 | `profile_events_compare.sql` | Side-by-side `ProfileEvents` for slow vs fast execution with `delta` and `percentage_diff` columns. *Most diagnostic query in the bundle.* |
 | `hash_by_host.sql` | Per-hostname execution count, avg / p95 / max duration, memory, errors — surfaces "one node is slow" patterns |
-| `hash_summary.sql` | Hourly bucket: executions, succeeded/failed split, p50/p95/max duration, avg memory, avg read bytes — feeds the dashboard's executions-over-time chart |
+| `hash_summary.sql` | **Single consolidated hourly aggregation** returning count / succeeded / failed / p50 / p95 / max / sum duration, sum memory, sum user CPU, sum read rows + bytes, sum written rows + bytes. The dashboard front-end derives multiple charts from this one array. |
+| `failed_over_time.sql` | Failed-execution count per hour, split by exception code — feeds the stacked "Failed queries per hour" chart |
+| `failed_queries.sql` | Per-table × per-error breakdown of failures (tables touched, error type, user, count, first/last seen, sample exception) |
 
 ### Dashboard integration
 
-When `--query-id` or `--normalized-query-hash` is set and `--skip-dashboard` is not, the generated `dashboard.html` includes a new **🔍 Query Analysis** section near the top of the nav. It shows:
+When `--query-id` or `--normalized-query-hash` is set and `--skip-dashboard` is not, the generated `dashboard.html` includes a new **🔍 Query Analysis** section near the top of the nav.
 
-- A focus header: which `query_id` / `hash` / time window the analysis is scoped to, plus the single execution's duration / memory / read-rows
-- Horizontal bar of the top 30 `ProfileEvents` for the focus execution
-- Horizontal bar comparing fast vs slow `ProfileEvents` (top 30 by delta)
-- Line chart of executions / avg duration / p95 over time
-- Tables: plan-step timings, time-by-logger, per-host distribution, tables-referenced, parts-scanned text-log lines
+**Focus header**: which `query_id` (user-supplied OR auto-derived slowest), which hash, time window, plus the focus execution's duration / memory / read-rows, plus a one-line comparison of the slow vs fast `query_id` durations.
+
+**Time-series row** — every chart is read from the same `hash_summary` array (one SQL query feeds them all):
+
+| Chart | X | Y |
+|---|---|---|
+| Executions per hour | event hour | count (stacked succeeded / failed) |
+| p95 duration per hour | event hour | p95 ms |
+| Sum query duration per hour | event hour | sum ms |
+| Sum memory usage per hour | event hour | sum MB |
+| Sum user CPU per hour | event hour | sum sec |
+| Read rows / bytes per hour | event hour | rows (left axis), bytes (right axis) |
+| Failed query count per hour | event hour | count, stacked by exception code (`MEMORY_LIMIT_EXCEEDED (241)`, `TIMEOUT_EXCEEDED (159)`, …) |
+
+**Single-execution row**:
+
+- Top 30 `ProfileEvents` for the focus execution
+- Fast vs slow `ProfileEvents` (top 30 by `|delta|`)
+
+**Detail tables**:
+
+- Per-host distribution (executions / durations / memory / errors per hostname)
+- Failed queries breakdown (per table × error type × user)
+- Tables referenced by the focus query (current DDL + size)
+- "Selected X parts, Y marks" log lines for the slowest execution
+- Full `text_log` for the slowest execution (scrollable)
 
 The section is hidden when neither analysis flag is set.
 

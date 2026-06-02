@@ -131,6 +131,67 @@ func (o *AnalysisOpts) Validate(now time.Time) error {
 	return nil
 }
 
+// PreflightForHash picks a representative query_id for the supplied
+// normalized_query_hash — the slowest finished execution within the
+// time window. This is how hash-only mode populates the single-id
+// queries (ProfileEvents, text_log slices, tables-referenced, …):
+// without a query_id every WHERE filter on `query_id = …` returns
+// zero rows.
+//
+// We deliberately pick the SLOWEST execution because that's the most
+// useful one for "why was this slow?" analysis. The fast vs slow
+// comparison surfaces the FASTEST execution separately via
+// fast_slow_query_ids.sql, so both ends of the spectrum are
+// available in the dashboard.
+//
+// Returns the chosen query_id and its event_time. If no execution is
+// found, both values are zero — callers should treat that as
+// "no representative available" and skip single-id files.
+func PreflightForHash(client *pkg.ClickHouseClient, mode, hash string, from, to time.Time) (queryID string, eventTime time.Time, err error) {
+	if err := ValidateNormalizedQueryHash(hash); err != nil {
+		return "", time.Time{}, err
+	}
+	if from.IsZero() || to.IsZero() {
+		return "", time.Time{}, fmt.Errorf("preflight: window must be set before deriving query_id from hash")
+	}
+	sql := fmt.Sprintf(`SELECT
+		argMax(query_id, query_duration_ms) AS qid,
+		toString(argMax(event_time, query_duration_ms)) AS et
+	FROM %s
+	WHERE normalized_query_hash = %s
+	  AND event_time >= '%s'
+	  AND event_time <= '%s'
+	  AND type = 'QueryFinish'
+	  AND NOT has(databases, 'system')
+	FORMAT JSONCompact`,
+		SysTable(mode, "query_log"),
+		hash,
+		from.UTC().Format("2006-01-02 15:04:05"),
+		to.UTC().Format("2006-01-02 15:04:05"))
+
+	raw, err := client.ExecuteQuery(sql)
+	if err != nil {
+		return "", time.Time{}, fmt.Errorf("preflight (hash → slowest query_id) failed: %w", err)
+	}
+	var res struct {
+		Data [][]string `json:"data"`
+		Rows int        `json:"rows"`
+	}
+	if err := json.Unmarshal([]byte(raw), &res); err != nil {
+		return "", time.Time{}, fmt.Errorf("preflight parse failed: %w (%.200s)", err, raw)
+	}
+	if res.Rows == 0 || len(res.Data) == 0 || len(res.Data[0]) < 2 || res.Data[0][0] == "" {
+		// Empty result is not an error — caller decides whether to
+		// continue without a representative query_id.
+		return "", time.Time{}, nil
+	}
+	queryID = res.Data[0][0]
+	if t, parseErr := time.Parse("2006-01-02 15:04:05", res.Data[0][1]); parseErr == nil {
+		eventTime = t.UTC()
+	}
+	return queryID, eventTime, nil
+}
+
 // PreflightForQueryID looks up normalized_query_hash and event_time
 // for the supplied --query-id. It runs ONCE before the analysis
 // bundle, so the bundle's group queries can be parameterised with the

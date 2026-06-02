@@ -347,8 +347,32 @@ func resolveAnalysisOpts(client *pkg.ClickHouseClient, mode, queryID, normalized
 		}
 	}
 
+	// Validate runs the default-window logic for whatever fields are
+	// still empty. We need a populated window before the reverse
+	// pre-flight (hash → slowest query_id) can run.
 	if err := opts.Validate(time.Now().UTC()); err != nil {
 		return opts, err
+	}
+
+	// Reverse pre-flight: when only --normalized-query-hash is set,
+	// pick the slowest finished execution as the representative
+	// query_id so the single-id queries (ProfileEvents, text_log,
+	// tables-referenced …) have something to filter on. Without
+	// this, hash-only mode shipped a dashboard with most cards
+	// empty (the user's main complaint).
+	if opts.NormalizedQueryHash != "" && opts.QueryID == "" {
+		qid, eventTime, err := query.PreflightForHash(client, mode, opts.NormalizedQueryHash, opts.From, opts.To)
+		if err != nil {
+			return opts, err
+		}
+		if qid == "" {
+			fmt.Printf("Pre-flight: no QueryFinish row found for normalized_query_hash %s in the window — single-id files will be skipped\n",
+				opts.NormalizedQueryHash)
+		} else {
+			opts.QueryID = qid
+			fmt.Printf("Pre-flight: normalized_query_hash %s → slowest query_id %s (event_time %s)\n",
+				opts.NormalizedQueryHash, qid, eventTime.Format(time.RFC3339))
+		}
 	}
 	return opts, nil
 }

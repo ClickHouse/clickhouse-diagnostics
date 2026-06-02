@@ -555,16 +555,17 @@ func (g *Generator) collectAnalysis(p map[string]interface{}) {
 	// Map of payload key → .sql filename. Keys match the JS fetches
 	// in the dashboard template (DATA.qa_*).
 	files := map[string]string{
-		"qa_details":     "query_details.sql",
-		"qa_profile":     "profile_events.sql",
-		"qa_text_parts":  "text_log_parts.sql",
-		"qa_text_logger": "text_log_by_logger.sql",
-		"qa_processors":  "processors_profile_log.sql",
-		"qa_tables":      "tables_for_query.sql",
-		"qa_fast_slow":   "fast_slow_query_ids.sql",
-		"qa_pe_compare":  "profile_events_compare.sql",
-		"qa_by_host":     "hash_by_host.sql",
-		"qa_summary":     "hash_summary.sql",
+		"qa_details":         "query_details.sql",
+		"qa_profile":         "profile_events.sql",
+		"qa_text_parts":      "text_log_parts.sql",
+		"qa_text_full":       "text_log_full.sql",
+		"qa_tables":          "tables_for_query.sql",
+		"qa_fast_slow":       "fast_slow_query_ids.sql",
+		"qa_pe_compare":      "profile_events_compare.sql",
+		"qa_by_host":         "hash_by_host.sql",
+		"qa_summary":         "hash_summary.sql",
+		"qa_failed_over_time": "failed_over_time.sql",
+		"qa_failed":          "failed_queries.sql",
 	}
 	for key, fname := range files {
 		raw, err := os.ReadFile(filepath.Join(g.analysisDir, fname))
@@ -746,30 +747,61 @@ footer{text-align:center;color:#aaa;font-size:12px;padding:20px;margin-top:8px}
 <section id="sec-qa" style="display:none">
   <h2>🔍 Query Analysis</h2>
   <div id="qa-focus" class="alert-item" style="border-left-color:#FC4F05;margin-bottom:18px"></div>
+
+  <!-- Time-series charts, all driven from a single hash_summary array -->
   <div class="charts-grid">
     <div class="chart-card">
-      <h3>Top 30 ProfileEvents (one execution)</h3>
+      <h3>Executions per hour</h3>
+      <div class="chart-wrap h260"><canvas id="chart-qa-execs"></canvas></div>
+    </div>
+    <div class="chart-card">
+      <h3>p95 duration per hour</h3>
+      <div class="chart-wrap h260"><canvas id="chart-qa-p95"></canvas></div>
+    </div>
+    <div class="chart-card">
+      <h3>Sum query duration per hour (ms)</h3>
+      <div class="chart-wrap h260"><canvas id="chart-qa-sumdur"></canvas></div>
+    </div>
+    <div class="chart-card">
+      <h3>Sum memory usage per hour (MB)</h3>
+      <div class="chart-wrap h260"><canvas id="chart-qa-mem"></canvas></div>
+    </div>
+    <div class="chart-card">
+      <h3>Sum user CPU per hour (sec)</h3>
+      <div class="chart-wrap h260"><canvas id="chart-qa-cpu"></canvas></div>
+    </div>
+    <div class="chart-card">
+      <h3>Read rows / bytes per hour</h3>
+      <div class="chart-wrap h260"><canvas id="chart-qa-read"></canvas></div>
+    </div>
+    <div class="chart-card" style="grid-column:1/-1">
+      <h3>Failed query count per hour, by error type (stacked)</h3>
+      <div class="chart-wrap h260"><canvas id="chart-qa-failed"></canvas></div>
+    </div>
+  </div>
+
+  <!-- Single-execution charts -->
+  <div class="charts-grid" style="margin-top:18px">
+    <div class="chart-card">
+      <h3>Top 30 ProfileEvents (slowest execution)</h3>
       <div class="chart-wrap h420"><canvas id="chart-qa-profile"></canvas></div>
     </div>
     <div class="chart-card">
-      <h3>Fast vs Slow — ProfileEvents diff (top 30 by delta)</h3>
+      <h3>Fast vs Slow — ProfileEvents (top 30 by |delta|)</h3>
       <div class="chart-wrap h420"><canvas id="chart-qa-compare"></canvas></div>
     </div>
-    <div class="chart-card" style="grid-column:1/-1">
-      <h3>Executions over time (hash)</h3>
-      <div class="chart-wrap h260"><canvas id="chart-qa-summary"></canvas></div>
-    </div>
   </div>
-  <div class="sub-title">Plan-step timings (processors_profile_log)</div>
-  <div class="tbl-wrap"><div id="tbl-qa-processors"></div></div>
-  <div class="sub-title" style="margin-top:18px">Time spent by logger (text_log)</div>
-  <div class="tbl-wrap"><div id="tbl-qa-logger"></div></div>
-  <div class="sub-title" style="margin-top:18px">Per-host distribution (hash)</div>
+
+  <div class="sub-title">Per-host distribution (hash)</div>
   <div class="tbl-wrap"><div id="tbl-qa-host"></div></div>
-  <div class="sub-title" style="margin-top:18px">Tables referenced by the query</div>
+  <div class="sub-title" style="margin-top:18px">Failed queries — per-table × per-error breakdown</div>
+  <div class="tbl-wrap"><div id="tbl-qa-failed"></div></div>
+  <div class="sub-title" style="margin-top:18px">Tables referenced by the focus query</div>
   <div class="tbl-wrap"><div id="tbl-qa-tables"></div></div>
-  <div class="sub-title" style="margin-top:18px">Parts / marks / streams scanned (text_log)</div>
+  <div class="sub-title" style="margin-top:18px">Parts / marks / streams scanned (text_log, slowest execution)</div>
   <div class="tbl-wrap"><div id="tbl-qa-parts"></div></div>
+  <div class="sub-title" style="margin-top:18px">Full text_log for the slowest execution</div>
+  <div class="tbl-wrap" style="max-height:480px;overflow-y:auto"><div id="tbl-qa-textlog"></div></div>
 </section>
 
 <!-- ── OVERVIEW ── -->
@@ -1215,12 +1247,16 @@ function renderQueryAnalysis(){
   document.getElementById('sec-qa').style.display='';
   document.getElementById('nav-qa').style.display='';
 
-  // Focus card — what the analysis is scoped to.
+  // Focus card — what the analysis is scoped to and which execution
+  // the single-id queries (ProfileEvents, text_log, tables, parts)
+  // were filtered against. In hash-only mode this is the slowest
+  // execution for the hash (auto-derived in the pre-flight); in
+  // --query-id mode it's the user-supplied UUID.
   const det=(DATA.qa_details||[])[0]||{};
   const fast=(DATA.qa_fast_slow||[])[0]||{};
   const focus=document.getElementById('qa-focus');
   let h='<div class="alert-header">';
-  h+='<span class="alert-title">Focus: '+(DATA.qa_query_id||'(hash only)')+'</span>';
+  h+='<span class="alert-title">Focus query_id: '+(DATA.qa_query_id||'(none)')+'</span>';
   h+='<span class="alert-tags"><span class="alert-tag">hash '+(DATA.qa_hash||'')+'</span>';
   h+='<span class="alert-tag">window '+(DATA.qa_from||'')+' → '+(DATA.qa_to||'')+'</span></span>';
   h+='</div>';
@@ -1236,22 +1272,114 @@ function renderQueryAnalysis(){
   if(fast.slow_query_id){
     h+='<div class="alert-desc">';
     h+='hash executions: <b>'+fmt(fast.executions)+'</b> · ';
-    h+='slowest: <b>'+fmt(fast.slow_duration_ms)+' ms</b> ('+fast.slow_query_id+') · ';
-    h+='fastest: <b>'+fmt(fast.fast_duration_ms)+' ms</b> ('+fast.fast_query_id+')';
+    h+='slowest: <b>'+fmt(fast.slow_duration_ms)+' ms</b> (<code>'+fast.slow_query_id+'</code>) · ';
+    h+='fastest: <b>'+fmt(fast.fast_duration_ms)+' ms</b> (<code>'+fast.fast_query_id+'</code>)';
+    if(Number(fast.fast_duration_ms)>0){
+      const ratio=(Number(fast.slow_duration_ms)/Number(fast.fast_duration_ms)).toFixed(1);
+      h+=' → <b>'+ratio+'×</b> slower';
+    }
     h+='</div>';
   }
   focus.innerHTML=h;
 
-  // Top ProfileEvents — horizontal bar of the 30 highest values.
+  // ── Time-series charts, all from DATA.qa_summary ─────────────────────────
+  const sum=DATA.qa_summary||[];
+  if(sum.length){
+    const labels=sum.map(r=>r.time_bucket);
+
+    // 1) Executions per hour (succeeded + failed split)
+    new Chart(document.getElementById('chart-qa-execs'),{
+      type:'bar',
+      data:{labels,datasets:[
+        {label:'succeeded',data:sum.map(r=>Number(r.succeeded)),
+          backgroundColor:alpha('#4CAF50',.8),borderColor:'#4CAF50',borderWidth:1,stack:'s'},
+        {label:'failed',data:sum.map(r=>Number(r.failed)),
+          backgroundColor:alpha('#E91E63',.8),borderColor:'#E91E63',borderWidth:1,stack:'s'}
+      ]},
+      options:{responsive:true,maintainAspectRatio:false,
+        interaction:{mode:'index',intersect:false},
+        plugins:{legend:{position:'top'}},
+        scales:{x:{stacked:true},y:{stacked:true,beginAtZero:true}}}
+    });
+
+    // 2) p95 duration per hour
+    new Chart(document.getElementById('chart-qa-p95'),{
+      type:'line',
+      data:{labels,datasets:[{label:'p95 ms',data:sum.map(r=>Number(r.p95_duration_ms)),
+        borderColor:'#9C27B0',backgroundColor:alpha('#9C27B0',.2),tension:.2,fill:true}]},
+      options:{responsive:true,maintainAspectRatio:false,
+        plugins:{legend:{display:false}},scales:{y:{beginAtZero:true}}}
+    });
+
+    // 3) Sum query duration per hour
+    new Chart(document.getElementById('chart-qa-sumdur'),{
+      type:'bar',
+      data:{labels,datasets:[{label:'sum ms',data:sum.map(r=>Number(r.sum_duration_ms)),
+        backgroundColor:alpha('#FC4F05',.8),borderColor:'#FC4F05',borderWidth:1}]},
+      options:{responsive:true,maintainAspectRatio:false,
+        plugins:{legend:{display:false}},scales:{y:{beginAtZero:true,ticks:{callback:v=>fmt(v)}}}}
+    });
+
+    // 4) Sum memory per hour (MB)
+    new Chart(document.getElementById('chart-qa-mem'),{
+      type:'line',
+      data:{labels,datasets:[{label:'sum MB',data:sum.map(r=>Number(r.sum_memory_mb)),
+        borderColor:'#2196F3',backgroundColor:alpha('#2196F3',.2),tension:.2,fill:true}]},
+      options:{responsive:true,maintainAspectRatio:false,
+        plugins:{legend:{display:false}},scales:{y:{beginAtZero:true}}}
+    });
+
+    // 5) Sum userCPU per hour (sec)
+    new Chart(document.getElementById('chart-qa-cpu'),{
+      type:'line',
+      data:{labels,datasets:[{label:'sum sec',data:sum.map(r=>Number(r.sum_user_cpu_sec)),
+        borderColor:'#FFB627',backgroundColor:alpha('#FFB627',.2),tension:.2,fill:true}]},
+      options:{responsive:true,maintainAspectRatio:false,
+        plugins:{legend:{display:false}},scales:{y:{beginAtZero:true}}}
+    });
+
+    // 6) Read rows / bytes per hour (dual-axis)
+    new Chart(document.getElementById('chart-qa-read'),{
+      type:'line',
+      data:{labels,datasets:[
+        {label:'read rows',data:sum.map(r=>Number(r.sum_read_rows)),
+          borderColor:'#00BCD4',backgroundColor:alpha('#00BCD4',.2),tension:.2,yAxisID:'y'},
+        {label:'read bytes',data:sum.map(r=>Number(r.sum_read_bytes)),
+          borderColor:'#9C27B0',backgroundColor:alpha('#9C27B0',.2),tension:.2,yAxisID:'y1'}
+      ]},
+      options:{responsive:true,maintainAspectRatio:false,
+        interaction:{mode:'index',intersect:false},
+        plugins:{legend:{position:'top'}},
+        scales:{
+          y:{position:'left',beginAtZero:true,title:{display:true,text:'rows'},ticks:{callback:v=>fmt(v)}},
+          y1:{position:'right',beginAtZero:true,grid:{drawOnChartArea:false},title:{display:true,text:'bytes'},ticks:{callback:v=>fmt(v)}}
+        }}
+    });
+  }
+
+  // 7) Failed by error type — stacked from a separate query (errors
+  // are pivoted by error_type so they cannot share the hash_summary
+  // GROUP BY without diluting the rest of the metrics).
+  const fot=DATA.qa_failed_over_time||[];
+  if(fot.length){
+    const piv=pivot(fot,'time_bucket','error_type','errors');
+    piv.datasets.forEach(ds=>{ds.stack='e';});
+    new Chart(document.getElementById('chart-qa-failed'),{
+      type:'bar',data:piv,
+      options:{responsive:true,maintainAspectRatio:false,
+        interaction:{mode:'index',intersect:false},
+        plugins:{legend:{position:'top'}},
+        scales:{x:{stacked:true},y:{stacked:true,beginAtZero:true}}}
+    });
+  }
+
+  // Top ProfileEvents for the focus (slowest) execution.
   const pe=(DATA.qa_profile||[]).slice(0,30);
   if(pe.length){
     new Chart(document.getElementById('chart-qa-profile'),{
       type:'bar',
-      data:{
-        labels:pe.map(r=>r.metric),
-        datasets:[{label:'value',data:pe.map(r=>Number(r.value)),
-          backgroundColor:alpha('#FC4F05',.75),borderColor:'#FC4F05',borderWidth:1}]
-      },
+      data:{labels:pe.map(r=>r.metric),datasets:[{label:'value',data:pe.map(r=>Number(r.value)),
+        backgroundColor:alpha('#FC4F05',.75),borderColor:'#FC4F05',borderWidth:1}]},
       options:{indexAxis:'y',responsive:true,maintainAspectRatio:false,
         plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>' '+fmt(c.raw)}}},
         scales:{x:{beginAtZero:true,ticks:{callback:v=>fmt(v)}}}}
@@ -1263,62 +1391,30 @@ function renderQueryAnalysis(){
   if(cmp.length){
     new Chart(document.getElementById('chart-qa-compare'),{
       type:'bar',
-      data:{
-        labels:cmp.map(r=>r.metric),
-        datasets:[
-          {label:'slow',data:cmp.map(r=>Number(r.slow_value)),
-            backgroundColor:alpha('#E91E63',.75),borderColor:'#E91E63',borderWidth:1},
-          {label:'fast',data:cmp.map(r=>Number(r.fast_value)),
-            backgroundColor:alpha('#4CAF50',.75),borderColor:'#4CAF50',borderWidth:1}
-        ]
-      },
+      data:{labels:cmp.map(r=>r.metric),datasets:[
+        {label:'slow',data:cmp.map(r=>Number(r.slow_value)),
+          backgroundColor:alpha('#E91E63',.75),borderColor:'#E91E63',borderWidth:1},
+        {label:'fast',data:cmp.map(r=>Number(r.fast_value)),
+          backgroundColor:alpha('#4CAF50',.75),borderColor:'#4CAF50',borderWidth:1}
+      ]},
       options:{indexAxis:'y',responsive:true,maintainAspectRatio:false,
-        plugins:{legend:{position:'top'},tooltip:{callbacks:{
-          label:c=>c.dataset.label+': '+fmt(c.raw)
-        }}},
+        plugins:{legend:{position:'top'},tooltip:{callbacks:{label:c=>c.dataset.label+': '+fmt(c.raw)}}},
         scales:{x:{beginAtZero:true,ticks:{callback:v=>fmt(v)}}}}
     });
   }
 
-  // Executions over time for the hash.
-  const sum=DATA.qa_summary||[];
-  if(sum.length){
-    new Chart(document.getElementById('chart-qa-summary'),{
-      type:'line',
-      data:{
-        labels:sum.map(r=>r.hour),
-        datasets:[
-          {label:'executions',data:sum.map(r=>Number(r.executions)),
-            borderColor:'#2196F3',backgroundColor:alpha('#2196F3',.2),tension:.2,yAxisID:'y'},
-          {label:'avg ms',data:sum.map(r=>Number(r.avg_duration_ms)),
-            borderColor:'#FC4F05',backgroundColor:alpha('#FC4F05',.2),tension:.2,yAxisID:'y1'},
-          {label:'p95 ms',data:sum.map(r=>Number(r.p95_duration_ms)),
-            borderColor:'#9C27B0',backgroundColor:alpha('#9C27B0',.2),tension:.2,yAxisID:'y1'}
-        ]
-      },
-      options:{responsive:true,maintainAspectRatio:false,
-        interaction:{mode:'index',intersect:false},
-        plugins:{legend:{position:'top'}},
-        scales:{
-          y:{position:'left',beginAtZero:true,title:{display:true,text:'count'}},
-          y1:{position:'right',beginAtZero:true,grid:{drawOnChartArea:false},title:{display:true,text:'ms'}}
-        }}
-    });
-  }
-
-  // Tables
-  renderTable('tbl-qa-processors',DATA.qa_processors||[],
-    ['name','plan_step','elapsed_ms','wait_ms','input_rows','output_rows','input_bytes','output_bytes','processor_count'],
-    r=>Number(r.wait_ms||0)>Number(r.elapsed_ms||0)?'alert-row':'');
-  renderTable('tbl-qa-logger',DATA.qa_text_logger||[],
-    ['logger_name','message_count','time_spent_by_action_ms','time_since_query_started_ms','any_level','sample_message']);
+  // Detail tables
   renderTable('tbl-qa-host',DATA.qa_by_host||[],
     ['hostname','executions','avg_duration_ms','p95_duration_ms','max_duration_ms','min_duration_ms','avg_memory','max_memory','errors'],
     r=>Number(r.errors||0)>0?'error-row':'');
+  renderTable('tbl-qa-failed',DATA.qa_failed||[],
+    ['error_type','tables_touched','user','errors','first_seen','last_seen','max_duration_ms','sample_exception']);
   renderTable('tbl-qa-tables',DATA.qa_tables||[],
     ['database','table_name','engine','total_rows','size','size_uncompressed','partition_key','sorting_key','storage_policy']);
   renderTable('tbl-qa-parts',DATA.qa_text_parts||[],
     ['ts','level','logger_name','message']);
+  renderTable('tbl-qa-textlog',DATA.qa_text_full||[],
+    ['ts','level','logger_name','message','message_format_string']);
 }
 
 document.addEventListener('DOMContentLoaded',function(){
