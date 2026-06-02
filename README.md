@@ -350,20 +350,25 @@ Eleven `.sql` files under `queries.query_analysis/`, each written to `<backup>/q
 | `hash_summary.sql` | **Single consolidated hourly aggregation** returning count / succeeded / failed / p50 / p95 / max / sum duration, sum memory, sum user CPU, sum read rows + bytes, sum written rows + bytes. The dashboard front-end derives multiple charts from this one array. |
 | `failed_over_time.sql` | Failed-execution count per hour, split by exception code — feeds the stacked "Failed queries per hour" chart |
 | `failed_queries.sql` | Per-table × per-error breakdown of failures (tables touched, error type, user, count, first/last seen, sample exception) |
+| `executions_timeline.sql` | One row per individual execution of the hash (`LIMIT 10000`, most recent first) — feeds the per-execution scatter plot so each query is visible as its own dot |
 
 ### Dashboard integration
 
 When `--query-id` or `--normalized-query-hash` is set and `--skip-dashboard` is not, the generated `dashboard.html` includes a new **🔍 Query Analysis** section near the top of the nav.
 
-**Focus header**: which `query_id` (user-supplied OR auto-derived slowest), which hash, time window, plus the focus execution's duration / memory / read-rows, plus a one-line comparison of the slow vs fast `query_id` durations.
+**Focus header**: which `query_id` (user-supplied OR auto-derived slowest), which hash, time window, plus the focus execution's duration / memory / read-rows, plus a one-line comparison of the slow vs fast `query_id` durations (e.g. "slowest 2400 ms · fastest 50 ms → 48× slower").
 
-**Time-series row** — every chart is read from the same `hash_summary` array (one SQL query feeds them all):
+**Query text card** (cloud / onprem only): the exact SQL of the focus execution, monospaced and scrollable. Hidden — and also stripped from the embedded JSON — in `gov` mode, because the query text contains the table names gov mode is otherwise hashing.
+
+**Per-execution scatter**: one dot per individual query (up to 10 000 rows). X = event_time, Y = duration. Green = success, red cross = failure. Hover tooltip shows `query_id`, hostname, exception_code. Use this to see the spread within an hour bucket — e.g. nine executions clustered at 5 ms and one outlier at 5 000 ms is invisible in an hourly average.
+
+**Time-series row** — every chart is read from the same `hash_summary` array (one SQL query feeds them all). Duration axes auto-pick **seconds** for short queries, **minutes** once the peak exceeds 200 seconds:
 
 | Chart | X | Y |
 |---|---|---|
 | Executions per hour | event hour | count (stacked succeeded / failed) |
-| p95 duration per hour | event hour | p95 ms |
-| Sum query duration per hour | event hour | sum ms |
+| p95 duration per hour | event hour | sec or min (adaptive) |
+| Sum query duration per hour | event hour | sec or min (adaptive) |
 | Sum memory usage per hour | event hour | sum MB |
 | Sum user CPU per hour | event hour | sum sec |
 | Read rows / bytes per hour | event hour | rows (left axis), bytes (right axis) |

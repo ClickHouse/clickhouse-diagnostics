@@ -555,17 +555,18 @@ func (g *Generator) collectAnalysis(p map[string]interface{}) {
 	// Map of payload key → .sql filename. Keys match the JS fetches
 	// in the dashboard template (DATA.qa_*).
 	files := map[string]string{
-		"qa_details":         "query_details.sql",
-		"qa_profile":         "profile_events.sql",
-		"qa_text_parts":      "text_log_parts.sql",
-		"qa_text_full":       "text_log_full.sql",
-		"qa_tables":          "tables_for_query.sql",
-		"qa_fast_slow":       "fast_slow_query_ids.sql",
-		"qa_pe_compare":      "profile_events_compare.sql",
-		"qa_by_host":         "hash_by_host.sql",
-		"qa_summary":         "hash_summary.sql",
+		"qa_details":          "query_details.sql",
+		"qa_profile":          "profile_events.sql",
+		"qa_text_parts":       "text_log_parts.sql",
+		"qa_text_full":        "text_log_full.sql",
+		"qa_tables":           "tables_for_query.sql",
+		"qa_fast_slow":        "fast_slow_query_ids.sql",
+		"qa_pe_compare":       "profile_events_compare.sql",
+		"qa_by_host":          "hash_by_host.sql",
+		"qa_summary":          "hash_summary.sql",
 		"qa_failed_over_time": "failed_over_time.sql",
-		"qa_failed":          "failed_queries.sql",
+		"qa_failed":           "failed_queries.sql",
+		"qa_executions":       "executions_timeline.sql",
 	}
 	for key, fname := range files {
 		raw, err := os.ReadFile(filepath.Join(g.analysisDir, fname))
@@ -579,7 +580,24 @@ func (g *Generator) collectAnalysis(p map[string]interface{}) {
 		// Strip trailing `FORMAT Native` so safeQuery can append
 		// JSONCompact via the standard execJSON path.
 		sql = stripTrailingFormat(sql)
-		p[key] = g.safeQuery(key, sql)
+		rows := g.safeQuery(key, sql)
+		// Defence in depth for gov mode: the dashboard JSON is part
+		// of the support archive, so any field that the JS would
+		// otherwise hide should also be cleared from the embedded
+		// payload. The `query` and `exception` columns in
+		// system.query_log contain raw text the customer ran
+		// (referencing the same table names gov-mode hashes
+		// elsewhere); empty them out before embedding.
+		if g.mode == "gov" {
+			for _, r := range rows {
+				for _, sensitive := range []string{"query", "exception", "sample_query", "sample_exception"} {
+					if _, ok := r[sensitive]; ok {
+						r[sensitive] = "(redacted in gov mode)"
+					}
+				}
+			}
+		}
+		p[key] = rows
 	}
 
 	p["qa_enabled"] = true
@@ -587,6 +605,12 @@ func (g *Generator) collectAnalysis(p map[string]interface{}) {
 	p["qa_hash"] = g.analysis.NormalizedQueryHash
 	p["qa_from"] = g.analysis.From.UTC().Format(time.RFC3339)
 	p["qa_to"] = g.analysis.To.UTC().Format(time.RFC3339)
+	// qa_mode gates the rendering of the focus query's SQL text: in
+	// gov mode we still hash database/table names in queries.gov/*.sql,
+	// but query_log.query stores the raw SQL the customer ran, which
+	// references the same names. Exposing it in the dashboard would
+	// defeat the hashing. JS hides the card when mode == 'gov'.
+	p["qa_mode"] = g.mode
 }
 
 // stripTrailingFormat removes a trailing `FORMAT <name>` clause (and
@@ -747,6 +771,18 @@ footer{text-align:center;color:#aaa;font-size:12px;padding:20px;margin-top:8px}
 <section id="sec-qa" style="display:none">
   <h2>🔍 Query Analysis</h2>
   <div id="qa-focus" class="alert-item" style="border-left-color:#FC4F05;margin-bottom:18px"></div>
+
+  <!-- Query text card — hidden in gov mode -->
+  <div id="qa-query-card" class="chart-card" style="display:none;margin-bottom:18px">
+    <h3>Focus query — SQL text</h3>
+    <pre id="qa-query-text" style="background:#1a1a2e;color:#e0e0e0;padding:14px;border-radius:6px;overflow:auto;max-height:280px;font-family:'SF Mono',monospace;font-size:12px;white-space:pre-wrap;line-height:1.4"></pre>
+  </div>
+
+  <!-- Per-execution scatter — one dot per individual query execution -->
+  <div class="chart-card" style="margin-bottom:18px">
+    <h3>Per-execution duration (each dot = one query)</h3>
+    <div class="chart-wrap h300"><canvas id="chart-qa-scatter"></canvas></div>
+  </div>
 
   <!-- Time-series charts, all driven from a single hash_summary array -->
   <div class="charts-grid">
@@ -1241,11 +1277,37 @@ function renderAlerts(){
 }
 
 // ── main init ─────────────────────────────────────────────────────────────────
+// Adaptive duration helper used by every duration axis / tooltip in
+// the Query Analysis section. The original requirement: render in
+// seconds when the value is short, switch to minutes once the peak
+// crosses 200 seconds, so a long-running query doesn't show up as
+// "180000 ms" in a tooltip.
+function pickDurationUnit(maxMs){
+  if(maxMs > 200000){
+    return {factor: 1/60000, label: 'min', precision: 2};
+  }
+  return {factor: 1/1000, label: 'sec', precision: 2};
+}
+function fmtDuration(ms, unit){
+  if(ms==null) return '—';
+  return (Number(ms) * unit.factor).toFixed(unit.precision) + ' ' + unit.label;
+}
+
 // ── query analysis renderer ───────────────────────────────────────────────────
 function renderQueryAnalysis(){
   if(!DATA.qa_enabled) return;
   document.getElementById('sec-qa').style.display='';
   document.getElementById('nav-qa').style.display='';
+
+  // Focus query SQL text — only when not in gov mode (the query text
+  // contains real database/table names that gov-mode hashes elsewhere).
+  if(DATA.qa_mode !== 'gov'){
+    const txt=(((DATA.qa_details||[])[0])||{}).query;
+    if(txt){
+      document.getElementById('qa-query-text').textContent=txt;
+      document.getElementById('qa-query-card').style.display='';
+    }
+  }
 
   // Focus card — what the analysis is scoped to and which execution
   // the single-id queries (ProfileEvents, text_log, tables, parts)
@@ -1282,6 +1344,55 @@ function renderQueryAnalysis(){
   }
   focus.innerHTML=h;
 
+  // ── Per-execution scatter ─────────────────────────────────────────────────
+  // One dot per query execution: x = event_time, y = duration. Distinct
+  // dots make the spread within a single hour-bucket visible (the
+  // hourly hash_summary chart can hide ten executions inside one
+  // averaged bar). Capped at 10000 rows on the SQL side.
+  const execs=DATA.qa_executions||[];
+  if(execs.length){
+    const succ=[],fail=[];
+    let maxMs=0;
+    execs.forEach(r=>{
+      const t=Date.parse(r.ts);
+      const d=Number(r.query_duration_ms);
+      if(d>maxMs) maxMs=d;
+      const pt={x:t,y:d,query_id:r.query_id,exception_code:r.exception_code,hostname:r.hostname};
+      if(Number(r.exception_code)===0 && r.type==='QueryFinish'){
+        succ.push(pt);
+      } else {
+        fail.push(pt);
+      }
+    });
+    const u=pickDurationUnit(maxMs);
+    new Chart(document.getElementById('chart-qa-scatter'),{
+      type:'scatter',
+      data:{datasets:[
+        {label:'succeeded',data:succ,backgroundColor:alpha('#4CAF50',.7),borderColor:'#4CAF50',pointRadius:4},
+        {label:'failed',data:fail,backgroundColor:alpha('#E91E63',.85),borderColor:'#E91E63',pointRadius:5,pointStyle:'crossRot'}
+      ]},
+      options:{responsive:true,maintainAspectRatio:false,
+        plugins:{
+          legend:{position:'top'},
+          tooltip:{callbacks:{label:c=>{
+            const p=c.raw;
+            const when=new Date(p.x).toISOString().replace('T',' ').replace(/\..*/,'');
+            const lines=[when+' · '+fmtDuration(p.y,u),'query_id: '+(p.query_id||''),'host: '+(p.hostname||'')];
+            if(Number(p.exception_code)!==0) lines.push('exception_code: '+p.exception_code);
+            return lines;
+          }}}
+        },
+        scales:{
+          x:{type:'linear',
+            title:{display:true,text:'event_time (UTC)'},
+            ticks:{callback:v=>new Date(v).toISOString().replace('T',' ').replace(/\..*/,'').slice(5,16)}},
+          y:{type:'linear',beginAtZero:true,
+            title:{display:true,text:'duration ('+u.label+')'},
+            ticks:{callback:v=>(v*u.factor).toFixed(u.precision)}}
+        }}
+    });
+  }
+
   // ── Time-series charts, all from DATA.qa_summary ─────────────────────────
   const sum=DATA.qa_summary||[];
   if(sum.length){
@@ -1302,22 +1413,32 @@ function renderQueryAnalysis(){
         scales:{x:{stacked:true},y:{stacked:true,beginAtZero:true}}}
     });
 
-    // 2) p95 duration per hour
+    // 2) p95 duration per hour — adaptive unit (sec or min based on peak)
+    const p95Vals=sum.map(r=>Number(r.p95_duration_ms));
+    const p95Unit=pickDurationUnit(Math.max(...p95Vals,0));
     new Chart(document.getElementById('chart-qa-p95'),{
       type:'line',
-      data:{labels,datasets:[{label:'p95 ms',data:sum.map(r=>Number(r.p95_duration_ms)),
+      data:{labels,datasets:[{label:'p95 '+p95Unit.label,data:p95Vals,
         borderColor:'#9C27B0',backgroundColor:alpha('#9C27B0',.2),tension:.2,fill:true}]},
       options:{responsive:true,maintainAspectRatio:false,
-        plugins:{legend:{display:false}},scales:{y:{beginAtZero:true}}}
+        plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>' '+fmtDuration(c.raw,p95Unit)}}},
+        scales:{y:{beginAtZero:true,
+          title:{display:true,text:'p95 ('+p95Unit.label+')'},
+          ticks:{callback:v=>(v*p95Unit.factor).toFixed(p95Unit.precision)}}}}
     });
 
-    // 3) Sum query duration per hour
+    // 3) Sum query duration per hour — same adaptive unit treatment
+    const sdVals=sum.map(r=>Number(r.sum_duration_ms));
+    const sdUnit=pickDurationUnit(Math.max(...sdVals,0));
     new Chart(document.getElementById('chart-qa-sumdur'),{
       type:'bar',
-      data:{labels,datasets:[{label:'sum ms',data:sum.map(r=>Number(r.sum_duration_ms)),
+      data:{labels,datasets:[{label:'sum '+sdUnit.label,data:sdVals,
         backgroundColor:alpha('#FC4F05',.8),borderColor:'#FC4F05',borderWidth:1}]},
       options:{responsive:true,maintainAspectRatio:false,
-        plugins:{legend:{display:false}},scales:{y:{beginAtZero:true,ticks:{callback:v=>fmt(v)}}}}
+        plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>' '+fmtDuration(c.raw,sdUnit)}}},
+        scales:{y:{beginAtZero:true,
+          title:{display:true,text:'sum ('+sdUnit.label+')'},
+          ticks:{callback:v=>(v*sdUnit.factor).toFixed(sdUnit.precision)}}}}
     });
 
     // 4) Sum memory per hour (MB)
