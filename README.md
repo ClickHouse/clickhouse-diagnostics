@@ -347,10 +347,10 @@ Eleven `.sql` files under `queries.query_analysis/`, each written to `<backup>/q
 | `fast_slow_query_ids.sql` | The slowest and fastest `query_id` for this hash in the window — defines the comparison pair |
 | `profile_events_compare.sql` | Side-by-side `ProfileEvents` for slow vs fast execution with `delta` and `percentage_diff` columns. *Most diagnostic query in the bundle.* |
 | `hash_by_host.sql` | Per-hostname execution count, avg / p95 / max duration, memory, errors — surfaces "one node is slow" patterns |
-| `hash_summary.sql` | **Single consolidated hourly aggregation** returning count / succeeded / failed / p50 / p95 / max / sum duration, sum memory, sum user CPU, sum read rows + bytes, sum written rows + bytes. The dashboard front-end derives multiple charts from this one array. |
-| `failed_over_time.sql` | Failed-execution count per hour, split by exception code — feeds the stacked "Failed queries per hour" chart |
+| `hash_summary.sql` | Per-minute execution count (executions / succeeded / failed). Drives the "Executions per minute" stacked bar. |
+| `failed_over_time.sql` | Failed-execution count per minute, split by exception code — feeds the "Failed queries per minute" stacked bar |
 | `failed_queries.sql` | Per-table × per-error breakdown of failures (tables touched, error type, user, count, first/last seen, sample exception) |
-| `executions_timeline.sql` | One row per individual execution of the hash (`LIMIT 10000`, most recent first) — feeds the per-execution scatter plot so each query is visible as its own dot |
+| `executions_timeline.sql` | One row per individual execution of the hash (`LIMIT 10000`, most recent first), including `ProfileEvents['UserTimeMicroseconds']`. Drives all five per-execution scatter charts (duration / memory / CPU / read rows / read bytes). |
 
 ### Dashboard integration
 
@@ -360,19 +360,22 @@ When `--query-id` or `--normalized-query-hash` is set and `--skip-dashboard` is 
 
 **Query text card** (cloud / onprem only): the exact SQL of the focus execution, monospaced and scrollable. Hidden — and also stripped from the embedded JSON — in `gov` mode, because the query text contains the table names gov mode is otherwise hashing.
 
-**Per-execution scatter**: one dot per individual query (up to 10 000 rows). X = event_time, Y = duration. Green = success, red cross = failure. Hover tooltip shows `query_id`, hostname, exception_code. Use this to see the spread within an hour bucket — e.g. nine executions clustered at 5 ms and one outlier at 5 000 ms is invisible in an hourly average.
+**Per-execution scatters** — five charts, one dot per individual query (up to 10 000 rows from `executions_timeline.sql`). Green dot = success, red cross = failure. Hover shows `query_id`, hostname, exception code, and the metric value in human units:
 
-**Time-series row** — every chart is read from the same `hash_summary` array (one SQL query feeds them all). Duration axes auto-pick **seconds** for short queries, **minutes** once the peak exceeds 200 seconds:
+| Chart | Y axis | Notes |
+|---|---|---|
+| Per-execution duration | sec or min (adaptive at 200 s) | the "why was THIS execution slow" view |
+| Per-execution memory usage | MiB / GiB / TiB (adaptive) | |
+| Per-execution user CPU | sec | from `ProfileEvents['UserTimeMicroseconds']` |
+| Per-execution read rows | rows | |
+| Per-execution read bytes | MiB / GiB / TiB (adaptive) | |
+
+**Count bars** — minute-bucketed (the one place per-execution doesn't apply, since the metric *is* "1"):
 
 | Chart | X | Y |
 |---|---|---|
-| Executions per hour | event hour | count (stacked succeeded / failed) |
-| p95 duration per hour | event hour | sec or min (adaptive) |
-| Sum query duration per hour | event hour | sec or min (adaptive) |
-| Sum memory usage per hour | event hour | sum MB |
-| Sum user CPU per hour | event hour | sum sec |
-| Read rows / bytes per hour | event hour | rows (left axis), bytes (right axis) |
-| Failed query count per hour | event hour | count, stacked by exception code (`MEMORY_LIMIT_EXCEEDED (241)`, `TIMEOUT_EXCEEDED (159)`, …) |
+| Executions per minute | event minute | count, stacked succeeded / failed |
+| Failed queries per minute | event minute | count, stacked by exception code (`MEMORY_LIMIT_EXCEEDED (241)`, `TIMEOUT_EXCEEDED (159)`, …) |
 
 **Single-execution row**:
 

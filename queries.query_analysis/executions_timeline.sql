@@ -17,6 +17,11 @@ SELECT
     query_duration_ms,
     memory_usage,
     formatReadableSize(memory_usage)                        AS memory_usage_human,
+    -- user CPU per execution, in microseconds → JS renders this as
+    -- seconds in the per-execution scatter. Coalesced because not
+    -- every ProfileEvents map has UserTimeMicroseconds (e.g. very
+    -- short queries that never spent CPU in user space).
+    ProfileEvents['UserTimeMicroseconds']                   AS user_cpu_us,
     read_rows,
     read_bytes,
     formatReadableSize(read_bytes)                          AS read_bytes_human,

@@ -4,7 +4,7 @@
 -- TIMEOUT_EXCEEDED.
 -- Run when --normalized-query-hash is set (auto-derived from --query-id).
 SELECT
-    toString(toStartOfHour(event_time))                     AS time_bucket,
+    toString(toStartOfMinute(event_time))                   AS time_bucket,
     errorCodeToName(exception_code) || ' (' || toString(exception_code) || ')' AS error_type,
     count()                                                 AS errors
 FROM {sys.query_log}

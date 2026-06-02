@@ -778,40 +778,43 @@ footer{text-align:center;color:#aaa;font-size:12px;padding:20px;margin-top:8px}
     <pre id="qa-query-text" style="background:#1a1a2e;color:#e0e0e0;padding:14px;border-radius:6px;overflow:auto;max-height:280px;font-family:'SF Mono',monospace;font-size:12px;white-space:pre-wrap;line-height:1.4"></pre>
   </div>
 
-  <!-- Per-execution scatter — one dot per individual query execution -->
-  <div class="chart-card" style="margin-bottom:18px">
-    <h3>Per-execution duration (each dot = one query)</h3>
-    <div class="chart-wrap h300"><canvas id="chart-qa-scatter"></canvas></div>
-  </div>
-
-  <!-- Time-series charts, all driven from a single hash_summary array -->
+  <!-- Per-execution scatters — one dot per individual query execution.
+       Five charts share this shape; each picks a different metric off
+       the qa_executions array and uses the same adaptive-unit + colour
+       logic (green succ, red cross failure, tooltip with query_id). -->
   <div class="charts-grid">
     <div class="chart-card">
-      <h3>Executions per hour</h3>
+      <h3>Per-execution duration</h3>
+      <div class="chart-wrap h300"><canvas id="chart-qa-scatter"></canvas></div>
+    </div>
+    <div class="chart-card">
+      <h3>Per-execution memory usage</h3>
+      <div class="chart-wrap h300"><canvas id="chart-qa-mem"></canvas></div>
+    </div>
+    <div class="chart-card">
+      <h3>Per-execution user CPU</h3>
+      <div class="chart-wrap h300"><canvas id="chart-qa-cpu"></canvas></div>
+    </div>
+    <div class="chart-card">
+      <h3>Per-execution read rows</h3>
+      <div class="chart-wrap h300"><canvas id="chart-qa-rrows"></canvas></div>
+    </div>
+    <div class="chart-card">
+      <h3>Per-execution read bytes</h3>
+      <div class="chart-wrap h300"><canvas id="chart-qa-rbytes"></canvas></div>
+    </div>
+  </div>
+
+  <!-- Count charts — bucketed per MINUTE. Per-execution doesn't apply
+       here (count of "one" per dot would be uninformative); minute is
+       the finest useful grain. -->
+  <div class="charts-grid" style="margin-top:18px">
+    <div class="chart-card">
+      <h3>Executions per minute</h3>
       <div class="chart-wrap h260"><canvas id="chart-qa-execs"></canvas></div>
     </div>
     <div class="chart-card">
-      <h3>p95 duration per hour</h3>
-      <div class="chart-wrap h260"><canvas id="chart-qa-p95"></canvas></div>
-    </div>
-    <div class="chart-card">
-      <h3>Sum query duration per hour (ms)</h3>
-      <div class="chart-wrap h260"><canvas id="chart-qa-sumdur"></canvas></div>
-    </div>
-    <div class="chart-card">
-      <h3>Sum memory usage per hour (MB)</h3>
-      <div class="chart-wrap h260"><canvas id="chart-qa-mem"></canvas></div>
-    </div>
-    <div class="chart-card">
-      <h3>Sum user CPU per hour (sec)</h3>
-      <div class="chart-wrap h260"><canvas id="chart-qa-cpu"></canvas></div>
-    </div>
-    <div class="chart-card">
-      <h3>Read rows / bytes per hour</h3>
-      <div class="chart-wrap h260"><canvas id="chart-qa-read"></canvas></div>
-    </div>
-    <div class="chart-card" style="grid-column:1/-1">
-      <h3>Failed query count per hour, by error type (stacked)</h3>
+      <h3>Failed queries per minute, by error type</h3>
       <div class="chart-wrap h260"><canvas id="chart-qa-failed"></canvas></div>
     </div>
   </div>
@@ -1293,6 +1296,70 @@ function fmtDuration(ms, unit){
   return (Number(ms) * unit.factor).toFixed(unit.precision) + ' ' + unit.label;
 }
 
+// pickByteUnit chooses MiB / GiB / TiB based on the largest value in
+// the series. KiB is skipped because at the scale ClickHouse reports
+// (read_bytes, memory_usage) a per-execution metric below 1 MiB is
+// usually noise and would look like "0.001 MB" anyway.
+function pickByteUnit(maxBytes){
+  if(maxBytes >= 1024**4) return {factor: 1/(1024**4), label:'TiB', precision:2};
+  if(maxBytes >= 1024**3) return {factor: 1/(1024**3), label:'GiB', precision:2};
+  return {factor: 1/(1024**2), label:'MiB', precision:2};
+}
+function fmtBytes(b, unit){
+  if(b==null) return '—';
+  return (Number(b) * unit.factor).toFixed(unit.precision) + ' ' + unit.label;
+}
+
+// renderQaScatter draws a per-execution scatter for one numeric metric
+// off the qa_executions array. Five charts in the Query Analysis
+// section share this shape — colour-coded success vs failure, tooltip
+// shows query_id + hostname + the metric in human units.
+//
+// opts:
+//   ySelect(row) → number     project a metric from one execution
+//   yUnit(maxVal) → unit obj  pick the axis unit ({factor,label,precision})
+//   yLabel(unit)  → string    title for the Y axis
+//   yFmt(value, unit) → string formatter for tooltip
+function renderQaScatter(canvasId, rows, opts){
+  const succ=[], fail=[];
+  let maxY=0;
+  rows.forEach(r=>{
+    const t=Date.parse(r.ts);
+    const y=opts.ySelect(r);
+    if(y>maxY) maxY=y;
+    const pt={x:t,y:y,query_id:r.query_id,exception_code:r.exception_code,hostname:r.hostname};
+    if(Number(r.exception_code)===0 && r.type==='QueryFinish'){ succ.push(pt); }
+    else { fail.push(pt); }
+  });
+  const u=opts.yUnit(maxY);
+  new Chart(document.getElementById(canvasId),{
+    type:'scatter',
+    data:{datasets:[
+      {label:'succeeded',data:succ,backgroundColor:alpha('#4CAF50',.7),borderColor:'#4CAF50',pointRadius:4},
+      {label:'failed',data:fail,backgroundColor:alpha('#E91E63',.85),borderColor:'#E91E63',pointRadius:5,pointStyle:'crossRot'}
+    ]},
+    options:{responsive:true,maintainAspectRatio:false,
+      plugins:{
+        legend:{position:'top'},
+        tooltip:{callbacks:{label:c=>{
+          const p=c.raw;
+          const when=new Date(p.x).toISOString().replace('T',' ').replace(/\..*/,'');
+          const lines=[when+' · '+opts.yFmt(p.y,u),'query_id: '+(p.query_id||''),'host: '+(p.hostname||'')];
+          if(Number(p.exception_code)!==0) lines.push('exception_code: '+p.exception_code);
+          return lines;
+        }}}
+      },
+      scales:{
+        x:{type:'linear',
+          title:{display:true,text:'event_time (UTC)'},
+          ticks:{callback:v=>new Date(v).toISOString().replace('T',' ').replace(/\..*/,'').slice(5,16)}},
+        y:{type:'linear',beginAtZero:true,
+          title:{display:true,text:opts.yLabel(u)},
+          ticks:{callback:v=>(v*u.factor).toFixed(u.precision)}}
+      }}
+  });
+}
+
 // ── query analysis renderer ───────────────────────────────────────────────────
 function renderQueryAnalysis(){
   if(!DATA.qa_enabled) return;
@@ -1344,61 +1411,51 @@ function renderQueryAnalysis(){
   }
   focus.innerHTML=h;
 
-  // ── Per-execution scatter ─────────────────────────────────────────────────
-  // One dot per query execution: x = event_time, y = duration. Distinct
-  // dots make the spread within a single hour-bucket visible (the
-  // hourly hash_summary chart can hide ten executions inside one
-  // averaged bar). Capped at 10000 rows on the SQL side.
+  // ── Per-execution scatters ────────────────────────────────────────────────
+  // Five charts (duration, memory, user CPU, read rows, read bytes)
+  // share the same shape: one dot per execution, x = event_time,
+  // y = the metric for that execution, succ = green dot, fail = red
+  // cross. Built off DATA.qa_executions so we never need a separate
+  // SQL aggregation for any of these — the executions_timeline query
+  // already carries every column we need.
   const execs=DATA.qa_executions||[];
   if(execs.length){
-    const succ=[],fail=[];
-    let maxMs=0;
-    execs.forEach(r=>{
-      const t=Date.parse(r.ts);
-      const d=Number(r.query_duration_ms);
-      if(d>maxMs) maxMs=d;
-      const pt={x:t,y:d,query_id:r.query_id,exception_code:r.exception_code,hostname:r.hostname};
-      if(Number(r.exception_code)===0 && r.type==='QueryFinish'){
-        succ.push(pt);
-      } else {
-        fail.push(pt);
-      }
+    renderQaScatter('chart-qa-scatter', execs, {
+      ySelect: r => Number(r.query_duration_ms),
+      yUnit:   max => pickDurationUnit(max),
+      yLabel:  u => 'duration (' + u.label + ')',
+      yFmt:    (v,u) => fmtDuration(v,u),
     });
-    const u=pickDurationUnit(maxMs);
-    new Chart(document.getElementById('chart-qa-scatter'),{
-      type:'scatter',
-      data:{datasets:[
-        {label:'succeeded',data:succ,backgroundColor:alpha('#4CAF50',.7),borderColor:'#4CAF50',pointRadius:4},
-        {label:'failed',data:fail,backgroundColor:alpha('#E91E63',.85),borderColor:'#E91E63',pointRadius:5,pointStyle:'crossRot'}
-      ]},
-      options:{responsive:true,maintainAspectRatio:false,
-        plugins:{
-          legend:{position:'top'},
-          tooltip:{callbacks:{label:c=>{
-            const p=c.raw;
-            const when=new Date(p.x).toISOString().replace('T',' ').replace(/\..*/,'');
-            const lines=[when+' · '+fmtDuration(p.y,u),'query_id: '+(p.query_id||''),'host: '+(p.hostname||'')];
-            if(Number(p.exception_code)!==0) lines.push('exception_code: '+p.exception_code);
-            return lines;
-          }}}
-        },
-        scales:{
-          x:{type:'linear',
-            title:{display:true,text:'event_time (UTC)'},
-            ticks:{callback:v=>new Date(v).toISOString().replace('T',' ').replace(/\..*/,'').slice(5,16)}},
-          y:{type:'linear',beginAtZero:true,
-            title:{display:true,text:'duration ('+u.label+')'},
-            ticks:{callback:v=>(v*u.factor).toFixed(u.precision)}}
-        }}
+    renderQaScatter('chart-qa-mem', execs, {
+      ySelect: r => Number(r.memory_usage),
+      yUnit:   max => pickByteUnit(max),
+      yLabel:  u => 'memory (' + u.label + ')',
+      yFmt:    (v,u) => fmtBytes(v,u),
+    });
+    renderQaScatter('chart-qa-cpu', execs, {
+      ySelect: r => Number(r.user_cpu_us||0) / 1e6,    // µs → sec
+      yUnit:   () => ({factor:1, label:'sec', precision:3}),
+      yLabel:  () => 'user CPU (sec)',
+      yFmt:    v => v.toFixed(3) + ' sec',
+    });
+    renderQaScatter('chart-qa-rrows', execs, {
+      ySelect: r => Number(r.read_rows),
+      yUnit:   () => ({factor:1, label:'rows', precision:0}),
+      yLabel:  () => 'read rows',
+      yFmt:    v => fmt(v) + ' rows',
+    });
+    renderQaScatter('chart-qa-rbytes', execs, {
+      ySelect: r => Number(r.read_bytes),
+      yUnit:   max => pickByteUnit(max),
+      yLabel:  u => 'read (' + u.label + ')',
+      yFmt:    (v,u) => fmtBytes(v,u),
     });
   }
 
-  // ── Time-series charts, all from DATA.qa_summary ─────────────────────────
+  // ── Minute-bucketed count charts ──────────────────────────────────────────
   const sum=DATA.qa_summary||[];
   if(sum.length){
     const labels=sum.map(r=>r.time_bucket);
-
-    // 1) Executions per hour (succeeded + failed split)
     new Chart(document.getElementById('chart-qa-execs'),{
       type:'bar',
       data:{labels,datasets:[
@@ -1412,75 +1469,8 @@ function renderQueryAnalysis(){
         plugins:{legend:{position:'top'}},
         scales:{x:{stacked:true},y:{stacked:true,beginAtZero:true}}}
     });
-
-    // 2) p95 duration per hour — adaptive unit (sec or min based on peak)
-    const p95Vals=sum.map(r=>Number(r.p95_duration_ms));
-    const p95Unit=pickDurationUnit(Math.max(...p95Vals,0));
-    new Chart(document.getElementById('chart-qa-p95'),{
-      type:'line',
-      data:{labels,datasets:[{label:'p95 '+p95Unit.label,data:p95Vals,
-        borderColor:'#9C27B0',backgroundColor:alpha('#9C27B0',.2),tension:.2,fill:true}]},
-      options:{responsive:true,maintainAspectRatio:false,
-        plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>' '+fmtDuration(c.raw,p95Unit)}}},
-        scales:{y:{beginAtZero:true,
-          title:{display:true,text:'p95 ('+p95Unit.label+')'},
-          ticks:{callback:v=>(v*p95Unit.factor).toFixed(p95Unit.precision)}}}}
-    });
-
-    // 3) Sum query duration per hour — same adaptive unit treatment
-    const sdVals=sum.map(r=>Number(r.sum_duration_ms));
-    const sdUnit=pickDurationUnit(Math.max(...sdVals,0));
-    new Chart(document.getElementById('chart-qa-sumdur'),{
-      type:'bar',
-      data:{labels,datasets:[{label:'sum '+sdUnit.label,data:sdVals,
-        backgroundColor:alpha('#FC4F05',.8),borderColor:'#FC4F05',borderWidth:1}]},
-      options:{responsive:true,maintainAspectRatio:false,
-        plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>' '+fmtDuration(c.raw,sdUnit)}}},
-        scales:{y:{beginAtZero:true,
-          title:{display:true,text:'sum ('+sdUnit.label+')'},
-          ticks:{callback:v=>(v*sdUnit.factor).toFixed(sdUnit.precision)}}}}
-    });
-
-    // 4) Sum memory per hour (MB)
-    new Chart(document.getElementById('chart-qa-mem'),{
-      type:'line',
-      data:{labels,datasets:[{label:'sum MB',data:sum.map(r=>Number(r.sum_memory_mb)),
-        borderColor:'#2196F3',backgroundColor:alpha('#2196F3',.2),tension:.2,fill:true}]},
-      options:{responsive:true,maintainAspectRatio:false,
-        plugins:{legend:{display:false}},scales:{y:{beginAtZero:true}}}
-    });
-
-    // 5) Sum userCPU per hour (sec)
-    new Chart(document.getElementById('chart-qa-cpu'),{
-      type:'line',
-      data:{labels,datasets:[{label:'sum sec',data:sum.map(r=>Number(r.sum_user_cpu_sec)),
-        borderColor:'#FFB627',backgroundColor:alpha('#FFB627',.2),tension:.2,fill:true}]},
-      options:{responsive:true,maintainAspectRatio:false,
-        plugins:{legend:{display:false}},scales:{y:{beginAtZero:true}}}
-    });
-
-    // 6) Read rows / bytes per hour (dual-axis)
-    new Chart(document.getElementById('chart-qa-read'),{
-      type:'line',
-      data:{labels,datasets:[
-        {label:'read rows',data:sum.map(r=>Number(r.sum_read_rows)),
-          borderColor:'#00BCD4',backgroundColor:alpha('#00BCD4',.2),tension:.2,yAxisID:'y'},
-        {label:'read bytes',data:sum.map(r=>Number(r.sum_read_bytes)),
-          borderColor:'#9C27B0',backgroundColor:alpha('#9C27B0',.2),tension:.2,yAxisID:'y1'}
-      ]},
-      options:{responsive:true,maintainAspectRatio:false,
-        interaction:{mode:'index',intersect:false},
-        plugins:{legend:{position:'top'}},
-        scales:{
-          y:{position:'left',beginAtZero:true,title:{display:true,text:'rows'},ticks:{callback:v=>fmt(v)}},
-          y1:{position:'right',beginAtZero:true,grid:{drawOnChartArea:false},title:{display:true,text:'bytes'},ticks:{callback:v=>fmt(v)}}
-        }}
-    });
   }
 
-  // 7) Failed by error type — stacked from a separate query (errors
-  // are pivoted by error_type so they cannot share the hash_summary
-  // GROUP BY without diluting the rest of the metrics).
   const fot=DATA.qa_failed_over_time||[];
   if(fot.length){
     const piv=pivot(fot,'time_bucket','error_type','errors');
