@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"clickhouse-diagnostic/internal"
 	"clickhouse-diagnostic/internal/alert"
@@ -36,6 +37,11 @@ func main() {
 	skipAlertsFlag    := flag.Bool("skip-alerts", false, "Skip evaluating alert rules")
 	alertsDirFlag     := flag.String("alerts-dir", "./alerts", "Directory containing alert YAML rule files")
 	saltFlag          := flag.String("salt", "", "Gov-mode hashing salt (8–64 alphanumeric chars; prompts interactively if empty)")
+	queryIDFlag       := flag.String("query-id", "", "Run query analysis focused on this query_id (UUID)")
+	normalizedHashFlag := flag.String("normalized-query-hash", "", "Run query analysis focused on this normalized_query_hash (uint64)")
+	fromFlag          := flag.String("from", "", "Time-window start for query analysis (RFC3339 or YYYY-MM-DD)")
+	toFlag            := flag.String("to", "", "Time-window end for query analysis (RFC3339 or YYYY-MM-DD)")
+	analysisDirFlag   := flag.String("analysis-dir", "./queries.query_analysis", "Directory containing query-analysis SQL files")
 
 	// Parse command line flags
 	flag.Parse()
@@ -56,6 +62,11 @@ func main() {
 		skipAlerts    = *skipAlertsFlag
 		alertsDir     = *alertsDirFlag
 		govSalt       = *saltFlag
+		queryID       = *queryIDFlag
+		normalizedHash = *normalizedHashFlag
+		fromStr       = *fromFlag
+		toStr         = *toFlag
+		analysisDir   = *analysisDirFlag
 	)
 
 	// Get user input for missing parameters
@@ -114,6 +125,14 @@ func main() {
 	fmt.Printf("ClickHouse server version: %d.%d.%d.%d\n",
 		serverVersion.Major, serverVersion.Minor, serverVersion.Patch, serverVersion.Build)
 
+	// Resolve query-analysis options up front so an invalid --query-id
+	// or --normalized-query-hash fails fast, before any heavy work runs.
+	analysisOpts, err := resolveAnalysisOpts(client, mode, queryID, normalizedHash, fromStr, toStr)
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		return
+	}
+
 	// Gov mode requires a customer-supplied salt so hashes in the
 	// support-bound artifacts cannot be reversed by a public rainbow
 	// table. Prompt for it now (with no echo) if it wasn't passed via
@@ -150,6 +169,17 @@ func main() {
 		}
 	}
 
+	// Query analysis bundle (only when --query-id or
+	// --normalized-query-hash was set). Runs the .sql files under
+	// analysisDir against the focus parameters and writes results into
+	// <finalOutputDir>/query_analysis/.
+	if analysisOpts.Enabled() {
+		coll := query.NewAnalysisCollector(client, mode)
+		if _, _, err := coll.Collect(analysisOpts, analysisDir, finalOutputDir); err != nil {
+			fmt.Printf("Warning: query analysis failed: %v\n", err)
+		}
+	}
+
 	// Evaluate alert rules if not skipped
 	var alertResults []alert.Result
 	if !skipAlerts {
@@ -166,7 +196,7 @@ func main() {
 
 	// Generate HTML dashboard if not skipped
 	if !skipDashboard {
-		gen := dashboard.NewGenerator(client, mode)
+		gen := dashboard.NewGenerator(client, mode).WithAnalysis(analysisOpts, analysisDir)
 		if err := gen.Generate(finalOutputDir, alertResults); err != nil {
 			fmt.Printf("Warning: dashboard generation failed: %v\n", err)
 		}
@@ -269,6 +299,82 @@ func getUserInput(protocol, host, port, username, password, mode, configDir *str
 	}
 
 	return nil
+}
+
+// resolveAnalysisOpts builds the query-analysis options from the raw
+// CLI flag strings. When --query-id is set without
+// --normalized-query-hash, a pre-flight SELECT against system.query_log
+// derives the hash and (when found) the query's event_time — the
+// default time window is then centred on that event_time instead of
+// "last N days from now," so a slow query from a week ago isn't missed
+// by a present-time default.
+func resolveAnalysisOpts(client *pkg.ClickHouseClient, mode, queryID, normalizedHash, fromStr, toStr string) (query.AnalysisOpts, error) {
+	opts := query.AnalysisOpts{
+		QueryID:             queryID,
+		NormalizedQueryHash: normalizedHash,
+	}
+	if !opts.Enabled() {
+		return opts, nil // neither set; analysis stays off, validation skipped
+	}
+
+	from, err := query.ParseTimeFlag(fromStr)
+	if err != nil {
+		return opts, fmt.Errorf("--from: %w", err)
+	}
+	to, err := query.ParseTimeFlag(toStr)
+	if err != nil {
+		return opts, fmt.Errorf("--to: %w", err)
+	}
+	opts.From, opts.To = from, to
+
+	// Pre-flight: when only query_id is set, derive the hash and the
+	// query's event_time. Skipped when the user already supplied the
+	// hash or when no query_id was given.
+	if opts.QueryID != "" && opts.NormalizedQueryHash == "" {
+		hash, eventTime, err := query.PreflightForQueryID(client, mode, opts.QueryID)
+		if err != nil {
+			return opts, err
+		}
+		opts.NormalizedQueryHash = hash
+		fmt.Printf("Pre-flight: query_id %s → normalized_query_hash %s (event_time %s)\n",
+			opts.QueryID, hash, eventTime.Format(time.RFC3339))
+		// If the user didn't pin --from/--to, center the default 3-day
+		// window on the derived event_time so the slow execution is
+		// definitely inside the analysis window.
+		if opts.From.IsZero() && opts.To.IsZero() && !eventTime.IsZero() {
+			opts.From = eventTime.Add(-36 * time.Hour)
+			opts.To = eventTime.Add(12 * time.Hour)
+		}
+	}
+
+	// Validate runs the default-window logic for whatever fields are
+	// still empty. We need a populated window before the reverse
+	// pre-flight (hash → slowest query_id) can run.
+	if err := opts.Validate(time.Now().UTC()); err != nil {
+		return opts, err
+	}
+
+	// Reverse pre-flight: when only --normalized-query-hash is set,
+	// pick the slowest finished execution as the representative
+	// query_id so the single-id queries (ProfileEvents, text_log,
+	// tables-referenced …) have something to filter on. Without
+	// this, hash-only mode shipped a dashboard with most cards
+	// empty (the user's main complaint).
+	if opts.NormalizedQueryHash != "" && opts.QueryID == "" {
+		qid, eventTime, err := query.PreflightForHash(client, mode, opts.NormalizedQueryHash, opts.From, opts.To)
+		if err != nil {
+			return opts, err
+		}
+		if qid == "" {
+			fmt.Printf("Pre-flight: no QueryFinish row found for normalized_query_hash %s in the window — single-id files will be skipped\n",
+				opts.NormalizedQueryHash)
+		} else {
+			opts.QueryID = qid
+			fmt.Printf("Pre-flight: normalized_query_hash %s → slowest query_id %s (event_time %s)\n",
+				opts.NormalizedQueryHash, qid, eventTime.Format(time.RFC3339))
+		}
+	}
+	return opts, nil
 }
 
 // promptForGovSalt asks the operator for the gov-mode salt without
