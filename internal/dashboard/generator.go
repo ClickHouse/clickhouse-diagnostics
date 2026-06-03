@@ -163,26 +163,44 @@ func (g *Generator) tablesListSQL() string {
 // queried on pod A but not on pod B will appear LOADED on A and
 // NOT_LOADED on B. hostname() is evaluated remotely on each replica so
 // we can label each row with the pod that produced it.
+//
+// Column choice tracks the system.dictionaries reference:
+//   https://clickhouse.com/docs/operations/system-tables/dictionaries
+//
+// In gov mode we additionally redact `source`, `origin`, `comment`
+// and `last_exception` — these can carry connection strings, file
+// paths, exception text and user comments that reveal schema or
+// infrastructure details that gov mode is otherwise hashing.
 func (g *Generator) dictionariesSQL() string {
-	exceptionCol := "last_exception"
+	exceptionCol, sourceCol, originCol, commentCol := "last_exception", "source", "origin", "comment"
 	if g.mode == "gov" {
 		exceptionCol = "'' AS last_exception"
+		sourceCol = "'' AS source"
+		originCol = "'' AS origin"
+		commentCol = "'' AS comment"
 	}
 	return fmt.Sprintf(`
 		SELECT
 			hostname()                                          AS hostname,
-			database, name, status, type,
+			database, name, status, type, toString(uuid)        AS uuid,
 			bytes_allocated,
 			formatReadableSize(bytes_allocated)                 AS bytes_allocated_human,
-			element_count, query_count,
+			element_count, query_count, error_count,
 			round(hit_rate * 100, 2)                            AS hit_rate_pct,
 			round(found_rate * 100, 2)                          AS found_rate_pct,
+			round(load_factor, 4)                               AS load_factor,
+			arrayStringConcat(key.names, ', ')                  AS key_names,
+			arrayStringConcat(key.types, ', ')                  AS key_types,
+			arrayStringConcat(attribute.names, ', ')            AS attribute_names,
+			arrayStringConcat(attribute.types, ', ')            AS attribute_types,
 			lifetime_min, lifetime_max,
+			toString(loading_start_time)                        AS loading_start_time,
 			toString(last_successful_update_time)               AS last_update,
 			round(loading_duration, 2)                          AS loading_duration_s,
-			%s
+			%s, %s, %s, %s
 		FROM %s
-		ORDER BY database, name, hostname`, exceptionCol, g.sysTable("dictionaries"))
+		ORDER BY database, name, hostname`,
+		sourceCol, originCol, commentCol, exceptionCol, g.sysTable("dictionaries"))
 }
 
 // collect gathers all metrics from ClickHouse and returns a JSON-ready map.
@@ -1915,11 +1933,18 @@ document.addEventListener('DOMContentLoaded',function(){
     }
 
     // Dictionary detail table — per-(dict, pod) rows so the operator
-    // can see which pod each runtime stat came from.
+    // can see which pod each runtime stat came from. Columns ordered:
+    // identity → topology → sizing → activity → schema → lifecycle →
+    // errors → metadata. Long-text columns last; the table wrapper
+    // already overflow-x's, so horizontal scroll is expected.
     const el=document.getElementById('tbl-dicts');
-    const cols=['hostname','database','name','status','type','bytes_allocated_human','element_count',
-                'hit_rate_pct','found_rate_pct','lifetime_min','lifetime_max',
-                'last_update','loading_duration_s','last_exception'];
+    const cols=['hostname','database','name','status','type','source',
+                'bytes_allocated_human','element_count','load_factor',
+                'query_count','hit_rate_pct','found_rate_pct','error_count',
+                'key_names','key_types','attribute_names','attribute_types',
+                'lifetime_min','lifetime_max',
+                'loading_start_time','last_update','loading_duration_s',
+                'last_exception','origin','comment','uuid'];
     let h='<table class="dt"><thead><tr>'+cols.map(k=>'<th>'+k+'</th>').join('')+'</tr></thead><tbody>';
     rows.forEach(r=>{
       const isFailed=r.status==='FAILED'||String(r.last_exception||'').length>1;
