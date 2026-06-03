@@ -30,23 +30,33 @@ func main() {
 	configDirFlag := flag.String("config-dir", "", "ClickHouse config directory to collect (default: /etc/clickhouse-server/config.d/)")
 	skipConfigFlag := flag.Bool("skip-config", false, "Skip collecting configuration files")
 	skipArchiveFlag := flag.Bool("skip-archive", false, "Skip creating archive of results and configuration")
+	dryRunFlag := flag.Bool("dry-run", false, "List every query the tool would execute (with the system tables each touches) and exit. Does NOT write results or create an archive.")
+	explainEstimateFlag := flag.Bool("explain-estimate", false, "With --dry-run, also run `EXPLAIN ESTIMATE <query>` against the server for each SELECT. EXPLAIN ESTIMATE is a read-only metadata query — it reports the rows/marks/parts the query WOULD scan without reading any data.")
 
 	// Parse command line flags
 	flag.Parse()
 
 	// Initialize variables with defaults
 	var (
-		host        = *hostFlag
-		port        = *portFlag
-		username    = *userFlag
-		password    = *passwordFlag
-		protocol    = *protocolFlag
-		mode        = *modeFlag
-		outputDir   = *outputDirFlag
-		configDir   = *configDirFlag
-		skipConfig  = *skipConfigFlag
-		skipArchive = *skipArchiveFlag
+		host            = *hostFlag
+		port            = *portFlag
+		username        = *userFlag
+		password        = *passwordFlag
+		protocol        = *protocolFlag
+		mode            = *modeFlag
+		outputDir       = *outputDirFlag
+		configDir       = *configDirFlag
+		skipConfig      = *skipConfigFlag
+		skipArchive     = *skipArchiveFlag
+		dryRun          = *dryRunFlag
+		explainEstimate = *explainEstimateFlag
 	)
+	// --dry-run is read-only by definition. Disable side effects that
+	// would write empty/garbage artefacts to disk.
+	if dryRun {
+		skipConfig = true
+		skipArchive = true
+	}
 
 	// Get user input for missing parameters
 	if err := getUserInput(&protocol, &host, &port, &username, &password, &mode, &configDir, skipConfig); err != nil {
@@ -104,11 +114,46 @@ func main() {
 	fmt.Printf("ClickHouse server version: %d.%d.%d.%d\n",
 		serverVersion.Major, serverVersion.Minor, serverVersion.Patch, serverVersion.Build)
 
+	// Dry-run path: route every subsequent query through the
+	// intercepting client and write all the executor's side-effect
+	// files (.native results) into a temp directory we delete on exit.
+	// The user sees the SQL + tables (+ optional EXPLAIN ESTIMATE)
+	// printed to stdout; the server only sees the version probe above
+	// and, if requested, EXPLAIN ESTIMATE queries (no actual scan).
+	if dryRun {
+		fmt.Println("\n=== DRY RUN ===")
+		fmt.Println("No data will be written to disk.")
+		fmt.Println("No archive will be created.")
+		if explainEstimate {
+			fmt.Println("EXPLAIN ESTIMATE is enabled — read-only metadata only, no data parts scanned.")
+			fmt.Println("Note: system.* tables are virtual; ESTIMATE returns empty for most of them,")
+			fmt.Println("which is itself a useful confirmation that no data part will be read.")
+		} else {
+			fmt.Println("No further server queries will run (pass --explain-estimate to add metadata-only EXPLAIN).")
+		}
+		fmt.Println()
+		client.SetDryRun(os.Stdout, explainEstimate)
+		tmpDir, err := os.MkdirTemp("", "diag-dryrun-*")
+		if err != nil {
+			fmt.Printf("Error creating dry-run temp dir: %v\n", err)
+			return
+		}
+		defer os.RemoveAll(tmpDir)
+		outputDir = tmpDir
+	}
+
 	// Find and execute queries - get the specific folder path
 	queryManager := query.NewManager()
 	finalOutputDir, err := queryManager.ExecuteQueries(client, queriesDir, serverVersion, outputDir)
 	if err != nil {
 		fmt.Printf("Error executing queries: %v\n", err)
+		return
+	}
+
+	if dryRun {
+		fmt.Println("\n=== DRY RUN SUMMARY ===")
+		fmt.Println("Above are the queries that would be executed.")
+		fmt.Println("To run for real, re-invoke without --dry-run.")
 		return
 	}
 
