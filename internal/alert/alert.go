@@ -128,49 +128,11 @@ func NewEvaluator(client *pkg.ClickHouseClient, mode string) *Evaluator {
 	return &Evaluator{client: client, mode: strings.ToLower(mode)}
 }
 
-// sharedSystemTables lists system.* tables whose contents are the same on
-// every replica. Wrapping these with clusterAllReplicas in cloud mode would
-// duplicate every row once per replica and produce repeat alerts (e.g. the
-// large_parts alert firing N times for the same part).
-var sharedSystemTables = map[string]bool{
-	"columns":           true,
-	"databases":         true,
-	"detached_parts":    true,
-	"dictionaries":      true,
-	"mutations":         true,
-	"parts":             true,
-	"replicas":          true,
-	"replication_queue": true,
-	"tables":            true,
-}
-
-// sysTable returns the mode-appropriate system table reference.
-// In cloud mode, only per-replica tables (query_log, part_log, errors, …)
-// are wrapped with clusterAllReplicas. Shared tables are queried directly.
-func (ev *Evaluator) sysTable(table string) string {
-	if ev.mode == "cloud" && !sharedSystemTables[table] {
-		return fmt.Sprintf("clusterAllReplicas(default, system.%s)", table)
-	}
-	return "system." + table
-}
-
-// expandQuery replaces {sys.<name>} placeholders with the correct table path.
+// expandQuery replaces {sys.<name>} placeholders with the correct table
+// path for the evaluator's mode. Delegated to the shared template
+// helper (single source of truth for the cloud-shared-tables list).
 func (ev *Evaluator) expandQuery(sql string) string {
-	out := sql
-	for {
-		start := strings.Index(out, "{sys.")
-		if start == -1 {
-			break
-		}
-		end := strings.Index(out[start:], "}")
-		if end == -1 {
-			break
-		}
-		placeholder := out[start : start+end+1] // e.g. "{sys.mutations}"
-		tableName := out[start+5 : start+end]   // e.g. "mutations"
-		out = strings.ReplaceAll(out, placeholder, ev.sysTable(tableName))
-	}
-	return out
+	return query.Apply(sql, query.Vars{Mode: ev.mode})
 }
 
 // RunAll loads every .yaml file from dir and evaluates each rule.

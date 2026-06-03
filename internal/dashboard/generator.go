@@ -10,35 +10,31 @@ import (
 	"time"
 
 	"clickhouse-diagnostic/internal/alert"
+	"clickhouse-diagnostic/internal/query"
 	"clickhouse-diagnostic/pkg"
 )
 
-// sharedSystemTables lists system.* tables whose contents are the same on
-// every replica — in ClickHouse Cloud (SharedMergeTree, shared storage) and
-// in self-managed ReplicatedMergeTree clusters. Wrapping these with
-// clusterAllReplicas duplicates every row once per replica, inflating
-// counts and producing repeat alerts.
-var sharedSystemTables = map[string]bool{
-	"columns":           true,
-	"databases":         true,
-	"detached_parts":    true,
-	"dictionaries":      true,
-	"mutations":         true,
-	"parts":             true,
-	"replicas":          true,
-	"replication_queue": true,
-	"tables":            true,
-}
-
 // Generator creates offline HTML diagnostic dashboards from ClickHouse data.
 type Generator struct {
-	client *pkg.ClickHouseClient
-	mode   string
+	client      *pkg.ClickHouseClient
+	mode        string
+	analysis    query.AnalysisOpts
+	analysisDir string
 }
 
 // NewGenerator creates a new Generator.
 func NewGenerator(client *pkg.ClickHouseClient, mode string) *Generator {
 	return &Generator{client: client, mode: strings.ToLower(mode)}
+}
+
+// WithAnalysis attaches query-analysis options + the directory holding
+// the .sql files. When opts is enabled, Generate adds a "Query
+// Analysis" section to the dashboard, rendered from the same SQL the
+// AnalysisCollector writes to disk. Returns the receiver for chaining.
+func (g *Generator) WithAnalysis(opts query.AnalysisOpts, dir string) *Generator {
+	g.analysis = opts
+	g.analysisDir = dir
+	return g
 }
 
 // chResult is the JSONCompact response envelope from ClickHouse.
@@ -72,15 +68,10 @@ func (r *chResult) records() []map[string]interface{} {
 }
 
 // sysTable returns the correct system table reference for the current mode.
-// In cloud mode, per-replica tables (query_log, part_log, errors, …) are
-// wrapped with clusterAllReplicas to cover the whole cluster. Tables whose
-// contents are shared across replicas (parts, tables, replicas, …) are
-// queried directly to avoid N× row duplication.
+// Delegated to the shared template helper — see internal/query/template.go
+// for the cloud-shared-tables allowlist (single source of truth).
 func (g *Generator) sysTable(table string) string {
-	if g.mode == "cloud" && !sharedSystemTables[table] {
-		return fmt.Sprintf("clusterAllReplicas(default, system.%s)", table)
-	}
-	return "system." + table
+	return query.SysTable(g.mode, table)
 }
 
 // parseUInt64 extracts an integer from a JSONCompact cell. ClickHouse
@@ -164,26 +155,52 @@ func (g *Generator) tablesListSQL() string {
 		LIMIT 2000`, g.sysTable("tables"), g.sysTable("parts"), notSystem)
 }
 
-// dictionariesSQL builds the dictionaries query, omitting last_exception for gov.
+// dictionariesSQL builds the dictionaries query, omitting last_exception
+// for gov. In cloud mode the query goes through clusterAllReplicas so
+// we get one row per (dictionary, replica) — dictionary RUNTIME state
+// (status, bytes_allocated, hit_rate, query_count) is per-pod even
+// though the definition is shared via Keeper, and a dict that's been
+// queried on pod A but not on pod B will appear LOADED on A and
+// NOT_LOADED on B. hostname() is evaluated remotely on each replica so
+// we can label each row with the pod that produced it.
+//
+// Column choice tracks the system.dictionaries reference:
+//   https://clickhouse.com/docs/operations/system-tables/dictionaries
+//
+// In gov mode we additionally redact `source`, `origin`, `comment`
+// and `last_exception` — these can carry connection strings, file
+// paths, exception text and user comments that reveal schema or
+// infrastructure details that gov mode is otherwise hashing.
 func (g *Generator) dictionariesSQL() string {
-	exceptionCol := "last_exception"
+	exceptionCol, sourceCol, originCol, commentCol := "last_exception", "source", "origin", "comment"
 	if g.mode == "gov" {
 		exceptionCol = "'' AS last_exception"
+		sourceCol = "'' AS source"
+		originCol = "'' AS origin"
+		commentCol = "'' AS comment"
 	}
 	return fmt.Sprintf(`
 		SELECT
-			database, name, status, type,
+			hostname()                                          AS hostname,
+			database, name, status, type, toString(uuid)        AS uuid,
 			bytes_allocated,
-			formatReadableSize(bytes_allocated) AS bytes_allocated_human,
-			element_count, query_count,
-			round(hit_rate * 100, 2) AS hit_rate_pct,
-			round(found_rate * 100, 2) AS found_rate_pct,
+			formatReadableSize(bytes_allocated)                 AS bytes_allocated_human,
+			element_count, query_count, error_count,
+			round(hit_rate * 100, 2)                            AS hit_rate_pct,
+			round(found_rate * 100, 2)                          AS found_rate_pct,
+			round(load_factor, 4)                               AS load_factor,
+			arrayStringConcat(key.names, ', ')                  AS key_names,
+			arrayStringConcat(key.types, ', ')                  AS key_types,
+			arrayStringConcat(attribute.names, ', ')            AS attribute_names,
+			arrayStringConcat(attribute.types, ', ')            AS attribute_types,
 			lifetime_min, lifetime_max,
-			toString(last_successful_update_time) AS last_update,
-			round(loading_duration, 2) AS loading_duration_s,
-			%s
+			toString(loading_start_time)                        AS loading_start_time,
+			toString(last_successful_update_time)               AS last_update,
+			round(loading_duration, 2)                          AS loading_duration_s,
+			%s, %s, %s, %s
 		FROM %s
-		ORDER BY bytes_allocated DESC`, exceptionCol, g.sysTable("dictionaries"))
+		ORDER BY database, name, hostname`,
+		sourceCol, originCol, commentCol, exceptionCol, g.sysTable("dictionaries"))
 }
 
 // collect gathers all metrics from ClickHouse and returns a JSON-ready map.
@@ -530,7 +547,117 @@ func (g *Generator) collect() map[string]interface{} {
 		p["async_inserts"] = []map[string]interface{}{}
 	}
 
+	// ── Query analysis (optional) ──────────────────────────────────────────
+	g.collectAnalysis(p)
+
 	return p
+}
+
+// collectAnalysis runs the query-analysis SQL files (same set the
+// AnalysisCollector writes to disk), embedding the JSONCompact output
+// into the dashboard payload so the front-end can render the "Query
+// Analysis" section. No-op when WithAnalysis was not called or when
+// opts.Enabled() is false.
+//
+// Each file's content is template-substituted in memory, the trailing
+// `FORMAT Native` clause stripped, then sent to ClickHouse with
+// `FORMAT JSONCompact` (via safeQuery). If a file still has unbound
+// placeholders after substitution (e.g. single-id files when only
+// --normalized-query-hash was given), it is silently skipped — the
+// missing key is then absent from the payload and the front-end hides
+// the corresponding card.
+func (g *Generator) collectAnalysis(p map[string]interface{}) {
+	if !g.analysis.Enabled() || g.analysisDir == "" {
+		return
+	}
+	vars := query.Vars{
+		Mode:                g.mode,
+		QueryID:             g.analysis.QueryID,
+		NormalizedQueryHash: g.analysis.NormalizedQueryHash,
+		From:                g.analysis.From,
+		To:                  g.analysis.To,
+	}
+
+	// Map of payload key → .sql filename. Keys match the JS fetches
+	// in the dashboard template (DATA.qa_*).
+	files := map[string]string{
+		"qa_details":          "query_details.sql",
+		"qa_profile":          "profile_events.sql",
+		"qa_text_parts":       "text_log_parts.sql",
+		"qa_text_full":        "text_log_full.sql",
+		"qa_tables":           "tables_for_query.sql",
+		"qa_fast_slow":        "fast_slow_query_ids.sql",
+		"qa_pe_compare":       "profile_events_compare.sql",
+		"qa_by_host":          "hash_by_host.sql",
+		"qa_summary":          "hash_summary.sql",
+		"qa_failed_over_time": "failed_over_time.sql",
+		"qa_failed":           "failed_queries.sql",
+		"qa_executions":       "executions_timeline.sql",
+	}
+	for key, fname := range files {
+		raw, err := os.ReadFile(filepath.Join(g.analysisDir, fname))
+		if err != nil {
+			continue
+		}
+		sql := query.Apply(string(raw), vars)
+		if len(query.UnboundPlaceholders(sql)) > 0 {
+			continue
+		}
+		// Strip trailing `FORMAT Native` so safeQuery can append
+		// JSONCompact via the standard execJSON path.
+		sql = stripTrailingFormat(sql)
+		if err := query.ValidateQueryContent(sql); err != nil {
+			fmt.Printf("  [dashboard] %s: blocked analysis query in %s: %v\n", key, fname, err)
+			continue
+		}
+		rows := g.safeQuery(key, sql)
+		// Defence in depth for gov mode: the dashboard JSON is part
+		// of the support archive, so any field that the JS would
+		// otherwise hide should also be cleared from the embedded
+		// payload. The `query` and `exception` columns in
+		// system.query_log contain raw text the customer ran
+		// (referencing the same table names gov-mode hashes
+		// elsewhere); empty them out before embedding.
+		if g.mode == "gov" {
+			for _, r := range rows {
+				for _, sensitive := range []string{"query", "exception", "sample_query", "sample_exception"} {
+					if _, ok := r[sensitive]; ok {
+						r[sensitive] = "(redacted in gov mode)"
+					}
+				}
+			}
+		}
+		p[key] = rows
+	}
+
+	p["qa_enabled"] = true
+	p["qa_query_id"] = g.analysis.QueryID
+	p["qa_hash"] = g.analysis.NormalizedQueryHash
+	p["qa_from"] = g.analysis.From.UTC().Format(time.RFC3339)
+	p["qa_to"] = g.analysis.To.UTC().Format(time.RFC3339)
+	// qa_mode gates the rendering of the focus query's SQL text: in
+	// gov mode we still hash database/table names in queries.gov/*.sql,
+	// but query_log.query stores the raw SQL the customer ran, which
+	// references the same names. Exposing it in the dashboard would
+	// defeat the hashing. JS hides the card when mode == 'gov'.
+	p["qa_mode"] = g.mode
+}
+
+// stripTrailingFormat removes a trailing `FORMAT <name>` clause (and
+// any whitespace / semicolons after it). The dashboard always wants
+// JSONCompact, which the underlying execJSON wrapper appends.
+func stripTrailingFormat(sql string) string {
+	t := strings.TrimRight(sql, " \t\r\n;")
+	idx := strings.LastIndex(strings.ToUpper(t), "FORMAT")
+	if idx == -1 {
+		return t
+	}
+	tail := strings.TrimSpace(t[idx:])
+	parts := strings.Fields(tail)
+	if len(parts) == 2 && strings.EqualFold(parts[0], "FORMAT") {
+		return strings.TrimRight(t[:idx], " \t\r\n")
+	}
+	return t
 }
 
 // buildHTML serialises the payload into the HTML template.
@@ -642,6 +769,7 @@ footer{text-align:center;color:#aaa;font-size:12px;padding:20px;margin-top:8px}
 
 <nav id="main-nav">
   <a href="#sec-alerts" id="nav-alerts">Alerts</a>
+  <a href="#sec-qa" id="nav-qa" style="display:none">Query Analysis</a>
   <a href="#sec-overview">Overview</a>
   <a href="#sec-storage">Storage</a>
   <a href="#sec-tables">Tables</a>
@@ -667,6 +795,82 @@ footer{text-align:center;color:#aaa;font-size:12px;padding:20px;margin-top:8px}
   <h2>🚨 Alert Summary</h2>
   <div id="alerts-summary-bar"></div>
   <div id="alerts-panel"></div>
+</section>
+
+<!-- ── QUERY ANALYSIS ── -->
+<section id="sec-qa" style="display:none">
+  <h2>🔍 Query Analysis</h2>
+  <div id="qa-focus" class="alert-item" style="border-left-color:#FC4F05;margin-bottom:18px"></div>
+
+  <!-- Query text card — hidden in gov mode -->
+  <div id="qa-query-card" class="chart-card" style="display:none;margin-bottom:18px">
+    <h3>Focus query — SQL text</h3>
+    <pre id="qa-query-text" style="background:#1a1a2e;color:#e0e0e0;padding:14px;border-radius:6px;overflow:auto;max-height:280px;font-family:'SF Mono',monospace;font-size:12px;white-space:pre-wrap;line-height:1.4"></pre>
+  </div>
+
+  <!-- Per-execution scatters — one dot per individual query execution.
+       Five charts share this shape; each picks a different metric off
+       the qa_executions array and uses the same adaptive-unit + colour
+       logic (green succ, red cross failure, tooltip with query_id). -->
+  <div class="charts-grid">
+    <div class="chart-card">
+      <h3>Per-execution duration</h3>
+      <div class="chart-wrap h300"><canvas id="chart-qa-scatter"></canvas></div>
+    </div>
+    <div class="chart-card">
+      <h3>Per-execution memory usage</h3>
+      <div class="chart-wrap h300"><canvas id="chart-qa-mem"></canvas></div>
+    </div>
+    <div class="chart-card">
+      <h3>Per-execution user CPU</h3>
+      <div class="chart-wrap h300"><canvas id="chart-qa-cpu"></canvas></div>
+    </div>
+    <div class="chart-card">
+      <h3>Per-execution read rows</h3>
+      <div class="chart-wrap h300"><canvas id="chart-qa-rrows"></canvas></div>
+    </div>
+    <div class="chart-card">
+      <h3>Per-execution read bytes</h3>
+      <div class="chart-wrap h300"><canvas id="chart-qa-rbytes"></canvas></div>
+    </div>
+  </div>
+
+  <!-- Count charts — bucketed per MINUTE. Per-execution doesn't apply
+       here (count of "one" per dot would be uninformative); minute is
+       the finest useful grain. -->
+  <div class="charts-grid" style="margin-top:18px">
+    <div class="chart-card">
+      <h3>Executions per minute</h3>
+      <div class="chart-wrap h260"><canvas id="chart-qa-execs"></canvas></div>
+    </div>
+    <div class="chart-card">
+      <h3>Failed queries per minute, by error type</h3>
+      <div class="chart-wrap h260"><canvas id="chart-qa-failed"></canvas></div>
+    </div>
+  </div>
+
+  <!-- Single-execution charts -->
+  <div class="charts-grid" style="margin-top:18px">
+    <div class="chart-card">
+      <h3>Top 30 ProfileEvents (slowest execution)</h3>
+      <div class="chart-wrap h420"><canvas id="chart-qa-profile"></canvas></div>
+    </div>
+    <div class="chart-card">
+      <h3>Fast vs Slow — ProfileEvents (top 30 by |delta|)</h3>
+      <div class="chart-wrap h420"><canvas id="chart-qa-compare"></canvas></div>
+    </div>
+  </div>
+
+  <div class="sub-title">Per-host distribution (hash)</div>
+  <div class="tbl-wrap"><div id="tbl-qa-host"></div></div>
+  <div class="sub-title" style="margin-top:18px">Failed queries — per-table × per-error breakdown</div>
+  <div class="tbl-wrap"><div id="tbl-qa-failed"></div></div>
+  <div class="sub-title" style="margin-top:18px">Tables referenced by the focus query</div>
+  <div class="tbl-wrap"><div id="tbl-qa-tables"></div></div>
+  <div class="sub-title" style="margin-top:18px">Parts / marks / streams scanned (text_log, slowest execution)</div>
+  <div class="tbl-wrap"><div id="tbl-qa-parts"></div></div>
+  <div class="sub-title" style="margin-top:18px">Full text_log for the slowest execution</div>
+  <div class="tbl-wrap" style="max-height:480px;overflow-y:auto"><div id="tbl-qa-textlog"></div></div>
 </section>
 
 <!-- ── OVERVIEW ── -->
@@ -1106,10 +1310,259 @@ function renderAlerts(){
 }
 
 // ── main init ─────────────────────────────────────────────────────────────────
+// Adaptive duration helper used by every duration axis / tooltip in
+// the Query Analysis section. The original requirement: render in
+// seconds when the value is short, switch to minutes once the peak
+// crosses 200 seconds, so a long-running query doesn't show up as
+// "180000 ms" in a tooltip.
+function pickDurationUnit(maxMs){
+  if(maxMs > 200000){
+    return {factor: 1/60000, label: 'min', precision: 2};
+  }
+  return {factor: 1/1000, label: 'sec', precision: 2};
+}
+function fmtDuration(ms, unit){
+  if(ms==null) return '—';
+  return (Number(ms) * unit.factor).toFixed(unit.precision) + ' ' + unit.label;
+}
+
+// pickByteUnit chooses MiB / GiB / TiB based on the largest value in
+// the series. KiB is skipped because at the scale ClickHouse reports
+// (read_bytes, memory_usage) a per-execution metric below 1 MiB is
+// usually noise and would look like "0.001 MB" anyway.
+function pickByteUnit(maxBytes){
+  if(maxBytes >= 1024**4) return {factor: 1/(1024**4), label:'TiB', precision:2};
+  if(maxBytes >= 1024**3) return {factor: 1/(1024**3), label:'GiB', precision:2};
+  return {factor: 1/(1024**2), label:'MiB', precision:2};
+}
+function fmtBytes(b, unit){
+  if(b==null) return '—';
+  return (Number(b) * unit.factor).toFixed(unit.precision) + ' ' + unit.label;
+}
+
+// renderQaScatter draws a per-execution scatter for one numeric metric
+// off the qa_executions array. Five charts in the Query Analysis
+// section share this shape — colour-coded success vs failure, tooltip
+// shows query_id + hostname + the metric in human units.
+//
+// opts:
+//   ySelect(row) → number     project a metric from one execution
+//   yUnit(maxVal) → unit obj  pick the axis unit ({factor,label,precision})
+//   yLabel(unit)  → string    title for the Y axis
+//   yFmt(value, unit) → string formatter for tooltip
+function renderQaScatter(canvasId, rows, opts){
+  const succ=[], fail=[];
+  let maxY=0;
+  rows.forEach(r=>{
+    const t=Date.parse(r.ts);
+    const y=opts.ySelect(r);
+    if(y>maxY) maxY=y;
+    const pt={x:t,y:y,query_id:r.query_id,exception_code:r.exception_code,hostname:r.hostname};
+    if(Number(r.exception_code)===0 && r.type==='QueryFinish'){ succ.push(pt); }
+    else { fail.push(pt); }
+  });
+  const u=opts.yUnit(maxY);
+  new Chart(document.getElementById(canvasId),{
+    type:'scatter',
+    data:{datasets:[
+      {label:'succeeded',data:succ,backgroundColor:alpha('#4CAF50',.7),borderColor:'#4CAF50',pointRadius:4},
+      {label:'failed',data:fail,backgroundColor:alpha('#E91E63',.85),borderColor:'#E91E63',pointRadius:5,pointStyle:'crossRot'}
+    ]},
+    options:{responsive:true,maintainAspectRatio:false,
+      plugins:{
+        legend:{position:'top'},
+        tooltip:{callbacks:{label:c=>{
+          const p=c.raw;
+          const when=new Date(p.x).toISOString().replace('T',' ').replace(/\..*/,'');
+          const lines=[when+' · '+opts.yFmt(p.y,u),'query_id: '+(p.query_id||''),'host: '+(p.hostname||'')];
+          if(Number(p.exception_code)!==0) lines.push('exception_code: '+p.exception_code);
+          return lines;
+        }}}
+      },
+      scales:{
+        x:{type:'linear',
+          title:{display:true,text:'event_time (UTC)'},
+          ticks:{callback:v=>new Date(v).toISOString().replace('T',' ').replace(/\..*/,'').slice(5,16)}},
+        y:{type:'linear',beginAtZero:true,
+          title:{display:true,text:opts.yLabel(u)},
+          ticks:{callback:v=>(v*u.factor).toFixed(u.precision)}}
+      }}
+  });
+}
+
+// ── query analysis renderer ───────────────────────────────────────────────────
+function renderQueryAnalysis(){
+  if(!DATA.qa_enabled) return;
+  document.getElementById('sec-qa').style.display='';
+  document.getElementById('nav-qa').style.display='';
+
+  // Focus query SQL text — only when not in gov mode (the query text
+  // contains real database/table names that gov-mode hashes elsewhere).
+  if(DATA.qa_mode !== 'gov'){
+    const txt=(((DATA.qa_details||[])[0])||{}).query;
+    if(txt){
+      document.getElementById('qa-query-text').textContent=txt;
+      document.getElementById('qa-query-card').style.display='';
+    }
+  }
+
+  // Focus card — what the analysis is scoped to and which execution
+  // the single-id queries (ProfileEvents, text_log, tables, parts)
+  // were filtered against. In hash-only mode this is the slowest
+  // execution for the hash (auto-derived in the pre-flight); in
+  // --query-id mode it's the user-supplied UUID.
+  const det=(DATA.qa_details||[])[0]||{};
+  const fast=(DATA.qa_fast_slow||[])[0]||{};
+  const focus=document.getElementById('qa-focus');
+  let h='<div class="alert-header">';
+  h+='<span class="alert-title">Focus query_id: '+(DATA.qa_query_id||'(none)')+'</span>';
+  h+='<span class="alert-tags"><span class="alert-tag">hash '+(DATA.qa_hash||'')+'</span>';
+  h+='<span class="alert-tag">window '+(DATA.qa_from||'')+' → '+(DATA.qa_to||'')+'</span></span>';
+  h+='</div>';
+  if(det.query_kind){
+    h+='<div class="alert-desc">';
+    h+='kind: <b>'+det.query_kind+'</b> · user: <b>'+(det.user||'?')+'</b> · duration: <b>'+fmt(det.query_duration_ms)+' ms</b>';
+    h+=' · read: <b>'+fmt(det.read_rows)+' rows / '+(det.memory_usage_human||'?')+'</b>';
+    if(det.exception_code && Number(det.exception_code)!==0){
+      h+=' · <span style="color:#c62828">exception '+det.exception_code+'</span>';
+    }
+    h+='</div>';
+  }
+  if(fast.slow_query_id){
+    h+='<div class="alert-desc">';
+    h+='hash executions: <b>'+fmt(fast.executions)+'</b> · ';
+    h+='slowest: <b>'+fmt(fast.slow_duration_ms)+' ms</b> (<code>'+fast.slow_query_id+'</code>) · ';
+    h+='fastest: <b>'+fmt(fast.fast_duration_ms)+' ms</b> (<code>'+fast.fast_query_id+'</code>)';
+    if(Number(fast.fast_duration_ms)>0){
+      const ratio=(Number(fast.slow_duration_ms)/Number(fast.fast_duration_ms)).toFixed(1);
+      h+=' → <b>'+ratio+'×</b> slower';
+    }
+    h+='</div>';
+  }
+  focus.innerHTML=h;
+
+  // ── Per-execution scatters ────────────────────────────────────────────────
+  // Five charts (duration, memory, user CPU, read rows, read bytes)
+  // share the same shape: one dot per execution, x = event_time,
+  // y = the metric for that execution, succ = green dot, fail = red
+  // cross. Built off DATA.qa_executions so we never need a separate
+  // SQL aggregation for any of these — the executions_timeline query
+  // already carries every column we need.
+  const execs=DATA.qa_executions||[];
+  if(execs.length){
+    renderQaScatter('chart-qa-scatter', execs, {
+      ySelect: r => Number(r.query_duration_ms),
+      yUnit:   max => pickDurationUnit(max),
+      yLabel:  u => 'duration (' + u.label + ')',
+      yFmt:    (v,u) => fmtDuration(v,u),
+    });
+    renderQaScatter('chart-qa-mem', execs, {
+      ySelect: r => Number(r.memory_usage),
+      yUnit:   max => pickByteUnit(max),
+      yLabel:  u => 'memory (' + u.label + ')',
+      yFmt:    (v,u) => fmtBytes(v,u),
+    });
+    renderQaScatter('chart-qa-cpu', execs, {
+      ySelect: r => Number(r.user_cpu_us||0) / 1e6,    // µs → sec
+      yUnit:   () => ({factor:1, label:'sec', precision:3}),
+      yLabel:  () => 'user CPU (sec)',
+      yFmt:    v => v.toFixed(3) + ' sec',
+    });
+    renderQaScatter('chart-qa-rrows', execs, {
+      ySelect: r => Number(r.read_rows),
+      yUnit:   () => ({factor:1, label:'rows', precision:0}),
+      yLabel:  () => 'read rows',
+      yFmt:    v => fmt(v) + ' rows',
+    });
+    renderQaScatter('chart-qa-rbytes', execs, {
+      ySelect: r => Number(r.read_bytes),
+      yUnit:   max => pickByteUnit(max),
+      yLabel:  u => 'read (' + u.label + ')',
+      yFmt:    (v,u) => fmtBytes(v,u),
+    });
+  }
+
+  // ── Minute-bucketed count charts ──────────────────────────────────────────
+  const sum=DATA.qa_summary||[];
+  if(sum.length){
+    const labels=sum.map(r=>r.time_bucket);
+    new Chart(document.getElementById('chart-qa-execs'),{
+      type:'bar',
+      data:{labels,datasets:[
+        {label:'succeeded',data:sum.map(r=>Number(r.succeeded)),
+          backgroundColor:alpha('#4CAF50',.8),borderColor:'#4CAF50',borderWidth:1,stack:'s'},
+        {label:'failed',data:sum.map(r=>Number(r.failed)),
+          backgroundColor:alpha('#E91E63',.8),borderColor:'#E91E63',borderWidth:1,stack:'s'}
+      ]},
+      options:{responsive:true,maintainAspectRatio:false,
+        interaction:{mode:'index',intersect:false},
+        plugins:{legend:{position:'top'}},
+        scales:{x:{stacked:true},y:{stacked:true,beginAtZero:true}}}
+    });
+  }
+
+  const fot=DATA.qa_failed_over_time||[];
+  if(fot.length){
+    const piv=pivot(fot,'time_bucket','error_type','errors');
+    piv.datasets.forEach(ds=>{ds.stack='e';});
+    new Chart(document.getElementById('chart-qa-failed'),{
+      type:'bar',data:piv,
+      options:{responsive:true,maintainAspectRatio:false,
+        interaction:{mode:'index',intersect:false},
+        plugins:{legend:{position:'top'}},
+        scales:{x:{stacked:true},y:{stacked:true,beginAtZero:true}}}
+    });
+  }
+
+  // Top ProfileEvents for the focus (slowest) execution.
+  const pe=(DATA.qa_profile||[]).slice(0,30);
+  if(pe.length){
+    new Chart(document.getElementById('chart-qa-profile'),{
+      type:'bar',
+      data:{labels:pe.map(r=>r.metric),datasets:[{label:'value',data:pe.map(r=>Number(r.value)),
+        backgroundColor:alpha('#FC4F05',.75),borderColor:'#FC4F05',borderWidth:1}]},
+      options:{indexAxis:'y',responsive:true,maintainAspectRatio:false,
+        plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>' '+fmt(c.raw)}}},
+        scales:{x:{beginAtZero:true,ticks:{callback:v=>fmt(v)}}}}
+    });
+  }
+
+  // Fast vs Slow comparison — top 30 by |delta|.
+  const cmp=(DATA.qa_pe_compare||[]).slice(0,30);
+  if(cmp.length){
+    new Chart(document.getElementById('chart-qa-compare'),{
+      type:'bar',
+      data:{labels:cmp.map(r=>r.metric),datasets:[
+        {label:'slow',data:cmp.map(r=>Number(r.slow_value)),
+          backgroundColor:alpha('#E91E63',.75),borderColor:'#E91E63',borderWidth:1},
+        {label:'fast',data:cmp.map(r=>Number(r.fast_value)),
+          backgroundColor:alpha('#4CAF50',.75),borderColor:'#4CAF50',borderWidth:1}
+      ]},
+      options:{indexAxis:'y',responsive:true,maintainAspectRatio:false,
+        plugins:{legend:{position:'top'},tooltip:{callbacks:{label:c=>c.dataset.label+': '+fmt(c.raw)}}},
+        scales:{x:{beginAtZero:true,ticks:{callback:v=>fmt(v)}}}}
+    });
+  }
+
+  // Detail tables
+  renderTable('tbl-qa-host',DATA.qa_by_host||[],
+    ['hostname','executions','avg_duration_ms','p95_duration_ms','max_duration_ms','min_duration_ms','avg_memory','max_memory','errors'],
+    r=>Number(r.errors||0)>0?'error-row':'');
+  renderTable('tbl-qa-failed',DATA.qa_failed||[],
+    ['error_type','tables_touched','user','errors','first_seen','last_seen','max_duration_ms','sample_exception']);
+  renderTable('tbl-qa-tables',DATA.qa_tables||[],
+    ['database','table_name','engine','total_rows','size','size_uncompressed','partition_key','sorting_key','storage_policy']);
+  renderTable('tbl-qa-parts',DATA.qa_text_parts||[],
+    ['ts','level','logger_name','message']);
+  renderTable('tbl-qa-textlog',DATA.qa_text_full||[],
+    ['ts','level','logger_name','message']);
+}
+
 document.addEventListener('DOMContentLoaded',function(){
   if(!DATA){document.body.innerHTML='<p style="padding:40px;color:red">No embedded data.</p>';return;}
 
   renderAlerts();
+  renderQueryAnalysis();
 
   // nav active highlight on scroll
   const secs=[...document.querySelectorAll('section[id]')];
@@ -1397,50 +1850,79 @@ document.addEventListener('DOMContentLoaded',function(){
       return;
     }
 
-    // status distribution (pie)
+    // Rows are now per-(dict, pod) — cloud mode uses clusterAllReplicas
+    // so a dict loaded on 3 replicas shows 3 rows. Aggregate to per-dict
+    // for the charts where rendering N copies would be misleading, but
+    // keep the raw per-pod rows for the table.
+    const byDict={};
+    rows.forEach(r=>{
+      const k=r.database+'.'+r.name;
+      const entry=byDict[k]||(byDict[k]={
+        key:k, database:r.database, name:r.name, type:r.type,
+        bytes_max:0, bytes_max_human:'',
+        lifetime_min:Number(r.lifetime_min||0), lifetime_max:Number(r.lifetime_max||0),
+        statuses:{}, loaded_pods:0, total_pods:0
+      });
+      entry.total_pods++;
+      entry.statuses[r.status]=(entry.statuses[r.status]||0)+1;
+      if(r.status==='LOADED') entry.loaded_pods++;
+      const b=Number(r.bytes_allocated||0);
+      if(b>entry.bytes_max){ entry.bytes_max=b; entry.bytes_max_human=r.bytes_allocated_human||''; }
+    });
+    const dicts=Object.values(byDict);
+
+    // Status pie — count of (dict × pod) slots per status. A dict
+    // LOADED on 3 pods and NOT_LOADED on 1 contributes 3+1 slots, so
+    // operators can see the cluster-wide loading coverage.
     const statusMap={};
     rows.forEach(r=>{statusMap[r.status]=(statusMap[r.status]||0)+1;});
     const statLabels=Object.keys(statusMap);
     new Chart(document.getElementById('chart-dict-status'),{
       type:'pie',
       data:{
-        labels:statLabels,
+        labels:statLabels.map(s=>s+' ('+statusMap[s]+' pod-slots)'),
         datasets:[{data:statLabels.map(s=>statusMap[s]),
           backgroundColor:statLabels.map(s=>DICT_STATUS_COLOR[s]||'#607D8B'),borderWidth:2}]
       },
       options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{position:'right'}}}
     });
 
-    // bytes allocated (horizontal bar)
-    const topDicts=rows.slice(0,15);
+    // Bytes allocated — max across pods per dict (same dict has very
+    // similar bytes on every pod that loaded it; using max avoids
+    // visually shrinking a dict that's NOT_LOADED on one replica).
+    const topDicts=[...dicts].sort((a,b)=>b.bytes_max-a.bytes_max).slice(0,15);
     new Chart(document.getElementById('chart-dict-bytes'),{
       type:'bar',
       data:{
-        labels:topDicts.map(r=>r.database+'.'+r.name),
+        labels:topDicts.map(d=>d.key),
         datasets:[{
-          label:'Bytes Allocated',
-          data:topDicts.map(r=>r.bytes_allocated),
+          label:'max bytes_allocated across pods',
+          data:topDicts.map(d=>d.bytes_max),
           backgroundColor:topDicts.map((_,i)=>alpha(C[i%C.length],.8)),
           borderColor:topDicts.map((_,i)=>C[i%C.length]),borderWidth:1
         }]
       },
       options:{
         indexAxis:'y',responsive:true,maintainAspectRatio:false,
-        plugins:{legend:{display:false},tooltip:{callbacks:{label:ctx=>' '+topDicts[ctx.dataIndex].bytes_allocated_human}}},
+        plugins:{legend:{display:false},tooltip:{callbacks:{label:ctx=>{
+          const d=topDicts[ctx.dataIndex];
+          return [' '+d.bytes_max_human, ' loaded on '+d.loaded_pods+' / '+d.total_pods+' pods'];
+        }}}},
         scales:{x:{ticks:{callback:v=>v>=1e9?(v/1e9).toFixed(1)+'G':v>=1e6?(v/1e6).toFixed(1)+'M':v>=1e3?(v/1e3).toFixed(0)+'K':v}}}
       }
     });
 
-    // lifetime range (grouped bar)
-    const lifeRows=rows.filter(r=>r.lifetime_max>0||r.lifetime_min>0).slice(0,20);
+    // Lifetime is per-definition (same value on every pod), so use the
+    // deduped per-dict view.
+    const lifeRows=dicts.filter(d=>d.lifetime_max>0||d.lifetime_min>0).slice(0,20);
     if(lifeRows.length){
       new Chart(document.getElementById('chart-dict-lifetime'),{
         type:'bar',
         data:{
-          labels:lifeRows.map(r=>r.name),
+          labels:lifeRows.map(d=>d.name),
           datasets:[
-            {label:'Lifetime Min (s)',data:lifeRows.map(r=>r.lifetime_min),backgroundColor:alpha('#2196F3',.75),borderColor:'#2196F3',borderWidth:1},
-            {label:'Lifetime Max (s)',data:lifeRows.map(r=>r.lifetime_max),backgroundColor:alpha('#FF9800',.75),borderColor:'#FF9800',borderWidth:1}
+            {label:'Lifetime Min (s)',data:lifeRows.map(d=>d.lifetime_min),backgroundColor:alpha('#2196F3',.75),borderColor:'#2196F3',borderWidth:1},
+            {label:'Lifetime Max (s)',data:lifeRows.map(d=>d.lifetime_max),backgroundColor:alpha('#FF9800',.75),borderColor:'#FF9800',borderWidth:1}
           ]
         },
         options:{
@@ -1454,11 +1936,19 @@ document.addEventListener('DOMContentLoaded',function(){
       document.getElementById('chart-dict-lifetime').parentElement.innerHTML='<p class="no-data">No lifetime data</p>';
     }
 
-    // dictionary detail table — render status as badge inline
+    // Dictionary detail table — per-(dict, pod) rows so the operator
+    // can see which pod each runtime stat came from. Columns ordered:
+    // identity → topology → sizing → activity → schema → lifecycle →
+    // errors → metadata. Long-text columns last; the table wrapper
+    // already overflow-x's, so horizontal scroll is expected.
     const el=document.getElementById('tbl-dicts');
-    const cols=['database','name','status','type','bytes_allocated_human','element_count',
-                'hit_rate_pct','found_rate_pct','lifetime_min','lifetime_max',
-                'last_update','loading_duration_s','last_exception'];
+    const cols=['hostname','database','name','status','type','source',
+                'bytes_allocated_human','element_count','load_factor',
+                'query_count','hit_rate_pct','found_rate_pct','error_count',
+                'key_names','key_types','attribute_names','attribute_types',
+                'lifetime_min','lifetime_max',
+                'loading_start_time','last_update','loading_duration_s',
+                'last_exception','origin','comment','uuid'];
     let h='<table class="dt"><thead><tr>'+cols.map(k=>'<th>'+k+'</th>').join('')+'</tr></thead><tbody>';
     rows.forEach(r=>{
       const isFailed=r.status==='FAILED'||String(r.last_exception||'').length>1;
