@@ -606,6 +606,10 @@ func (g *Generator) collectAnalysis(p map[string]interface{}) {
 		// Strip trailing `FORMAT Native` so safeQuery can append
 		// JSONCompact via the standard execJSON path.
 		sql = stripTrailingFormat(sql)
+		if err := query.ValidateQueryContent(sql); err != nil {
+			fmt.Printf("  [dashboard] %s: blocked analysis query in %s: %v\n", key, fname, err)
+			continue
+		}
 		rows := g.safeQuery(key, sql)
 		// Defence in depth for gov mode: the dashboard JSON is part
 		// of the support archive, so any field that the JS would
