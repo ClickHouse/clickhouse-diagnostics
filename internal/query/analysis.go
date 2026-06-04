@@ -169,7 +169,12 @@ func PreflightForHash(client *pkg.ClickHouseClient, mode, hash string, from, to 
 		from.UTC().Format("2006-01-02 15:04:05"),
 		to.UTC().Format("2006-01-02 15:04:05"))
 
-	raw, err := client.ExecuteQuery(sql)
+	// ExecuteQueryReal bypasses dry-run interception. Without this,
+	// dry-run would return an empty result here and the derived
+	// query_id would stay unset — the analysis bundle would then
+	// print `{query_id}` literally instead of the slow execution's
+	// real UUID, which defeats the purpose of dry-run.
+	raw, err := client.ExecuteQueryReal(sql)
 	if err != nil {
 		return "", time.Time{}, fmt.Errorf("preflight (hash → slowest query_id) failed: %w", err)
 	}
@@ -220,7 +225,9 @@ func PreflightForQueryID(client *pkg.ClickHouseClient, mode, queryID string) (ha
 	LIMIT 1
 	FORMAT JSONCompact`, SysTable(mode, "query_log"), queryID)
 
-	raw, err := client.ExecuteQuery(sql)
+	// ExecuteQueryReal — see comment in PreflightForHash. Must bypass
+	// dry-run so the derived hash flows into the analysis SQL.
+	raw, err := client.ExecuteQueryReal(sql)
 	if err != nil {
 		return "", time.Time{}, fmt.Errorf("preflight lookup for query_id %s failed: %w", queryID, err)
 	}
@@ -307,8 +314,12 @@ func (c *AnalysisCollector) Collect(opts AnalysisOpts, queriesDir, backupDir str
 	}
 	timestamp := time.Now().UTC().Format("20060102_150405")
 
-	fmt.Printf("\nQuery analysis: running %d file(s) (window %s → %s)\n",
-		len(files), opts.From.Format(time.RFC3339), opts.To.Format(time.RFC3339))
+	verb := "running"
+	if c.client.IsDryRun() {
+		verb = "would run"
+	}
+	fmt.Printf("\nQuery analysis: %s %d file(s) (window %s → %s)\n",
+		verb, len(files), opts.From.Format(time.RFC3339), opts.To.Format(time.RFC3339))
 
 	for _, fname := range files {
 		full := filepath.Join(queriesDir, fname)
@@ -335,13 +346,22 @@ func (c *AnalysisCollector) Collect(opts AnalysisOpts, queriesDir, backupDir str
 		}
 		base := strings.TrimSuffix(fname, ".sql")
 		out := filepath.Join(outDir, fmt.Sprintf("%s_%s.native", base, timestamp))
-		if writeErr := os.WriteFile(out, []byte(result), 0600); writeErr != nil {
-			fmt.Printf("  [analysis] write %s: %v\n", out, writeErr)
-			continue
+		// In dry-run the result is empty and the client has already
+		// printed the SQL + tables to stdout; writing an empty .native
+		// just clutters the temp dir.
+		if !c.client.IsDryRun() {
+			if writeErr := os.WriteFile(out, []byte(result), 0600); writeErr != nil {
+				fmt.Printf("  [analysis] write %s: %v\n", out, writeErr)
+				continue
+			}
+			fmt.Printf("  [analysis] %s → %s\n", fname, out)
 		}
-		fmt.Printf("  [analysis] %s → %s\n", fname, out)
 		written++
 	}
-	fmt.Printf("Query analysis: %d written, %d skipped\n", written, skipped)
+	if c.client.IsDryRun() {
+		fmt.Printf("Query analysis: %d would-run, %d skipped\n", written, skipped)
+	} else {
+		fmt.Printf("Query analysis: %d written, %d skipped\n", written, skipped)
+	}
 	return written, skipped, nil
 }

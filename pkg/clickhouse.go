@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -16,6 +17,21 @@ type ClickHouseClient struct {
 	username   string
 	password   string
 	httpClient *http.Client
+
+	// Dry-run state. When dryRun is true, ExecuteQuery prints the SQL
+	// and the system tables it would touch to dryOut, then returns an
+	// empty result without contacting the server. dryEstimate adds a
+	// real EXPLAIN ESTIMATE round-trip (read-only, metadata only) so
+	// the operator can see scan sizes without running the query itself.
+	//
+	// ExecuteQueryReal bypasses this interception — used for the
+	// version probe, query-analysis pre-flight (so we have real
+	// derived values to template into subsequent SQL), and the
+	// EXPLAIN ESTIMATE round-trip itself.
+	dryRun      bool
+	dryOut      io.Writer
+	dryEstimate bool
+	dryCounter  int
 }
 
 // NewClickHouseClient creates a new ClickHouse client
@@ -30,8 +46,60 @@ func NewClickHouseClient(protocol, host, port, username, password string) *Click
 	}
 }
 
-// ExecuteQuery executes a query against ClickHouse server
+// SetDryRun enables dry-run mode. While enabled, ExecuteQuery does NOT
+// contact the server — every query is printed to out (with its
+// system-table references) and an empty result is returned to the
+// caller so downstream parsing doesn't fail.
+//
+// If explainEstimate is true, each intercepted SELECT additionally
+// triggers a real `EXPLAIN ESTIMATE <query>` against the server. That
+// is a metadata-only query — it returns the rows/marks/parts the
+// query WOULD scan but reads no data parts. It respects readonly=1.
+func (c *ClickHouseClient) SetDryRun(out io.Writer, explainEstimate bool) {
+	c.dryRun = true
+	c.dryOut = out
+	c.dryEstimate = explainEstimate
+	c.dryCounter = 0
+}
+
+// IsDryRun reports whether the client is in dry-run mode. Callers
+// that print their own progress messages (e.g. the query executor,
+// the analysis collector) use this to suppress "successfully saved …"
+// lines whose presence in dry-run output would be misleading.
+func (c *ClickHouseClient) IsDryRun() bool { return c.dryRun }
+
+// ExecuteQuery executes a query against the ClickHouse server, or
+// intercepts in dry-run mode.
 func (c *ClickHouseClient) ExecuteQuery(query string) (string, error) {
+	if c.dryRun {
+		return c.dryRunIntercept(query)
+	}
+	return c.executeReal(query)
+}
+
+// ExecuteQueryReal bypasses dry-run interception. Used for queries
+// that MUST reach the server even in dry-run: the version probe (to
+// pick the right query variants), the query-analysis pre-flight (to
+// derive normalized_query_hash from --query-id and vice versa, so the
+// printed SQL has real values not unbound `{query_id}` markers), and
+// the EXPLAIN ESTIMATE round-trip itself.
+//
+// Callers can use it for any read-only metadata fetch that should
+// run independently of dry-run mode.
+func (c *ClickHouseClient) ExecuteQueryReal(query string) (string, error) {
+	return c.executeReal(query)
+}
+
+// ExecuteQueryWithFormat executes a query and returns results in JSONCompact format.
+// The query must NOT include a FORMAT clause.
+func (c *ClickHouseClient) ExecuteQueryWithFormat(query string) (string, error) {
+	return c.ExecuteQuery(query + "\nFORMAT JSONCompact")
+}
+
+// executeReal is the actual HTTP round-trip. Bypasses dry-run so it
+// can be used from inside dryRunIntercept (for the EXPLAIN ESTIMATE
+// metadata fetch) without recursion.
+func (c *ClickHouseClient) executeReal(query string) (string, error) {
 	// Build the URL with readonly setting to prevent write operations
 	url := fmt.Sprintf("%s://%s:%s/?readonly=1", c.protocol, c.host, c.port)
 
@@ -71,10 +139,73 @@ func (c *ClickHouseClient) ExecuteQuery(query string) (string, error) {
 	return string(body), nil
 }
 
-// ExecuteQueryWithFormat executes a query and returns results in JSONCompact format.
-// The query must NOT include a FORMAT clause.
-func (c *ClickHouseClient) ExecuteQueryWithFormat(query string) (string, error) {
-	return c.ExecuteQuery(query + "\nFORMAT JSONCompact")
+// dryRunIntercept prints the query that would be sent and (if
+// configured) returns a real EXPLAIN ESTIMATE for it. The returned
+// payload is an empty result so callers that try to parse the
+// response don't crash.
+func (c *ClickHouseClient) dryRunIntercept(query string) (string, error) {
+	c.dryCounter++
+	tables := ExtractTables(query)
+	tablesStr := "(no system.* references — function-only)"
+	if len(tables) > 0 {
+		tablesStr = strings.Join(tables, ", ")
+	}
+
+	fmt.Fprintf(c.dryOut, "\n[%d]\n", c.dryCounter)
+	fmt.Fprintf(c.dryOut, "    Tables: %s\n", tablesStr)
+	fmt.Fprintf(c.dryOut, "    SQL:\n%s\n", indentBlock(query, "      "))
+
+	if c.dryEstimate && isExplainable(query) {
+		est, err := c.executeReal("EXPLAIN ESTIMATE " + stripTrailingFormat(query))
+		if err != nil {
+			fmt.Fprintf(c.dryOut, "    EXPLAIN ESTIMATE: (error: %v)\n", err)
+		} else {
+			fmt.Fprintf(c.dryOut, "    EXPLAIN ESTIMATE:\n%s\n", indentBlock(strings.TrimRight(est, "\n"), "      "))
+		}
+	}
+	return emptyResponseFor(query), nil
+}
+
+// indentBlock prefixes every line of s with prefix.
+func indentBlock(s, prefix string) string {
+	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
+	for i, l := range lines {
+		lines[i] = prefix + l
+	}
+	return strings.Join(lines, "\n")
+}
+
+// isExplainable returns true if the query is a SELECT or WITH that
+// EXPLAIN ESTIMATE can analyse.
+func isExplainable(query string) bool {
+	trimmed := strings.TrimLeft(strings.TrimSpace(query), "(")
+	up := strings.ToUpper(trimmed)
+	return strings.HasPrefix(up, "SELECT") || strings.HasPrefix(up, "WITH")
+}
+
+// stripTrailingFormat removes a trailing `FORMAT <name>` clause so
+// EXPLAIN ESTIMATE can prefix the query cleanly.
+func stripTrailingFormat(query string) string {
+	t := strings.TrimRight(query, " \t\r\n;")
+	idx := strings.LastIndex(strings.ToUpper(t), "FORMAT")
+	if idx == -1 {
+		return t
+	}
+	tail := strings.TrimSpace(t[idx:])
+	parts := strings.Fields(tail)
+	if len(parts) == 2 && strings.EqualFold(parts[0], "FORMAT") {
+		return strings.TrimRight(t[:idx], " \t\r\n")
+	}
+	return t
+}
+
+// emptyResponseFor returns a parseable empty result matching the
+// shape the caller asked for.
+func emptyResponseFor(query string) string {
+	if strings.Contains(strings.ToUpper(query), "FORMAT JSONCOMPACT") {
+		return `{"meta":[],"data":[],"rows":0}`
+	}
+	return ""
 }
 
 // GetConnectionInfo returns connection information for display

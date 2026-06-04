@@ -42,6 +42,8 @@ func main() {
 	fromFlag          := flag.String("from", "", "Time-window start for query analysis (RFC3339 or YYYY-MM-DD)")
 	toFlag            := flag.String("to", "", "Time-window end for query analysis (RFC3339 or YYYY-MM-DD)")
 	analysisDirFlag   := flag.String("analysis-dir", "./queries.query_analysis", "Directory containing query-analysis SQL files")
+	dryRunFlag        := flag.Bool("dry-run", false, "List every query the tool would execute (with the system tables each touches) and exit. Does NOT write results or create an archive.")
+	explainEstimateFlag := flag.Bool("explain-estimate", false, "With --dry-run, also run `EXPLAIN ESTIMATE <query>` against the server for each SELECT. EXPLAIN ESTIMATE is a read-only metadata query — it reports the rows/marks/parts a query WOULD scan without reading data.")
 
 	// Parse command line flags
 	flag.Parse()
@@ -67,7 +69,15 @@ func main() {
 		fromStr       = *fromFlag
 		toStr         = *toFlag
 		analysisDir   = *analysisDirFlag
+		dryRun          = *dryRunFlag
+		explainEstimate = *explainEstimateFlag
 	)
+	// --dry-run is read-only by definition — silence the side effects
+	// that would write empty/garbage artefacts to disk.
+	if dryRun {
+		skipConfig = true
+		skipArchive = true
+	}
 
 	// Get user input for missing parameters
 	if err := getUserInput(&protocol, &host, &port, &username, &password, &mode, &configDir, skipConfig); err != nil {
@@ -125,6 +135,35 @@ func main() {
 	fmt.Printf("ClickHouse server version: %d.%d.%d.%d\n",
 		serverVersion.Major, serverVersion.Minor, serverVersion.Patch, serverVersion.Build)
 
+	// Dry-run: activate AFTER the version probe so version detection
+	// still works, but BEFORE everything else. resolveAnalysisOpts
+	// uses ExecuteQueryReal for its pre-flight lookups, which bypasses
+	// the dry-run intercept — that way the derived query_id / hash
+	// flow into the printed SQL instead of leaving `{query_id}`
+	// markers unbound.
+	if dryRun {
+		fmt.Println("\n=== DRY RUN ===")
+		fmt.Println("No data will be written to disk.")
+		fmt.Println("No archive will be created.")
+		if explainEstimate {
+			fmt.Println("EXPLAIN ESTIMATE is enabled — read-only metadata only, no data parts scanned.")
+			fmt.Println("Note: system.* tables are virtual; ESTIMATE returns empty for most of them,")
+			fmt.Println("which is itself a useful confirmation that no data part will be read.")
+		} else {
+			fmt.Println("Only the version probe and the query-analysis pre-flight reach the server.")
+			fmt.Println("Pass --explain-estimate to additionally run metadata-only EXPLAIN ESTIMATE.")
+		}
+		fmt.Println()
+		client.SetDryRun(os.Stdout, explainEstimate)
+		tmpDir, err := os.MkdirTemp("", "diag-dryrun-*")
+		if err != nil {
+			fmt.Printf("Error creating dry-run temp dir: %v\n", err)
+			return
+		}
+		defer os.RemoveAll(tmpDir)
+		outputDir = tmpDir
+	}
+
 	// Resolve query-analysis options up front so an invalid --query-id
 	// or --normalized-query-hash fails fast, before any heavy work runs.
 	analysisOpts, err := resolveAnalysisOpts(client, mode, queryID, normalizedHash, fromStr, toStr)
@@ -137,7 +176,12 @@ func main() {
 	// support-bound artifacts cannot be reversed by a public rainbow
 	// table. Prompt for it now (with no echo) if it wasn't passed via
 	// --salt. Salt never leaves the operator's machine.
-	if mode == "gov" {
+	//
+	// In dry-run we skip the prompt and use a placeholder so the
+	// printed `.sql` files still show what would substitute; nothing
+	// is written and no archive is built, so the placeholder cannot
+	// leak.
+	if mode == "gov" && !dryRun {
 		if govSalt == "" {
 			s, err := promptForGovSalt()
 			if err != nil {
@@ -150,6 +194,8 @@ func main() {
 			fmt.Printf("Invalid gov-mode salt: %v\n", err)
 			return
 		}
+	} else if mode == "gov" && dryRun && govSalt == "" {
+		govSalt = "DRYRUNPLACEHOLDER"
 	}
 
 	// Find and execute queries - get the specific folder path
@@ -163,7 +209,10 @@ func main() {
 	// Gov mode: print + save a local mapping from real database/table
 	// names to the hex(SHA256(name+salt)) form that appears in the
 	// support-bound output files. Saved outside the archive folder.
-	if mode == "gov" {
+	// Skipped in dry-run — the mapping is a local artefact, no point
+	// producing it (the SQL itself is still printed via the
+	// intercepting client when the function runs).
+	if mode == "gov" && !dryRun {
 		if err := internal.PrintGovNameMapping(client, outputDir, finalOutputDir, govSalt); err != nil {
 			fmt.Printf("Warning: gov-mode name mapping failed: %v\n", err)
 		}

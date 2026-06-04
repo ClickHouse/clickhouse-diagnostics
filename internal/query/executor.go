@@ -48,7 +48,11 @@ func (e *Executor) ExecuteQueries(queries map[string]internal.QueryFile, outputD
 		return "", fmt.Errorf("error creating output directory: %w", err)
 	}
 
-	fmt.Printf("Executing %d unique queries...\n\n", len(queries))
+	if e.client.IsDryRun() {
+		fmt.Printf("Would execute %d unique queries (dry-run):\n", len(queries))
+	} else {
+		fmt.Printf("Executing %d unique queries...\n\n", len(queries))
+	}
 
 	successCount := 0
 	errorCount := 0
@@ -63,8 +67,12 @@ func (e *Executor) ExecuteQueries(queries map[string]internal.QueryFile, outputD
 		}
 	}
 
-	fmt.Printf("\nQuery execution completed: %d successful, %d failed\n", successCount, errorCount)
-	fmt.Printf("Results saved to: %s\n", finalOutputDir)
+	if e.client.IsDryRun() {
+		fmt.Printf("\nDry-run summary: %d query file(s) would have been executed.\n", successCount)
+	} else {
+		fmt.Printf("\nQuery execution completed: %d successful, %d failed\n", successCount, errorCount)
+		fmt.Printf("Results saved to: %s\n", finalOutputDir)
+	}
 
 	return finalOutputDir, nil
 }
@@ -95,11 +103,16 @@ func (e *Executor) executeQuery(query internal.QueryFile, outputDir, timestamp s
 		return fmt.Errorf("security validation failed for '%s': %w", query.Name, err)
 	}
 
-	// Show source information
+	// Show source information. Prefix changes in dry-run to make clear
+	// nothing actually runs.
+	verb := "Executing"
+	if e.client.IsDryRun() {
+		verb = "Would execute"
+	}
 	if query.DirName != "" {
-		fmt.Printf("Executing query '%s' from directory '%s'...\n", query.Name, query.DirName)
+		fmt.Printf("%s query '%s' from directory '%s'...\n", verb, query.Name, query.DirName)
 	} else {
-		fmt.Printf("Executing query '%s' from root directory...\n", query.Name)
+		fmt.Printf("%s query '%s' from root directory...\n", verb, query.Name)
 	}
 
 	// Execute the query
@@ -118,7 +131,9 @@ func (e *Executor) executeQuery(query internal.QueryFile, outputDir, timestamp s
 		return fmt.Errorf("error saving result: %w", err)
 	}
 
-	fmt.Printf("Query '%s' executed successfully. Result saved to %s\n\n", query.Name, outputPath)
+	if !e.client.IsDryRun() {
+		fmt.Printf("Query '%s' executed successfully. Result saved to %s\n\n", query.Name, outputPath)
+	}
 	return nil
 }
 
