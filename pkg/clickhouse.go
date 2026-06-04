@@ -156,7 +156,19 @@ func (c *ClickHouseClient) dryRunIntercept(query string) (string, error) {
 	fmt.Fprintf(c.dryOut, "    SQL:\n%s\n", indentBlock(query, "      "))
 
 	if c.dryEstimate && isExplainable(query) {
-		est, err := c.executeReal("EXPLAIN ESTIMATE " + stripTrailingFormat(query))
+		// Append `FORMAT PrettyCompactMonoBlock` so the result renders
+		// as the box-drawing table the operator expects:
+		//   ┌─database─┬─table─┬─parts─┬─rows─┬─marks─┐
+		//   │ default  │ ttt   │     1 │  128 │     8 │
+		//   └──────────┴───────┴───────┴──────┴───────┘
+		// Without an explicit FORMAT the HTTP default is TabSeparated,
+		// which prints `default\tttt\t1\t128\t8` with no header — it
+		// reads as "empty" at a glance even when the estimate is
+		// populated. PrettyCompactMonoBlock also renders an empty
+		// table (just headers + separator) for the system.* queries
+		// that have no MergeTree parts to estimate, so the operator
+		// sees "no parts" explicitly instead of a blank line.
+		est, err := c.executeReal("EXPLAIN ESTIMATE " + stripTrailingFormat(query) + " FORMAT PrettyCompactMonoBlock")
 		if err != nil {
 			fmt.Fprintf(c.dryOut, "    EXPLAIN ESTIMATE: (error: %v)\n", err)
 		} else {
