@@ -188,11 +188,43 @@ func indentBlock(s, prefix string) string {
 }
 
 // isExplainable returns true if the query is a SELECT or WITH that
-// EXPLAIN ESTIMATE can analyse.
+// EXPLAIN ESTIMATE can analyse. Strips leading SQL line- and block-
+// comments first, because many of the .sql files in
+// queries.query_analysis/ start with several `-- description` lines
+// above the SELECT — without comment-stripping isExplainable would
+// see `--` as the first token and skip EXPLAIN ESTIMATE entirely.
 func isExplainable(query string) bool {
-	trimmed := strings.TrimLeft(strings.TrimSpace(query), "(")
+	trimmed := stripLeadingSQLComments(query)
+	trimmed = strings.TrimLeft(strings.TrimSpace(trimmed), "(")
 	up := strings.ToUpper(trimmed)
 	return strings.HasPrefix(up, "SELECT") || strings.HasPrefix(up, "WITH")
+}
+
+// stripLeadingSQLComments removes any leading whitespace, `-- line`
+// comments, and `/* block */` comments from s — i.e. everything
+// preceding the first real SQL keyword. Used by isExplainable so it
+// can correctly identify SELECT/WITH queries whose head is wrapped
+// in documentation comments.
+func stripLeadingSQLComments(s string) string {
+	for {
+		s = strings.TrimLeft(s, " \t\r\n")
+		switch {
+		case strings.HasPrefix(s, "--"):
+			if i := strings.IndexByte(s, '\n'); i >= 0 {
+				s = s[i+1:]
+				continue
+			}
+			return ""
+		case strings.HasPrefix(s, "/*"):
+			if i := strings.Index(s, "*/"); i >= 0 {
+				s = s[i+2:]
+				continue
+			}
+			return ""
+		default:
+			return s
+		}
+	}
 }
 
 // stripTrailingFormat removes a trailing `FORMAT <name>` clause so
