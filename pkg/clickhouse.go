@@ -169,13 +169,35 @@ func (c *ClickHouseClient) dryRunIntercept(query string) (string, error) {
 		// that have no MergeTree parts to estimate, so the operator
 		// sees "no parts" explicitly instead of a blank line.
 		est, err := c.executeReal("EXPLAIN ESTIMATE " + stripTrailingFormat(query) + " FORMAT PrettyCompactMonoBlock")
-		if err != nil {
+		switch {
+		case err != nil:
 			fmt.Fprintf(c.dryOut, "    EXPLAIN ESTIMATE: (error: %v)\n", err)
-		} else {
+		case isEmptyEstimate(est):
+			// Header + separator with no data row — the planner found
+			// nothing to scan. Most often a virtual system table
+			// (e.g. system.dictionaries) or a query whose predicate
+			// prunes every part. Saying so plainly beats a blank box.
+			fmt.Fprintln(c.dryOut, "    EXPLAIN ESTIMATE: this table is empty")
+		default:
 			fmt.Fprintf(c.dryOut, "    EXPLAIN ESTIMATE:\n%s\n", indentBlock(strings.TrimRight(est, "\n"), "      "))
 		}
 	}
 	return emptyResponseFor(query), nil
+}
+
+// isEmptyEstimate reports whether a PrettyCompactMonoBlock-formatted
+// EXPLAIN ESTIMATE result contains no data rows. The planner returns
+// just the top "┌──┐" and bottom "└──┘" separators when nothing
+// matched. Data rows always render with a "│" body, so any line that
+// starts (after leading whitespace) with "│" means we have content.
+func isEmptyEstimate(out string) bool {
+	for _, line := range strings.Split(out, "\n") {
+		t := strings.TrimLeft(line, " \t\r\n0123456789.")
+		if strings.HasPrefix(t, "│") {
+			return false
+		}
+	}
+	return true
 }
 
 // indentBlock prefixes every line of s with prefix.
