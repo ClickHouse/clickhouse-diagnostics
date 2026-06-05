@@ -42,8 +42,7 @@ func main() {
 	fromFlag          := flag.String("from", "", "Time-window start for query analysis (RFC3339 or YYYY-MM-DD)")
 	toFlag            := flag.String("to", "", "Time-window end for query analysis (RFC3339 or YYYY-MM-DD)")
 	analysisDirFlag   := flag.String("analysis-dir", "./queries.query_analysis", "Directory containing query-analysis SQL files")
-	dryRunFlag        := flag.Bool("dry-run", false, "List every query the tool would execute (with the system tables each touches) and exit. Does NOT write results or create an archive.")
-	explainEstimateFlag := flag.Bool("explain-estimate", false, "With --dry-run, also run `EXPLAIN ESTIMATE <query>` against the server for each SELECT. EXPLAIN ESTIMATE is a read-only metadata query — it reports the rows/marks/parts a query WOULD scan without reading data.")
+	dryRunFlag := flag.Bool("dry-run", false, "List every query the tool would execute (with the system tables each touches and an EXPLAIN ESTIMATE per SELECT) and exit. Does NOT write results or create an archive. EXPLAIN ESTIMATE is a read-only metadata query — it reports the rows/marks/parts the SELECT WOULD scan without reading any data.")
 
 	// Parse command line flags
 	flag.Parse()
@@ -68,9 +67,8 @@ func main() {
 		normalizedHash = *normalizedHashFlag
 		fromStr       = *fromFlag
 		toStr         = *toFlag
-		analysisDir   = *analysisDirFlag
-		dryRun          = *dryRunFlag
-		explainEstimate = *explainEstimateFlag
+		analysisDir = *analysisDirFlag
+		dryRun      = *dryRunFlag
 	)
 	// --dry-run is read-only by definition — silence the side effects
 	// that would write empty/garbage artefacts to disk.
@@ -145,16 +143,16 @@ func main() {
 		fmt.Println("\n=== DRY RUN ===")
 		fmt.Println("No data will be written to disk.")
 		fmt.Println("No archive will be created.")
-		if explainEstimate {
-			fmt.Println("EXPLAIN ESTIMATE is enabled — read-only metadata only, no data parts scanned.")
-			fmt.Println("Note: system.* tables are virtual; ESTIMATE returns empty for most of them,")
-			fmt.Println("which is itself a useful confirmation that no data part will be read.")
-		} else {
-			fmt.Println("Only the version probe and the query-analysis pre-flight reach the server.")
-			fmt.Println("Pass --explain-estimate to additionally run metadata-only EXPLAIN ESTIMATE.")
-		}
+		fmt.Println("Each SELECT is printed with the system tables it would touch and an")
+		fmt.Println("EXPLAIN ESTIMATE block (read-only metadata, no data parts scanned).")
+		fmt.Println("Empty estimates render as `this table is empty` — that's the planner")
+		fmt.Println("confirming nothing matches the query predicate.")
 		fmt.Println()
-		client.SetDryRun(os.Stdout, explainEstimate)
+		// EXPLAIN ESTIMATE is always on under --dry-run — one flag,
+		// one behavior. The pre-flight queries (PreflightForX) use
+		// ExecuteQueryReal to bypass the interception, so derived
+		// values flow into the printed SQL.
+		client.SetDryRun(os.Stdout, true)
 		tmpDir, err := os.MkdirTemp("", "diag-dryrun-*")
 		if err != nil {
 			fmt.Printf("Error creating dry-run temp dir: %v\n", err)
