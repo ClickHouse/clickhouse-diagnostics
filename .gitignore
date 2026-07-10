@@ -30,8 +30,38 @@ testdata/*
 go.work
 
 .idea
-clickhouse-diagnostics
 TODO.md
 output
 vendor
 dist/
+
+# Built binaries (do not commit — produced by `make build` / `go build`)
+/bin/
+clickhouse-diagnostic
+clickhouse-diagnostics
+clickhouse_diagnostic
+clickhouse-diagnostic-*
+
+# Local scripts (connect to private repos — not for public commit)
+local/
+
+# Node.js (used by local scripts)
+node_modules/
+package.json
+package-lock.json
+
+# Tool output — produced by every run. Never commit:
+#   the archive sent to support contains customer database/table data,
+#   the gov-mode mapping CSV is a local-only secret.
+clickhouse_results/
+clickhouse_backup_*/
+clickhouse_backup_*.tar.gz
+*_gov_name_mapping.csv
+configuration/
+
+# Customer-shipped diagnostic artifacts dropped at the repo root
+# (Grafana exports, dashboard JSON, etc.). Anchored with leading `/`
+# so legitimate JSON inside subdirectories is unaffected.
+/*.json
+/*HomeDash*.json
+/S2HomeDash*.json

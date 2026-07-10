@@ -14,6 +14,11 @@ import (
 // Executor handles query execution and result management
 type Executor struct {
 	client *pkg.ClickHouseClient
+	// salt, when non-empty, replaces the literal '%salt%' placeholder
+	// inside .sql query bodies just before execution. Used only in
+	// gov mode so the hash of database/table names is unique to the
+	// customer's run instead of a publicly known constant.
+	salt string
 }
 
 // NewExecutor creates a new query executor
@@ -21,6 +26,14 @@ func NewExecutor(client *pkg.ClickHouseClient) *Executor {
 	return &Executor{
 		client: client,
 	}
+}
+
+// WithSalt sets the gov-mode salt used for runtime substitution of the
+// '%salt%' placeholder in .sql files. The salt must already be sanitised
+// (alphanumeric); the caller is responsible for validation.
+func (e *Executor) WithSalt(salt string) *Executor {
+	e.salt = salt
+	return e
 }
 
 // ExecuteQueries executes a map of selected queries and saves results
@@ -64,7 +77,7 @@ func (e *Executor) ExecuteQueries(queries map[string]internal.QueryFile, outputD
 	return finalOutputDir, nil
 }
 
-// executeQuery executes a single query and saves the result
+// executeQuery validates, executes a single query and saves the result.
 func (e *Executor) executeQuery(query internal.QueryFile, outputDir, timestamp string) error {
 	// Read query from file
 	queryContent, err := os.ReadFile(query.FullPath)
@@ -84,6 +97,20 @@ func (e *Executor) executeQuery(query internal.QueryFile, outputDir, timestamp s
 	if e.client.IsDryRun() {
 		verb = "Would execute"
 	}
+	// Gov mode: replace the public '%salt%' placeholder in .sql files
+	// with the customer-supplied salt. Salt format is validated upstream
+	// (alphanumeric only), so it cannot break out of the SQL string literal.
+	sqlText := string(queryContent)
+	if e.salt != "" {
+		sqlText = strings.ReplaceAll(sqlText, "'%salt%'", "'"+e.salt+"'")
+	}
+
+	// Security: enforce read-only SELECT before execution.
+	if err := ValidateQueryContent(sqlText); err != nil {
+		return fmt.Errorf("security validation failed for '%s': %w", query.Name, err)
+	}
+
+	// Show source information
 	if query.DirName != "" {
 		fmt.Printf("%s query '%s' from directory '%s'...\n", verb, query.Name, query.DirName)
 	} else {
@@ -91,7 +118,7 @@ func (e *Executor) executeQuery(query internal.QueryFile, outputDir, timestamp s
 	}
 
 	// Execute the query
-	result, err := e.client.ExecuteQuery(string(queryContent))
+	result, err := e.client.ExecuteQuery(sqlText)
 	if err != nil {
 		return fmt.Errorf("error executing query: %w", err)
 	}
@@ -115,26 +142,11 @@ func (e *Executor) executeQuery(query internal.QueryFile, outputDir, timestamp s
 	return nil
 }
 
-// ValidateQuery performs basic validation on a query before execution
+// ValidateQuery reads a query file and validates it with ValidateQueryContent.
 func (e *Executor) ValidateQuery(queryPath string) error {
 	content, err := os.ReadFile(queryPath)
 	if err != nil {
 		return fmt.Errorf("cannot read query file: %w", err)
 	}
-
-	if len(content) == 0 {
-		return fmt.Errorf("query file is empty")
-	}
-
-	// Basic SQL validation - check for potentially dangerous commands
-	queryStr := strings.ToLower(strings.TrimSpace(string(content)))
-	dangerousCommands := []string{"drop", "delete", "truncate", "alter", "create", "insert", "update"}
-
-	for _, cmd := range dangerousCommands {
-		if strings.HasPrefix(queryStr, cmd) {
-			return fmt.Errorf("potentially dangerous query detected: starts with %s", cmd)
-		}
-	}
-
-	return nil
+	return ValidateQueryContent(string(content))
 }

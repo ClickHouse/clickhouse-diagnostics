@@ -1,0 +1,32 @@
+name: replica_readonly
+title: "Replica entered read-only mode"
+severity: critical
+description: |
+  One or more replicated tables are in read-only mode. In this state
+  the affected table accepts SELECT queries but all INSERT and DDL
+  operations will be rejected. Read-only mode is usually caused by:
+  - Lost or expired Keeper/ZooKeeper session
+  - Disk full condition
+  - Network partition isolating the replica from Keeper
+  - Metadata corruption requiring manual recovery
+
+  The replica will attempt to recover automatically when the root cause
+  is resolved. If it does not recover within a few minutes, check Keeper
+  connectivity and server logs (system.text_log) for the error details.
+tags:
+  - replication
+  - reliability
+  - keeper
+
+query: |
+  SELECT
+    database,
+    table,
+    is_session_expired,
+    absolute_delay,
+    active_replicas,
+    total_replicas
+  FROM {sys.replicas}
+  WHERE is_readonly = 1
+
+message: "{database}.{table} is in read-only mode (session_expired={is_session_expired}, delay={absolute_delay}s, active_replicas={active_replicas}/{total_replicas})"

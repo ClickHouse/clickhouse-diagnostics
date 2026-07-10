@@ -1,0 +1,32 @@
+name: large_parts
+title: "Individual part exceeds 150 GB"
+severity: warning
+description: |
+  A single active data part is larger than 150 GB on disk.
+  Very large parts can slow down merges, increase memory pressure during
+  queries, and make backup/restore operations slower. Consider reviewing
+  the partition key for the affected table so that parts are split more
+  granularly.
+tags:
+  - storage
+  - parts
+  - performance
+
+query: |
+  SELECT
+    database,
+    table,
+    name                                                AS part_name,
+    disk_name,
+    formatReadableSize(bytes_on_disk)                  AS size_on_disk,
+    bytes_on_disk,
+    formatReadableSize(data_uncompressed_bytes)        AS uncompressed_size,
+    round(data_uncompressed_bytes / data_compressed_bytes, 2) AS compression_ratio,
+    rows,
+    toString(modification_time)                        AS modification_time
+  FROM {sys.parts}
+  WHERE active = 1
+    AND bytes_on_disk > 150 * 1024 * 1024 * 1024
+  ORDER BY bytes_on_disk DESC
+
+message: "Part {part_name} of {database}.{table} on disk '{disk_name}' is {size_on_disk} (compression ratio {compression_ratio}x)"

@@ -191,6 +191,12 @@ func emptyResponseFor(query string) string {
 // presence in dry-run output would be misleading.
 func (c *ClickHouseClient) IsDryRun() bool { return c.dryRun }
 
+// ExecuteQueryWithFormat executes a query and returns results in JSONCompact format.
+// The query must NOT include a FORMAT clause.
+func (c *ClickHouseClient) ExecuteQueryWithFormat(query string) (string, error) {
+	return c.ExecuteQuery(query + "\nFORMAT JSONCompact")
+}
+
 // GetConnectionInfo returns connection information for display
 func (c *ClickHouseClient) GetConnectionInfo() string {
 	return fmt.Sprintf("%s://%s:%s", c.protocol, c.host, c.port)

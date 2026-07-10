@@ -8,9 +8,12 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"clickhouse-diagnostic/internal"
+	"clickhouse-diagnostic/internal/alert"
 	"clickhouse-diagnostic/internal/config"
+	"clickhouse-diagnostic/internal/dashboard"
 	"clickhouse-diagnostic/internal/query"
 	"clickhouse-diagnostic/internal/version"
 	"clickhouse-diagnostic/pkg"
@@ -25,13 +28,22 @@ func main() {
 	userFlag := flag.String("user", "", "Username")
 	passwordFlag := flag.String("password", "", "Password (not recommended for security reasons)")
 	protocolFlag := flag.String("protocol", "", "Protocol (http or https)")
-	modeFlag := flag.String("mode", "onprem", "Query mode (cloud, onprem, gouv)")
+	modeFlag := flag.String("mode", "onprem", "Query mode (cloud, onprem, gov)")
 	outputDirFlag := flag.String("output-dir", "./clickhouse_results", "Directory for results output")
 	configDirFlag := flag.String("config-dir", "", "ClickHouse config directory to collect (default: /etc/clickhouse-server/config.d/)")
 	skipConfigFlag := flag.Bool("skip-config", false, "Skip collecting configuration files")
 	skipArchiveFlag := flag.Bool("skip-archive", false, "Skip creating archive of results and configuration")
 	dryRunFlag := flag.Bool("dry-run", false, "List every query the tool would execute (with the system tables each touches) and exit. Does NOT write results or create an archive.")
 	explainEstimateFlag := flag.Bool("explain-estimate", false, "With --dry-run, also run `EXPLAIN ESTIMATE <query>` against the server for each SELECT. EXPLAIN ESTIMATE is a read-only metadata query — it reports the rows/marks/parts the query WOULD scan without reading any data.")
+	skipDashboardFlag := flag.Bool("skip-dashboard", false, "Skip generating HTML dashboard")
+	skipAlertsFlag    := flag.Bool("skip-alerts", false, "Skip evaluating alert rules")
+	alertsDirFlag     := flag.String("alerts-dir", "./alerts", "Directory containing alert YAML rule files")
+	saltFlag          := flag.String("salt", "", "Gov-mode hashing salt (8–64 alphanumeric chars; prompts interactively if empty)")
+	queryIDFlag       := flag.String("query-id", "", "Run query analysis focused on this query_id (UUID)")
+	normalizedHashFlag := flag.String("normalized-query-hash", "", "Run query analysis focused on this normalized_query_hash (uint64)")
+	fromFlag          := flag.String("from", "", "Time-window start for query analysis (RFC3339 or YYYY-MM-DD)")
+	toFlag            := flag.String("to", "", "Time-window end for query analysis (RFC3339 or YYYY-MM-DD)")
+	analysisDirFlag   := flag.String("analysis-dir", "./queries.query_analysis", "Directory containing query-analysis SQL files")
 
 	// Parse command line flags
 	flag.Parse()
@@ -50,6 +62,15 @@ func main() {
 		skipArchive     = *skipArchiveFlag
 		dryRun          = *dryRunFlag
 		explainEstimate = *explainEstimateFlag
+		skipDashboard = *skipDashboardFlag
+		skipAlerts    = *skipAlertsFlag
+		alertsDir     = *alertsDirFlag
+		govSalt       = *saltFlag
+		queryID       = *queryIDFlag
+		normalizedHash = *normalizedHashFlag
+		fromStr       = *fromFlag
+		toStr         = *toFlag
+		analysisDir   = *analysisDirFlag
 	)
 	// --dry-run is read-only by definition. Disable side effects that
 	// would write empty/garbage artefacts to disk.
@@ -141,10 +162,36 @@ func main() {
 		defer os.RemoveAll(tmpDir)
 		outputDir = tmpDir
 	}
+	// Resolve query-analysis options up front so an invalid --query-id
+	// or --normalized-query-hash fails fast, before any heavy work runs.
+	analysisOpts, err := resolveAnalysisOpts(client, mode, queryID, normalizedHash, fromStr, toStr)
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		return
+	}
+
+	// Gov mode requires a customer-supplied salt so hashes in the
+	// support-bound artifacts cannot be reversed by a public rainbow
+	// table. Prompt for it now (with no echo) if it wasn't passed via
+	// --salt. Salt never leaves the operator's machine.
+	if mode == "gov" {
+		if govSalt == "" {
+			s, err := promptForGovSalt()
+			if err != nil {
+				fmt.Printf("Error reading gov-mode salt: %v\n", err)
+				return
+			}
+			govSalt = s
+		}
+		if err := internal.ValidateGovSalt(govSalt); err != nil {
+			fmt.Printf("Invalid gov-mode salt: %v\n", err)
+			return
+		}
+	}
 
 	// Find and execute queries - get the specific folder path
 	queryManager := query.NewManager()
-	finalOutputDir, err := queryManager.ExecuteQueries(client, queriesDir, serverVersion, outputDir)
+	finalOutputDir, err := queryManager.ExecuteQueries(client, queriesDir, serverVersion, outputDir, govSalt)
 	if err != nil {
 		fmt.Printf("Error executing queries: %v\n", err)
 		return
@@ -155,6 +202,47 @@ func main() {
 		fmt.Println("Above are the queries that would be executed.")
 		fmt.Println("To run for real, re-invoke without --dry-run.")
 		return
+	}
+	// Gov mode: print + save a local mapping from real database/table
+	// names to the hex(SHA256(name+salt)) form that appears in the
+	// support-bound output files. Saved outside the archive folder.
+	if mode == "gov" {
+		if err := internal.PrintGovNameMapping(client, outputDir, finalOutputDir, govSalt); err != nil {
+			fmt.Printf("Warning: gov-mode name mapping failed: %v\n", err)
+		}
+	}
+
+	// Query analysis bundle (only when --query-id or
+	// --normalized-query-hash was set). Runs the .sql files under
+	// analysisDir against the focus parameters and writes results into
+	// <finalOutputDir>/query_analysis/.
+	if analysisOpts.Enabled() {
+		coll := query.NewAnalysisCollector(client, mode)
+		if _, _, err := coll.Collect(analysisOpts, analysisDir, finalOutputDir); err != nil {
+			fmt.Printf("Warning: query analysis failed: %v\n", err)
+		}
+	}
+
+	// Evaluate alert rules if not skipped
+	var alertResults []alert.Result
+	if !skipAlerts {
+		fmt.Println("Evaluating alert rules...")
+		alertResults = alert.NewEvaluator(client, mode).RunAll(alertsDir)
+		fired := 0
+		for _, r := range alertResults {
+			if r.Fired() {
+				fired++
+			}
+		}
+		fmt.Printf("Alert evaluation complete: %d rule(s) checked, %d fired\n", len(alertResults), fired)
+	}
+
+	// Generate HTML dashboard if not skipped
+	if !skipDashboard {
+		gen := dashboard.NewGenerator(client, mode).WithAnalysis(analysisOpts, analysisDir)
+		if err := gen.Generate(finalOutputDir, alertResults); err != nil {
+			fmt.Printf("Warning: dashboard generation failed: %v\n", err)
+		}
 	}
 
 	// Create archive if not skipped - use the specific folder that was created
@@ -225,10 +313,10 @@ func getUserInput(protocol, host, port, username, password, mode, configDir *str
 	}
 
 	// Get mode if not provided or validate provided mode
-	validModes := []string{"cloud", "onprem", "gouv"}
+	validModes := []string{"cloud", "onprem", "gov"}
 	*mode = strings.ToLower(*mode)
 	if !isValidMode(*mode) {
-		fmt.Printf("Select query mode (cloud/onprem/gouv) [default: onprem]: ")
+		fmt.Printf("Select query mode (cloud/onprem/gov) [default: onprem]: ")
 		input, _ := reader.ReadString('\n')
 		*mode = strings.TrimSpace(strings.ToLower(input))
 		if *mode == "" {
@@ -256,6 +344,101 @@ func getUserInput(protocol, host, port, username, password, mode, configDir *str
 	return nil
 }
 
+// resolveAnalysisOpts builds the query-analysis options from the raw
+// CLI flag strings. When --query-id is set without
+// --normalized-query-hash, a pre-flight SELECT against system.query_log
+// derives the hash and (when found) the query's event_time — the
+// default time window is then centred on that event_time instead of
+// "last N days from now," so a slow query from a week ago isn't missed
+// by a present-time default.
+func resolveAnalysisOpts(client *pkg.ClickHouseClient, mode, queryID, normalizedHash, fromStr, toStr string) (query.AnalysisOpts, error) {
+	opts := query.AnalysisOpts{
+		QueryID:             queryID,
+		NormalizedQueryHash: normalizedHash,
+	}
+	if !opts.Enabled() {
+		return opts, nil // neither set; analysis stays off, validation skipped
+	}
+
+	from, err := query.ParseTimeFlag(fromStr)
+	if err != nil {
+		return opts, fmt.Errorf("--from: %w", err)
+	}
+	to, err := query.ParseTimeFlag(toStr)
+	if err != nil {
+		return opts, fmt.Errorf("--to: %w", err)
+	}
+	opts.From, opts.To = from, to
+
+	// Pre-flight: when only query_id is set, derive the hash and the
+	// query's event_time. Skipped when the user already supplied the
+	// hash or when no query_id was given.
+	if opts.QueryID != "" && opts.NormalizedQueryHash == "" {
+		hash, eventTime, err := query.PreflightForQueryID(client, mode, opts.QueryID)
+		if err != nil {
+			return opts, err
+		}
+		opts.NormalizedQueryHash = hash
+		fmt.Printf("Pre-flight: query_id %s → normalized_query_hash %s (event_time %s)\n",
+			opts.QueryID, hash, eventTime.Format(time.RFC3339))
+		// If the user didn't pin --from/--to, center the default 3-day
+		// window on the derived event_time so the slow execution is
+		// definitely inside the analysis window.
+		if opts.From.IsZero() && opts.To.IsZero() && !eventTime.IsZero() {
+			opts.From = eventTime.Add(-36 * time.Hour)
+			opts.To = eventTime.Add(12 * time.Hour)
+		}
+	}
+
+	// Validate runs the default-window logic for whatever fields are
+	// still empty. We need a populated window before the reverse
+	// pre-flight (hash → slowest query_id) can run.
+	if err := opts.Validate(time.Now().UTC()); err != nil {
+		return opts, err
+	}
+
+	// Reverse pre-flight: when only --normalized-query-hash is set,
+	// pick the slowest finished execution as the representative
+	// query_id so the single-id queries (ProfileEvents, text_log,
+	// tables-referenced …) have something to filter on. Without
+	// this, hash-only mode shipped a dashboard with most cards
+	// empty (the user's main complaint).
+	if opts.NormalizedQueryHash != "" && opts.QueryID == "" {
+		qid, eventTime, err := query.PreflightForHash(client, mode, opts.NormalizedQueryHash, opts.From, opts.To)
+		if err != nil {
+			return opts, err
+		}
+		if qid == "" {
+			fmt.Printf("Pre-flight: no QueryFinish row found for normalized_query_hash %s in the window — single-id files will be skipped\n",
+				opts.NormalizedQueryHash)
+		} else {
+			opts.QueryID = qid
+			fmt.Printf("Pre-flight: normalized_query_hash %s → slowest query_id %s (event_time %s)\n",
+				opts.NormalizedQueryHash, qid, eventTime.Format(time.RFC3339))
+		}
+	}
+	return opts, nil
+}
+
+// promptForGovSalt asks the operator for the gov-mode salt without
+// echoing it to the terminal. The salt is the customer's local secret
+// — keeping it off the screen avoids accidental capture in screen-share
+// recordings, ticket attachments, or terminal scrollback.
+func promptForGovSalt() (string, error) {
+	fmt.Println()
+	fmt.Println("Gov mode: enter a salt used to hash database / table names in the output.")
+	fmt.Println("  - 8–64 alphanumeric characters (A–Z, a–z, 0–9)")
+	fmt.Println("  - Keep this value local; do NOT share it with ClickHouse support.")
+	fmt.Println("  - Use the same salt across runs if you want hashes to be comparable.")
+	fmt.Print("Salt: ")
+	saltBytes, err := term.ReadPassword(int(syscall.Stdin))
+	fmt.Println()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(saltBytes)), nil
+}
+
 // getQueriesDir maps the mode to the corresponding queries directory
 func getQueriesDir(mode string) string {
 	switch strings.ToLower(mode) {
@@ -263,8 +446,8 @@ func getQueriesDir(mode string) string {
 		return "./queries.cloud"
 	case "onprem":
 		return "./queries.onprem"
-	case "gouv":
-		return "./queries.gouv"
+	case "gov":
+		return "./queries.gov"
 	default:
 		return "./queries.onprem" // fallback to onprem
 	}
@@ -272,7 +455,7 @@ func getQueriesDir(mode string) string {
 
 // isValidMode checks if the provided mode is valid
 func isValidMode(mode string) bool {
-	validModes := []string{"cloud", "onprem", "gouv"}
+	validModes := []string{"cloud", "onprem", "gov"}
 	for _, validMode := range validModes {
 		if mode == validMode {
 			return true

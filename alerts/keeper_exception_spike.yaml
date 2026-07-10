@@ -1,0 +1,32 @@
+name: keeper_exception_spike
+title: "Keeper/ZooKeeper exceptions spiking (code 999)"
+severity: warning
+description: |
+  More than 20 Keeper exception errors (code 999 — KEEPER_EXCEPTION)
+  occurred in the last hour. These errors mean ClickHouse failed to
+  complete a coordination request with ClickHouse Keeper or ZooKeeper.
+
+  Ongoing Keeper exceptions can block DDL operations, stall replication,
+  and prevent mutations from completing. Common causes include Keeper
+  network issues, session expiry, Keeper overload, or a Keeper leader
+  election in progress.
+
+  Check: system.replication_queue for stuck entries, Keeper logs for
+  leadership changes, and whether affected queries were DDL or writes
+  to replicated tables.
+tags:
+  - keeper
+  - replication
+  - reliability
+
+query: |
+  SELECT
+    count()        AS error_count,
+    any(exception) AS example_message
+  FROM {sys.query_log}
+  WHERE event_time > now() - INTERVAL 1 HOUR
+    AND exception_code = 999
+    AND type = 'ExceptionWhileProcessing'
+  HAVING error_count > 20
+
+message: "Keeper exception (code 999) fired {error_count} times in the last hour — example: {example_message}"

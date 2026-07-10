@@ -1,0 +1,30 @@
+name: too_many_simultaneous_queries
+title: "Too many simultaneous queries (code 252)"
+severity: warning
+description: |
+  More than 10 queries failed with "Too many simultaneous queries"
+  (exception code 252) in the last hour. This means the server hit its
+  max_concurrent_queries limit. Clients will receive immediate errors
+  rather than waiting.
+
+  Common causes: a traffic spike, runaway queries piling up, or a
+  misconfigured connection pool sending too many parallel requests.
+  Check system.processes for currently running queries and consider
+  tuning max_concurrent_queries or max_concurrent_select_queries in
+  the server configuration.
+tags:
+  - concurrency
+  - performance
+  - query-log
+
+query: |
+  SELECT
+    count()       AS error_count,
+    any(exception) AS example_message
+  FROM {sys.query_log}
+  WHERE event_time > now() - INTERVAL 1 HOUR
+    AND exception_code = 252
+    AND type = 'ExceptionWhileProcessing'
+  HAVING error_count > 10
+
+message: "Too many simultaneous queries (code 252) occurred {error_count} times in the last hour — example: {example_message}"

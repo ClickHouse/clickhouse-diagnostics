@@ -1,0 +1,24 @@
+name: crash_log_entries
+title: "Server crash detected"
+severity: critical
+description: |
+  The system.crash_log table contains one or more entries, meaning the
+  ClickHouse server has crashed (received a fatal signal such as SIGSEGV or
+  SIGABRT). Even a single crash warrants investigation — check the server
+  logs at the time of each event and consider opening a support ticket.
+tags:
+  - stability
+  - crash
+
+query: |
+  SELECT
+    toString(event_time)  AS event_time,
+    signal,
+    toString(thread_id)   AS thread_id,
+    query_id,
+    version
+  FROM {sys.crash_log}
+  ORDER BY event_time DESC
+  LIMIT 20
+
+message: "Server crash at {event_time} — signal {signal}, version {version}, query_id: {query_id}"
