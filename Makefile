@@ -8,7 +8,7 @@ CMD_DIR=./cmd
 DIST_DIR=./dist
 
 # Platforms to package release archives for (os/arch)
-PLATFORMS=linux/amd64 darwin/amd64 darwin/arm64 windows/amd64
+PLATFORMS=linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64
 # Runtime data the tool reads from the working directory. These must ship
 # alongside the binary, so each release archive bundles them.
 DATA_DIRS=queries.cloud queries.onprem queries.gov queries.query_analysis alerts
