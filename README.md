@@ -242,6 +242,25 @@ Sample block of the output:
 | `onprem` | `queries.onprem/` | Single-node `system.*` references |
 | `gov` | `queries.gov/` | Same shape as on-prem but PII columns are hashed |
 
+> ⚠️ **The `queries.<mode>/` directory MUST exist in the current working directory when you run the binary.** The tool resolves the queries folder as a path *relative to your CWD* (e.g. `./queries.onprem`), not relative to the binary itself. So if you ship the binary to another host, you must ship the matching `queries.<mode>/` folder alongside it and `cd` into the directory containing both before running.
+>
+> Recommended bundling pattern:
+> ```bash
+> # Build + bundle locally
+> make release
+> tar czf clickhouse-diagnostic.tgz \
+>   bin/clickhouse-diagnostic-linux-amd64 \
+>   queries.cloud queries.onprem queries.gov
+>
+> # On the target host
+> scp clickhouse-diagnostic.tgz host:/tmp/
+> ssh host
+> mkdir -p /opt/ch-diag && cd /opt/ch-diag && tar xzf /tmp/clickhouse-diagnostic.tgz
+> ./bin/clickhouse-diagnostic-linux-amd64 -mode onprem ...   # CWD now has the queries.* folders
+> ```
+>
+> Running from `/`, `~`, or any other directory without `queries.<mode>/` as a sibling will fail with `Error: Queries folder './queries.<mode>' does not exist`.
+
 Alert queries use the same mode — see [Alerts](#alerts).
 
 ### Gov mode and hashed names

@@ -31,8 +31,10 @@ func main() {
 	modeFlag := flag.String("mode", "onprem", "Query mode (cloud, onprem, gov)")
 	outputDirFlag := flag.String("output-dir", "./clickhouse_results", "Directory for results output")
 	configDirFlag := flag.String("config-dir", "", "ClickHouse config directory to collect (default: /etc/clickhouse-server/config.d/)")
-	skipConfigFlag    := flag.Bool("skip-config", false, "Skip collecting configuration files")
-	skipArchiveFlag   := flag.Bool("skip-archive", false, "Skip creating archive of results and configuration")
+	skipConfigFlag := flag.Bool("skip-config", false, "Skip collecting configuration files")
+	skipArchiveFlag := flag.Bool("skip-archive", false, "Skip creating archive of results and configuration")
+	dryRunFlag := flag.Bool("dry-run", false, "List every query the tool would execute (with the system tables each touches) and exit. Does NOT write results or create an archive.")
+	explainEstimateFlag := flag.Bool("explain-estimate", false, "With --dry-run, also run `EXPLAIN ESTIMATE <query>` against the server for each SELECT. EXPLAIN ESTIMATE is a read-only metadata query — it reports the rows/marks/parts the query WOULD scan without reading any data.")
 	skipDashboardFlag := flag.Bool("skip-dashboard", false, "Skip generating HTML dashboard")
 	skipAlertsFlag    := flag.Bool("skip-alerts", false, "Skip evaluating alert rules")
 	alertsDirFlag     := flag.String("alerts-dir", "./alerts", "Directory containing alert YAML rule files")
@@ -49,16 +51,18 @@ func main() {
 
 	// Initialize variables with defaults
 	var (
-		host        = *hostFlag
-		port        = *portFlag
-		username    = *userFlag
-		password    = *passwordFlag
-		protocol    = *protocolFlag
-		mode        = *modeFlag
-		outputDir   = *outputDirFlag
-		configDir   = *configDirFlag
-		skipConfig    = *skipConfigFlag
-		skipArchive   = *skipArchiveFlag
+		host            = *hostFlag
+		port            = *portFlag
+		username        = *userFlag
+		password        = *passwordFlag
+		protocol        = *protocolFlag
+		mode            = *modeFlag
+		outputDir       = *outputDirFlag
+		configDir       = *configDirFlag
+		skipConfig      = *skipConfigFlag
+		skipArchive     = *skipArchiveFlag
+		dryRun          = *dryRunFlag
+		explainEstimate = *explainEstimateFlag
 		skipDashboard = *skipDashboardFlag
 		skipAlerts    = *skipAlertsFlag
 		alertsDir     = *alertsDirFlag
@@ -204,6 +208,12 @@ func main() {
 		return
 	}
 
+	if dryRun {
+		fmt.Println("\n=== DRY RUN SUMMARY ===")
+		fmt.Println("Above are the queries that would be executed.")
+		fmt.Println("To run for real, re-invoke without --dry-run.")
+		return
+	}
 	// Gov mode: print + save a local mapping from real database/table
 	// names to the hex(SHA256(name+salt)) form that appears in the
 	// support-bound output files. Saved outside the archive folder.

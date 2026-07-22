@@ -1,4 +1,4 @@
--- Failed-execution count per hour, split by exception code. Drives
+-- Failed-execution count per minute, split by exception code. Drives
 -- the stacked "FAILED Queries count" chart in the dashboard so a spike
 -- of (say) MEMORY_LIMIT_EXCEEDED is distinguishable from a spike of
 -- TIMEOUT_EXCEEDED.
