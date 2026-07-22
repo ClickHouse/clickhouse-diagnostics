@@ -34,12 +34,12 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Build cross-platform binaries
+      - name: Build cross-platform archives
         run: make release
 
       - name: Generate checksums
-        working-directory: bin
-        run: sha256sum clickhouse-diagnostic-* > SHA256SUMS.txt
+        working-directory: dist
+        run: sha256sum clickhouse-diagnostic-*.tar.gz clickhouse-diagnostic-*.zip > SHA256SUMS.txt
 
       - name: Publish release with assets
         uses: softprops/action-gh-release@v2
@@ -49,8 +49,11 @@ jobs:
           # Any tag containing a hyphen (e.g. v0.1.0-rc.1) is a pre-release,
           # so it won't be shown as the repo's "Latest" release.
           prerelease: ${{ contains(github.event.inputs.tag || github.ref_name, '-') }}
+          # Each archive bundles the binary with the queries.*/alerts data
+          # dirs the tool reads at runtime.
           files: |
-            bin/clickhouse-diagnostic-*
-            bin/SHA256SUMS.txt
+            dist/clickhouse-diagnostic-*.tar.gz
+            dist/clickhouse-diagnostic-*.zip
+            dist/SHA256SUMS.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
