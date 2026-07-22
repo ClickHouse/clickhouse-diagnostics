@@ -5,6 +5,13 @@ BINARY_NAME=clickhouse-diagnostic
 GO_FILES=$(shell find . -name "*.go" -type f)
 BUILD_DIR=./bin
 CMD_DIR=./cmd
+DIST_DIR=./dist
+
+# Platforms to package release archives for (os/arch)
+PLATFORMS=linux/amd64 darwin/amd64 darwin/arm64 windows/amd64
+# Runtime data the tool reads from the working directory. These must ship
+# alongside the binary, so each release archive bundles them.
+DATA_DIRS=queries.cloud queries.onprem queries.gov queries.query_analysis alerts
 
 # Default target
 .PHONY: all
@@ -35,6 +42,7 @@ run: build
 .PHONY: clean
 clean:
 	rm -rf $(BUILD_DIR)
+	rm -rf $(DIST_DIR)
 	rm -rf clickhouse_results
 	rm -rf configuration
 	rm -f *.tar.gz
@@ -55,18 +63,34 @@ fmt:
 lint:
 	golangci-lint run
 
-# Create release builds for multiple platforms
+# Create release archives for multiple platforms.
+# Each archive bundles the binary with the runtime data dirs (queries.*,
+# alerts) so the tool works from the extracted folder — the binary alone
+# reads those files from the working directory and would otherwise fail.
+# Produces .tar.gz for Unix targets and .zip for Windows, under $(DIST_DIR).
 .PHONY: release
 release: clean
-	@mkdir -p $(BUILD_DIR)
-	# Linux
-	GOOS=linux GOARCH=amd64 go build -o $(BUILD_DIR)/$(BINARY_NAME)-linux-amd64 $(CMD_DIR)
-	# macOS
-	GOOS=darwin GOARCH=amd64 go build -o $(BUILD_DIR)/$(BINARY_NAME)-darwin-amd64 $(CMD_DIR)
-	GOOS=darwin GOARCH=arm64 go build -o $(BUILD_DIR)/$(BINARY_NAME)-darwin-arm64 $(CMD_DIR)
-	# Windows
-	GOOS=windows GOARCH=amd64 go build -o $(BUILD_DIR)/$(BINARY_NAME)-windows-amd64.exe $(CMD_DIR)
-	@echo "Release builds created in $(BUILD_DIR)/"
+	@mkdir -p $(DIST_DIR)
+	@set -e; \
+	for platform in $(PLATFORMS); do \
+		os=$${platform%/*}; arch=$${platform#*/}; \
+		pkg=$(BINARY_NAME)-$$os-$$arch; \
+		stage=$(DIST_DIR)/$$pkg; \
+		bin=$(BINARY_NAME); \
+		if [ "$$os" = "windows" ]; then bin=$(BINARY_NAME).exe; fi; \
+		echo "Packaging $$pkg..."; \
+		mkdir -p $$stage; \
+		GOOS=$$os GOARCH=$$arch go build -o $$stage/$$bin $(CMD_DIR) || exit 1; \
+		cp -R $(DATA_DIRS) $$stage/; \
+		cp README.md $$stage/ 2>/dev/null || true; \
+		if [ "$$os" = "windows" ]; then \
+			(cd $(DIST_DIR) && zip -qr $$pkg.zip $$pkg); \
+		else \
+			tar -czf $(DIST_DIR)/$$pkg.tar.gz -C $(DIST_DIR) $$pkg; \
+		fi; \
+		rm -rf $$stage; \
+	done
+	@echo "Release archives created in $(DIST_DIR)/"
 
 # Install the binary to GOPATH/bin
 .PHONY: install
