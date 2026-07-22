@@ -46,6 +46,9 @@ jobs:
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           generate_release_notes: true
+          # Any tag containing a hyphen (e.g. v0.1.0-rc.1) is a pre-release,
+          # so it won't be shown as the repo's "Latest" release.
+          prerelease: ${{ contains(github.event.inputs.tag || github.ref_name, '-') }}
           files: |
             bin/clickhouse-diagnostic-*
             bin/SHA256SUMS.txt
