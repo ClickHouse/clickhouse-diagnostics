@@ -71,7 +71,8 @@ lint:
 .PHONY: release
 release: clean
 	@mkdir -p $(DIST_DIR)
-	@for platform in $(PLATFORMS); do \
+	@set -e; \
+	for platform in $(PLATFORMS); do \
 		os=$${platform%/*}; arch=$${platform#*/}; \
 		pkg=$(BINARY_NAME)-$$os-$$arch; \
 		stage=$(DIST_DIR)/$$pkg; \
