@@ -33,8 +33,6 @@ func main() {
 	configDirFlag := flag.String("config-dir", "", "ClickHouse config directory to collect (default: /etc/clickhouse-server/config.d/)")
 	skipConfigFlag := flag.Bool("skip-config", false, "Skip collecting configuration files")
 	skipArchiveFlag := flag.Bool("skip-archive", false, "Skip creating archive of results and configuration")
-	dryRunFlag := flag.Bool("dry-run", false, "List every query the tool would execute (with the system tables each touches) and exit. Does NOT write results or create an archive.")
-	explainEstimateFlag := flag.Bool("explain-estimate", false, "With --dry-run, also run `EXPLAIN ESTIMATE <query>` against the server for each SELECT. EXPLAIN ESTIMATE is a read-only metadata query — it reports the rows/marks/parts the query WOULD scan without reading any data.")
 	skipDashboardFlag := flag.Bool("skip-dashboard", false, "Skip generating HTML dashboard")
 	skipAlertsFlag    := flag.Bool("skip-alerts", false, "Skip evaluating alert rules")
 	alertsDirFlag     := flag.String("alerts-dir", "./alerts", "Directory containing alert YAML rule files")
@@ -62,7 +60,6 @@ func main() {
 		skipConfig      = *skipConfigFlag
 		skipArchive     = *skipArchiveFlag
 		dryRun          = *dryRunFlag
-		explainEstimate = *explainEstimateFlag
 		skipDashboard = *skipDashboardFlag
 		skipAlerts    = *skipAlertsFlag
 		alertsDir     = *alertsDirFlag
@@ -72,7 +69,6 @@ func main() {
 		fromStr       = *fromFlag
 		toStr         = *toFlag
 		analysisDir = *analysisDirFlag
-		dryRun      = *dryRunFlag
 	)
 	// --dry-run is read-only by definition — silence the side effects
 	// that would write empty/garbage artefacts to disk.

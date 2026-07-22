@@ -90,13 +90,6 @@ func (e *Executor) executeQuery(query internal.QueryFile, outputDir, timestamp s
 		return nil
 	}
 
-	// Show source information. In dry-run we prefix the label so it
-	// reads alongside the [N] block the client prints next, and we use
-	// "Would execute" to make it clear nothing is actually running.
-	verb := "Executing"
-	if e.client.IsDryRun() {
-		verb = "Would execute"
-	}
 	// Gov mode: replace the public '%salt%' placeholder in .sql files
 	// with the customer-supplied salt. Salt format is validated upstream
 	// (alphanumeric only), so it cannot break out of the SQL string literal.
