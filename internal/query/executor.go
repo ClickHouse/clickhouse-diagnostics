@@ -90,13 +90,6 @@ func (e *Executor) executeQuery(query internal.QueryFile, outputDir, timestamp s
 		return nil
 	}
 
-	// Show source information. In dry-run we prefix the label so it
-	// reads alongside the [N] block the client prints next, and we use
-	// "Would execute" to make it clear nothing is actually running.
-	verb := "Executing"
-	if e.client.IsDryRun() {
-		verb = "Would execute"
-	}
 	// Gov mode: replace the public '%salt%' placeholder in .sql files
 	// with the customer-supplied salt. Salt format is validated upstream
 	// (alphanumeric only), so it cannot break out of the SQL string literal.
@@ -110,7 +103,12 @@ func (e *Executor) executeQuery(query internal.QueryFile, outputDir, timestamp s
 		return fmt.Errorf("security validation failed for '%s': %w", query.Name, err)
 	}
 
-	// Show source information
+	// Show source information. Prefix changes in dry-run to make clear
+	// nothing actually runs.
+	verb := "Executing"
+	if e.client.IsDryRun() {
+		verb = "Would execute"
+	}
 	if query.DirName != "" {
 		fmt.Printf("%s query '%s' from directory '%s'...\n", verb, query.Name, query.DirName)
 	} else {
@@ -133,9 +131,6 @@ func (e *Executor) executeQuery(query internal.QueryFile, outputDir, timestamp s
 		return fmt.Errorf("error saving result: %w", err)
 	}
 
-	// In dry-run the .native file is empty (the client returned ""),
-	// and writing it just clutters /tmp. The client already printed
-	// the SQL + tables; no further per-query progress line needed.
 	if !e.client.IsDryRun() {
 		fmt.Printf("Query '%s' executed successfully. Result saved to %s\n\n", query.Name, outputPath)
 	}

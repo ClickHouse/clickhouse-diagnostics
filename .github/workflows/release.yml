@@ -1,0 +1,56 @@
+name: Release
+
+# Publish cross-platform Go binaries to GitHub Release Assets.
+#
+# Triggers when you push a semver tag, e.g.:
+#   git tag v1.2.0 && git push origin v1.2.0
+#
+# You can also run it manually from the Actions tab against an existing tag.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build and release (e.g. v1.2.0)"
+        required: true
+
+permissions:
+  contents: write # required to create the release and upload assets
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build cross-platform binaries
+        run: make release
+
+      - name: Generate checksums
+        working-directory: bin
+        run: sha256sum clickhouse-diagnostic-* > SHA256SUMS.txt
+
+      - name: Publish release with assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          generate_release_notes: true
+          # Any tag containing a hyphen (e.g. v0.1.0-rc.1) is a pre-release,
+          # so it won't be shown as the repo's "Latest" release.
+          prerelease: ${{ contains(github.event.inputs.tag || github.ref_name, '-') }}
+          files: |
+            bin/clickhouse-diagnostic-*
+            bin/SHA256SUMS.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

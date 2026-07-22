@@ -125,6 +125,10 @@ Run `./clickhouse-diagnostic -help` to see the full list. Current flags:
 -to string             Time-window end for query analysis (default: now).
 -analysis-dir string   Directory containing query-analysis SQL files
                        (default "./queries.query_analysis")
+-dry-run               List every query that would be executed (with the
+                       system tables each touches and a read-only
+                       EXPLAIN ESTIMATE per SELECT) and exit. No results,
+                       no archive. See "Dry-run mode" below.
 -skip-config           Skip collecting configuration files
 -skip-alerts           Skip evaluating alert rules
 -skip-dashboard        Skip generating HTML dashboard
@@ -176,6 +180,57 @@ Fully non-interactive (CI / automation):
 ```
 
 > **Security:** prefer the interactive password prompt or an environment variable over `-password` — flags appear in `ps`/shell history.
+
+## Dry-run mode
+
+Security-conscious customers can pass `-dry-run` to see exactly which queries the tool would execute, against which tables, **without** any actual data collection:
+
+```bash
+./clickhouse-diagnostic -mode cloud -host my-service.region.aws.clickhouse.cloud \
+  -port 8443 -protocol https -user default \
+  -dry-run
+```
+
+What `-dry-run` does:
+
+- Lists every SELECT that would be sent (file-based, alert rules, dashboard inline, query-analysis bundle)
+- Tags each query with the `system.*` tables it touches
+- Adds a read-only `EXPLAIN ESTIMATE` block under each SELECT — reports the rows/marks/parts the query **would** scan but reads no data parts. See [the EXPLAIN ESTIMATE docs](https://clickhouse.com/docs/sql-reference/statements/explain#explain-estimate).
+- Renders empty estimates as `this table is empty` (the planner's confirmation that nothing matches the predicate)
+- Skips `-skip-config` and `-skip-archive` automatically (no side-effect files)
+
+What still reaches the server in dry-run:
+
+| Call | Why |
+|---|---|
+| `SELECT version()` | Picks the right query variant for the server version |
+| Pre-flight for `--query-id` / `--normalized-query-hash` | Derives the hash + event_time (or the slowest query_id) so the printed analysis SQL has real values, not unbound `{query_id}` markers |
+| `EXPLAIN ESTIMATE <query>` per SELECT | Read-only metadata only |
+
+Combine with the query-analysis flags to dry-run the focused bundle too:
+
+```bash
+./clickhouse-diagnostic -mode cloud -host ... \
+  -dry-run \
+  -normalized-query-hash 15477159632099527852
+```
+
+Sample block of the output:
+
+```
+[28]
+    Tables: system.query_log
+    SQL:
+      SELECT ts, query_id, query_duration_ms, ...
+      FROM system.query_log
+      WHERE query_id = '30df7836-fe07-4f42-9d52-832a69abbb8b'
+        AND event_time >= '2026-05-28 09:06:21'
+        AND event_time <= '2026-06-04 09:06:21'
+    EXPLAIN ESTIMATE:
+      ┌─database─┬─table─────┬─parts─┬─rows─┬─marks─┐
+      │ system   │ query_log │     2 │   14 │     2 │
+      └──────────┴───────────┴───────┴──────┴───────┘
+```
 
 ## Modes and Query Layout
 

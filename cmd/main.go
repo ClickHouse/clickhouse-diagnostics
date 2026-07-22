@@ -33,8 +33,6 @@ func main() {
 	configDirFlag := flag.String("config-dir", "", "ClickHouse config directory to collect (default: /etc/clickhouse-server/config.d/)")
 	skipConfigFlag := flag.Bool("skip-config", false, "Skip collecting configuration files")
 	skipArchiveFlag := flag.Bool("skip-archive", false, "Skip creating archive of results and configuration")
-	dryRunFlag := flag.Bool("dry-run", false, "List every query the tool would execute (with the system tables each touches) and exit. Does NOT write results or create an archive.")
-	explainEstimateFlag := flag.Bool("explain-estimate", false, "With --dry-run, also run `EXPLAIN ESTIMATE <query>` against the server for each SELECT. EXPLAIN ESTIMATE is a read-only metadata query — it reports the rows/marks/parts the query WOULD scan without reading any data.")
 	skipDashboardFlag := flag.Bool("skip-dashboard", false, "Skip generating HTML dashboard")
 	skipAlertsFlag    := flag.Bool("skip-alerts", false, "Skip evaluating alert rules")
 	alertsDirFlag     := flag.String("alerts-dir", "./alerts", "Directory containing alert YAML rule files")
@@ -44,6 +42,7 @@ func main() {
 	fromFlag          := flag.String("from", "", "Time-window start for query analysis (RFC3339 or YYYY-MM-DD)")
 	toFlag            := flag.String("to", "", "Time-window end for query analysis (RFC3339 or YYYY-MM-DD)")
 	analysisDirFlag   := flag.String("analysis-dir", "./queries.query_analysis", "Directory containing query-analysis SQL files")
+	dryRunFlag := flag.Bool("dry-run", false, "List every query the tool would execute (with the system tables each touches and an EXPLAIN ESTIMATE per SELECT) and exit. Does NOT write results or create an archive. EXPLAIN ESTIMATE is a read-only metadata query — it reports the rows/marks/parts the SELECT WOULD scan without reading any data.")
 
 	// Parse command line flags
 	flag.Parse()
@@ -61,7 +60,6 @@ func main() {
 		skipConfig      = *skipConfigFlag
 		skipArchive     = *skipArchiveFlag
 		dryRun          = *dryRunFlag
-		explainEstimate = *explainEstimateFlag
 		skipDashboard = *skipDashboardFlag
 		skipAlerts    = *skipAlertsFlag
 		alertsDir     = *alertsDirFlag
@@ -70,10 +68,10 @@ func main() {
 		normalizedHash = *normalizedHashFlag
 		fromStr       = *fromFlag
 		toStr         = *toFlag
-		analysisDir   = *analysisDirFlag
+		analysisDir = *analysisDirFlag
 	)
-	// --dry-run is read-only by definition. Disable side effects that
-	// would write empty/garbage artefacts to disk.
+	// --dry-run is read-only by definition — silence the side effects
+	// that would write empty/garbage artefacts to disk.
 	if dryRun {
 		skipConfig = true
 		skipArchive = true
@@ -135,25 +133,26 @@ func main() {
 	fmt.Printf("ClickHouse server version: %d.%d.%d.%d\n",
 		serverVersion.Major, serverVersion.Minor, serverVersion.Patch, serverVersion.Build)
 
-	// Dry-run path: route every subsequent query through the
-	// intercepting client and write all the executor's side-effect
-	// files (.native results) into a temp directory we delete on exit.
-	// The user sees the SQL + tables (+ optional EXPLAIN ESTIMATE)
-	// printed to stdout; the server only sees the version probe above
-	// and, if requested, EXPLAIN ESTIMATE queries (no actual scan).
+	// Dry-run: activate AFTER the version probe so version detection
+	// still works, but BEFORE everything else. resolveAnalysisOpts
+	// uses ExecuteQueryReal for its pre-flight lookups, which bypasses
+	// the dry-run intercept — that way the derived query_id / hash
+	// flow into the printed SQL instead of leaving `{query_id}`
+	// markers unbound.
 	if dryRun {
 		fmt.Println("\n=== DRY RUN ===")
 		fmt.Println("No data will be written to disk.")
 		fmt.Println("No archive will be created.")
-		if explainEstimate {
-			fmt.Println("EXPLAIN ESTIMATE is enabled — read-only metadata only, no data parts scanned.")
-			fmt.Println("Note: system.* tables are virtual; ESTIMATE returns empty for most of them,")
-			fmt.Println("which is itself a useful confirmation that no data part will be read.")
-		} else {
-			fmt.Println("No further server queries will run (pass --explain-estimate to add metadata-only EXPLAIN).")
-		}
+		fmt.Println("Each SELECT is printed with the system tables it would touch and an")
+		fmt.Println("EXPLAIN ESTIMATE block (read-only metadata, no data parts scanned).")
+		fmt.Println("Empty estimates render as `this table is empty` — that's the planner")
+		fmt.Println("confirming nothing matches the query predicate.")
 		fmt.Println()
-		client.SetDryRun(os.Stdout, explainEstimate)
+		// EXPLAIN ESTIMATE is always on under --dry-run — one flag,
+		// one behavior. The pre-flight queries (PreflightForX) use
+		// ExecuteQueryReal to bypass the interception, so derived
+		// values flow into the printed SQL.
+		client.SetDryRun(os.Stdout, true)
 		tmpDir, err := os.MkdirTemp("", "diag-dryrun-*")
 		if err != nil {
 			fmt.Printf("Error creating dry-run temp dir: %v\n", err)
@@ -162,6 +161,7 @@ func main() {
 		defer os.RemoveAll(tmpDir)
 		outputDir = tmpDir
 	}
+
 	// Resolve query-analysis options up front so an invalid --query-id
 	// or --normalized-query-hash fails fast, before any heavy work runs.
 	analysisOpts, err := resolveAnalysisOpts(client, mode, queryID, normalizedHash, fromStr, toStr)
@@ -174,7 +174,12 @@ func main() {
 	// support-bound artifacts cannot be reversed by a public rainbow
 	// table. Prompt for it now (with no echo) if it wasn't passed via
 	// --salt. Salt never leaves the operator's machine.
-	if mode == "gov" {
+	//
+	// In dry-run we skip the prompt and use a placeholder so the
+	// printed `.sql` files still show what would substitute; nothing
+	// is written and no archive is built, so the placeholder cannot
+	// leak.
+	if mode == "gov" && !dryRun {
 		if govSalt == "" {
 			s, err := promptForGovSalt()
 			if err != nil {
@@ -187,6 +192,8 @@ func main() {
 			fmt.Printf("Invalid gov-mode salt: %v\n", err)
 			return
 		}
+	} else if mode == "gov" && dryRun && govSalt == "" {
+		govSalt = "DRYRUNPLACEHOLDER"
 	}
 
 	// Find and execute queries - get the specific folder path
@@ -206,7 +213,10 @@ func main() {
 	// Gov mode: print + save a local mapping from real database/table
 	// names to the hex(SHA256(name+salt)) form that appears in the
 	// support-bound output files. Saved outside the archive folder.
-	if mode == "gov" {
+	// Skipped in dry-run — the mapping is a local artefact, no point
+	// producing it (the SQL itself is still printed via the
+	// intercepting client when the function runs).
+	if mode == "gov" && !dryRun {
 		if err := internal.PrintGovNameMapping(client, outputDir, finalOutputDir, govSalt); err != nil {
 			fmt.Printf("Warning: gov-mode name mapping failed: %v\n", err)
 		}
