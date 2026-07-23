@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"clickhouse-diagnostic/internal"
 	"clickhouse-diagnostic/internal/query"
 	"gopkg.in/yaml.v3"
 )
@@ -138,7 +139,7 @@ func TestParseJSONCompact_Empty(t *testing.T) {
 
 func TestRunAll_MissingDir(t *testing.T) {
 	ev := &Evaluator{mode: "onprem"}
-	results := ev.RunAll("/nonexistent/dir/that/does/not/exist")
+	results := ev.RunAll("/nonexistent/dir/that/does/not/exist", internal.Version{Major: 25, Minor: 4, Patch: 1, Build: 0})
 	if results != nil {
 		t.Errorf("expected nil for missing dir, got %v", results)
 	}
@@ -203,7 +204,7 @@ func TestRunAll_IgnoresNonYAML(t *testing.T) {
 
 	// Empty client is OK here because no .yaml files exist so RunAll returns early.
 	ev := &Evaluator{mode: "onprem"}
-	results := ev.RunAll(dir)
+	results := ev.RunAll(dir, internal.Version{Major: 25, Minor: 4, Patch: 1, Build: 0})
 	if len(results) != 0 {
 		t.Errorf("expected 0 results (no yaml files), got %d", len(results))
 	}

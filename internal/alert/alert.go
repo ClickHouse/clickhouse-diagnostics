@@ -7,50 +7,53 @@
 // YAML rule format
 // ────────────────
 //
-//   name:        unique_snake_case_id
-//   title:       "Human-readable title"
-//   severity:    critical | warning | info        (default: warning)
-//   description: |
-//     Multi-line explanation of what the alert means
-//     and what to do about it.
-//   tags:
-//     - mutations
-//     - performance
-//   query: |
-//     SELECT database, table, mutation_id,
-//            dateDiff('hour', create_time, now()) AS hours_running,
-//            parts_to_do
-//     FROM {sys.mutations}                 -- placeholder, see below
-//     WHERE parts_to_do > 0
-//       AND is_killed = 0
-//       AND dateDiff('hour', create_time, now()) > 3
-//     ORDER BY hours_running DESC
-//   message: "Mutation {mutation_id} on {database}.{table} running {hours_running}h"
+//	name:        unique_snake_case_id
+//	title:       "Human-readable title"
+//	severity:    critical | warning | info        (default: warning)
+//	description: |
+//	  Multi-line explanation of what the alert means
+//	  and what to do about it.
+//	tags:
+//	  - mutations
+//	  - performance
+//	query: |
+//	  SELECT database, table, mutation_id,
+//	         dateDiff('hour', create_time, now()) AS hours_running,
+//	         parts_to_do
+//	  FROM {sys.mutations}                 -- placeholder, see below
+//	  WHERE parts_to_do > 0
+//	    AND is_killed = 0
+//	    AND dateDiff('hour', create_time, now()) > 3
+//	  ORDER BY hours_running DESC
+//	message: "Mutation {mutation_id} on {database}.{table} running {hours_running}h"
 //
 // System-table placeholder
 // ────────────────────────
-//   Use {sys.<table>} in your query instead of a hard-coded table path.
-//   The evaluator substitutes the right reference based on the run mode:
 //
-//     {sys.query_log}  →  system.query_log                                  (onprem / gov)
-//                      →  clusterAllReplicas(default, system.query_log)     (cloud, per-replica)
-//     {sys.parts}      →  system.parts                                      (all modes)
+//	Use {sys.<table>} in your query instead of a hard-coded table path.
+//	The evaluator substitutes the right reference based on the run mode:
 //
-//   Tables whose contents are shared across replicas (parts, tables,
-//   replicas, replication_queue, mutations, dictionaries, detached_parts,
-//   columns, databases) are queried directly even in cloud mode: each
-//   replica sees the same rows, so clusterAllReplicas would duplicate them.
+//	  {sys.query_log}  →  system.query_log                                  (onprem / gov)
+//	                   →  clusterAllReplicas(default, system.query_log)     (cloud, per-replica)
+//	  {sys.parts}      →  system.parts                                      (all modes)
+//
+//	Tables whose contents are shared across replicas (parts, tables,
+//	replicas, replication_queue, mutations, dictionaries, detached_parts,
+//	columns, databases) are queried directly even in cloud mode: each
+//	replica sees the same rows, so clusterAllReplicas would duplicate them.
 //
 // Message template
 // ────────────────
-//   Use {column_name} in the message string; the evaluator substitutes the
-//   column value from each result row.  One alert instance is created per row.
+//
+//	Use {column_name} in the message string; the evaluator substitutes the
+//	column value from each result row.  One alert instance is created per row.
 //
 // Security
 // ────────
-//   All alert queries are validated by ValidateQueryContent before execution.
-//   Only SELECT / WITH queries are accepted; INSERT, ALTER, DROP, etc. are
-//   rejected with an error and the alert is skipped.
+//
+//	All alert queries are validated by ValidateQueryContent before execution.
+//	Only SELECT / WITH queries are accepted; INSERT, ALTER, DROP, etc. are
+//	rejected with an error and the alert is skipped.
 package alert
 
 import (
@@ -63,6 +66,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"clickhouse-diagnostic/internal"
 	"clickhouse-diagnostic/internal/query"
 	"clickhouse-diagnostic/pkg"
 )
@@ -137,22 +141,24 @@ func (ev *Evaluator) expandQuery(sql string) string {
 
 // RunAll loads every .yaml file from dir and evaluates each rule.
 // If the directory does not exist the call is a no-op (returns nil).
-func (ev *Evaluator) RunAll(dir string) []Result {
+//
+// dir follows the same version-directory convention as the query
+// directories: a subdirectory named like a ClickHouse version
+// (e.g. "25.4.1.0") overrides a same-named root rule when the connected
+// server (serverVersion) is at least that version.
+func (ev *Evaluator) RunAll(dir string, serverVersion internal.Version) []Result {
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
 		return nil
 	}
-	entries, err := os.ReadDir(dir)
+	files, err := query.FindVersionedFiles(dir, serverVersion, ".yaml")
 	if err != nil {
 		fmt.Printf("[alerts] cannot read %s: %v\n", dir, err)
 		return nil
 	}
 
 	var results []Result
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(strings.ToLower(e.Name()), ".yaml") {
-			continue
-		}
-		results = append(results, ev.evalFile(filepath.Join(dir, e.Name())))
+	for _, f := range files {
+		results = append(results, ev.evalFile(f.FullPath))
 	}
 
 	fired := 0

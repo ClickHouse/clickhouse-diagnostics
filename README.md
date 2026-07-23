@@ -312,6 +312,15 @@ queries.cloud/
 
 Directories that don't parse as a version are skipped.
 
+The same convention applies to `queries.query_analysis/` (`.sql` files) and `alerts/` (`.yaml` rules): place a file with the same name in a `MAJOR.MINOR.PATCH.BUILD` subdirectory to override the root version for servers at or above that version.
+
+```
+alerts/
+├── too_many_parts.yaml           # default rule
+└── 25.4.1.0/
+    └── too_many_parts.yaml       # replaces the default on servers ≥ 25.4.1.0
+```
+
 ## Alerts
 
 Alert rules are plain YAML files in `alerts/` (override with `-alerts-dir`). Each file defines one read-only SELECT query — if it returns any rows, the alert fires and the rows are surfaced in the dashboard. All alert SQL is validated before execution: only `SELECT` / `WITH` is accepted, anything else (`INSERT`, `ALTER`, `DROP`, …) is rejected and the rule is skipped.

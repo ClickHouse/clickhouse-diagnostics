@@ -6,10 +6,10 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strings"
 	"time"
 
+	"clickhouse-diagnostic/internal"
 	"clickhouse-diagnostic/pkg"
 )
 
@@ -91,8 +91,8 @@ func (o AnalysisOpts) Enabled() bool {
 //   - both --from and --to set:           use as-is
 //   - one of them set:                    fill the other relative to now
 //   - neither set, --query-id only:       last 3 days (event_time-centered
-//                                          windowing happens after the
-//                                          pre-flight; see PreflightForQueryID)
+//     windowing happens after the
+//     pre-flight; see PreflightForQueryID)
 //   - neither set, --hash only:           last 7 days  (more history)
 func (o *AnalysisOpts) Validate(now time.Time) error {
 	if !o.Enabled() {
@@ -270,6 +270,11 @@ func NewAnalysisCollector(client *pkg.ClickHouseClient, mode string) *AnalysisCo
 // each query, executes it, and writes the result as a `.native` file
 // into <backupDir>/query_analysis/.
 //
+// queriesDir follows the same version-directory convention as the mode
+// query directories: a subdirectory named like a ClickHouse version
+// (e.g. "25.4.1.0") overrides a same-named root file when the connected
+// server (serverVersion) is at least that version.
+//
 // Files that still contain unbound placeholders after template
 // substitution are skipped — that's how single-query-id-only files
 // behave when --normalized-query-hash is set without --query-id, and
@@ -277,24 +282,15 @@ func NewAnalysisCollector(client *pkg.ClickHouseClient, mode string) *AnalysisCo
 //
 // Returns the number of files written and the number skipped due to
 // unbound placeholders (informational only — no error).
-func (c *AnalysisCollector) Collect(opts AnalysisOpts, queriesDir, backupDir string) (written, skipped int, err error) {
+func (c *AnalysisCollector) Collect(opts AnalysisOpts, queriesDir, backupDir string, serverVersion internal.Version) (written, skipped int, err error) {
 	if !opts.Enabled() {
 		return 0, 0, fmt.Errorf("analysis collector called with no focus parameter set")
 	}
 
-	entries, err := os.ReadDir(queriesDir)
+	files, err := FindVersionedFiles(queriesDir, serverVersion, ".sql")
 	if err != nil {
 		return 0, 0, fmt.Errorf("read query-analysis dir %s: %w", queriesDir, err)
 	}
-
-	files := make([]string, 0, len(entries))
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".sql") {
-			continue
-		}
-		files = append(files, e.Name())
-	}
-	sort.Strings(files) // deterministic execution order
 
 	if len(files) == 0 {
 		return 0, 0, fmt.Errorf("no .sql files found in %s", queriesDir)
@@ -321,9 +317,13 @@ func (c *AnalysisCollector) Collect(opts AnalysisOpts, queriesDir, backupDir str
 	fmt.Printf("\nQuery analysis: %s %d file(s) (window %s → %s)\n",
 		verb, len(files), opts.From.Format(time.RFC3339), opts.To.Format(time.RFC3339))
 
-	for _, fname := range files {
-		full := filepath.Join(queriesDir, fname)
-		raw, readErr := os.ReadFile(full)
+	for _, qf := range files {
+		fname := qf.Name
+		if qf.DirName != "" {
+			// Version-specific override selected for this server.
+			fname = qf.DirName + "/" + qf.Name
+		}
+		raw, readErr := os.ReadFile(qf.FullPath)
 		if readErr != nil {
 			fmt.Printf("  [analysis] read %s: %v\n", fname, readErr)
 			continue
@@ -344,7 +344,7 @@ func (c *AnalysisCollector) Collect(opts AnalysisOpts, queriesDir, backupDir str
 			fmt.Printf("  [analysis] %s: %v\n", fname, qErr)
 			continue
 		}
-		base := strings.TrimSuffix(fname, ".sql")
+		base := strings.TrimSuffix(qf.Name, ".sql")
 		out := filepath.Join(outDir, fmt.Sprintf("%s_%s.native", base, timestamp))
 		// In dry-run the result is empty and the client has already
 		// printed the SQL + tables to stdout; writing an empty .native

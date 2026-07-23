@@ -34,14 +34,14 @@ func main() {
 	skipConfigFlag := flag.Bool("skip-config", false, "Skip collecting configuration files")
 	skipArchiveFlag := flag.Bool("skip-archive", false, "Skip creating archive of results and configuration")
 	skipDashboardFlag := flag.Bool("skip-dashboard", false, "Skip generating HTML dashboard")
-	skipAlertsFlag    := flag.Bool("skip-alerts", false, "Skip evaluating alert rules")
-	alertsDirFlag     := flag.String("alerts-dir", "./alerts", "Directory containing alert YAML rule files")
-	saltFlag          := flag.String("salt", "", "Gov-mode hashing salt (8–64 alphanumeric chars; prompts interactively if empty)")
-	queryIDFlag       := flag.String("query-id", "", "Run query analysis focused on this query_id (UUID)")
+	skipAlertsFlag := flag.Bool("skip-alerts", false, "Skip evaluating alert rules")
+	alertsDirFlag := flag.String("alerts-dir", "./alerts", "Directory containing alert YAML rule files")
+	saltFlag := flag.String("salt", "", "Gov-mode hashing salt (8–64 alphanumeric chars; prompts interactively if empty)")
+	queryIDFlag := flag.String("query-id", "", "Run query analysis focused on this query_id (UUID)")
 	normalizedHashFlag := flag.String("normalized-query-hash", "", "Run query analysis focused on this normalized_query_hash (uint64)")
-	fromFlag          := flag.String("from", "", "Time-window start for query analysis (RFC3339 or YYYY-MM-DD)")
-	toFlag            := flag.String("to", "", "Time-window end for query analysis (RFC3339 or YYYY-MM-DD)")
-	analysisDirFlag   := flag.String("analysis-dir", "./queries.query_analysis", "Directory containing query-analysis SQL files")
+	fromFlag := flag.String("from", "", "Time-window start for query analysis (RFC3339 or YYYY-MM-DD)")
+	toFlag := flag.String("to", "", "Time-window end for query analysis (RFC3339 or YYYY-MM-DD)")
+	analysisDirFlag := flag.String("analysis-dir", "./queries.query_analysis", "Directory containing query-analysis SQL files")
 	dryRunFlag := flag.Bool("dry-run", false, "List every query the tool would execute (with the system tables each touches and an EXPLAIN ESTIMATE per SELECT) and exit. Does NOT write results or create an archive. EXPLAIN ESTIMATE is a read-only metadata query — it reports the rows/marks/parts the SELECT WOULD scan without reading any data.")
 
 	// Parse command line flags
@@ -49,26 +49,26 @@ func main() {
 
 	// Initialize variables with defaults
 	var (
-		host            = *hostFlag
-		port            = *portFlag
-		username        = *userFlag
-		password        = *passwordFlag
-		protocol        = *protocolFlag
-		mode            = *modeFlag
-		outputDir       = *outputDirFlag
-		configDir       = *configDirFlag
-		skipConfig      = *skipConfigFlag
-		skipArchive     = *skipArchiveFlag
-		dryRun          = *dryRunFlag
-		skipDashboard = *skipDashboardFlag
-		skipAlerts    = *skipAlertsFlag
-		alertsDir     = *alertsDirFlag
-		govSalt       = *saltFlag
-		queryID       = *queryIDFlag
+		host           = *hostFlag
+		port           = *portFlag
+		username       = *userFlag
+		password       = *passwordFlag
+		protocol       = *protocolFlag
+		mode           = *modeFlag
+		outputDir      = *outputDirFlag
+		configDir      = *configDirFlag
+		skipConfig     = *skipConfigFlag
+		skipArchive    = *skipArchiveFlag
+		dryRun         = *dryRunFlag
+		skipDashboard  = *skipDashboardFlag
+		skipAlerts     = *skipAlertsFlag
+		alertsDir      = *alertsDirFlag
+		govSalt        = *saltFlag
+		queryID        = *queryIDFlag
 		normalizedHash = *normalizedHashFlag
-		fromStr       = *fromFlag
-		toStr         = *toFlag
-		analysisDir = *analysisDirFlag
+		fromStr        = *fromFlag
+		toStr          = *toFlag
+		analysisDir    = *analysisDirFlag
 	)
 	// --dry-run is read-only by definition — silence the side effects
 	// that would write empty/garbage artefacts to disk.
@@ -228,7 +228,7 @@ func main() {
 	// <finalOutputDir>/query_analysis/.
 	if analysisOpts.Enabled() {
 		coll := query.NewAnalysisCollector(client, mode)
-		if _, _, err := coll.Collect(analysisOpts, analysisDir, finalOutputDir); err != nil {
+		if _, _, err := coll.Collect(analysisOpts, analysisDir, finalOutputDir, serverVersion); err != nil {
 			fmt.Printf("Warning: query analysis failed: %v\n", err)
 		}
 	}
@@ -237,7 +237,7 @@ func main() {
 	var alertResults []alert.Result
 	if !skipAlerts {
 		fmt.Println("Evaluating alert rules...")
-		alertResults = alert.NewEvaluator(client, mode).RunAll(alertsDir)
+		alertResults = alert.NewEvaluator(client, mode).RunAll(alertsDir, serverVersion)
 		fired := 0
 		for _, r := range alertResults {
 			if r.Fired() {
