@@ -14,5 +14,8 @@ SELECT
     count() as count
 FROM system.part_log
 WHERE (event_time > (now() - toIntervalDay(7)))
-GROUP BY ALL
+-- Explicit key list instead of GROUP BY ALL: that syntax needs 22.12+
+-- and this root file must run on every supported server (22.8+).
+GROUP BY time, event_type, merge_reason, part_name, partition_id,
+         table_name, error
 FORMAT Native

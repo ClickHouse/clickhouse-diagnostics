@@ -1,3 +1,4 @@
+# 22.11+ variant: reports total size via detached_parts.bytes_on_disk (added in 22.11). See the root rule for the 22.8 baseline.
 name: detached_parts_exist
 title: "Detached parts found"
 severity: info
@@ -12,17 +13,15 @@ tags:
   - parts
   - maintenance
 
-# Root variant for the oldest supported servers (22.8–22.10):
-# detached_parts.bytes_on_disk was added in 22.11 — see
-# 22.11.1.0/detached_parts_exist.yaml for the variant that reports size.
 query: |
   SELECT
     database,
     table,
     count()                                  AS detached_count,
+    formatReadableSize(sum(bytes_on_disk))   AS total_size,
     groupArray(reason)                       AS reasons
   FROM {sys.detached_parts}
   GROUP BY database, table
-  ORDER BY detached_count DESC
+  ORDER BY sum(bytes_on_disk) DESC
 
-message: "{database}.{table} has {detached_count} detached part(s) (reason(s): {reasons})"
+message: "{database}.{table} has {detached_count} detached part(s) totalling {total_size} (reason(s): {reasons})"

@@ -126,6 +126,51 @@ func TestFindVersionedFiles_HighestCompatibleVersionWins(t *testing.T) {
 	}
 }
 
+// TestFindVersionedFiles_TieredLadder mirrors the real
+// queries.query_analysis/query_details.sql ladder (root → 23.8.1.0 →
+// 23.9.1.0 → 23.11.1.0) plus the asynchronous_insert_log pattern of a
+// file that exists ONLY in a version dir and must vanish for older
+// servers.
+func TestFindVersionedFiles_TieredLadder(t *testing.T) {
+	dir := t.TempDir()
+	writeFiles(t, dir, map[string]string{
+		"query_details.sql":           "SELECT 'baseline'",
+		"23.8.1.0/query_details.sql":  "SELECT 'plus query_cache_usage'",
+		"23.9.1.0/query_details.sql":  "SELECT 'plus peak_threads_usage'",
+		"23.11.1.0/query_details.sql": "SELECT 'plus hostname column'",
+		// No root counterpart — like system.asynchronous_insert_log
+		// (the table itself only exists from 22.10).
+		"22.10.1.0/async_log.sql": "SELECT 'table exists from 22.10'",
+	})
+
+	cases := []struct {
+		server        internal.Version
+		wantDetails   string // expected DirName for query_details.sql
+		wantAsyncSeen bool
+	}{
+		{v(22, 8, 1, 0), "", false},
+		{v(22, 10, 1, 0), "", true},
+		{v(23, 8, 5, 0), "23.8.1.0", true},
+		{v(23, 10, 1, 0), "23.9.1.0", true},
+		{v(25, 4, 1, 0), "23.11.1.0", true},
+	}
+	for _, tc := range cases {
+		files, err := FindVersionedFiles(dir, tc.server, ".sql")
+		if err != nil {
+			t.Fatal(err)
+		}
+		m := asMap(files)
+		if got := m["query_details.sql"].DirName; got != tc.wantDetails {
+			t.Errorf("server %d.%d: query_details from %q, want %q",
+				tc.server.Major, tc.server.Minor, got, tc.wantDetails)
+		}
+		if _, seen := m["async_log.sql"]; seen != tc.wantAsyncSeen {
+			t.Errorf("server %d.%d: async_log seen=%v, want %v",
+				tc.server.Major, tc.server.Minor, seen, tc.wantAsyncSeen)
+		}
+	}
+}
+
 func TestFindVersionedFiles_ExtensionFilter(t *testing.T) {
 	dir := t.TempDir()
 	writeFiles(t, dir, map[string]string{

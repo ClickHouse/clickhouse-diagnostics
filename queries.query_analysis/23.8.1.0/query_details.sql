@@ -1,11 +1,7 @@
 -- Full query_log row for the focus query_id.
 -- Run when --query-id is set.
---
--- Root variant for the oldest supported servers (22.8+). Columns that
--- arrived later are added by version overrides:
---   23.8.1.0/  → query_cache_usage      (added 23.8)
---   23.9.1.0/  → peak_threads_usage     (added 23.9)
---   23.11.1.0/ → hostname column        (added 23.11; root uses hostName())
+-- 23.8+ variant: adds query_cache_usage (new in 23.8). peak_threads_usage
+-- (23.9) and the hostname column (23.11) come in later overrides.
 SELECT
     event_time_microseconds                                AS ts,
     query_id,
@@ -29,6 +25,7 @@ SELECT
     databases,
     tables,
     used_dictionaries,
+    query_cache_usage,
     exception_code,
     exception,
     log_comment,

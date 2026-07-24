@@ -1,3 +1,4 @@
+-- 23.11+ variant: uses the hostname COLUMN (added to system log tables in 23.11); the root file uses hostName() instead.
 -- One row per individual execution of the focus hash within the window.
 -- Drives the per-execution scatter chart in the dashboard so each run
 -- is visible as its own dot (the hourly hash_summary buckets hide this
@@ -25,11 +26,7 @@ SELECT
     read_rows,
     read_bytes,
     formatReadableSize(read_bytes)                          AS read_bytes_human,
-    -- Root variant: the hostname COLUMN was added to query_log in 23.11
-    -- (see 23.11.1.0/). hostName() is evaluated on whichever server
-    -- serves the row, so it labels rows correctly even through
-    -- clusterAllReplicas.
-    hostName()                                              AS hostname,
+    hostname,
     user
 FROM {sys.query_log}
 WHERE normalized_query_hash = {normalized_query_hash}

@@ -316,10 +316,30 @@ The same convention applies to `queries.query_analysis/` (`.sql` files) and `ale
 
 ```
 alerts/
-├── too_many_parts.yaml           # default rule
-└── 25.4.1.0/
-    └── too_many_parts.yaml       # replaces the default on servers ≥ 25.4.1.0
+├── detached_parts_exist.yaml     # default rule (works from 22.8)
+└── 22.11.1.0/
+    └── detached_parts_exist.yaml # adds bytes_on_disk (column added in 22.11)
 ```
+
+A file that exists **only** in a version subdirectory (no root counterpart) is simply skipped on older servers — use this for queries against system tables that don't exist yet (e.g. `system.asynchronous_insert_log`, added in 22.10).
+
+### Supported ClickHouse versions
+
+The tool targets **ClickHouse 22.8 and newer** for on-prem servers. Root-level query and alert files stick to columns and syntax available in 22.8; anything newer lives behind a version subdirectory. Current gates (verified against the ClickHouse changelogs):
+
+| Feature | Added in | Gated at |
+|---|---|---|
+| `system.asynchronous_insert_log` table | 22.10 | `queries.onprem/22.10.1.0/` |
+| `system.disks.unreserved_space` | 22.10 | `queries.onprem/22.10.1.0/` |
+| `system.detached_parts.bytes_on_disk`, `path` | 22.11 | `queries.onprem/22.11.1.0/`, `alerts/22.11.1.0/` |
+| `GROUP BY ALL` syntax | 22.12 | root files use explicit key lists |
+| `system.text_log.message_format_string` | 23.1 | `queries.query_analysis/23.1.1.0/` |
+| `system.query_log.query_cache_usage` | 23.8 | `queries.query_analysis/23.8.1.0/` |
+| `system.query_log.peak_threads_usage` | 23.9 | `queries.query_analysis/23.9.1.0/` |
+| `hostname` column in system log tables | 23.11 | `queries.*/23.11.1.0/` (roots use `hostName()`) |
+| `system.tables.total_bytes_uncompressed` | 23.12 | `queries.query_analysis/23.12.1.0/` |
+
+`queries.cloud/` and `queries.gov/` target managed ClickHouse Cloud services, which always run recent versions — the 22.8 floor applies to `queries.onprem/` and the shared `queries.query_analysis/` + `alerts/` directories.
 
 ## Alerts
 

@@ -1,11 +1,8 @@
+-- 23.12+ variant: includes system.tables.total_bytes_uncompressed (added in 23.12). See root file for the 22.8 baseline.
 -- Current DDL + size for the tables the focus query touched.
 -- The query_log.tables array reports `database.table` strings; we
 -- split on '.' and look up each name in system.tables.
 -- Run when --query-id is set.
---
--- Root variant for the oldest supported servers (22.8+):
--- system.tables.total_bytes_uncompressed was added in 23.12 — see
--- 23.12.1.0/ for the variant that includes the uncompressed size.
 WITH tables_for_query AS (
     SELECT
         splitByChar('.', t)[1]                              AS db,
@@ -24,6 +21,7 @@ SELECT
     t.engine                                                AS engine,
     t.total_rows                                            AS total_rows,
     formatReadableSize(t.total_bytes)                       AS size,
+    formatReadableSize(t.total_bytes_uncompressed)          AS size_uncompressed,
     t.partition_key                                         AS partition_key,
     t.sorting_key                                           AS sorting_key,
     t.storage_policy                                        AS storage_policy,
