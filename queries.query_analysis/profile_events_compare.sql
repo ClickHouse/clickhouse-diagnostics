@@ -14,10 +14,13 @@ WITH
           AND event_time >= {from} AND event_time <= {to}
           AND type != 'QueryStart'
           AND NOT has(databases, 'system')) AS fast_id
+-- ProfileEvents is a Map(String, UInt64); we ARRAY JOIN its keys and
+-- values rather than `ARRAY JOIN ProfileEvents AS PE` + PE.1/PE.2,
+-- which errors on 22.8 (see profile_events.sql for the details).
 SELECT
-    PE.1                                                                                  AS metric,
-    anyIf(PE.2, query_id = slow_id)                                                       AS slow_value,
-    anyIf(PE.2, query_id = fast_id)                                                       AS fast_value,
+    metric,
+    anyIf(value, query_id = slow_id)                                                      AS slow_value,
+    anyIf(value, query_id = fast_id)                                                      AS fast_value,
     toInt64(slow_value) - toInt64(fast_value)                                             AS delta,
     round(
         if(greatest(slow_value, fast_value) > 0,
@@ -27,7 +30,9 @@ SELECT
         2
     )                                                                                     AS percentage_diff
 FROM {sys.query_log}
-ARRAY JOIN ProfileEvents AS PE
+ARRAY JOIN
+    mapKeys(ProfileEvents)   AS metric,
+    mapValues(ProfileEvents) AS value
 WHERE (query_id = slow_id OR query_id = fast_id)
   AND event_time >= {from}
   AND event_time <= {to}

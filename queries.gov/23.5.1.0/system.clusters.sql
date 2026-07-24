@@ -1,7 +1,4 @@
--- Root variant for the oldest supported servers (22.8+):
--- database_shard_name, database_replica_name, is_active and name were
--- added to system.clusters in 23.5 — see 23.5.1.0/system.clusters.sql
--- for the variant that includes them.
+-- 23.5+ variant: includes database_shard_name, database_replica_name, is_active and name (added to system.clusters in 23.5). See the root file for the 22.8 baseline.
 SELECT
     hex(SHA256(concat(cluster, '%salt%'))) AS cluster,
     shard_num,
@@ -15,7 +12,11 @@ SELECT
     hex(SHA256(concat(default_database, '%salt%'))) AS default_database,
     errors_count,
     slowdowns_count,
-    estimated_recovery_time
+    estimated_recovery_time,
+    hex(SHA256(concat(database_shard_name, '%salt%'))) AS database_shard_name,
+    hex(SHA256(concat(database_replica_name, '%salt%'))) AS database_replica_name,
+    is_active,
+    hex(SHA256(concat(name, '%salt%'))) AS name
 FROM
     system.clusters
 FORMAT Native
