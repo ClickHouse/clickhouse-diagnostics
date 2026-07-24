@@ -113,6 +113,53 @@ func (g *Generator) safeQuery(label, sql string) []map[string]interface{} {
 	return res.records()
 }
 
+// scalarExists runs sql (expected to return a single numeric scalar) and
+// reports whether it is non-zero. count() returns UInt64, which JSON
+// renders as a quoted string, so both string and numeric forms are
+// handled.
+func (g *Generator) scalarExists(sql string) bool {
+	r, err := g.execJSON(sql)
+	if err != nil || r == nil || r.Rows == 0 || len(r.Data) == 0 || len(r.Data[0]) == 0 {
+		return false
+	}
+	var s string
+	if err := json.Unmarshal(r.Data[0][0], &s); err == nil {
+		return s != "0" && s != ""
+	}
+	var n float64
+	if err := json.Unmarshal(r.Data[0][0], &n); err == nil {
+		return n != 0
+	}
+	return false
+}
+
+// hasColumn / hasTable let the dashboard's live queries stay compatible
+// across the supported version range (ClickHouse 22.8+) without
+// hard-coding per-column "added-in" versions. The dashboard builds its
+// SQL dynamically (unlike the .sql query files, which use the
+// version-directory mechanism), so a runtime schema check is both
+// simpler and more robust — it also covers optional tables that may be
+// disabled by config on any version. Schema is identical across
+// replicas, so these check the local system tables directly.
+func (g *Generator) hasColumn(table, column string) bool {
+	// No client to probe with (e.g. unit tests building SQL in isolation):
+	// assume the column exists so we emit the full, modern query.
+	if g.client == nil {
+		return true
+	}
+	return g.scalarExists(fmt.Sprintf(
+		"SELECT count() FROM system.columns WHERE database='system' AND table='%s' AND name='%s'",
+		table, column))
+}
+
+func (g *Generator) hasTable(table string) bool {
+	if g.client == nil {
+		return true
+	}
+	return g.scalarExists(fmt.Sprintf(
+		"SELECT count() FROM system.tables WHERE database='system' AND name='%s'", table))
+}
+
 // Generate produces dashboard.html inside outputDir.
 // alertResults may be nil or empty if alert evaluation was skipped.
 func (g *Generator) Generate(outputDir string, alertResults []alert.Result) error {
@@ -165,7 +212,8 @@ func (g *Generator) tablesListSQL() string {
 // we can label each row with the pod that produced it.
 //
 // Column choice tracks the system.dictionaries reference:
-//   https://clickhouse.com/docs/operations/system-tables/dictionaries
+//
+//	https://clickhouse.com/docs/operations/system-tables/dictionaries
 //
 // In gov mode we additionally redact `source`, `origin`, `comment`
 // and `last_exception` — these can carry connection strings, file
@@ -179,13 +227,19 @@ func (g *Generator) dictionariesSQL() string {
 		originCol = "'' AS origin"
 		commentCol = "'' AS comment"
 	}
+	// error_count was added to system.dictionaries after 22.8; fall back
+	// to 0 so the dashboard column still renders on older servers.
+	errorCountCol := "error_count"
+	if !g.hasColumn("dictionaries", "error_count") {
+		errorCountCol = "0 AS error_count"
+	}
 	return fmt.Sprintf(`
 		SELECT
 			hostname()                                          AS hostname,
 			database, name, status, type, toString(uuid)        AS uuid,
 			bytes_allocated,
 			formatReadableSize(bytes_allocated)                 AS bytes_allocated_human,
-			element_count, query_count, error_count,
+			element_count, query_count, %s,
 			round(hit_rate * 100, 2)                            AS hit_rate_pct,
 			round(found_rate * 100, 2)                          AS found_rate_pct,
 			round(load_factor, 4)                               AS load_factor,
@@ -200,7 +254,7 @@ func (g *Generator) dictionariesSQL() string {
 			%s, %s, %s, %s
 		FROM %s
 		ORDER BY database, name, hostname`,
-		sourceCol, originCol, commentCol, exceptionCol, g.sysTable("dictionaries"))
+		errorCountCol, sourceCol, originCol, commentCol, exceptionCol, g.sysTable("dictionaries"))
 }
 
 // collect gathers all metrics from ClickHouse and returns a JSON-ready map.
@@ -393,13 +447,20 @@ func (g *Generator) collect() map[string]interface{} {
 
 	// ── Crash log ─────────────────────────────────────────────────────────────
 
-	p["crash_log"] = g.safeQuery("crash_log", fmt.Sprintf(
-		`SELECT toString(event_time) AS event_time,
-				signal, toString(thread_id) AS thread_id,
-				query_id, version
-		 FROM %s ORDER BY event_time DESC LIMIT 100`,
-		g.sysTable("crash_log"),
-	))
+	// system.crash_log only exists once the server has recorded a crash,
+	// so it is absent on a healthy instance of any version — skip the
+	// panel rather than emit a spurious "table doesn't exist" warning.
+	if g.hasTable("crash_log") {
+		p["crash_log"] = g.safeQuery("crash_log", fmt.Sprintf(
+			`SELECT toString(event_time) AS event_time,
+					signal, toString(thread_id) AS thread_id,
+					query_id, version
+			 FROM %s ORDER BY event_time DESC LIMIT 100`,
+			g.sysTable("crash_log"),
+		))
+	} else {
+		p["crash_log"] = []map[string]interface{}{}
+	}
 
 	// ── Pending work ──────────────────────────────────────────────────────────
 
@@ -417,23 +478,35 @@ func (g *Generator) collect() map[string]interface{} {
 		g.sysTable("parts"),
 	))
 
+	// is_killed was added to system.mutations after 22.8; only filter on
+	// it when present, otherwise show all in-progress mutations.
+	killedFilter := ""
+	if g.hasColumn("mutations", "is_killed") {
+		killedFilter = "AND is_killed = 0"
+	}
 	p["mutations"] = g.safeQuery("mutations", fmt.Sprintf(
 		`SELECT database, table, mutation_id, command,
 				toString(create_time) AS create_time, parts_to_do
 		 FROM %s
-		 WHERE parts_to_do > 0 AND is_killed = 0
+		 WHERE parts_to_do > 0 %s
 		 ORDER BY parts_to_do DESC LIMIT 20`,
-		g.sysTable("mutations"),
+		g.sysTable("mutations"), killedFilter,
 	))
 
+	// bytes_on_disk was added to system.detached_parts in 22.11; fall
+	// back to a count-only view (no size) on older servers.
+	detachedSize, detachedOrder := "formatReadableSize(sum(bytes_on_disk)) AS size", "sum(bytes_on_disk)"
+	if !g.hasColumn("detached_parts", "bytes_on_disk") {
+		detachedSize, detachedOrder = "'n/a' AS size", "count()"
+	}
 	p["detached"] = g.safeQuery("detached", fmt.Sprintf(
 		`SELECT database, table, count() AS count,
-				formatReadableSize(sum(bytes_on_disk)) AS size,
+				%s,
 				arrayStringConcat(groupUniqArray(reason), ', ') AS reasons
 		 FROM %s
 		 GROUP BY database, table
-		 ORDER BY sum(bytes_on_disk) DESC LIMIT 20`,
-		g.sysTable("detached_parts"),
+		 ORDER BY %s DESC LIMIT 20`,
+		detachedSize, g.sysTable("detached_parts"), detachedOrder,
 	))
 
 	// cluster nodes (cloud only)
@@ -525,23 +598,34 @@ func (g *Generator) collect() map[string]interface{} {
 
 	// ── Async insert activity (last 24 h, skip gov) ───────────────────────────
 
-	if g.mode != "gov" {
+	// system.asynchronous_insert_log was added in 22.10; skip the panel
+	// on older servers where the table doesn't exist.
+	if g.mode != "gov" && g.hasTable("asynchronous_insert_log") {
 		asyncTable := "system.asynchronous_insert_log"
 		if g.mode == "cloud" {
 			asyncTable = "clusterAllReplicas(default, merge(system, '^asynchronous_insert_log'))"
 		}
-		// flush_time_microseconds is DateTime64(6) in CH 25.x and can't be
-		// passed to avg() directly (ILLEGAL_TYPE_OF_ARGUMENT). Compute the
-		// queue→flush latency in milliseconds via dateDiff instead.
+		// The `rows` column was added to asynchronous_insert_log after
+		// 22.12 (22.10–22.12 have `bytes` but not `rows`); report whichever
+		// volume column exists so the panel populates across the range.
+		volumeCol := "sum(bytes) AS total_bytes"
+		if g.hasColumn("asynchronous_insert_log", "rows") {
+			volumeCol = "sum(rows) AS total_rows"
+		}
+		// Queue→flush latency in ms. We avoid dateDiff('millisecond', …):
+		// the sub-second unit isn't supported on older servers (22.12
+		// errors with BAD_ARGUMENTS). Subtracting the DateTime/DateTime64
+		// values as floats works across the whole range — full ms
+		// precision on 25.x (DateTime64), second granularity on 22.x.
 		p["async_inserts"] = g.safeQuery("async_inserts", fmt.Sprintf(
 			`SELECT toString(toStartOfHour(event_time)) AS hour,
 				 status, count() AS flushes,
-				 sum(rows) AS total_rows,
-				 round(avg(dateDiff('millisecond', event_time, flush_time)), 0) AS avg_flush_ms
+				 %s,
+				 round(avg((toFloat64(flush_time) - toFloat64(event_time)) * 1000), 0) AS avg_flush_ms
 			 FROM %s
 			 WHERE event_time > now() - INTERVAL 24 HOUR
 			 GROUP BY hour, status ORDER BY hour`,
-			asyncTable,
+			volumeCol, asyncTable,
 		))
 	} else {
 		p["async_inserts"] = []map[string]interface{}{}
