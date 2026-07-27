@@ -158,7 +158,14 @@ func (ev *Evaluator) RunAll(dir string, serverVersion internal.Version) []Result
 
 	var results []Result
 	for _, f := range files {
-		results = append(results, ev.evalFile(f.FullPath))
+		r := ev.evalFile(f.FullPath)
+		// Preserve the version-override context in the reported filename
+		// (mirrors analysis.go) so support engineers can tell which variant
+		// fired — e.g. "22.11.1.0/detached_parts_exist.yaml".
+		if f.DirName != "" {
+			r.File = f.DirName + "/" + f.Name
+		}
+		results = append(results, r)
 	}
 
 	fired := 0

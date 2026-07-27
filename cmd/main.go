@@ -249,7 +249,7 @@ func main() {
 
 	// Generate HTML dashboard if not skipped
 	if !skipDashboard {
-		gen := dashboard.NewGenerator(client, mode).WithAnalysis(analysisOpts, analysisDir)
+		gen := dashboard.NewGenerator(client, mode).WithServerVersion(serverVersion).WithAnalysis(analysisOpts, analysisDir)
 		if err := gen.Generate(finalOutputDir, alertResults); err != nil {
 			fmt.Printf("Warning: dashboard generation failed: %v\n", err)
 		}

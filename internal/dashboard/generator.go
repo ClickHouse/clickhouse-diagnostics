@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"clickhouse-diagnostic/internal"
 	"clickhouse-diagnostic/internal/alert"
 	"clickhouse-diagnostic/internal/query"
 	"clickhouse-diagnostic/pkg"
@@ -16,15 +17,26 @@ import (
 
 // Generator creates offline HTML diagnostic dashboards from ClickHouse data.
 type Generator struct {
-	client      *pkg.ClickHouseClient
-	mode        string
-	analysis    query.AnalysisOpts
-	analysisDir string
+	client        *pkg.ClickHouseClient
+	mode          string
+	serverVersion internal.Version
+	analysis      query.AnalysisOpts
+	analysisDir   string
+	probeCache    map[string]bool // memoized hasColumn/hasTable results
 }
 
 // NewGenerator creates a new Generator.
 func NewGenerator(client *pkg.ClickHouseClient, mode string) *Generator {
 	return &Generator{client: client, mode: strings.ToLower(mode)}
+}
+
+// WithServerVersion records the connected server version so the
+// query-analysis section resolves the same version-directory overrides
+// as AnalysisCollector.Collect (see collectAnalysis). Returns the
+// receiver for chaining.
+func (g *Generator) WithServerVersion(v internal.Version) *Generator {
+	g.serverVersion = v
+	return g
 }
 
 // WithAnalysis attaches query-analysis options + the directory holding
@@ -113,24 +125,60 @@ func (g *Generator) safeQuery(label, sql string) []map[string]interface{} {
 	return res.records()
 }
 
-// scalarExists runs sql (expected to return a single numeric scalar) and
-// reports whether it is non-zero. count() returns UInt64, which JSON
-// renders as a quoted string, so both string and numeric forms are
-// handled.
-func (g *Generator) scalarExists(sql string) bool {
+// scalarCount runs sql (expected to return a single count()) and returns
+// the value. count() is UInt64, JSON-rendered as a quoted string, so both
+// string and numeric forms are parsed.
+func (g *Generator) scalarCount(sql string) (int64, error) {
 	r, err := g.execJSON(sql)
-	if err != nil || r == nil || r.Rows == 0 || len(r.Data) == 0 || len(r.Data[0]) == 0 {
-		return false
+	if err != nil {
+		return 0, err
+	}
+	if r == nil || r.Rows == 0 || len(r.Data) == 0 || len(r.Data[0]) == 0 {
+		return 0, nil
 	}
 	var s string
-	if err := json.Unmarshal(r.Data[0][0], &s); err == nil {
-		return s != "0" && s != ""
+	if json.Unmarshal(r.Data[0][0], &s) == nil {
+		n, _ := strconv.ParseInt(s, 10, 64)
+		return n, nil
 	}
-	var n float64
-	if err := json.Unmarshal(r.Data[0][0], &n); err == nil {
-		return n != 0
+	var f float64
+	if json.Unmarshal(r.Data[0][0], &f) == nil {
+		return int64(f), nil
 	}
-	return false
+	return 0, nil
+}
+
+// probe runs a schema-existence count query (memoized by key) and reports
+// whether the object exists.
+//
+// On a probe ERROR it fails OPEN — assumes the object is present and prints
+// a [dashboard] warning. A transient probe failure must not silently
+// downgrade the dashboard to its oldest-server shape (this tool exists to
+// diagnose; a silent downgrade would be the wrong default). If the object
+// really is absent, the subsequent full query fails through safeQuery,
+// which surfaces its own visible warning. A genuine zero count means
+// "absent" and selects the fallback.
+func (g *Generator) probe(key, sql string) bool {
+	// No client to probe with (e.g. unit tests building SQL in isolation):
+	// assume present so we emit the full, modern query.
+	if g.client == nil {
+		return true
+	}
+	if g.probeCache == nil {
+		g.probeCache = map[string]bool{}
+	}
+	if v, ok := g.probeCache[key]; ok {
+		return v
+	}
+	n, err := g.scalarCount(sql)
+	if err != nil {
+		fmt.Printf("  [dashboard] schema probe %q failed: %v (assuming present)\n", key, err)
+		g.probeCache[key] = true
+		return true
+	}
+	present := n > 0
+	g.probeCache[key] = present
+	return present
 }
 
 // hasColumn / hasTable let the dashboard's live queries stay compatible
@@ -142,21 +190,13 @@ func (g *Generator) scalarExists(sql string) bool {
 // disabled by config on any version. Schema is identical across
 // replicas, so these check the local system tables directly.
 func (g *Generator) hasColumn(table, column string) bool {
-	// No client to probe with (e.g. unit tests building SQL in isolation):
-	// assume the column exists so we emit the full, modern query.
-	if g.client == nil {
-		return true
-	}
-	return g.scalarExists(fmt.Sprintf(
+	return g.probe(table+"."+column, fmt.Sprintf(
 		"SELECT count() FROM system.columns WHERE database='system' AND table='%s' AND name='%s'",
 		table, column))
 }
 
 func (g *Generator) hasTable(table string) bool {
-	if g.client == nil {
-		return true
-	}
-	return g.scalarExists(fmt.Sprintf(
+	return g.probe("table:"+table, fmt.Sprintf(
 		"SELECT count() FROM system.tables WHERE database='system' AND name='%s'", table))
 }
 
@@ -605,27 +645,29 @@ func (g *Generator) collect() map[string]interface{} {
 		if g.mode == "cloud" {
 			asyncTable = "clusterAllReplicas(default, merge(system, '^asynchronous_insert_log'))"
 		}
-		// The `rows` column was added to asynchronous_insert_log after
-		// 22.12 (22.10–22.12 have `bytes` but not `rows`); report whichever
-		// volume column exists so the panel populates across the range.
-		volumeCol := "sum(bytes) AS total_bytes"
+		// total_bytes exists since the table's inception (22.10); total_rows
+		// was added later (absent on 22.10–23.x, present by 23.8+). Always
+		// report bytes and add rows when available, so no rendered column is
+		// ever blank (the front-end shows both).
+		rowsCol := "0 AS total_rows"
 		if g.hasColumn("asynchronous_insert_log", "rows") {
-			volumeCol = "sum(rows) AS total_rows"
+			rowsCol = "sum(rows) AS total_rows"
 		}
 		// Queue→flush latency in ms. We avoid dateDiff('millisecond', …):
-		// the sub-second unit isn't supported on older servers (22.12
-		// errors with BAD_ARGUMENTS). Subtracting the DateTime/DateTime64
-		// values as floats works across the whole range — full ms
-		// precision on 25.x (DateTime64), second granularity on 22.x.
+		// the sub-second unit errors on older servers (22.12: BAD_ARGUMENTS).
+		// event_time_microseconds / flush_time_microseconds are DateTime64(6)
+		// and exist since 22.10, so subtracting them as floats gives true
+		// sub-second latency across the whole supported range.
 		p["async_inserts"] = g.safeQuery("async_inserts", fmt.Sprintf(
 			`SELECT toString(toStartOfHour(event_time)) AS hour,
 				 status, count() AS flushes,
 				 %s,
-				 round(avg((toFloat64(flush_time) - toFloat64(event_time)) * 1000), 0) AS avg_flush_ms
+				 formatReadableSize(sum(bytes)) AS total_bytes,
+				 round(avg((toFloat64(flush_time_microseconds) - toFloat64(event_time_microseconds)) * 1000), 0) AS avg_flush_ms
 			 FROM %s
 			 WHERE event_time > now() - INTERVAL 24 HOUR
 			 GROUP BY hour, status ORDER BY hour`,
-			volumeCol, asyncTable,
+			rowsCol, asyncTable,
 		))
 	} else {
 		p["async_inserts"] = []map[string]interface{}{}
@@ -678,8 +720,26 @@ func (g *Generator) collectAnalysis(p map[string]interface{}) {
 		"qa_failed":           "failed_queries.sql",
 		"qa_executions":       "executions_timeline.sql",
 	}
+
+	// Resolve version-directory overrides exactly as AnalysisCollector
+	// does, so the dashboard renders the SAME variant that the archive
+	// writes to disk. Reading the root file directly would run the
+	// downgraded 22.8 baseline on modern servers. Falls back to the base
+	// name (root) if resolution fails.
+	resolved := map[string]string{} // base name → full path
+	if vf, err := query.FindVersionedFiles(g.analysisDir, g.serverVersion, ".sql"); err == nil {
+		for _, f := range vf {
+			resolved[f.Name] = f.FullPath
+		}
+	}
 	for key, fname := range files {
-		raw, err := os.ReadFile(filepath.Join(g.analysisDir, fname))
+		path, ok := resolved[fname]
+		if !ok {
+			// Not surfaced by the resolver (e.g. a version-dir-only file
+			// gated above this server): skip, matching Collect().
+			continue
+		}
+		raw, err := os.ReadFile(path)
 		if err != nil {
 			continue
 		}
@@ -2221,7 +2281,7 @@ document.addEventListener('DOMContentLoaded',function(){
         scales:{x:{stacked:true,ticks:{maxRotation:45}},y:{stacked:true,beginAtZero:true}}}
     });
     renderTable('tbl-async-inserts',rows,
-      ['hour','status','flushes','total_rows','avg_flush_ms']);
+      ['hour','status','flushes','total_rows','total_bytes','avg_flush_ms']);
   })();
 });
 </script>

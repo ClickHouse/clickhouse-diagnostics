@@ -323,6 +323,8 @@ alerts/
 
 A file that exists **only** in a version subdirectory (no root counterpart) is simply skipped on older servers — use this for queries against system tables that don't exist yet (e.g. `system.asynchronous_insert_log`, added in 22.10).
 
+> **Overrides match by base filename.** A file in a version subdirectory overrides a root file only when their names are identical. If you rename the file in the version directory, it is treated as a *separate* query/rule (both run), not an override — so keep the filename the same as the root when you intend to override it.
+
 ### Supported ClickHouse versions
 
 The tool targets **ClickHouse 22.8 and newer** for on-prem servers. Root-level query and alert files stick to columns and syntax available in 22.8; anything newer lives behind a version subdirectory. Current gates (verified against the ClickHouse changelogs):
