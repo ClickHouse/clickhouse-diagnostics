@@ -196,8 +196,17 @@ func (g *Generator) hasColumn(table, column string) bool {
 }
 
 func (g *Generator) hasTable(table string) bool {
+	// Unlike column schema (identical across replicas), a table's
+	// *existence* can be per-replica — system.crash_log only materialises
+	// on the node that crashed, and the panels query it via
+	// clusterAllReplicas in cloud mode. So in cloud mode check every
+	// replica, otherwise a crash on a non-serving node would hide the panel.
+	tablesRef := "system.tables"
+	if g.mode == "cloud" {
+		tablesRef = "clusterAllReplicas(default, system.tables)"
+	}
 	return g.probe("table:"+table, fmt.Sprintf(
-		"SELECT count() FROM system.tables WHERE database='system' AND name='%s'", table))
+		"SELECT count() FROM %s WHERE database='system' AND name='%s'", tablesRef, table))
 }
 
 // Generate produces dashboard.html inside outputDir.
@@ -645,13 +654,14 @@ func (g *Generator) collect() map[string]interface{} {
 		if g.mode == "cloud" {
 			asyncTable = "clusterAllReplicas(default, merge(system, '^asynchronous_insert_log'))"
 		}
-		// total_bytes exists since the table's inception (22.10); total_rows
-		// was added later (absent on 22.10–23.x, present by 23.8+). Always
-		// report bytes and add rows when available, so no rendered column is
-		// ever blank (the front-end shows both).
-		rowsCol := "0 AS total_rows"
+		// total_bytes exists since the table's inception (22.10); the `rows`
+		// column was added in 23.4 (absent on 22.10–23.3). Always report
+		// bytes and add rows when available, so no rendered column is ever
+		// blank (the front-end shows both); 'n/a' reads more honestly than a
+		// literal 0 when the column is unavailable.
+		rowsCol := "'n/a' AS total_rows"
 		if g.hasColumn("asynchronous_insert_log", "rows") {
-			rowsCol = "sum(rows) AS total_rows"
+			rowsCol = "toString(sum(rows)) AS total_rows"
 		}
 		// Queue→flush latency in ms. We avoid dateDiff('millisecond', …):
 		// the sub-second unit errors on older servers (22.12: BAD_ARGUMENTS).
@@ -724,20 +734,25 @@ func (g *Generator) collectAnalysis(p map[string]interface{}) {
 	// Resolve version-directory overrides exactly as AnalysisCollector
 	// does, so the dashboard renders the SAME variant that the archive
 	// writes to disk. Reading the root file directly would run the
-	// downgraded 22.8 baseline on modern servers. Falls back to the base
-	// name (root) if resolution fails.
+	// downgraded 22.8 baseline on modern servers.
 	resolved := map[string]string{} // base name → full path
-	if vf, err := query.FindVersionedFiles(g.analysisDir, g.serverVersion, ".sql"); err == nil {
-		for _, f := range vf {
-			resolved[f.Name] = f.FullPath
-		}
+	vf, err := query.FindVersionedFiles(g.analysisDir, g.serverVersion, ".sql")
+	if err != nil {
+		// Don't silently blank the whole Query Analysis section on a
+		// resolver error (unreadable dir, broken symlink, …): warn and
+		// fall back to the root files below.
+		fmt.Printf("  [dashboard] query-analysis file resolution failed: %v (falling back to root files)\n", err)
+	}
+	for _, f := range vf {
+		resolved[f.Name] = f.FullPath
 	}
 	for key, fname := range files {
 		path, ok := resolved[fname]
 		if !ok {
-			// Not surfaced by the resolver (e.g. a version-dir-only file
-			// gated above this server): skip, matching Collect().
-			continue
+			// Fall back to the root file. For a version-dir-only file
+			// gated above this server there is no root, so os.ReadFile
+			// fails below and we skip it — matching Collect().
+			path = filepath.Join(g.analysisDir, fname)
 		}
 		raw, err := os.ReadFile(path)
 		if err != nil {

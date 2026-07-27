@@ -331,17 +331,28 @@ The tool targets **ClickHouse 22.8 and newer** for on-prem servers. Root-level q
 
 | Feature | Added in | Gated at |
 |---|---|---|
+| `ARRAY JOIN` over a `Map` (`ProfileEvents`) | after 22.8 | roots use `mapKeys()`/`mapValues()` (all versions) |
 | `system.asynchronous_insert_log` table | 22.10 | `queries.onprem/22.10.1.0/` |
 | `system.disks.unreserved_space` | 22.10 | `queries.onprem/22.10.1.0/` |
 | `system.detached_parts.bytes_on_disk`, `path` | 22.11 | `queries.onprem/22.11.1.0/`, `alerts/22.11.1.0/` |
 | `GROUP BY ALL` syntax | 22.12 | root files use explicit key lists |
+| `dateDiff('millisecond', …)` sub-second unit | after 22.12 | async latency uses float subtraction of `*_microseconds` |
 | `system.text_log.message_format_string` | 23.1 | `queries.query_analysis/23.1.1.0/` |
+| `system.asynchronous_insert_log.rows` | 23.4 | `queries.onprem/23.4.1.0/` (22.10–23.3 report `bytes`) |
+| `system.clusters` replicated-db columns (`database_shard_name`, `database_replica_name`, `is_active`, `name`) | 23.5 | `queries.*/23.5.1.0/` |
 | `system.query_log.query_cache_usage` | 23.8 | `queries.query_analysis/23.8.1.0/` |
 | `system.query_log.peak_threads_usage` | 23.9 | `queries.query_analysis/23.9.1.0/` |
 | `hostname` column in system log tables | 23.11 | `queries.*/23.11.1.0/` (roots use `hostName()`) |
 | `system.tables.total_bytes_uncompressed` | 23.12 | `queries.query_analysis/23.12.1.0/` |
+| `system.mutations.is_killed` | 24.1 | `alerts/24.1.1.0/` (root omits the filter) |
+| `system.tables.metadata_version` | 24.2 | `queries.*/24.2.1.0/` |
+| `system.tables.parameterized_view_parameters` | 25.4 | `queries.*/25.4.1.0/` |
+
+The dashboard (`internal/dashboard/generator.go`) builds its SQL dynamically, so instead of version directories it probes the live schema at runtime (`hasColumn`/`hasTable`) and adapts each panel — covering the same columns (`error_count`, `is_killed`, `bytes_on_disk`, the async table/`rows`, `crash_log`) plus optional tables that may be disabled by config.
 
 `queries.cloud/` and `queries.gov/` target managed ClickHouse Cloud services, which always run recent versions — the 22.8 floor applies to `queries.onprem/` and the shared `queries.query_analysis/` + `alerts/` directories.
+
+Overrides are matched **only** at the top level of each directory; a version subdirectory nested deeper (e.g. `alerts/foo/25.4.1.0/`) is not treated as a nested override of `alerts/foo/`.
 
 ## Alerts
 

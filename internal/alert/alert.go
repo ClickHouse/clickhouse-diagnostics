@@ -219,6 +219,11 @@ func (ev *Evaluator) evalFile(path string) Result {
 	resp, err := ev.client.ExecuteQueryWithFormat(sql)
 	if err != nil {
 		r.Error = fmt.Sprintf("query: %v", err)
+		// Surface the failure: a rule stored as r.Error still counts as
+		// "fired", but without this line the error text never reaches
+		// stdout, so a broken rule (e.g. a column missing on this server
+		// version) looks identical to a healthy one in the run output.
+		fmt.Printf("  [alert] ERROR %q: %v\n", def.Name, err)
 		return r
 	}
 

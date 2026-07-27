@@ -24,6 +24,11 @@ SELECT
     t.engine                                                AS engine,
     t.total_rows                                            AS total_rows,
     formatReadableSize(t.total_bytes)                       AS size,
+    -- total_bytes_uncompressed was added to system.tables in 23.12; the
+    -- dashboard renders a size_uncompressed column, so emit a placeholder
+    -- here to keep it present (the 23.12.1.0/ variant fills in the real
+    -- value).
+    'n/a'                                                   AS size_uncompressed,
     t.partition_key                                         AS partition_key,
     t.sorting_key                                           AS sorting_key,
     t.storage_policy                                        AS storage_policy,
