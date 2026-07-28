@@ -197,6 +197,63 @@ func (ev *Evaluator) RunAll(dir string, serverVersion internal.Version) []Result
 	return results
 }
 
+// WriteSummaryJSON writes alerts_summary.json into dir: one entry per
+// rule with its identity, outcome and instance COUNT — deliberately NOT
+// the matched rows.
+//
+// This is the gov-mode substitute for the HTML dashboard (the dashboard is
+// the only other consumer of alert results, and it isn't produced in gov
+// mode). Row contents are omitted because an alert's columns are defined
+// by the rule, so they routinely carry raw database/table names that gov
+// mode hashes everywhere else — a count plus the rule's own message
+// template gives support the signal without the identifiers.
+func WriteSummaryJSON(dir string, results []Result) error {
+	type entry struct {
+		Name     string `json:"name"`
+		Title    string `json:"title"`
+		Severity string `json:"severity"`
+		File     string `json:"file"`
+		State    string `json:"state"` // fired | clean | skipped | error
+		Count    int    `json:"instance_count"`
+		Reason   string `json:"skip_reason,omitempty"`
+		Error    string `json:"error,omitempty"`
+		FiredAt  string `json:"checked_at"`
+	}
+	evaluated, fired, skipped := Summarize(results)
+	out := struct {
+		Evaluated     int     `json:"evaluated"`
+		Fired         int     `json:"fired"`
+		NotApplicable int     `json:"not_applicable"`
+		Note          string  `json:"note"`
+		Rules         []entry `json:"rules"`
+	}{
+		Evaluated:     evaluated,
+		Fired:         fired,
+		NotApplicable: skipped,
+		Note:          "gov mode: rule outcomes and instance counts only; matched rows are omitted because their columns can contain unhashed identifiers",
+	}
+	for _, r := range results {
+		e := entry{Name: r.Name, Title: r.Title, Severity: r.Severity, File: r.File,
+			Count: len(r.Rows), Reason: r.Reason, Error: r.Error, FiredAt: r.FiredAt}
+		switch {
+		case r.Skipped:
+			e.State = "skipped"
+		case r.Error != "":
+			e.State = "error"
+		case len(r.Rows) > 0:
+			e.State = "fired"
+		default:
+			e.State = "clean"
+		}
+		out.Rules = append(out.Rules, e)
+	}
+	blob, err := json.MarshalIndent(out, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, "alerts_summary.json"), blob, 0600)
+}
+
 // Summarize counts results for reporting. "evaluated" excludes skipped
 // rules — a rule that never ran (its table doesn't exist on this server)
 // must not be reported as a check that passed. Single source of truth
@@ -219,6 +276,22 @@ func Summarize(results []Result) (evaluated, fired, skipped int) {
 // so the version-gating detector still catches the is_killed class of bug.
 func isMissingTable(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "UNKNOWN_TABLE")
+}
+
+// notApplicable reports whether err means "this rule does not apply to
+// this server" (as opposed to "this rule is broken").
+//
+// Only safe to conclude in single-node modes. In cloud, per-replica
+// tables are read through clusterAllReplicas, and a table that exists on
+// only SOME replicas — system.crash_log materialises solely on the node
+// that crashed — makes the fan-out raise UNKNOWN_TABLE from the healthy
+// replicas. Treating that as "not applicable" would silently reclassify
+// a fired `critical` crash alert as a check that doesn't apply, on a
+// cluster where a node really did crash. So in cloud mode we keep it an
+// error and let it surface — the same "surface, don't hide" tradeoff the
+// dashboard's hasTable() documents for this exact table.
+func (ev *Evaluator) notApplicable(err error) bool {
+	return isMissingTable(err) && ev.mode != "cloud"
 }
 
 // evalFile loads, validates, and executes one alert rule file.
@@ -276,7 +349,11 @@ func (ev *Evaluator) evalFile(path string) Result {
 		// must stay reserved for genuine breakage like a missing column
 		// (UNKNOWN_IDENTIFIER) — nor gets counted as an evaluated check that
 		// found nothing. RunAll prints genuine errors.
-		if isMissingTable(err) {
+		//
+		// notApplicable() excludes cloud mode, where a clusterAllReplicas
+		// fan-out over a partially-present table cannot be distinguished
+		// from a genuinely absent one.
+		if ev.notApplicable(err) {
 			r.Skipped = true
 			r.Reason = "table not present"
 			fmt.Printf("  [alert] skipped %q (table not present)\n", def.Name)

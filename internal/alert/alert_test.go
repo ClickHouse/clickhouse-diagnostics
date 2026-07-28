@@ -273,6 +273,36 @@ func TestRunAll_OverrideFilePrefix(t *testing.T) {
 	}
 }
 
+// TestNotApplicable_ModeAware pins the cloud asymmetry: a missing table
+// means "rule not applicable" only on a single node. In cloud, per-replica
+// tables are read via clusterAllReplicas, and a table present on only SOME
+// replicas (system.crash_log lives solely on the node that crashed) makes
+// the fan-out raise UNKNOWN_TABLE from the healthy ones — so treating it as
+// not-applicable would hide a real critical crash alert.
+func TestNotApplicable_ModeAware(t *testing.T) {
+	missing := errString("Code: 60. DB::Exception: Table system.crash_log doesn't exist. (UNKNOWN_TABLE) (version 24.8.1.1)")
+	badColumn := errString("Code: 47. DB::Exception: Missing columns: 'is_killed' (UNKNOWN_IDENTIFIER)")
+
+	for _, mode := range []string{"onprem", "gov"} {
+		ev := &Evaluator{mode: mode}
+		if !ev.notApplicable(missing) {
+			t.Errorf("%s: a locally missing table should be not-applicable", mode)
+		}
+		if ev.notApplicable(badColumn) {
+			t.Errorf("%s: a missing COLUMN must stay a genuine error", mode)
+		}
+	}
+
+	cloud := &Evaluator{mode: "cloud"}
+	if cloud.notApplicable(missing) {
+		t.Error("cloud: UNKNOWN_TABLE behind clusterAllReplicas must NOT be treated as not-applicable — " +
+			"it can mean the table exists on a different replica (a real crash)")
+	}
+	if cloud.notApplicable(badColumn) {
+		t.Error("cloud: a missing COLUMN must stay a genuine error")
+	}
+}
+
 func TestIsMissingTable(t *testing.T) {
 	cases := []struct {
 		name string

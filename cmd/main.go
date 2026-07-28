@@ -133,6 +133,19 @@ func main() {
 	fmt.Printf("ClickHouse server version: %d.%d.%d.%d\n",
 		serverVersion.Major, serverVersion.Minor, serverVersion.Patch, serverVersion.Build)
 
+	// Query analysis is not available in gov mode: its results embed raw
+	// query text, exception messages, identifiers and full DDL
+	// (query_details, failed_queries, tables_for_query, text_log slices),
+	// which gov-mode hashing cannot cover — the archive would leak the
+	// names gov exists to protect. Refuse the flags rather than silently
+	// producing an unhashed bundle. Checked before the dry-run banner so
+	// an unsupported combination fails immediately.
+	if mode == "gov" && (queryID != "" || normalizedHash != "") {
+		fmt.Println("Error: --query-id / --normalized-query-hash are not supported in gov mode " +
+			"(query-analysis output contains raw query text and identifiers that cannot be hashed)")
+		return
+	}
+
 	// Dry-run: activate AFTER the version probe so version detection
 	// still works, but BEFORE everything else. resolveAnalysisOpts
 	// uses ExecuteQueryReal for its pre-flight lookups, which bypasses
@@ -160,18 +173,6 @@ func main() {
 		}
 		defer os.RemoveAll(tmpDir)
 		outputDir = tmpDir
-	}
-
-	// Query analysis is not available in gov mode: its results embed raw
-	// query text, exception messages, identifiers and full DDL
-	// (query_details, failed_queries, tables_for_query, text_log slices),
-	// which gov-mode hashing cannot cover — the archive would leak the
-	// names gov exists to protect. Refuse the flags rather than silently
-	// producing an unhashed bundle.
-	if mode == "gov" && (queryID != "" || normalizedHash != "") {
-		fmt.Println("Error: --query-id / --normalized-query-hash are not supported in gov mode " +
-			"(query-analysis output contains raw query text and identifiers that cannot be hashed)")
-		return
 	}
 
 	// Resolve query-analysis options up front so an invalid --query-id
@@ -260,8 +261,34 @@ func main() {
 			evaluated, fired, skipped)
 	}
 
-	// Generate HTML dashboard if not skipped
-	if !skipDashboard {
+	// Generate HTML dashboard if not skipped.
+	//
+	// Not produced in gov mode: dashboard.html lands in the same archive as
+	// the hashed .native files, but its queries are built in Go and select
+	// raw identifiers (database/table names for up to 2000 tables, disk
+	// paths, users, plus server-generated text like last_exception and
+	// last_error_message) — the very values the queries.gov/*.sql files
+	// hash. Shipping it would defeat gov-mode hashing, so it is refused for
+	// the same reason query analysis is. Hashing every dashboard panel is
+	// the follow-up that would restore it.
+	if mode == "gov" {
+		fmt.Println("Skipping HTML dashboard in gov mode: its panels select raw identifiers " +
+			"(table names, disk paths, users, exception text) that cannot be hashed, and the " +
+			"dashboard is part of the support-bound archive.")
+		// The dashboard is the only consumer of alertResults, so without a
+		// substitute a gov archive would carry no alert record at all.
+		// Write rule-level metadata only — name/title/severity/state and the
+		// instance COUNT, never the matched rows, whose columns are
+		// rule-defined and would carry raw identifiers.
+		if !skipAlerts && len(alertResults) > 0 {
+			if err := alert.WriteSummaryJSON(finalOutputDir, alertResults); err != nil {
+				fmt.Printf("Warning: alert summary could not be written: %v\n", err)
+			} else {
+				fmt.Println("Wrote alerts_summary.json (rule outcomes and instance counts; " +
+					"matched rows omitted in gov mode).")
+			}
+		}
+	} else if !skipDashboard {
 		gen := dashboard.NewGenerator(client, mode).WithServerVersion(serverVersion).WithAnalysis(analysisOpts, analysisDir)
 		if err := gen.Generate(finalOutputDir, alertResults); err != nil {
 			fmt.Printf("Warning: dashboard generation failed: %v\n", err)

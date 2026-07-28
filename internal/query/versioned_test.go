@@ -3,6 +3,8 @@ package query
 import (
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"testing"
 
 	"clickhouse-diagnostic/internal"
@@ -178,9 +180,14 @@ func TestFindVersionedFiles_TieredLadder(t *testing.T) {
 // gate). This is the CI check that a rung added in one mode but renamed,
 // or a version dir with a typo, can't land silently.
 func TestFindVersionedFiles_RealRepoDirs(t *testing.T) {
-	// Files that intentionally exist ONLY in version directories.
+	// Files that intentionally exist ONLY in version directories, keyed by
+	// "<dir>/<file>" so the exemption stays as narrow as its reason: the
+	// asynchronous_insert_log table was added in 22.10, so onprem/gov have
+	// no root file — but cloud DOES (it never runs anything that old), and
+	// there the exemption must not apply.
 	versionOnly := map[string]bool{
-		"system.asynchronous_insert_log_7_days.sql": true, // table added 22.10
+		"queries.onprem/system.asynchronous_insert_log_7_days.sql": true,
+		"queries.gov/system.asynchronous_insert_log_7_days.sql":    true,
 	}
 	dirs := map[string]string{
 		"../../queries.onprem":         ".sql",
@@ -205,7 +212,7 @@ func TestFindVersionedFiles_RealRepoDirs(t *testing.T) {
 			// Every override must shadow a root twin (same base name)
 			// unless it's a documented version-only file.
 			for _, f := range files {
-				if f.DirName == "" || versionOnly[f.Name] {
+				if f.DirName == "" || versionOnly[filepath.Base(dir)+"/"+f.Name] {
 					continue
 				}
 				if _, err := os.Stat(filepath.Join(dir, f.Name)); err != nil {
@@ -214,6 +221,84 @@ func TestFindVersionedFiles_RealRepoDirs(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestRealRepoLadders_Monotonic automates the check the SQL review has been
+// doing by hand every round: as the server version rises, a file's selected
+// column set must never SHRINK. A rung that forgets a column its lower rung
+// had silently drops data on newer servers — and only on newer servers,
+// which is exactly the case nobody runs locally.
+//
+// Column sets are approximated by the aliases/bare columns each file
+// projects; that's coarse but sufficient to catch a dropped column, which is
+// the failure mode.
+func TestRealRepoLadders_Monotonic(t *testing.T) {
+	ladders := []internal.Version{
+		{Major: 22, Minor: 8, Patch: 1}, {Major: 22, Minor: 11, Patch: 1},
+		{Major: 23, Minor: 4, Patch: 1}, {Major: 23, Minor: 11, Patch: 1},
+		{Major: 24, Minor: 2, Patch: 1}, {Major: 25, Minor: 4, Patch: 1},
+	}
+	// Columns that a higher rung may legitimately drop because the lower
+	// rung only had them as a placeholder for an unavailable real column.
+	placeholder := regexp.MustCompile(`^'n/a'|^0 AS `)
+
+	for _, dir := range []string{"../../queries.onprem", "../../queries.gov", "../../queries.query_analysis"} {
+		t.Run(filepath.Base(dir), func(t *testing.T) {
+			if _, err := os.Stat(dir); os.IsNotExist(err) {
+				t.Skipf("%s not present", dir)
+			}
+			prev := map[string]map[string]bool{} // file → column set at the previous version
+			for _, v := range ladders {
+				files, err := FindVersionedFiles(dir, v, ".sql")
+				if err != nil {
+					t.Fatalf("%d.%d: %v", v.Major, v.Minor, err)
+				}
+				for _, f := range files {
+					raw, err := os.ReadFile(f.FullPath)
+					if err != nil {
+						t.Fatal(err)
+					}
+					cur := projectedColumns(string(raw))
+					for col := range prev[f.Name] {
+						if !cur[col] && !placeholder.MatchString(col) {
+							t.Errorf("%s: column %q present below %d.%d but missing from the rung selected at %d.%d (%s) — ladder must not shrink",
+								f.Name, col, v.Major, v.Minor, v.Major, v.Minor, f.DirName)
+						}
+					}
+					prev[f.Name] = cur
+				}
+			}
+		})
+	}
+}
+
+// projectedColumns extracts the output column names a query projects: the
+// alias when one is present, otherwise the bare column. Comments, the FROM
+// clause onward, and aggregate internals are ignored.
+func projectedColumns(sql string) map[string]bool {
+	out := map[string]bool{}
+	reAlias := regexp.MustCompile(`(?i)\sAS\s+` + "`?" + `([A-Za-z_][A-Za-z0-9_.]*)` + "`?" + `\s*,?$`)
+	reBare := regexp.MustCompile("^`?([A-Za-z_][A-Za-z0-9_.]*)`?,$")
+	for _, line := range strings.Split(sql, "\n") {
+		s := strings.TrimSpace(line)
+		if s == "" || strings.HasPrefix(s, "--") {
+			continue
+		}
+		up := strings.ToUpper(s)
+		if strings.HasPrefix(up, "FROM ") || strings.HasPrefix(up, "WHERE ") ||
+			strings.HasPrefix(up, "GROUP BY") || strings.HasPrefix(up, "ORDER BY") ||
+			strings.HasPrefix(up, "FORMAT ") || strings.HasPrefix(up, "LIMIT ") {
+			continue
+		}
+		if m := reAlias.FindStringSubmatch(s); m != nil {
+			out[m[1]] = true
+			continue
+		}
+		if m := reBare.FindStringSubmatch(s); m != nil {
+			out[m[1]] = true
+		}
+	}
+	return out
 }
 
 func TestFindVersionedFiles_ExtensionFilter(t *testing.T) {

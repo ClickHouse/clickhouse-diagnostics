@@ -295,6 +295,19 @@ The mapping CSV (real_name → hashed_name) is written **outside** the timestamp
 
 If you lose the salt, the hashes in past archives are no longer reversible (you can still run a new diagnostic with a fresh salt — but old and new hashes won't compare).
 
+### What gov mode does not produce
+
+Two outputs are deliberately withheld in gov mode, because both are part of the support-bound archive and neither can be hashed meaningfully:
+
+| Output | Why |
+|---|---|
+| `dashboard.html` | Its panels are built in Go and select raw identifiers — database/table names for up to 2000 tables, disk paths, users — plus server-generated text (`last_exception`, `last_error_message`). Hashing every panel is the follow-up that would restore it. |
+| Query analysis (`--query-id` / `--normalized-query-hash`) | The bundle embeds raw query text, exception messages and full DDL. Freeform SQL text can't be hashed without destroying its diagnostic value, so the flags are rejected outright. |
+
+Because the dashboard is the only other consumer of alert results, gov runs instead write **`alerts_summary.json`** into the archive: each rule's name, title, severity, outcome (`fired` / `clean` / `skipped` / `error`) and **instance count** — but not the matched rows, whose columns are defined per-rule and would carry unhashed identifiers. So you still get *"`too_many_parts` fired, 12 instances"* without the table names.
+
+Everything else — the per-mode `.native` files — is hashed as described above.
+
 ### Version-specific queries
 
 Inside each mode directory, you can override a query for a specific ClickHouse version by placing it in a subdirectory named `MAJOR.MINOR.PATCH.BUILD`. The tool picks the highest version ≤ the connected server.
@@ -332,7 +345,7 @@ The tool targets **ClickHouse 22.8 and newer** for on-prem servers. Root-level q
 | `ARRAY JOIN` over a `Map` (`ProfileEvents`) | after 22.8 | roots use `mapKeys()`/`mapValues()` (all versions) |
 | `system.asynchronous_insert_log` table | 22.10 | `queries.{onprem,gov}/22.10.1.0/` |
 | `system.disks.unreserved_space` | 22.10 | `queries.{onprem,gov}/22.10.1.0/` |
-| `system.detached_parts.bytes_on_disk`, `path` | 22.11 | `queries.{onprem,gov}/22.11.1.0/`, `alerts/22.11.1.0/` |
+| `system.detached_parts.bytes_on_disk`, `path` | 22.11 | `queries.{onprem,gov}/22.11.1.0/`, `alerts/22.11.1.0/` (gov gates `bytes_on_disk` only — it never collects `path`/`disk`) |
 | `GROUP BY ALL` syntax | 22.12 | root files use explicit key lists |
 | `dateDiff('millisecond', …)` sub-second unit | after 22.12 | async latency uses float subtraction of `*_microseconds` |
 | `system.text_log.message_format_string` | 23.1 | `queries.query_analysis/23.1.1.0/` |
