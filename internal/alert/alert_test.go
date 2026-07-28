@@ -299,13 +299,43 @@ func TestNotApplicable_ModeAware(t *testing.T) {
 		}
 	}
 
+	// Cloud resolves the ambiguity by counting replicas that have the table
+	// (clusterAllReplicas over system.tables). With no client the probe
+	// can't run, so it must refuse to claim "not applicable" and let the
+	// error surface — never silently hide a possible real finding.
 	cloud := &Evaluator{mode: "cloud"}
 	if cloud.notApplicable(missing) {
-		t.Error("cloud: UNKNOWN_TABLE behind clusterAllReplicas must NOT be treated as not-applicable — " +
-			"it can mean the table exists on a different replica (a real crash)")
+		t.Error("cloud: without a verifiable cluster-wide absence check, UNKNOWN_TABLE must NOT " +
+			"be treated as not-applicable — it can mean the table exists on another replica (a real crash)")
 	}
 	if cloud.notApplicable(badColumn) {
 		t.Error("cloud: a missing COLUMN must stay a genuine error")
+	}
+}
+
+func TestMissingTableNameExtraction(t *testing.T) {
+	// Both wordings must parse: 22.8 emits "doesn't exist", 26.2 emits
+	// "does not exist". Matching only the older form made the cloud
+	// cluster-wide probe silently unreachable on newer servers (observed
+	// live on Cloud 26.2.1.525).
+	cases := map[string]string{
+		"Code: 60. DB::Exception: Table system.crash_log doesn't exist. (UNKNOWN_TABLE) (version 22.8.21.38)":    "crash_log",
+		"Code: 60. DB::Exception: Table system.no_such_log does not exist. (UNKNOWN_TABLE) (version 26.2.1.525)": "no_such_log",
+		"Table system.text_log doesn't exist. (UNKNOWN_TABLE)":                                                   "text_log",
+		"Code: 47. Missing columns: 'x' (UNKNOWN_IDENTIFIER)":                                                    "",
+	}
+	for errText, want := range cases {
+		m := reMissingTable.FindStringSubmatch(errText)
+		got := ""
+		if m != nil {
+			got = m[1]
+			if i := strings.LastIndex(got, "."); i >= 0 {
+				got = got[i+1:]
+			}
+		}
+		if got != want {
+			t.Errorf("from %q: got %q, want %q", errText, got, want)
+		}
 	}
 }
 

@@ -645,8 +645,14 @@ func (g *Generator) collect() map[string]interface{} {
 
 	// ── Disk usage ────────────────────────────────────────────────────────────
 
+	// system.disks is per-replica, so in cloud mode this fans out and every
+	// replica contributes its own (largely identical) disk list — measured
+	// 11 disks → 33 rows on a 3-replica service. Without a host label those
+	// read as duplicates. hostName() is evaluated on the replica that
+	// produced the row, exactly as dictionariesSQL does.
 	p["disks"] = g.safeQuery("disks", fmt.Sprintf(
-		`SELECT name, path, type,
+		`SELECT hostName() AS hostname,
+			 name, path, type,
 			 free_space, total_space,
 			 formatReadableSize(free_space)       AS free_space_human,
 			 formatReadableSize(total_space)      AS total_space_human,
@@ -654,20 +660,38 @@ func (g *Generator) collect() map[string]interface{} {
 			    round(free_space / total_space * 100, 1),
 			    0) AS free_pct
 		 FROM %s
-		 ORDER BY total_space DESC`,
+		 ORDER BY hostname, total_space DESC`,
 		g.sysTable("disks"),
 	))
 
 	// ── Server errors (cumulative error counters) ──────────────────────────────
 
-	p["server_errors"] = g.safeQuery("server_errors",
-		`SELECT name, code, value,
-			 toString(last_error_time) AS last_error_time,
-			 left(last_error_message, 300) AS last_error_message
-		 FROM system.errors
-		 WHERE value > 0
+	// system.errors holds PER-REPLICA counters, so hard-coding system.errors
+	// here showed only the serving node's errors and hid the other replicas'
+	// entirely (measured on a 3-replica Cloud service). Fan out via
+	// sysTable, then aggregate to cluster-wide totals: this panel renders as
+	// one bar per error, so emitting a row per replica would produce
+	// duplicate same-labelled bars instead of a single meaningful count.
+	p["server_errors"] = g.safeQuery("server_errors", fmt.Sprintf(
+		// Aggregate under a NON-colliding alias in a subquery, then rename to
+		// `value` outside. Aliasing sum(value) AS value in the same SELECT
+		// shadows the source column, and the analyzer then resolves the bare
+		// `value` inside argMax()/WHERE against the aggregate →
+		// ILLEGAL_AGGREGATION. Same subquery trick as
+		// alerts/disk_space_low.yaml.
+		`SELECT name, code, total AS value, last_error_time, last_error_message
+		 FROM (
+			 SELECT name, code,
+				 sum(value)                                   AS total,
+				 toString(max(last_error_time))               AS last_error_time,
+				 left(argMax(last_error_message, value), 300) AS last_error_message
+			 FROM %s
+			 GROUP BY name, code
+			 HAVING total > 0
+		 )
 		 ORDER BY value DESC LIMIT 30`,
-	)
+		g.sysTable("errors"),
+	))
 
 	// ── High part-count tables (potential "too many parts") ───────────────────
 
@@ -2325,7 +2349,7 @@ document.addEventListener('DOMContentLoaded',function(){
       });
     }
     renderTable('tbl-disks',rows,
-      ['name','type','free_space_human','total_space_human','free_pct','path'],
+      ['hostname','name','type','free_space_human','total_space_human','free_pct','path'],
       r=>Number(r.free_pct||100)<CRIT_PCT?'error-row':Number(r.free_pct||100)<WARN_PCT?'alert-row':'');
   })();
 

@@ -67,6 +67,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -292,20 +293,59 @@ func isMissingTable(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "UNKNOWN_TABLE")
 }
 
+// reMissingTable pulls the table out of the UNKNOWN_TABLE message so a
+// cluster-wide existence check can be targeted at it.
+//
+// The wording is NOT stable across versions — 22.8 emits "Table
+// system.crash_log doesn't exist." while 26.2 emits "... does not
+// exist." — so both spellings are accepted. (Found the hard way: matching
+// only the older form made the cloud probe silently unreachable on 26.2.)
+var reMissingTable = regexp.MustCompile(`Table ([A-Za-z_][\w.]*) (?:doesn'?t|does not) exist`)
+
 // notApplicable reports whether err means "this rule does not apply to
 // this server" (as opposed to "this rule is broken").
 //
-// Only safe to conclude in single-node modes. In cloud, per-replica
-// tables are read through clusterAllReplicas, and a table that exists on
-// only SOME replicas — system.crash_log materialises solely on the node
-// that crashed — makes the fan-out raise UNKNOWN_TABLE from the healthy
-// replicas. Treating that as "not applicable" would silently reclassify
-// a fired `critical` crash alert as a check that doesn't apply, on a
-// cluster where a node really did crash. So in cloud mode we keep it an
-// error and let it surface — the same "surface, don't hide" tradeoff the
-// dashboard's hasTable() documents for this exact table.
+// Single-node modes: a local UNKNOWN_TABLE is conclusive.
+//
+// Cloud: per-replica tables are read through clusterAllReplicas, so
+// UNKNOWN_TABLE is ambiguous — it can come from a table that is absent
+// everywhere (genuinely not applicable) OR from one that exists on only
+// SOME replicas, where treating it as not-applicable would hide a real
+// finding (system.crash_log materialises on the node that crashed).
+// Rather than guess, ask: count the replicas that have the table. Zero
+// means absent cluster-wide, so skipping is correct; any other answer
+// (including a failed probe) means we cannot rule out partial presence,
+// so the error surfaces.
+//
+// Measured on a 3-replica Cloud 26.2 service: crash_log and text_log are
+// pre-created on every replica, so the fan-out returns 0 rows instead of
+// UNKNOWN_TABLE and this path isn't reached at all there.
 func (ev *Evaluator) notApplicable(err error) bool {
-	return isMissingTable(err) && ev.mode != "cloud"
+	if !isMissingTable(err) {
+		return false
+	}
+	if ev.mode != "cloud" {
+		return true
+	}
+	m := reMissingTable.FindStringSubmatch(err.Error())
+	if m == nil || ev.client == nil {
+		return false // can't verify → surface it
+	}
+	name := m[1]
+	if i := strings.LastIndex(name, "."); i >= 0 {
+		name = name[i+1:]
+	}
+	raw, probeErr := ev.client.ExecuteQueryWithFormat(fmt.Sprintf(
+		"SELECT count() AS c FROM clusterAllReplicas(default, system.tables) "+
+			"WHERE database='system' AND name='%s'", name))
+	if probeErr != nil {
+		return false // probe failed → don't claim not-applicable
+	}
+	rows, parseErr := parseJSONCompact(raw)
+	if parseErr != nil || len(rows) == 0 {
+		return false
+	}
+	return fmt.Sprintf("%v", rows[0]["c"]) == "0"
 }
 
 // evalFile loads, validates, and executes one alert rule file.
