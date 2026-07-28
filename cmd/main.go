@@ -256,9 +256,13 @@ func main() {
 		alertResults = alert.NewEvaluator(client, mode).RunAll(alertsDir, serverVersion)
 		// Skipped rules (table not present) are not "checked" — reporting
 		// them as checked would imply they passed.
-		evaluated, fired, skipped := alert.Summarize(alertResults)
-		fmt.Printf("Alert evaluation complete: %d rule(s) checked, %d fired, %d not applicable\n",
-			evaluated, fired, skipped)
+		evaluated, fired, errored, skipped := alert.Summarize(alertResults)
+		fmt.Printf("Alert evaluation complete: %d rule(s) checked, %d fired, %d errored, %d not applicable\n",
+			evaluated, fired, errored, skipped)
+		if errored > 0 {
+			fmt.Printf("  (%d rule(s) could not run — see the [alert] ERROR lines above; "+
+				"these are NOT findings)\n", errored)
+		}
 	}
 
 	// Generate HTML dashboard if not skipped.

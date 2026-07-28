@@ -190,9 +190,40 @@ func (g *Generator) probe(key, sql string) bool {
 // disabled by config on any version. Schema is identical across
 // replicas, so these check the local system tables directly.
 func (g *Generator) hasColumn(table, column string) bool {
+	// Guard against a privilege-blind probe. ClickHouse filters
+	// system.columns by grant SILENTLY — a user without SELECT on
+	// system.<table> gets zero rows, not ACCESS_DENIED. That reads as
+	// "column absent" and would degrade every gated panel to its
+	// oldest-server shape on a modern server, with no warning (observed
+	// on a Cloud 26.2 service with only database-level grants).
+	//
+	// A table that really exists always has columns, so "I can't see ANY
+	// column of this table" means the probe cannot answer — fail open.
+	if !g.probeCanSeeColumns(table) {
+		return true
+	}
 	return g.probe(table+"."+column, fmt.Sprintf(
 		"SELECT count() FROM system.columns WHERE database='system' AND table='%s' AND name='%s'",
 		table, column))
+}
+
+// probeCanSeeColumns reports whether system.columns exposes any column of
+// the given system table to the current user. Warns once per table when it
+// cannot, since every hasColumn() answer for that table is then a guess.
+func (g *Generator) probeCanSeeColumns(table string) bool {
+	key := "visible:" + table
+	if g.probeCache != nil {
+		if v, ok := g.probeCache[key]; ok {
+			return v
+		}
+	}
+	visible := g.probe(key, fmt.Sprintf(
+		"SELECT count() FROM system.columns WHERE database='system' AND table='%s'", table))
+	if !visible {
+		fmt.Printf("  [dashboard] cannot read system.columns for system.%s "+
+			"(missing SELECT grant?) — assuming modern columns are present\n", table)
+	}
+	return visible
 }
 
 func (g *Generator) hasTable(table string) bool {
@@ -216,6 +247,16 @@ func (g *Generator) hasTable(table string) bool {
 	tablesRef := "system.tables"
 	if g.mode == "cloud" {
 		tablesRef = "clusterAllReplicas(default, system.tables)"
+	}
+	// Same privilege-blindness guard as hasColumn: system.tables is
+	// filtered by grant without erroring, and a server always has SOME
+	// system tables — so zero rows means the probe can't answer. Fail open
+	// and let the panel query surface its own error.
+	if !g.probe("visible:system-tables", fmt.Sprintf(
+		"SELECT count() FROM %s WHERE database='system'", tablesRef)) {
+		fmt.Printf("  [dashboard] cannot read %s (missing SELECT grant?) — "+
+			"assuming system.%s exists\n", tablesRef, table)
+		return true
 	}
 	return g.probe("table:"+table, fmt.Sprintf(
 		"SELECT count() FROM %s WHERE database='system' AND name='%s'", tablesRef, table))
@@ -943,6 +984,7 @@ footer{text-align:center;color:#aaa;font-size:12px;padding:20px;margin-top:8px}
 .alert-summary-bar{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:14px}
 .alert-summary-chip{padding:6px 14px;border-radius:20px;font-size:13px;font-weight:600}
 .chip-critical{background:#ffebee;color:#c62828}
+.chip-error{background:#ede7f6;color:#5e35b1}
 .chip-warning{background:#fff3e0;color:#e65100}
 .chip-info{background:#e3f2fd;color:#1565c0}
 </style>
@@ -1443,9 +1485,12 @@ function renderAlerts(){
   const bar=document.getElementById('alerts-summary-bar');
   const navLink=document.getElementById('nav-alerts');
 
-  // summary chips
+  // summary chips. Rules that ERRORED are counted separately from real
+  // findings — bucketing them by severity would report e.g. a missing
+  // SELECT grant as N critical/warning production problems.
   const counts={critical:0,warning:0,info:0};
-  fired.forEach(a=>{const s=a.severity||'warning';if(counts[s]!==undefined)counts[s]++;});
+  const erroredRules=fired.filter(a=>a.error);
+  fired.filter(a=>!a.error).forEach(a=>{const s=a.severity||'warning';if(counts[s]!==undefined)counts[s]++;});
   const total=fired.length;
 
   // badge the nav link
@@ -1458,6 +1503,7 @@ function renderAlerts(){
   if(counts.critical) barHtml+='<span class="alert-summary-chip chip-critical">🔴 '+counts.critical+' Critical</span>';
   if(counts.warning)  barHtml+='<span class="alert-summary-chip chip-warning">🟡 '+counts.warning+' Warning</span>';
   if(counts.info)     barHtml+='<span class="alert-summary-chip chip-info">🔵 '+counts.info+' Info</span>';
+  if(erroredRules.length) barHtml+='<span class="alert-summary-chip chip-error">⚠ '+erroredRules.length+' Could not run</span>';
   if(bar) bar.innerHTML=barHtml?'<div class="alert-summary-bar">'+barHtml+'</div>':'';
 
   if(!panel) return;

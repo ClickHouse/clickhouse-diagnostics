@@ -191,9 +191,9 @@ func (ev *Evaluator) RunAll(dir string, serverVersion internal.Version) []Result
 		results = append(results, r)
 	}
 
-	evaluated, fired, skipped := Summarize(results)
-	fmt.Printf("[alerts] evaluated %d rule(s), %d fired, %d skipped (not applicable)\n",
-		evaluated, fired, skipped)
+	evaluated, fired, errored, skipped := Summarize(results)
+	fmt.Printf("[alerts] evaluated %d rule(s), %d fired, %d errored, %d skipped (not applicable)\n",
+		evaluated, fired, errored, skipped)
 	return results
 }
 
@@ -219,16 +219,18 @@ func WriteSummaryJSON(dir string, results []Result) error {
 		Error    string `json:"error,omitempty"`
 		FiredAt  string `json:"checked_at"`
 	}
-	evaluated, fired, skipped := Summarize(results)
+	evaluated, fired, errored, skipped := Summarize(results)
 	out := struct {
 		Evaluated     int     `json:"evaluated"`
 		Fired         int     `json:"fired"`
+		Errored       int     `json:"errored"`
 		NotApplicable int     `json:"not_applicable"`
 		Note          string  `json:"note"`
 		Rules         []entry `json:"rules"`
 	}{
 		Evaluated:     evaluated,
 		Fired:         fired,
+		Errored:       errored,
 		NotApplicable: skipped,
 		Note:          "gov mode: rule outcomes and instance counts only; matched rows are omitted because their columns can contain unhashed identifiers",
 	}
@@ -254,20 +256,32 @@ func WriteSummaryJSON(dir string, results []Result) error {
 	return os.WriteFile(filepath.Join(dir, "alerts_summary.json"), blob, 0600)
 }
 
-// Summarize counts results for reporting. "evaluated" excludes skipped
-// rules — a rule that never ran (its table doesn't exist on this server)
-// must not be reported as a check that passed. Single source of truth
-// for RunAll's summary and cmd/main.go's completion line.
-func Summarize(results []Result) (evaluated, fired, skipped int) {
+// Summarize counts results for reporting. Single source of truth for
+// RunAll's summary and cmd/main.go's completion line.
+//
+// Three distinctions matter, because each means something different to
+// the person reading the archive:
+//   - "evaluated" excludes skipped rules — a rule that never ran (its
+//     table doesn't exist here) must not read as a check that passed.
+//   - "fired" counts only rules that actually matched rows, i.e. real
+//     findings.
+//   - "errored" is counted separately from fired. Folding the two
+//     together is actively misleading: a user missing SELECT grants makes
+//     every rule fail, and the summary then reads "11 fired" — eleven
+//     apparent production problems that are really one permissions issue
+//     (observed against a restricted ClickHouse Cloud user).
+func Summarize(results []Result) (evaluated, fired, errored, skipped int) {
 	for _, r := range results {
 		switch {
 		case r.Skipped:
 			skipped++
-		case r.Fired():
+		case r.Error != "":
+			errored++
+		case len(r.Rows) > 0:
 			fired++
 		}
 	}
-	return len(results) - skipped, fired, skipped
+	return len(results) - skipped, fired, errored, skipped
 }
 
 // isMissingTable reports whether err is a ClickHouse "table doesn't

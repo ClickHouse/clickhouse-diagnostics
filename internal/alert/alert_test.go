@@ -223,12 +223,18 @@ func TestSummarize(t *testing.T) {
 		{Name: "errored", Error: "query: boom"}, // fired (error counts)
 		{Name: "skipped", Skipped: true, Reason: "table not present"}, // not evaluated
 	}
-	evaluated, fired, skipped := Summarize(results)
+	evaluated, fired, errored, skipped := Summarize(results)
 	if evaluated != 3 {
 		t.Errorf("evaluated = %d, want 3 (skipped rule must be excluded)", evaluated)
 	}
-	if fired != 2 {
-		t.Errorf("fired = %d, want 2 (rows + error)", fired)
+	// fired counts real findings only. Folding errors in here would report
+	// a permissions problem as N production findings — observed live
+	// against a restricted Cloud user where all 11 rules errored.
+	if fired != 1 {
+		t.Errorf("fired = %d, want 1 (matched rows only, NOT errors)", fired)
+	}
+	if errored != 1 {
+		t.Errorf("errored = %d, want 1 (counted separately from fired)", errored)
 	}
 	if skipped != 1 {
 		t.Errorf("skipped = %d, want 1", skipped)
