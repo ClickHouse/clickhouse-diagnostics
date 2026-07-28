@@ -25,6 +25,13 @@ import (
 // each. We want to see per-pod loading state, so we let cloud mode
 // wrap with clusterAllReplicas; callers add hostname() to the SELECT
 // to label each row with its pod.
+//
+// "Shared" here refers to ROW CONTENTS, not table existence. This is
+// about avoiding clusterAllReplicas row duplication when reading a
+// table. It is unrelated to whether a table EXISTS on every replica —
+// per-node system log tables (e.g. crash_log) may be absent on some
+// replicas even though `tables` is listed here. The dashboard's
+// hasTable() probe handles that separately.
 var SharedSystemTables = map[string]bool{
 	"columns":           true,
 	"databases":         true,
@@ -136,7 +143,9 @@ func expandSysPlaceholders(sql, mode string) string {
 // composed of ASCII letters, digits, dots, and underscores, between
 // braces. This deliberately does NOT match the empty `{}` form, so
 // ClickHouse log-format strings like
-//   'Selected {}/{} parts by partition key, …'
+//
+//	'Selected {}/{} parts by partition key, …'
+//
 // — which appear as literal values in some queries — are left alone.
 var rePlaceholder = regexp.MustCompile(`\{[A-Za-z0-9_.]+\}`)
 

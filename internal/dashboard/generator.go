@@ -198,9 +198,21 @@ func (g *Generator) hasColumn(table, column string) bool {
 func (g *Generator) hasTable(table string) bool {
 	// Unlike column schema (identical across replicas), a table's
 	// *existence* can be per-replica — system.crash_log only materialises
-	// on the node that crashed, and the panels query it via
-	// clusterAllReplicas in cloud mode. So in cloud mode check every
-	// replica, otherwise a crash on a non-serving node would hide the panel.
+	// on the node that crashed. In cloud mode we therefore probe every
+	// replica, so a crash on a non-serving node isn't mistaken for "no
+	// crash anywhere" and the panel silently skipped.
+	//
+	// Caveat: when the table exists on only some replicas, the guarded
+	// panel query — clusterAllReplicas(default, system.<table>) — still
+	// raises UNKNOWN_TABLE on the replicas that lack it, so the panel
+	// surfaces that error via safeQuery rather than rendering the crashed
+	// node's rows. This is a deliberate "surface, don't hide" tradeoff;
+	// showing per-replica rows would need a fault-tolerant fan-out.
+	//
+	// (system.tables is listed in SharedSystemTables — see
+	// internal/query/template.go — because its user-table rows are the
+	// same everywhere; that's about row contents, not the existence of
+	// per-node system log tables, which is what we probe here.)
 	tablesRef := "system.tables"
 	if g.mode == "cloud" {
 		tablesRef = "clusterAllReplicas(default, system.tables)"

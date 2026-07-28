@@ -22,10 +22,14 @@
 //	         parts_to_do
 //	  FROM {sys.mutations}                 -- placeholder, see below
 //	  WHERE parts_to_do > 0
-//	    AND is_killed = 0
 //	    AND dateDiff('hour', create_time, now()) > 3
 //	  ORDER BY hours_running DESC
 //	message: "Mutation {mutation_id} on {database}.{table} running {hours_running}h"
+//
+//	Keep root rules to columns/syntax available on the oldest supported
+//	server (22.8); gate anything newer behind a version subdirectory. For
+//	example system.mutations.is_killed (24.1+) lives in
+//	alerts/24.1.1.0/mutation_running_too_long.yaml, not the root rule.
 //
 // System-table placeholder
 // ────────────────────────
@@ -165,6 +169,15 @@ func (ev *Evaluator) RunAll(dir string, serverVersion internal.Version) []Result
 		if f.DirName != "" {
 			r.File = f.DirName + "/" + f.Name
 		}
+		// Surface any genuine failure (read / yaml / query / parse) once,
+		// here, using the version-aware File — evalFile only stores it in
+		// Result.Error, which otherwise never reaches stdout, so a broken
+		// rule would look identical to a healthy one. The security case is
+		// skipped: evalFile already prints "[alert] BLOCKED". Missing-table
+		// skips carry no Error, so they're excluded automatically.
+		if r.Error != "" && !strings.HasPrefix(r.Error, "security:") {
+			fmt.Printf("  [alert] ERROR %s: %s\n", r.File, r.Error)
+		}
 		results = append(results, r)
 	}
 
@@ -218,12 +231,18 @@ func (ev *Evaluator) evalFile(path string) Result {
 	fmt.Printf("  [alert] evaluating %q...\n", def.Name)
 	resp, err := ev.client.ExecuteQueryWithFormat(sql)
 	if err != nil {
+		// A missing table means the rule is not applicable on this server
+		// (e.g. system.crash_log only exists after a crash; system.text_log
+		// / system.query_log may be disabled), not that the rule is broken.
+		// Return a non-fired, non-error result so it doesn't masquerade as a
+		// fired alert and doesn't trip "[alert] ERROR" — which must stay a
+		// reliable signal for genuinely broken rules (missing column, bad
+		// SQL). RunAll prints genuine errors.
+		if strings.Contains(err.Error(), "UNKNOWN_TABLE") {
+			fmt.Printf("  [alert] skipped %q (table not present)\n", def.Name)
+			return r
+		}
 		r.Error = fmt.Sprintf("query: %v", err)
-		// Surface the failure: a rule stored as r.Error still counts as
-		// "fired", but without this line the error text never reaches
-		// stdout, so a broken rule (e.g. a column missing on this server
-		// version) looks identical to a healthy one in the run output.
-		fmt.Printf("  [alert] ERROR %q: %v\n", def.Name, err)
 		return r
 	}
 

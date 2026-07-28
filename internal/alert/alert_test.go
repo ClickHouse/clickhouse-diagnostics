@@ -3,6 +3,7 @@ package alert
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -252,5 +253,76 @@ func TestAlertYAML_FilesAreValid(t *testing.T) {
 				t.Errorf("security validation failed: %v", err)
 			}
 		})
+	}
+}
+
+// TestAlertYAML_OverridesMatchRoot guards against root/override drift: a
+// version-directory rule (e.g. alerts/24.1.1.0/foo.yaml) is a near-copy of
+// its root twin differing only in the query, so a future edit could easily
+// land in one and not the other. Assert every override has a root twin with
+// the same identity metadata (name/title/severity/tags), and that its name
+// matches the filename (a rename silently creates a second rule instead of
+// an override — see the README note).
+func TestAlertYAML_OverridesMatchRoot(t *testing.T) {
+	alertsDir := "../../alerts"
+	if _, err := os.Stat(alertsDir); os.IsNotExist(err) {
+		t.Skip("alerts/ directory not present")
+	}
+	load := func(path string) (Definition, error) {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return Definition{}, err
+		}
+		var d Definition
+		return d, yaml.Unmarshal(raw, &d)
+	}
+	entries, err := os.ReadDir(alertsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		verDir := filepath.Join(alertsDir, e.Name())
+		files, err := os.ReadDir(verDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, f := range files {
+			if f.IsDir() || !strings.HasSuffix(strings.ToLower(f.Name()), ".yaml") {
+				continue
+			}
+			name := f.Name()
+			t.Run(e.Name()+"/"+name, func(t *testing.T) {
+				rootPath := filepath.Join(alertsDir, name)
+				if _, err := os.Stat(rootPath); err != nil {
+					t.Fatalf("override has no root twin %s — a renamed override becomes a separate rule, not an override", rootPath)
+				}
+				ov, err := load(filepath.Join(verDir, name))
+				if err != nil {
+					t.Fatal(err)
+				}
+				rt, err := load(rootPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if base := strings.TrimSuffix(name, ".yaml"); ov.Name != base {
+					t.Errorf("name %q does not match filename %q", ov.Name, base)
+				}
+				if ov.Name != rt.Name {
+					t.Errorf("name drift: override %q vs root %q", ov.Name, rt.Name)
+				}
+				if ov.Title != rt.Title {
+					t.Errorf("title drift: override %q vs root %q", ov.Title, rt.Title)
+				}
+				if ov.Severity != rt.Severity {
+					t.Errorf("severity drift: override %q vs root %q", ov.Severity, rt.Severity)
+				}
+				if !reflect.DeepEqual(ov.Tags, rt.Tags) {
+					t.Errorf("tags drift: override %v vs root %v", ov.Tags, rt.Tags)
+				}
+			})
+		}
 	}
 }
