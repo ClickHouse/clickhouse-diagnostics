@@ -8,6 +8,11 @@
 -- message_format_string was added in 23.1, so this filters on the
 -- rendered message text instead — see 23.1.1.0/ for the exact
 -- format-string match used on newer servers.
+--
+-- Patterns are anchored on a stable prefix and left open-ended (trailing
+-- %) so a ClickHouse version that appends extra fields to either log line
+-- (it has extended the "Selected … parts" message before) still matches
+-- rather than silently returning zero rows.
 SELECT
     event_time_microseconds                                AS ts,
     thread_id,
@@ -21,8 +26,8 @@ WHERE query_id = {query_id}
   AND event_time >= {from}
   AND event_time <= {to}
   AND (
-    message LIKE 'Selected % parts by partition key, % parts by primary key, % marks by primary key, % marks to read from % ranges'
-    OR message LIKE 'Reading approx. % rows with % streams'
+    message LIKE 'Selected %parts by partition key%marks to read from%'
+    OR message LIKE 'Reading approx. %rows with %streams%'
   )
 ORDER BY event_time_microseconds ASC
 LIMIT 300

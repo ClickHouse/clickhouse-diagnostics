@@ -238,13 +238,19 @@ func main() {
 	if !skipAlerts {
 		fmt.Println("Evaluating alert rules...")
 		alertResults = alert.NewEvaluator(client, mode).RunAll(alertsDir, serverVersion)
-		fired := 0
+		fired, skipped := 0, 0
 		for _, r := range alertResults {
-			if r.Fired() {
+			switch {
+			case r.Skipped:
+				skipped++
+			case r.Fired():
 				fired++
 			}
 		}
-		fmt.Printf("Alert evaluation complete: %d rule(s) checked, %d fired\n", len(alertResults), fired)
+		// Skipped rules (table not present) are not "checked" — reporting
+		// them as checked would imply they passed.
+		fmt.Printf("Alert evaluation complete: %d rule(s) checked, %d fired, %d not applicable\n",
+			len(alertResults)-skipped, fired, skipped)
 	}
 
 	// Generate HTML dashboard if not skipped

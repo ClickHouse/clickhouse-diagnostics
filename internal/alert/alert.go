@@ -106,6 +106,14 @@ type Result struct {
 	FiredAt     string                   `json:"fired_at"`
 	Error       string                   `json:"error,omitempty"`
 	File        string                   `json:"file"`
+	// Skipped marks a rule that did not run because it is not applicable
+	// on this server — e.g. the system table it queries doesn't exist
+	// (crash_log with no crash, or a config-disabled text_log/query_log).
+	// A skipped rule is neither fired nor errored; it must NOT be counted
+	// as "evaluated", or the dashboard would claim a check passed when it
+	// never ran.
+	Skipped bool   `json:"skipped,omitempty"`
+	Reason  string `json:"skip_reason,omitempty"`
 }
 
 // Fired returns true when the alert triggered (rows > 0) or had a query error.
@@ -181,14 +189,28 @@ func (ev *Evaluator) RunAll(dir string, serverVersion internal.Version) []Result
 		results = append(results, r)
 	}
 
-	fired := 0
+	fired, skipped := 0, 0
 	for _, r := range results {
-		if r.Fired() {
+		switch {
+		case r.Skipped:
+			skipped++
+		case r.Fired():
 			fired++
 		}
 	}
-	fmt.Printf("[alerts] evaluated %d rule(s), %d fired\n", len(results), fired)
+	// "evaluated" excludes skipped rules — a rule that never ran must not
+	// be reported as a check that passed.
+	fmt.Printf("[alerts] evaluated %d rule(s), %d fired, %d skipped (not applicable)\n",
+		len(results)-skipped, fired, skipped)
 	return results
+}
+
+// isMissingTable reports whether err is a ClickHouse "table doesn't
+// exist" error (code 60 / UNKNOWN_TABLE). It deliberately does NOT match
+// UNKNOWN_IDENTIFIER (a missing column) — that must stay a genuine error
+// so the version-gating detector still catches the is_killed class of bug.
+func isMissingTable(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "UNKNOWN_TABLE")
 }
 
 // evalFile loads, validates, and executes one alert rule file.
@@ -228,17 +250,20 @@ func (ev *Evaluator) evalFile(path string) Result {
 		return r
 	}
 
-	fmt.Printf("  [alert] evaluating %q...\n", def.Name)
 	resp, err := ev.client.ExecuteQueryWithFormat(sql)
 	if err != nil {
 		// A missing table means the rule is not applicable on this server
 		// (e.g. system.crash_log only exists after a crash; system.text_log
-		// / system.query_log may be disabled), not that the rule is broken.
-		// Return a non-fired, non-error result so it doesn't masquerade as a
-		// fired alert and doesn't trip "[alert] ERROR" — which must stay a
-		// reliable signal for genuinely broken rules (missing column, bad
-		// SQL). RunAll prints genuine errors.
-		if strings.Contains(err.Error(), "UNKNOWN_TABLE") {
+		// / system.query_log may be disabled) — as does a typo'd table name,
+		// which the *_FilesAreValid tests and review are expected to catch.
+		// Either way it is not a broken rule: return a Skipped result (not
+		// fired, not errored) so it neither trips "[alert] ERROR" — which
+		// must stay reserved for genuine breakage like a missing column
+		// (UNKNOWN_IDENTIFIER) — nor gets counted as an evaluated check that
+		// found nothing. RunAll prints genuine errors.
+		if isMissingTable(err) {
+			r.Skipped = true
+			r.Reason = "table not present"
 			fmt.Printf("  [alert] skipped %q (table not present)\n", def.Name)
 			return r
 		}

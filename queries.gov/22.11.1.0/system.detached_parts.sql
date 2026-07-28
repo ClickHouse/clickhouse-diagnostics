@@ -1,10 +1,11 @@
--- Root variant for the oldest supported servers (22.8–22.10):
--- bytes_on_disk was added in 22.11 — see 22.11.1.0/ (adds bytes_on_disk)
--- and 23.11.1.0/ (also adds modification_time) for newer servers.
+-- 22.11+ variant: includes bytes_on_disk (added to system.detached_parts
+-- in 22.11). See the root file for the 22.8–22.10 baseline, and
+-- 23.11.1.0/ which additionally adds modification_time.
 SELECT
   hex(SHA256(concat(database, '%salt%'))) AS database,
   hex(SHA256(concat(table, '%salt%'))) AS table,
   partition_id,
+  bytes_on_disk,
   min_block_number,
   max_block_number,
   level

@@ -718,6 +718,15 @@ func (g *Generator) collectAnalysis(p map[string]interface{}) {
 	if !g.analysis.Enabled() || g.analysisDir == "" {
 		return
 	}
+	// A zero server version sorts below every version directory, so
+	// FindVersionedFiles would return only root files and the dashboard
+	// would run the 22.8 baseline on a modern server (the round-1
+	// regression). cmd/main.go always calls WithServerVersion after a
+	// successful version probe, so this only trips if a future caller
+	// forgets — warn loudly rather than silently degrade.
+	if g.serverVersion == (internal.Version{}) {
+		fmt.Println("  [dashboard] warning: server version unknown; query-analysis panels fall back to the oldest (root) query variants")
+	}
 	vars := query.Vars{
 		Mode:                g.mode,
 		QueryID:             g.analysis.QueryID,
@@ -902,6 +911,7 @@ footer{text-align:center;color:#aaa;font-size:12px;padding:20px;margin-top:8px}
 @media(max-width:700px){.charts-grid{grid-template-columns:1fr}}
 /* alerts */
 .alert-ok{background:#e8f5e9;border:1px solid #a5d6a7;border-left:4px solid #4CAF50;padding:14px 20px;border-radius:8px;color:#2e7d32;font-weight:600;font-size:14px}
+.alert-skipped{background:#f5f5f5;border:1px solid #e0e0e0;border-left:4px solid #9e9e9e;padding:10px 20px;border-radius:8px;color:#616161;font-size:13px;margin-top:8px}
 .alert-item{background:#fff;border-radius:8px;padding:14px 18px;margin-bottom:10px;border-left:4px solid #ccc;box-shadow:0 1px 3px rgba(0,0,0,.08)}
 .alert-item.alert-critical{border-left-color:#f44336}
 .alert-item.alert-warning{border-left-color:#FF9800}
@@ -1414,6 +1424,11 @@ function dictStatusBadge(status){
 function renderAlerts(){
   const alerts=DATA.alerts||[];
   const fired=alerts.filter(a=>(a.rows&&a.rows.length>0)||a.error);
+  const skipped=alerts.filter(a=>a.skipped);
+  const evaluated=alerts.length-skipped.length;
+  const skipNote=skipped.length
+    ? '<div class="alert-skipped">ℹ️ '+skipped.length+' rule(s) not applicable on this server (table not present): '+skipped.map(a=>a.name).join(', ')+'</div>'
+    : '';
   const panel=document.getElementById('alerts-panel');
   const bar=document.getElementById('alerts-summary-bar');
   const navLink=document.getElementById('nav-alerts');
@@ -1438,7 +1453,7 @@ function renderAlerts(){
   if(!panel) return;
 
   if(!fired.length){
-    panel.innerHTML='<div class="alert-ok">✅ All '+alerts.length+' alert rule(s) evaluated — no issues detected</div>';
+    panel.innerHTML='<div class="alert-ok">✅ '+evaluated+' alert rule(s) evaluated — no issues detected</div>'+skipNote;
     return;
   }
 
@@ -1477,7 +1492,7 @@ function renderAlerts(){
 
     html+='</div>'; // item
   });
-  panel.innerHTML=html;
+  panel.innerHTML=html+skipNote;
 }
 
 // ── main init ─────────────────────────────────────────────────────────────────

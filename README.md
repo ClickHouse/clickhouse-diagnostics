@@ -323,7 +323,7 @@ alerts/
 
 A file that exists **only** in a version subdirectory (no root counterpart) is simply skipped on older servers — use this for queries against system tables that don't exist yet (e.g. `system.asynchronous_insert_log`, added in 22.10).
 
-> **Overrides match by base filename.** A file in a version subdirectory overrides a root file only when their names are identical. If you rename the file in the version directory, it is treated as a *separate* query/rule (both run), not an override — so keep the filename the same as the root when you intend to override it.
+> **Overrides match by base filename, case-sensitively.** A file in a version subdirectory overrides a root file only when their names are identical, including case. If you rename the file in the version directory — or just change its case (`Foo.yaml` vs `foo.yaml`) — it is treated as a *separate* query/rule (both run), not an override. Keep the filename byte-for-byte identical to the root when you intend to override it.
 
 ### Supported ClickHouse versions
 
@@ -350,7 +350,7 @@ The tool targets **ClickHouse 22.8 and newer** for on-prem servers. Root-level q
 
 The dashboard (`internal/dashboard/generator.go`) builds its SQL dynamically, so instead of version directories it probes the live schema at runtime (`hasColumn`/`hasTable`) and adapts each panel — covering the same columns (`error_count`, `is_killed`, `bytes_on_disk`, the async table/`rows`, `crash_log`) plus optional tables that may be disabled by config.
 
-`queries.cloud/` and `queries.gov/` target managed ClickHouse Cloud services, which always run recent versions — the 22.8 floor applies to `queries.onprem/` and the shared `queries.query_analysis/` + `alerts/` directories.
+`queries.cloud/` targets managed ClickHouse Cloud, which always runs recent versions, so its files aren't version-gated. The **22.8 floor applies to `queries.onprem/` and `queries.gov/`** (both are self-hosted — gov is on-prem with hashed PII, and neither uses `clusterAllReplicas`) as well as the shared `queries.query_analysis/` + `alerts/` directories.
 
 Overrides are matched **only** at the top level of each directory; a version subdirectory nested deeper (e.g. `alerts/foo/25.4.1.0/`) is not treated as a nested override of `alerts/foo/`.
 

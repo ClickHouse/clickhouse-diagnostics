@@ -9,7 +9,7 @@ SELECT
     replica_num,
     hex(SHA256(concat(host_name, '%salt%'))) AS host_name,
     hex(SHA256(concat(host_address, '%salt%'))) AS host_address,
-    hex(SHA256(concat(port, '%salt%'))) AS port,
+    hex(SHA256(concat(toString(port), '%salt%'))) AS port,
     is_local,
     hex(SHA256(concat(user, '%salt%'))) AS user,
     hex(SHA256(concat(default_database, '%salt%'))) AS default_database,

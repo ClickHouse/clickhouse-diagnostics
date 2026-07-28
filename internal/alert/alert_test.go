@@ -213,24 +213,68 @@ func TestRunAll_IgnoresNonYAML(t *testing.T) {
 
 // ── Real alert YAML files from the alerts/ directory ─────────────────────────
 
+func TestIsMissingTable(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"unknown table (crash_log)", errString("non-OK status: 404, body: Code: 60. DB::Exception: Table system.crash_log doesn't exist. (UNKNOWN_TABLE) (version 22.8.21.38 (official build))"), true},
+		{"unknown identifier (missing column) must NOT match", errString("Code: 47. DB::Exception: Missing columns: 'is_killed' … (UNKNOWN_IDENTIFIER) (version 23.8...)"), false},
+		{"transport error", errString("dial tcp: connection refused"), false},
+		{"nil", nil, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := isMissingTable(c.err); got != c.want {
+				t.Errorf("isMissingTable(%v) = %v, want %v", c.err, got, c.want)
+			}
+		})
+	}
+}
+
+// errString is a trivial error whose message is the given string.
+type errString string
+
+func (e errString) Error() string { return string(e) }
+
 func TestAlertYAML_FilesAreValid(t *testing.T) {
 	alertsDir := "../../alerts"
 	if _, err := os.Stat(alertsDir); os.IsNotExist(err) {
 		t.Skip("alerts/ directory not present")
 	}
 
+	// Validate every rule at the root AND one level down (version-override
+	// directories), so override rules get the same required-field and
+	// security checks as root rules — not just the ones in the root.
+	type yfile struct{ display, path string }
+	var files []yfile
 	entries, err := os.ReadDir(alertsDir)
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	ev := &Evaluator{mode: "onprem"}
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(strings.ToLower(e.Name()), ".yaml") {
+		if e.IsDir() {
+			sub, err := os.ReadDir(filepath.Join(alertsDir, e.Name()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, s := range sub {
+				if !s.IsDir() && strings.HasSuffix(strings.ToLower(s.Name()), ".yaml") {
+					files = append(files, yfile{e.Name() + "/" + s.Name(), filepath.Join(alertsDir, e.Name(), s.Name())})
+				}
+			}
 			continue
 		}
-		t.Run(e.Name(), func(t *testing.T) {
-			raw, err := os.ReadFile(filepath.Join(alertsDir, e.Name()))
+		if strings.HasSuffix(strings.ToLower(e.Name()), ".yaml") {
+			files = append(files, yfile{e.Name(), filepath.Join(alertsDir, e.Name())})
+		}
+	}
+
+	ev := &Evaluator{mode: "onprem"}
+	for _, f := range files {
+		t.Run(f.display, func(t *testing.T) {
+			raw, err := os.ReadFile(f.path)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -295,20 +339,26 @@ func TestAlertYAML_OverridesMatchRoot(t *testing.T) {
 			}
 			name := f.Name()
 			t.Run(e.Name()+"/"+name, func(t *testing.T) {
-				rootPath := filepath.Join(alertsDir, name)
-				if _, err := os.Stat(rootPath); err != nil {
-					t.Fatalf("override has no root twin %s — a renamed override becomes a separate rule, not an override", rootPath)
-				}
 				ov, err := load(filepath.Join(verDir, name))
 				if err != nil {
 					t.Fatal(err)
 				}
+				// The load-bearing check: an override's name must match its
+				// filename. A mismatch means a rename that silently turns the
+				// override into a separate rule. Applies to every override.
+				if base := strings.TrimSuffix(name, ".yaml"); ov.Name != base {
+					t.Errorf("name %q does not match filename %q", ov.Name, base)
+				}
+				// A file that exists only in a version directory (no root
+				// twin) is a supported pattern — skipped on older servers,
+				// see the README. There's nothing to compare metadata against.
+				rootPath := filepath.Join(alertsDir, name)
+				if _, err := os.Stat(rootPath); err != nil {
+					return
+				}
 				rt, err := load(rootPath)
 				if err != nil {
 					t.Fatal(err)
-				}
-				if base := strings.TrimSuffix(name, ".yaml"); ov.Name != base {
-					t.Errorf("name %q does not match filename %q", ov.Name, base)
 				}
 				if ov.Name != rt.Name {
 					t.Errorf("name drift: override %q vs root %q", ov.Name, rt.Name)
