@@ -13,6 +13,7 @@ SELECT
     written_rows,
     read_rows,
     read_bytes,
+    query_duration_ms,
     interface,
     normalized_query_hash,
     count,

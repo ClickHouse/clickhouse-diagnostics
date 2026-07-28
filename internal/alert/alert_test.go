@@ -213,6 +213,66 @@ func TestRunAll_IgnoresNonYAML(t *testing.T) {
 
 // ── Real alert YAML files from the alerts/ directory ─────────────────────────
 
+// TestSummarize asserts the load-bearing reporting invariant: skipped
+// rules (table not present) are excluded from "evaluated" — a check that
+// never ran must not read as a check that passed.
+func TestSummarize(t *testing.T) {
+	results := []Result{
+		{Name: "fired", Rows: []map[string]interface{}{{"a": 1}}}, // fired
+		{Name: "clean"},                         // evaluated, not fired
+		{Name: "errored", Error: "query: boom"}, // fired (error counts)
+		{Name: "skipped", Skipped: true, Reason: "table not present"}, // not evaluated
+	}
+	evaluated, fired, skipped := Summarize(results)
+	if evaluated != 3 {
+		t.Errorf("evaluated = %d, want 3 (skipped rule must be excluded)", evaluated)
+	}
+	if fired != 2 {
+		t.Errorf("fired = %d, want 2 (rows + error)", fired)
+	}
+	if skipped != 1 {
+		t.Errorf("skipped = %d, want 1", skipped)
+	}
+	// A skipped result is neither fired nor errored.
+	if results[3].Fired() {
+		t.Error("a Skipped result must not report Fired()")
+	}
+}
+
+// TestRunAll_OverrideFilePrefix asserts that a rule served from a version
+// directory reports its File with the directory prefix (mirrors
+// analysis.go), so support engineers can tell which variant ran. Uses
+// security-blocked rules: evalFile returns before touching the client, so
+// no ClickHouse connection is needed.
+func TestRunAll_OverrideFilePrefix(t *testing.T) {
+	dir := t.TempDir()
+	blocked := []byte("name: r\ntitle: t\nquery: |\n  DROP TABLE x\nmessage: m\n")
+	if err := os.WriteFile(filepath.Join(dir, "r.yaml"), blocked, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "22.11.1.0"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "22.11.1.0", "r.yaml"), blocked, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	ev := &Evaluator{mode: "onprem"}
+	// New server → the 22.11.1.0 override wins.
+	results := ev.RunAll(dir, internal.Version{Major: 25, Minor: 4, Patch: 1, Build: 0})
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result (override shadows root), got %d", len(results))
+	}
+	if results[0].File != "22.11.1.0/r.yaml" {
+		t.Errorf("File = %q, want %q", results[0].File, "22.11.1.0/r.yaml")
+	}
+	// Old server → the root rule, no prefix.
+	results = ev.RunAll(dir, internal.Version{Major: 22, Minor: 8, Patch: 1, Build: 0})
+	if len(results) != 1 || results[0].File != "r.yaml" {
+		t.Errorf("root run: got %+v, want single result with File=r.yaml", results)
+	}
+}
+
 func TestIsMissingTable(t *testing.T) {
 	cases := []struct {
 		name string

@@ -42,9 +42,11 @@
 //	  {sys.parts}      →  system.parts                                      (all modes)
 //
 //	Tables whose contents are shared across replicas (parts, tables,
-//	replicas, replication_queue, mutations, dictionaries, detached_parts,
-//	columns, databases) are queried directly even in cloud mode: each
-//	replica sees the same rows, so clusterAllReplicas would duplicate them.
+//	replicas, replication_queue, mutations, detached_parts, columns,
+//	databases) are queried directly even in cloud mode: each replica
+//	sees the same rows, so clusterAllReplicas would duplicate them.
+//	(system.dictionaries is deliberately NOT in that list — its runtime
+//	state is per-replica; see internal/query/template.go.)
 //
 // Message template
 // ────────────────
@@ -189,7 +191,17 @@ func (ev *Evaluator) RunAll(dir string, serverVersion internal.Version) []Result
 		results = append(results, r)
 	}
 
-	fired, skipped := 0, 0
+	evaluated, fired, skipped := Summarize(results)
+	fmt.Printf("[alerts] evaluated %d rule(s), %d fired, %d skipped (not applicable)\n",
+		evaluated, fired, skipped)
+	return results
+}
+
+// Summarize counts results for reporting. "evaluated" excludes skipped
+// rules — a rule that never ran (its table doesn't exist on this server)
+// must not be reported as a check that passed. Single source of truth
+// for RunAll's summary and cmd/main.go's completion line.
+func Summarize(results []Result) (evaluated, fired, skipped int) {
 	for _, r := range results {
 		switch {
 		case r.Skipped:
@@ -198,11 +210,7 @@ func (ev *Evaluator) RunAll(dir string, serverVersion internal.Version) []Result
 			fired++
 		}
 	}
-	// "evaluated" excludes skipped rules — a rule that never ran must not
-	// be reported as a check that passed.
-	fmt.Printf("[alerts] evaluated %d rule(s), %d fired, %d skipped (not applicable)\n",
-		len(results)-skipped, fired, skipped)
-	return results
+	return len(results) - skipped, fired, skipped
 }
 
 // isMissingTable reports whether err is a ClickHouse "table doesn't
@@ -217,14 +225,21 @@ func isMissingTable(err error) bool {
 func (ev *Evaluator) evalFile(path string) Result {
 	now := time.Now().UTC().Format(time.RFC3339)
 
+	// On read/yaml failures there is no parsed definition, so derive the
+	// identity fields from the filename — otherwise the dashboard renders
+	// an untitled error card ((a.title||a.name) both empty) and the
+	// operator can't tell which rule broke.
+	base := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return Result{File: filepath.Base(path), Error: fmt.Sprintf("read: %v", err), FiredAt: now}
+		return Result{Name: base, Title: base, Severity: SeverityWarning,
+			File: filepath.Base(path), Error: fmt.Sprintf("read: %v", err), FiredAt: now}
 	}
 
 	var def Definition
 	if err := yaml.Unmarshal(raw, &def); err != nil {
-		return Result{File: filepath.Base(path), Error: fmt.Sprintf("yaml: %v", err), FiredAt: now}
+		return Result{Name: base, Title: base, Severity: SeverityWarning,
+			File: filepath.Base(path), Error: fmt.Sprintf("yaml: %v", err), FiredAt: now}
 	}
 
 	r := Result{

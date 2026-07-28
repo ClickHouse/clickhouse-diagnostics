@@ -2,6 +2,10 @@
 -- 24.2 (PR ClickHouse#59942, merged 2024-02-16 — absent on 23.x/24.1).
 -- Previously this file was mis-gated under 23.8.1.0/, so the tool failed
 -- on 23.8–24.1 servers with "Missing columns: 'metadata_version'".
+--
+-- This is deliberately gov's TOP rung: gov does not collect
+-- parameterized_view_parameters (the 25.4 addition in onprem/cloud) —
+-- parameter names are identifier-like and gov hashes identifiers.
 SELECT
   hex(SHA256(concat(database, '%salt%'))) AS database,
   hex(SHA256(concat(name, '%salt%'))) AS name,

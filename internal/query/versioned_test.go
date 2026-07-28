@@ -171,6 +171,51 @@ func TestFindVersionedFiles_TieredLadder(t *testing.T) {
 	}
 }
 
+// TestFindVersionedFiles_RealRepoDirs guards the SHIPPED trees, not
+// synthetic ones: every query/alert directory must resolve cleanly, and
+// every version-directory override must have a root twin — except the
+// documented version-only files (tables that don't exist below their
+// gate). This is the CI check that a rung added in one mode but renamed,
+// or a version dir with a typo, can't land silently.
+func TestFindVersionedFiles_RealRepoDirs(t *testing.T) {
+	// Files that intentionally exist ONLY in version directories.
+	versionOnly := map[string]bool{
+		"system.asynchronous_insert_log_7_days.sql": true, // table added 22.10
+	}
+	dirs := map[string]string{
+		"../../queries.onprem":         ".sql",
+		"../../queries.gov":            ".sql",
+		"../../queries.cloud":          ".sql",
+		"../../queries.query_analysis": ".sql",
+		"../../alerts":                 ".yaml",
+	}
+	high := internal.Version{Major: 99, Minor: 1, Patch: 1, Build: 1}
+	for dir, ext := range dirs {
+		t.Run(filepath.Base(dir), func(t *testing.T) {
+			if _, err := os.Stat(dir); os.IsNotExist(err) {
+				t.Skipf("%s not present", dir)
+			}
+			files, err := FindVersionedFiles(dir, high, ext)
+			if err != nil {
+				t.Fatalf("resolution failed: %v", err)
+			}
+			if len(files) == 0 {
+				t.Fatal("resolved zero files")
+			}
+			// Every override must shadow a root twin (same base name)
+			// unless it's a documented version-only file.
+			for _, f := range files {
+				if f.DirName == "" || versionOnly[f.Name] {
+					continue
+				}
+				if _, err := os.Stat(filepath.Join(dir, f.Name)); err != nil {
+					t.Errorf("override %s/%s has no root twin — renamed override becomes a separate file", f.DirName, f.Name)
+				}
+			}
+		})
+	}
+}
+
 func TestFindVersionedFiles_ExtensionFilter(t *testing.T) {
 	dir := t.TempDir()
 	writeFiles(t, dir, map[string]string{

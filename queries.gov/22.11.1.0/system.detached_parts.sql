@@ -6,6 +6,7 @@ SELECT
   hex(SHA256(concat(table, '%salt%'))) AS table,
   partition_id,
   bytes_on_disk,
+  reason,
   min_block_number,
   max_block_number,
   level

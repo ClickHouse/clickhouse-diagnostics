@@ -162,6 +162,18 @@ func main() {
 		outputDir = tmpDir
 	}
 
+	// Query analysis is not available in gov mode: its results embed raw
+	// query text, exception messages, identifiers and full DDL
+	// (query_details, failed_queries, tables_for_query, text_log slices),
+	// which gov-mode hashing cannot cover — the archive would leak the
+	// names gov exists to protect. Refuse the flags rather than silently
+	// producing an unhashed bundle.
+	if mode == "gov" && (queryID != "" || normalizedHash != "") {
+		fmt.Println("Error: --query-id / --normalized-query-hash are not supported in gov mode " +
+			"(query-analysis output contains raw query text and identifiers that cannot be hashed)")
+		return
+	}
+
 	// Resolve query-analysis options up front so an invalid --query-id
 	// or --normalized-query-hash fails fast, before any heavy work runs.
 	analysisOpts, err := resolveAnalysisOpts(client, mode, queryID, normalizedHash, fromStr, toStr)
@@ -204,6 +216,20 @@ func main() {
 		return
 	}
 
+	// Query analysis bundle (only when --query-id or
+	// --normalized-query-hash was set). Runs the .sql files under
+	// analysisDir against the focus parameters and writes results into
+	// <finalOutputDir>/query_analysis/. Runs BEFORE the dry-run summary
+	// so --dry-run previews the analysis SQL too (Collect's IsDryRun
+	// handling prints each file instead of writing results) — otherwise
+	// "list every query the tool would execute" would omit the bundle.
+	if analysisOpts.Enabled() {
+		coll := query.NewAnalysisCollector(client, mode)
+		if _, _, err := coll.Collect(analysisOpts, analysisDir, finalOutputDir, serverVersion); err != nil {
+			fmt.Printf("Warning: query analysis failed: %v\n", err)
+		}
+	}
+
 	if dryRun {
 		fmt.Println("\n=== DRY RUN SUMMARY ===")
 		fmt.Println("Above are the queries that would be executed.")
@@ -222,35 +248,16 @@ func main() {
 		}
 	}
 
-	// Query analysis bundle (only when --query-id or
-	// --normalized-query-hash was set). Runs the .sql files under
-	// analysisDir against the focus parameters and writes results into
-	// <finalOutputDir>/query_analysis/.
-	if analysisOpts.Enabled() {
-		coll := query.NewAnalysisCollector(client, mode)
-		if _, _, err := coll.Collect(analysisOpts, analysisDir, finalOutputDir, serverVersion); err != nil {
-			fmt.Printf("Warning: query analysis failed: %v\n", err)
-		}
-	}
-
 	// Evaluate alert rules if not skipped
 	var alertResults []alert.Result
 	if !skipAlerts {
 		fmt.Println("Evaluating alert rules...")
 		alertResults = alert.NewEvaluator(client, mode).RunAll(alertsDir, serverVersion)
-		fired, skipped := 0, 0
-		for _, r := range alertResults {
-			switch {
-			case r.Skipped:
-				skipped++
-			case r.Fired():
-				fired++
-			}
-		}
 		// Skipped rules (table not present) are not "checked" — reporting
 		// them as checked would imply they passed.
+		evaluated, fired, skipped := alert.Summarize(alertResults)
 		fmt.Printf("Alert evaluation complete: %d rule(s) checked, %d fired, %d not applicable\n",
-			len(alertResults)-skipped, fired, skipped)
+			evaluated, fired, skipped)
 	}
 
 	// Generate HTML dashboard if not skipped

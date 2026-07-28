@@ -7,7 +7,6 @@ SELECT
     hex(SHA256(concat(hostname, '%salt%'))) AS hostname,
     hex(SHA256(concat(database, '%salt%'))) AS database,
     hex(SHA256(concat(table, '%salt%'))) AS table,
-    part_name,
     error,
     sum(peak_memory_usage) AS peak_memory_usage,
     sum(duration_ms) AS duration_ms,

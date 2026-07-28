@@ -198,16 +198,16 @@ func (g *Generator) hasColumn(table, column string) bool {
 func (g *Generator) hasTable(table string) bool {
 	// Unlike column schema (identical across replicas), a table's
 	// *existence* can be per-replica — system.crash_log only materialises
-	// on the node that crashed. In cloud mode we therefore probe every
-	// replica, so a crash on a non-serving node isn't mistaken for "no
-	// crash anywhere" and the panel silently skipped.
+	// on the node that crashed. In cloud mode we probe every replica so a
+	// crash on a non-serving node is at least DETECTED (the probe returns
+	// true and the panel query runs).
 	//
-	// Caveat: when the table exists on only some replicas, the guarded
-	// panel query — clusterAllReplicas(default, system.<table>) — still
-	// raises UNKNOWN_TABLE on the replicas that lack it, so the panel
-	// surfaces that error via safeQuery rather than rendering the crashed
-	// node's rows. This is a deliberate "surface, don't hide" tradeoff;
-	// showing per-replica rows would need a fault-tolerant fan-out.
+	// Honest limit: in that partial-existence case the guarded panel
+	// query — clusterAllReplicas(default, system.<table>) — still raises
+	// UNKNOWN_TABLE on the replicas that lack the table, so the outcome
+	// is a visible [dashboard] error rather than the crashed node's rows.
+	// That is the intended "surface, don't hide" tradeoff: rendering the
+	// rows would need a fault-tolerant per-node fan-out.
 	//
 	// (system.tables is listed in SharedSystemTables — see
 	// internal/query/template.go — because its user-table rows are the
@@ -755,7 +755,10 @@ func (g *Generator) collectAnalysis(p map[string]interface{}) {
 	// Resolve version-directory overrides exactly as AnalysisCollector
 	// does, so the dashboard renders the SAME variant that the archive
 	// writes to disk. Reading the root file directly would run the
-	// downgraded 22.8 baseline on modern servers.
+	// downgraded 22.8 baseline on modern servers. (On a resolver ERROR
+	// the two paths intentionally differ: Collect aborts the archive
+	// bundle, while the dashboard warns and degrades to root files so
+	// the section isn't entirely blank.)
 	resolved := map[string]string{} // base name → full path
 	vf, err := query.FindVersionedFiles(g.analysisDir, g.serverVersion, ".sql")
 	if err != nil {
@@ -777,6 +780,13 @@ func (g *Generator) collectAnalysis(p map[string]interface{}) {
 		}
 		raw, err := os.ReadFile(path)
 		if err != nil {
+			// A resolved path failing to read (deleted/permissions race)
+			// is diagnostic-worthy — log like Collect does. A version-dir-
+			// only file below its gate simply has no root path and lands
+			// here silently by design.
+			if ok {
+				fmt.Printf("  [dashboard] %s: read %s: %v\n", key, path, err)
+			}
 			continue
 		}
 		sql := query.Apply(string(raw), vars)

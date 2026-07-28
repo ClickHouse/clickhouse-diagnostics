@@ -5,6 +5,7 @@ SELECT
   hex(SHA256(concat(database, '%salt%'))) AS database,
   hex(SHA256(concat(table, '%salt%'))) AS table,
   partition_id,
+  reason,
   min_block_number,
   max_block_number,
   level
