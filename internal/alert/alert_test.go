@@ -88,23 +88,23 @@ func TestFormattedMessages_MultiRow(t *testing.T) {
 
 // ── Fired ────────────────────────────────────────────────────────────────────
 
-func TestFired_NoRows(t *testing.T) {
+func TestNotable_NoRows(t *testing.T) {
 	r := Result{Rows: []map[string]interface{}{}}
-	if r.Fired() {
+	if r.Notable() {
 		t.Error("empty rows should not be fired")
 	}
 }
 
-func TestFired_WithRows(t *testing.T) {
+func TestNotable_WithRows(t *testing.T) {
 	r := Result{Rows: []map[string]interface{}{{"x": "1"}}}
-	if !r.Fired() {
+	if !r.Notable() {
 		t.Error("rows present should be fired")
 	}
 }
 
-func TestFired_WithError(t *testing.T) {
+func TestNotable_WithError(t *testing.T) {
 	r := Result{Error: "connection refused"}
-	if !r.Fired() {
+	if !r.Notable() {
 		t.Error("error result should be fired")
 	}
 }
@@ -224,8 +224,11 @@ func TestSummarize(t *testing.T) {
 		{Name: "skipped", Skipped: true, Reason: "table not present"}, // not evaluated
 	}
 	evaluated, fired, errored, skipped := Summarize(results)
-	if evaluated != 3 {
-		t.Errorf("evaluated = %d, want 3 (skipped rule must be excluded)", evaluated)
+	// evaluated = produced an answer. Both the skipped rule (never ran) and
+	// the errored rule (ran, got nothing) are excluded — reporting either as
+	// "checked" claims verification that didn't happen.
+	if evaluated != 2 {
+		t.Errorf("evaluated = %d, want 2 (skipped AND errored rules must be excluded)", evaluated)
 	}
 	// fired counts real findings only. Folding errors in here would report
 	// a permissions problem as N production findings — observed live
@@ -240,8 +243,8 @@ func TestSummarize(t *testing.T) {
 		t.Errorf("skipped = %d, want 1", skipped)
 	}
 	// A skipped result is neither fired nor errored.
-	if results[3].Fired() {
-		t.Error("a Skipped result must not report Fired()")
+	if results[3].Notable() {
+		t.Error("a Skipped result must not report Notable()")
 	}
 }
 
@@ -279,12 +282,11 @@ func TestRunAll_OverrideFilePrefix(t *testing.T) {
 	}
 }
 
-// TestNotApplicable_ModeAware pins the cloud asymmetry: a missing table
-// means "rule not applicable" only on a single node. In cloud, per-replica
-// tables are read via clusterAllReplicas, and a table present on only SOME
-// replicas (system.crash_log lives solely on the node that crashed) makes
-// the fan-out raise UNKNOWN_TABLE from the healthy ones — so treating it as
-// not-applicable would hide a real critical crash alert.
+// TestNotApplicable_ModeAware pins the single-node half of the rule: a
+// local UNKNOWN_TABLE is conclusive ("not applicable"), while a missing
+// COLUMN never is. In cloud the answer is not mode-derived — it comes from
+// counting replicas that have the table; see
+// TestNotApplicable_CloudClusterProbe for those branches.
 func TestNotApplicable_ModeAware(t *testing.T) {
 	missing := errString("Code: 60. DB::Exception: Table system.crash_log doesn't exist. (UNKNOWN_TABLE) (version 24.8.1.1)")
 	badColumn := errString("Code: 47. DB::Exception: Missing columns: 'is_killed' (UNKNOWN_IDENTIFIER)")
@@ -310,6 +312,93 @@ func TestNotApplicable_ModeAware(t *testing.T) {
 	}
 	if cloud.notApplicable(badColumn) {
 		t.Error("cloud: a missing COLUMN must stay a genuine error")
+	}
+}
+
+// TestNotApplicable_CloudClusterProbe covers the branch the whole cloud
+// design rests on — and the one that decides whether a critical crash
+// alert is hidden or surfaced. Uses the queryFn seam so no live cluster is
+// needed. Every uncertain outcome must fail toward SURFACING.
+func TestNotApplicable_CloudClusterProbe(t *testing.T) {
+	missing := errString("Code: 60. DB::Exception: Table system.crash_log does not exist. (UNKNOWN_TABLE)")
+	// count() responses keyed by whether the query targets the specific table.
+	resp := func(n string) string {
+		return `{"meta":[{"name":"c"}],"data":[["` + n + `"]],"rows":1}`
+	}
+
+	cases := []struct {
+		name string
+		fn   func(string) (string, error)
+		want bool // true ⇒ treated as not-applicable (skipped)
+	}{
+		{
+			name: "absent cluster-wide → skip",
+			fn: func(sql string) (string, error) {
+				if strings.Contains(sql, "name='crash_log'") {
+					return resp("0"), nil // no replica has it
+				}
+				return resp("120"), nil // but the database is visible
+			},
+			want: true,
+		},
+		{
+			name: "present on some replicas → surface (a real crash must not be hidden)",
+			fn: func(sql string) (string, error) {
+				if strings.Contains(sql, "name='crash_log'") {
+					return resp("1"), nil // one replica has it
+				}
+				return resp("120"), nil
+			},
+			want: false,
+		},
+		{
+			name: "privilege-blind (database itself invisible) → surface, never claim absent",
+			fn: func(sql string) (string, error) {
+				return resp("0"), nil // even the database check returns 0
+			},
+			want: false,
+		},
+		{
+			name: "probe query fails → surface",
+			fn: func(string) (string, error) {
+				return "", errString("connection reset")
+			},
+			want: false,
+		},
+		{
+			name: "unparseable probe response → surface",
+			fn: func(string) (string, error) {
+				return "not json", nil
+			},
+			want: false,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ev := &Evaluator{mode: "cloud", queryFn: c.fn}
+			if got := ev.notApplicable(missing); got != c.want {
+				t.Errorf("notApplicable = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+// TestNotApplicable_CloudKeepsDatabase asserts the probe checks the database
+// the error named, not a hard-coded "system" — otherwise a rule against
+// mydb.foo would be validated against system.foo and wrongly skipped.
+func TestNotApplicable_CloudKeepsDatabase(t *testing.T) {
+	var seen []string
+	ev := &Evaluator{mode: "cloud", queryFn: func(sql string) (string, error) {
+		seen = append(seen, sql)
+		return `{"meta":[{"name":"c"}],"data":[["5"]],"rows":1}`, nil
+	}}
+	ev.notApplicable(errString("Table mydb.foo does not exist. (UNKNOWN_TABLE)"))
+	joined := strings.Join(seen, " | ")
+	if !strings.Contains(joined, "database='mydb'") {
+		t.Errorf("probe should target the named database; queries were: %s", joined)
+	}
+	if strings.Contains(joined, "database='system' AND name='foo'") {
+		t.Errorf("probe must not fall back to system for a qualified name: %s", joined)
 	}
 }
 

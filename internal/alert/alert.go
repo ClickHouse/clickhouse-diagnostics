@@ -68,6 +68,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -119,8 +120,15 @@ type Result struct {
 	Reason  string `json:"skip_reason,omitempty"`
 }
 
-// Fired returns true when the alert triggered (rows > 0) or had a query error.
-func (r Result) Fired() bool { return len(r.Rows) > 0 || r.Error != "" }
+// Notable reports whether this result deserves the reader's attention —
+// it matched rows OR failed to run. Used only to decide what to DISPLAY.
+//
+// Deliberately not called "Fired": treating an error as a fire is what
+// produced the "11 fired" line on a server where all eleven rules failed
+// on permissions. For counting, use Summarize, which separates fired /
+// errored / skipped. Anything reporting numbers to a human must use
+// Summarize, not this.
+func (r Result) Notable() bool { return len(r.Rows) > 0 || r.Error != "" }
 
 // FormattedMessages returns one message string per result row, with
 // {column_name} placeholders substituted from that row's values.
@@ -140,6 +148,24 @@ func (r Result) FormattedMessages() []string {
 type Evaluator struct {
 	client *pkg.ClickHouseClient
 	mode   string
+	// queryFn, when set, replaces the client for auxiliary probe queries.
+	// Exists so the cloud not-applicable logic — which decides whether a
+	// critical crash alert is hidden or surfaced — can be unit-tested
+	// without a live cluster. Nil in production; see query().
+	queryFn func(string) (string, error)
+}
+
+// query runs an auxiliary probe query through the injected seam if present,
+// otherwise the real client. Returns an error when neither is available so
+// callers fail toward surfacing rather than silently skipping.
+func (ev *Evaluator) query(sql string) (string, error) {
+	if ev.queryFn != nil {
+		return ev.queryFn(sql)
+	}
+	if ev.client == nil {
+		return "", fmt.Errorf("no ClickHouse client available")
+	}
+	return ev.client.ExecuteQueryWithFormat(sql)
 }
 
 // NewEvaluator creates a new Evaluator for the given connection and mode.
@@ -262,15 +288,17 @@ func WriteSummaryJSON(dir string, results []Result) error {
 //
 // Three distinctions matter, because each means something different to
 // the person reading the archive:
-//   - "evaluated" excludes skipped rules — a rule that never ran (its
-//     table doesn't exist here) must not read as a check that passed.
-//   - "fired" counts only rules that actually matched rows, i.e. real
-//     findings.
+//   - "evaluated" counts only rules that actually produced an answer, so
+//     it excludes BOTH skipped and errored rules. A rule that never ran
+//     — whether because its table is absent here or because the query
+//     failed — must not read as a check that passed.
+//   - "fired" counts only rules that matched rows, i.e. real findings.
 //   - "errored" is counted separately from fired. Folding the two
 //     together is actively misleading: a user missing SELECT grants makes
 //     every rule fail, and the summary then reads "11 fired" — eleven
 //     apparent production problems that are really one permissions issue
-//     (observed against a restricted ClickHouse Cloud user).
+//     (observed against a restricted ClickHouse Cloud user, which is also
+//     where "11 checked" was shown to overstate what had been verified).
 func Summarize(results []Result) (evaluated, fired, errored, skipped int) {
 	for _, r := range results {
 		switch {
@@ -282,7 +310,7 @@ func Summarize(results []Result) (evaluated, fired, errored, skipped int) {
 			fired++
 		}
 	}
-	return len(results) - skipped, fired, errored, skipped
+	return len(results) - skipped - errored, fired, errored, skipped
 }
 
 // isMissingTable reports whether err is a ClickHouse "table doesn't
@@ -328,24 +356,37 @@ func (ev *Evaluator) notApplicable(err error) bool {
 		return true
 	}
 	m := reMissingTable.FindStringSubmatch(err.Error())
-	if m == nil || ev.client == nil {
-		return false // can't verify → surface it
+	if m == nil {
+		return false // can't identify the table → surface it
 	}
-	name := m[1]
+	// Keep the database the error named instead of assuming "system", so a
+	// rule against mydb.foo isn't checked against system.foo.
+	db, name := "system", m[1]
 	if i := strings.LastIndex(name, "."); i >= 0 {
-		name = name[i+1:]
+		db, name = name[:i], name[i+1:]
 	}
-	raw, probeErr := ev.client.ExecuteQueryWithFormat(fmt.Sprintf(
-		"SELECT count() AS c FROM clusterAllReplicas(default, system.tables) "+
-			"WHERE database='system' AND name='%s'", name))
-	if probeErr != nil {
-		return false // probe failed → don't claim not-applicable
+	count := func(where string) (int64, bool) {
+		raw, qErr := ev.query(fmt.Sprintf(
+			"SELECT count() AS c FROM clusterAllReplicas(default, system.tables) WHERE %s", where))
+		if qErr != nil {
+			return 0, false
+		}
+		rows, parseErr := parseJSONCompact(raw)
+		if parseErr != nil || len(rows) == 0 {
+			return 0, false
+		}
+		n, convErr := strconv.ParseInt(strings.TrimSpace(fmt.Sprintf("%v", rows[0]["c"])), 10, 64)
+		return n, convErr == nil
 	}
-	rows, parseErr := parseJSONCompact(raw)
-	if parseErr != nil || len(rows) == 0 {
+	// Same privilege-blindness guard the dashboard probes use: system.tables
+	// is filtered by grant WITHOUT erroring, so a bare zero can mean "no
+	// permission" rather than "absent". A database we can query always has
+	// SOME visible table, so require that before trusting the specific zero.
+	if n, ok := count(fmt.Sprintf("database='%s'", db)); !ok || n == 0 {
 		return false
 	}
-	return fmt.Sprintf("%v", rows[0]["c"]) == "0"
+	n, ok := count(fmt.Sprintf("database='%s' AND name='%s'", db, name))
+	return ok && n == 0
 }
 
 // evalFile loads, validates, and executes one alert rule file.
@@ -404,9 +445,9 @@ func (ev *Evaluator) evalFile(path string) Result {
 		// (UNKNOWN_IDENTIFIER) — nor gets counted as an evaluated check that
 		// found nothing. RunAll prints genuine errors.
 		//
-		// notApplicable() excludes cloud mode, where a clusterAllReplicas
-		// fan-out over a partially-present table cannot be distinguished
-		// from a genuinely absent one.
+		// In cloud mode a clusterAllReplicas fan-out makes UNKNOWN_TABLE
+		// ambiguous, so notApplicable() resolves it by counting the
+		// replicas that actually have the table — see its doc comment.
 		if ev.notApplicable(err) {
 			r.Skipped = true
 			r.Reason = "table not present"

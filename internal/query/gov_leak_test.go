@@ -104,7 +104,13 @@ func TestGovQueries_NoRawIdentifiersOrDDL(t *testing.T) {
 				if exempt[rel][id] {
 					continue
 				}
-				projected := regexp.MustCompile(`(?m)^` + id + `\s*,?$`).MatchString(body)
+				// Matches the identifier as its own projection, whether on its
+				// own line (how every gov file is formatted) or inline in a
+				// comma-separated list — so an onprem file pasted in as
+				// "SELECT database, table, engine" can't slip past the check
+				// that exists to catch exactly that copy-paste.
+				projected := regexp.MustCompile(
+					`(?m)(?:^|,)\s*` + id + `\s*(?:,|$)`).MatchString(body)
 				// "Hashed" means some SHA256 expression is aliased to this
 				// name — covers both the direct form
 				// (SHA256(concat(database, …)) AS database) and hashing a

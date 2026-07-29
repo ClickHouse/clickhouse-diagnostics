@@ -220,8 +220,13 @@ func (g *Generator) probeCanSeeColumns(table string) bool {
 	visible := g.probe(key, fmt.Sprintf(
 		"SELECT count() FROM system.columns WHERE database='system' AND table='%s'", table))
 	if !visible {
-		fmt.Printf("  [dashboard] cannot read system.columns for system.%s "+
-			"(missing SELECT grant?) — assuming modern columns are present\n", table)
+		// Don't attribute the cause: this probe reads the LOCAL
+		// system.columns, so zero rows can mean a missing SELECT grant OR —
+		// in cloud — a table that only exists on a remote replica. Both lead
+		// to the same fail-open, so state the effect and let the operator
+		// judge the cause.
+		fmt.Printf("  [dashboard] cannot inspect columns of system.%s locally "+
+			"— assuming modern columns are present\n", table)
 	}
 	return visible
 }
@@ -252,10 +257,18 @@ func (g *Generator) hasTable(table string) bool {
 	// filtered by grant without erroring, and a server always has SOME
 	// system tables — so zero rows means the probe can't answer. Fail open
 	// and let the panel query surface its own error.
-	if !g.probe("visible:system-tables", fmt.Sprintf(
+	//
+	// Warn only on the first table, not once per guarded panel: the probe is
+	// memoized but a bare Printf after it would repeat the same line for
+	// crash_log, asynchronous_insert_log, …
+	const visKey = "visible:system-tables"
+	_, alreadyProbed := g.probeCache[visKey]
+	if !g.probe(visKey, fmt.Sprintf(
 		"SELECT count() FROM %s WHERE database='system'", tablesRef)) {
-		fmt.Printf("  [dashboard] cannot read %s (missing SELECT grant?) — "+
-			"assuming system.%s exists\n", tablesRef, table)
+		if !alreadyProbed {
+			fmt.Printf("  [dashboard] cannot read %s — assuming the system log "+
+				"tables exist (check SELECT grants if panels look empty)\n", tablesRef)
+		}
 		return true
 	}
 	return g.probe("table:"+table, fmt.Sprintf(
@@ -1515,7 +1528,11 @@ function renderAlerts(){
   const counts={critical:0,warning:0,info:0};
   const erroredRules=fired.filter(a=>a.error);
   fired.filter(a=>!a.error).forEach(a=>{const s=a.severity||'warning';if(counts[s]!==undefined)counts[s]++;});
-  const total=fired.length;
+  // The badge counts real findings only. Including errored rules would
+  // render a red "11" identical to eleven critical findings when the true
+  // state is one permissions problem — the same conflation the CLI's
+  // fired/errored split removed. Broken rules get the ⚠ chip instead.
+  const total=counts.critical+counts.warning+counts.info;
 
   // badge the nav link
   if(total>0){
@@ -1544,7 +1561,9 @@ function renderAlerts(){
   let html='';
   sorted.forEach(a=>{
     const sev=a.severity||'warning';
-    const icon=SEV_ICON[sev]||'🟡';
+    // A rule whose QUERY broke is not a severity-N finding — show ⚠ so it
+    // can't be misread as a red critical at the top of the list.
+    const icon=a.error?'⚠':(SEV_ICON[sev]||'🟡');
     const cls=a.error?'alert-error':'alert-'+sev;
     const cnt=a.error?'error':(a.rows||[]).length;
     const cntLabel=a.error?'query error':cnt+' instance'+(cnt===1?'':'s');
@@ -2323,7 +2342,12 @@ document.addEventListener('DOMContentLoaded',function(){
       new Chart(document.getElementById('chart-disk-usage'),{
         type:'bar',
         data:{
-          labels:rows.map(r=>r.name),
+          // In cloud mode system.disks fans out, so the same disk appears
+          // once per replica (measured 11 disks → 33 rows on 3 replicas).
+          // Qualify the label with the short hostname, matching the
+          // hostname column the table below now shows — otherwise the
+          // chart is 33 bars under 11 duplicate labels.
+          labels:rows.map(r=>r.hostname?r.name+' @ '+String(r.hostname).split('.')[0]:r.name),
           datasets:[
             {label:'Used',data:rows.map(r=>Number(r.total_space||0)-Number(r.free_space||0)),
               backgroundColor:rows.map(r=>Number(r.free_pct||100)<CRIT_PCT?alpha('#f44336',.8):Number(r.free_pct||100)<WARN_PCT?alpha('#FF9800',.8):alpha('#2196F3',.75)),
@@ -2339,8 +2363,9 @@ document.addEventListener('DOMContentLoaded',function(){
           plugins:{legend:{position:'top'},tooltip:{callbacks:{
             label:ctx=>{
               const r=rows[ctx.dataIndex];
-              if(ctx.datasetIndex===0)return' Used: '+r.total_space_human+' total, '+r.free_pct+'% free';
-              return' Free: '+r.free_space_human;
+              const host=r.hostname?' ('+String(r.hostname).split('.')[0]+')':'';
+              if(ctx.datasetIndex===0)return' Used: '+r.total_space_human+' total, '+r.free_pct+'% free'+host;
+              return' Free: '+r.free_space_human+host;
             }
           }}},
           scales:{x:{stacked:true},y:{stacked:true,beginAtZero:true,

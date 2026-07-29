@@ -238,16 +238,24 @@ func TestRealRepoLadders_Monotonic(t *testing.T) {
 		{Major: 23, Minor: 4, Patch: 1}, {Major: 23, Minor: 11, Patch: 1},
 		{Major: 24, Minor: 2, Patch: 1}, {Major: 25, Minor: 4, Patch: 1},
 	}
-	// Columns that a higher rung may legitimately drop because the lower
-	// rung only had them as a placeholder for an unavailable real column.
-	placeholder := regexp.MustCompile(`^'n/a'|^0 AS `)
-
+	// No placeholder exemption: a lower rung that stands in a literal
+	// ('n/a' AS size_uncompressed) still aliases it to the real output name,
+	// so the higher rung keeps the same name and the set never shrinks. That
+	// convention is what makes this check simple — enforce it rather than
+	// carve an exception. (An earlier version had a regex here that could
+	// never match, because projectedColumns returns output NAMES, not
+	// expressions.)
+	type seen struct {
+		cols map[string]bool
+		ver  internal.Version
+		dir  string
+	}
 	for _, dir := range []string{"../../queries.onprem", "../../queries.gov", "../../queries.query_analysis"} {
 		t.Run(filepath.Base(dir), func(t *testing.T) {
 			if _, err := os.Stat(dir); os.IsNotExist(err) {
 				t.Skipf("%s not present", dir)
 			}
-			prev := map[string]map[string]bool{} // file → column set at the previous version
+			prev := map[string]seen{} // file → what the previously-selected rung projected
 			for _, v := range ladders {
 				files, err := FindVersionedFiles(dir, v, ".sql")
 				if err != nil {
@@ -259,17 +267,32 @@ func TestRealRepoLadders_Monotonic(t *testing.T) {
 						t.Fatal(err)
 					}
 					cur := projectedColumns(string(raw))
-					for col := range prev[f.Name] {
-						if !cur[col] && !placeholder.MatchString(col) {
-							t.Errorf("%s: column %q present below %d.%d but missing from the rung selected at %d.%d (%s) — ladder must not shrink",
-								f.Name, col, v.Major, v.Minor, v.Major, v.Minor, f.DirName)
+					p, had := prev[f.Name]
+					if had {
+						for col := range p.cols {
+							if !cur[col] {
+								t.Errorf("%s: column %q was projected by the rung selected at %d.%d (%s) "+
+									"but is missing from the rung selected at %d.%d (%s) — ladder must not shrink",
+									f.Name, col,
+									p.ver.Major, p.ver.Minor, rungLabel(p.dir),
+									v.Major, v.Minor, rungLabel(f.DirName))
+							}
 						}
 					}
-					prev[f.Name] = cur
+					prev[f.Name] = seen{cols: cur, ver: v, dir: f.DirName}
 				}
 			}
 		})
 	}
+}
+
+// rungLabel names a rung for failure messages ("root" when the file came
+// from the directory root rather than a version subdirectory).
+func rungLabel(dirName string) string {
+	if dirName == "" {
+		return "root"
+	}
+	return dirName + "/"
 }
 
 // projectedColumns extracts the output column names a query projects: the

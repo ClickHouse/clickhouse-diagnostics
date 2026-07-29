@@ -369,7 +369,26 @@ Overrides are matched **only** at the top level of each directory; a version sub
 
 Alert rules are plain YAML files in `alerts/` (override with `-alerts-dir`). Each file defines one read-only SELECT query — if it returns any rows, the alert fires and the rows are surfaced in the dashboard. All alert SQL is validated before execution: only `SELECT` / `WITH` is accepted, anything else (`INSERT`, `ALTER`, `DROP`, …) is rejected and the rule is skipped.
 
-**Not-applicable rules.** A rule whose system table doesn't exist on the connected server (e.g. `crash_log` on a healthy instance, or a config-disabled `text_log`/`query_log`) is **skipped**, not evaluated: it is excluded from the "N rule(s) checked" count, and the dashboard lists it under "not applicable (table not present)" instead of implying the check passed. A missing *column* is different — that's a genuinely broken (mis-gated) rule and is reported as an `[alert] ERROR`.
+### Rule outcomes
+
+Every run reports four distinct outcomes, because each means something different to whoever reads the archive:
+
+| Outcome | Meaning |
+|---|---|
+| **fired** | The rule ran and matched rows — a real finding. |
+| **clean** | The rule ran and matched nothing. |
+| **errored** | The rule could not run (bad SQL, a column missing on this version, no `SELECT` grant). **Not a finding** — counted and displayed separately, and excluded from "checked". |
+| **not applicable** (skipped) | The system table the rule queries doesn't exist here — `crash_log` on a healthy self-managed instance, or a config-disabled `text_log`/`query_log`. Excluded from "checked" so it never reads as a check that passed. |
+
+```
+Alert evaluation complete: 8 rule(s) checked, 1 fired, 2 errored, 1 not applicable
+```
+
+Only rules that actually produced an answer count as *checked*. The dashboard mirrors this: findings get a severity badge, errored rules get a muted **⚠ N Could not run** chip (never a red severity count), and skipped rules are listed as "not applicable (table not present)".
+
+A missing **column** is always an error, never "not applicable" — that's the signal that a rule needs [version-gating](#version-specific-queries).
+
+> **Cloud caveat.** In `cloud` mode per-replica tables are read through `clusterAllReplicas`, so an `UNKNOWN_TABLE` can mean *absent everywhere* or *present on only some replicas* — and `system.crash_log` exists only on the node that crashed. The tool therefore counts how many replicas actually have the table before deciding: zero means genuinely not applicable, anything else (or an unverifiable answer) surfaces the error rather than risk hiding a real crash.
 
 ### YAML schema
 
@@ -557,7 +576,7 @@ When `-skip-dashboard` is not set, the tool generates a single self-contained `d
 
 | # | Section | What it shows |
 |---|---|---|
-| 1 | 🚨 **Alert Summary** | Fired alerts grouped by severity (critical / warning / info), with the row-level message template expanded per instance. A green "no issues" banner appears when nothing fired. |
+| 1 | 🚨 **Alert Summary** | Fired alerts grouped by severity (critical / warning / info), with the row-level message template expanded per instance. Rules that **could not run** appear with a ⚠ marker and a separate "Could not run" chip — they are never counted in the severity badge. Rules that are **not applicable** here are listed in a muted footnote. A green "no issues" banner appears when nothing fired. |
 | 2 | 📈 **Overview** | Top-level counters: server version, uptime, total databases, total tables, active parts, total size |
 | 3 | 📦 **Storage** | Size by database (horizontal bar), table-engine distribution (doughnut), and a top-20-by-size table list |
 | 4 | 📋 **Tables Explorer** | Searchable / paginated table of every user table with engine, parts, rows, size, partition / sorting keys, and storage policy |
