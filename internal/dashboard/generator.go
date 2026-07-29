@@ -1514,7 +1514,12 @@ function renderAlerts(){
   const alerts=DATA.alerts||[];
   const fired=alerts.filter(a=>(a.rows&&a.rows.length>0)||a.error);
   const skipped=alerts.filter(a=>a.skipped);
-  const evaluated=alerts.length-skipped.length;
+  // Mirror alert.Summarize exactly: "evaluated" excludes BOTH skipped and
+  // errored rules, so this number can never disagree with the CLI's.
+  // (Today the banner using it only renders when erroredRules is empty, so
+  // the subtraction is a no-op there — but keeping two different
+  // definitions of one number is how the "11 fired" bug happened.)
+  const evaluated=alerts.length-skipped.length-alerts.filter(a=>a.error).length;
   const skipNote=skipped.length
     ? '<div class="alert-skipped">ℹ️ '+skipped.length+' rule(s) not applicable on this server (table not present): '+skipped.map(a=>a.name).join(', ')+'</div>'
     : '';

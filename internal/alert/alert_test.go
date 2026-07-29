@@ -86,26 +86,26 @@ func TestFormattedMessages_MultiRow(t *testing.T) {
 	}
 }
 
-// ── Fired ────────────────────────────────────────────────────────────────────
+// ── Notable ────────────────────────────────────────────────────────────────────
 
 func TestNotable_NoRows(t *testing.T) {
 	r := Result{Rows: []map[string]interface{}{}}
 	if r.Notable() {
-		t.Error("empty rows should not be fired")
+		t.Error("empty rows must not be Notable")
 	}
 }
 
 func TestNotable_WithRows(t *testing.T) {
 	r := Result{Rows: []map[string]interface{}{{"x": "1"}}}
 	if !r.Notable() {
-		t.Error("rows present should be fired")
+		t.Error("rows present must be Notable")
 	}
 }
 
 func TestNotable_WithError(t *testing.T) {
 	r := Result{Error: "connection refused"}
 	if !r.Notable() {
-		t.Error("error result should be fired")
+		t.Error("an errored result must be Notable (it needs display) — but Summarize must not count it as fired")
 	}
 }
 
@@ -505,6 +505,20 @@ func TestAlertYAML_FilesAreValid(t *testing.T) {
 			}
 			if def.Query == "" {
 				t.Error("alert has no query")
+			}
+			// Severity must be one of the three known values (empty is fine —
+			// evalFile defaults it to warning). Anything else passes straight
+			// through to the dashboard, where the severity chips and the nav
+			// badge only count critical/warning/info: a rule with
+			// `severity: high` that genuinely FIRES would be counted nowhere
+			// and be invisible in both summary surfaces. Cheaper to make the
+			// "we control the severities" assumption enforced than assumed.
+			switch def.Severity {
+			case "", SeverityCritical, SeverityWarning, SeverityInfo:
+			default:
+				t.Errorf("severity %q is not one of %q/%q/%q — a firing rule with an "+
+					"unknown severity is counted in neither the badge nor any chip",
+					def.Severity, SeverityCritical, SeverityWarning, SeverityInfo)
 			}
 			// Security: expanded query must pass validation
 			expanded := ev.expandQuery(def.Query)

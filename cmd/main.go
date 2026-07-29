@@ -254,8 +254,10 @@ func main() {
 	if !skipAlerts {
 		fmt.Println("Evaluating alert rules...")
 		alertResults = alert.NewEvaluator(client, mode).RunAll(alertsDir, serverVersion)
-		// Skipped rules (table not present) are not "checked" — reporting
-		// them as checked would imply they passed.
+		// "checked" counts only rules that produced an answer: both skipped
+		// (table not present here) and errored (query failed) rules are
+		// excluded, because reporting either as checked would imply a
+		// verification that never happened. See alert.Summarize.
 		evaluated, fired, errored, skipped := alert.Summarize(alertResults)
 		fmt.Printf("Alert evaluation complete: %d rule(s) checked, %d fired, %d errored, %d not applicable\n",
 			evaluated, fired, errored, skipped)
