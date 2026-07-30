@@ -304,7 +304,7 @@ Two outputs are deliberately withheld in gov mode, because both are part of the 
 | `dashboard.html` | Its panels are built in Go and select raw identifiers — database/table names for up to 2000 tables, disk paths, users — plus server-generated text (`last_exception`, `last_error_message`). Hashing every panel is the follow-up that would restore it. |
 | Query analysis (`--query-id` / `--normalized-query-hash`) | The bundle embeds raw query text, exception messages and full DDL. Freeform SQL text can't be hashed without destroying its diagnostic value, so the flags are rejected outright. |
 
-Because the dashboard is the only other consumer of alert results, gov runs instead write **`alerts_summary.json`** into the archive: each rule's name, title, severity, outcome (`fired` / `clean` / `skipped` / `error`) and **instance count** — but not the matched rows, whose columns are defined per-rule and would carry unhashed identifiers. So you still get *"`too_many_parts` fired, 12 instances"* without the table names.
+Because the dashboard is the only other consumer of alert results, gov runs instead write **[`alerts_summary.json`](#alerts_summaryjson)** into the archive — so you still get *"`too_many_parts` fired, 12 instances"* without the table names.
 
 Everything else — the per-mode `.native` files — is hashed as described above.
 
@@ -388,6 +388,16 @@ Only rules that actually produced an answer count as *checked*. The dashboard mi
 
 A missing **column** is always an error, never "not applicable" — that's the signal that a rule needs [version-gating](#version-specific-queries).
 
+### `alerts_summary.json`
+
+The HTML dashboard is the only other place alert results are recorded, so whenever it **isn't** produced the archive would otherwise contain no trace that the rules ran at all. In that case the tool writes `alerts_summary.json` into the output directory instead. It appears when:
+
+- `-mode gov` (the dashboard is [withheld](#what-gov-mode-does-not-produce)),
+- `-skip-dashboard` was passed, or
+- dashboard generation failed.
+
+It records each rule's name, title, severity, file (including the version-override directory, e.g. `24.1.1.0/…`), outcome (`fired` / `clean` / `error` / `skipped`) and **instance count**, plus the run totals. **Matched rows are never included in any mode** — their columns are defined per-rule, so they routinely carry database and table names. The count is the substitute: *"`too_many_parts` fired, 12 instances"*.
+
 > **Cloud caveat.** In `cloud` mode per-replica tables are read through `clusterAllReplicas`, so an `UNKNOWN_TABLE` can mean *absent everywhere* or *present on only some replicas* — and `system.crash_log` exists only on the node that crashed. The tool therefore counts how many replicas actually have the table before deciding: zero means genuinely not applicable, anything else (or an unverifiable answer) surfaces the error rather than risk hiding a real crash.
 
 ### YAML schema
@@ -445,7 +455,7 @@ The repo ships with 11 alert rules in `alerts/`. They are intended as a starting
 | `crash_log_entries` | critical | `system.crash_log` is non-empty (server crashed at least once) |
 | `replica_readonly` | critical | A replicated table is in read-only mode (lost Keeper session, disk full, network partition) |
 | `replication_queue_errors` | critical | Replication queue entries have a non-empty `last_exception` |
-| `disk_space_low` | critical | Any disk has less than 15% free space |
+| `disk_space_low` | critical | Any disk has less than 15% free space — **on any replica** in cloud mode, with the reporting host named in the message |
 | `keeper_exception_spike` | warning | More than 20 KEEPER_EXCEPTION (code 999) errors in the last hour |
 | `high_exception_rate` | warning | More than 50 query exceptions for a single exception code in the last hour |
 | `too_many_simultaneous_queries` | warning | More than 10 code-252 errors in the last hour (`max_concurrent_queries` hit) |
@@ -649,7 +659,9 @@ clickhouse_results/
 │   ├── system.parts_YYYYMMDD_HHMMSS.native                  #   one file per query
 │   ├── system.mutations_YYYYMMDD_HHMMSS.native
 │   ├── ...
-│   └── dashboard.html                                       #   unless -skip-dashboard
+│   ├── query_analysis/                                      #   only with --query-id / --hash
+│   ├── dashboard.html                                       #   unless -skip-dashboard or gov
+│   └── alerts_summary.json                                  #   when dashboard.html is absent
 └── clickhouse_backup_YYYYMMDD_HHMMSS_gov_name_mapping.csv   # → LOCAL only (gov mode)
 configuration/                                               # → archived (unless -skip-config)
 └── *.xml                                                    #   sanitised configs

@@ -95,11 +95,17 @@ func TestGovQueries_NoRawIdentifiersOrDDL(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			// Strip comment lines: they legitimately name columns.
+			// Strip comments — whole-line AND trailing — so they can't hide a
+			// projection from the check ("name  -- hashed below" would
+			// otherwise escape, since only lines STARTING with -- were cut).
+			// Comments legitimately name columns, so they must not count as
+			// projections either.
 			var code []string
 			for _, line := range strings.Split(string(raw), "\n") {
-				s := strings.TrimSpace(line)
-				if s != "" && !strings.HasPrefix(s, "--") {
+				if i := strings.Index(line, "--"); i >= 0 {
+					line = line[:i]
+				}
+				if s := strings.TrimSpace(line); s != "" {
 					code = append(code, s)
 				}
 			}
@@ -114,16 +120,20 @@ func TestGovQueries_NoRawIdentifiersOrDDL(t *testing.T) {
 				if exempt[filepath.Base(rel)][id] {
 					continue
 				}
-				// Matches the identifier as its own projection. Both ends need
-				// alternatives beyond "own line":
-				//   leading  — line start, a comma, or SELECT (the first item
-				//              of an inline list is preceded by neither).
-				//   trailing — a comma, end of line, or FROM (the last item of
-				//              a single-line query is followed by neither).
-				// Without both, "SELECT database FROM system.databases" slips
-				// through entirely — which it did until this was widened.
+				// Matches the identifier as its own projection. Every part of
+				// this has been needed by a real shape:
+				//   leading    — line start, a comma, or SELECT (the first item
+				//                of an inline list is preceded by neither).
+				//   qualifier  — an optional `t.` prefix. Without it a
+				//                table-qualified projection never matches,
+				//                because the preceding char is `.` — and
+				//                `SELECT t.database, t.name FROM system.tables t`
+				//                is verbatim how the dashboard's tablesListSQL
+				//                is written, i.e. the likeliest paste source.
+				//   trailing   — a comma, end of line, or FROM (the last item
+				//                of a single-line query is followed by neither).
 				projected := regexp.MustCompile(
-					`(?mi)(?:^|,|\bSELECT\b)\s*` + id + `\s*(?:,|$|\s+FROM\b)`).MatchString(body)
+					`(?mi)(?:^|,|\bSELECT\b)\s*(?:\w+\.)?` + id + `\s*(?:,|$|\s+FROM\b)`).MatchString(body)
 				// "Hashed" means some SHA256 expression is aliased to this
 				// name — covers both the direct form
 				// (SHA256(concat(database, …)) AS database) and hashing a

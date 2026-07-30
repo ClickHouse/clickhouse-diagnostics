@@ -294,8 +294,12 @@ func summaryNote(mode string) string {
 		return "gov mode: rule outcomes and instance counts only; matched rows are omitted " +
 			"because their columns can contain unhashed identifiers"
 	}
-	return "rule outcomes and instance counts only (written because the HTML dashboard was " +
-		"not generated); matched rows are omitted — see the dashboard for row-level detail"
+	// Don't point the reader at dashboard.html: this file exists precisely
+	// because that artifact is NOT in this archive, so "see the dashboard"
+	// reads as a missing attachment. Give an action instead.
+	return "rule outcomes and instance counts only, written because the HTML dashboard was " +
+		"not generated for this run; matched rows are omitted — re-run without --skip-dashboard " +
+		"(or resolve the dashboard generation error above) for row-level detail"
 }
 
 // Summarize counts results for reporting. Single source of truth for

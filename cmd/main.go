@@ -279,12 +279,15 @@ func main() {
 	// the follow-up that would restore it.
 	dashboardWritten := false
 	switch {
+	// An explicit --skip-dashboard is reported first: a user who asked to
+	// skip it should be told their flag was honoured, not that gov policy
+	// withheld it. Same outcome either way (dashboardWritten stays false).
+	case skipDashboard:
+		fmt.Println("Skipping HTML dashboard (--skip-dashboard).")
 	case mode == "gov":
 		fmt.Println("Skipping HTML dashboard in gov mode: its panels select raw identifiers " +
 			"(table names, disk paths, users, exception text) that cannot be hashed, and the " +
 			"dashboard is part of the support-bound archive.")
-	case skipDashboard:
-		fmt.Println("Skipping HTML dashboard (--skip-dashboard).")
 	default:
 		gen := dashboard.NewGenerator(client, mode).WithServerVersion(serverVersion).WithAnalysis(analysisOpts, analysisDir)
 		if err := gen.Generate(finalOutputDir, alertResults); err != nil {

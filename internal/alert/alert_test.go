@@ -1,6 +1,7 @@
 package alert
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -245,6 +246,86 @@ func TestSummarize(t *testing.T) {
 	// A skipped result is neither fired nor errored.
 	if results[3].Notable() {
 		t.Error("a Skipped result must not report Notable()")
+	}
+}
+
+// TestWriteSummaryJSON covers the one artifact a support engineer reads
+// when there is no dashboard: the four states must map correctly, and
+// matched ROWS must never appear — their columns are rule-defined, so in
+// gov mode they would carry the identifiers gov hashes everywhere else.
+func TestWriteSummaryJSON(t *testing.T) {
+	results := []Result{
+		{Name: "fired_rule", Title: "Fired", Severity: SeverityCritical,
+			Rows: []map[string]interface{}{
+				{"database": "secretdb", "table": "customer_pii"},
+				{"database": "secretdb", "table": "other"},
+			}},
+		{Name: "clean_rule", Title: "Clean", Severity: SeverityWarning},
+		{Name: "errored_rule", Title: "Errored", Severity: SeverityWarning, Error: "query: boom"},
+		{Name: "skipped_rule", Title: "Skipped", Skipped: true, Reason: "table not present"},
+	}
+
+	for _, mode := range []string{"onprem", "gov"} {
+		t.Run(mode, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := WriteSummaryJSON(dir, results, mode); err != nil {
+				t.Fatal(err)
+			}
+			blob, err := os.ReadFile(filepath.Join(dir, "alerts_summary.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Row contents must not leak, in ANY mode.
+			for _, leak := range []string{"secretdb", "customer_pii"} {
+				if strings.Contains(string(blob), leak) {
+					t.Errorf("row content %q leaked into alerts_summary.json", leak)
+				}
+			}
+			var got struct {
+				Evaluated int `json:"evaluated"`
+				Fired     int `json:"fired"`
+				Errored   int `json:"errored"`
+				// Needs the tag: Go won't map not_applicable → NotApplicable.
+				NotApplicable int `json:"not_applicable"`
+				Note          string
+				Rules         []struct {
+					Name, State, Reason string
+					Count               int `json:"instance_count"`
+				}
+			}
+			if err := json.Unmarshal(blob, &got); err != nil {
+				t.Fatal(err)
+			}
+			if got.Evaluated != 2 || got.Fired != 1 || got.Errored != 1 || got.NotApplicable != 1 {
+				t.Errorf("counts = evaluated %d / fired %d / errored %d / n-a %d; want 2/1/1/1",
+					got.Evaluated, got.Fired, got.Errored, got.NotApplicable)
+			}
+			states := map[string]string{}
+			counts := map[string]int{}
+			for _, r := range got.Rules {
+				states[r.Name] = r.State
+				counts[r.Name] = r.Count
+			}
+			for name, want := range map[string]string{
+				"fired_rule": "fired", "clean_rule": "clean",
+				"errored_rule": "error", "skipped_rule": "skipped",
+			} {
+				if states[name] != want {
+					t.Errorf("%s: state %q, want %q", name, states[name], want)
+				}
+			}
+			// The count is the substitute for the omitted rows.
+			if counts["fired_rule"] != 2 {
+				t.Errorf("fired_rule instance_count = %d, want 2", counts["fired_rule"])
+			}
+			// The note must not send the reader to an artifact that isn't there.
+			if strings.Contains(got.Note, "see the dashboard") {
+				t.Errorf("note points at a dashboard this archive lacks: %q", got.Note)
+			}
+			if mode == "gov" && !strings.Contains(got.Note, "gov") {
+				t.Errorf("gov note should state the privacy reason: %q", got.Note)
+			}
+		})
 	}
 }
 
