@@ -220,7 +220,7 @@ func TestSummarize(t *testing.T) {
 	results := []Result{
 		{Name: "fired", Rows: []map[string]interface{}{{"a": 1}}}, // fired
 		{Name: "clean"},                         // evaluated, not fired
-		{Name: "errored", Error: "query: boom"}, // fired (error counts)
+		{Name: "errored", Error: "query: boom"}, // errored, NOT fired
 		{Name: "skipped", Skipped: true, Reason: "table not present"}, // not evaluated
 	}
 	evaluated, fired, errored, skipped := Summarize(results)

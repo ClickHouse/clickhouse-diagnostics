@@ -51,10 +51,20 @@ func TestGovQueries_NoRawIdentifiersOrDDL(t *testing.T) {
 	// onprem file dropped into queries.gov/ hashes nothing). It does not
 	// catch a file that hashes a column AND also emits it raw; that needs
 	// real result-column analysis, so it stays a review concern.
-	mustBeHashed := []string{"database", "table", "name", "user", "path", "host_name", "host_address"}
+	// Covers identifier columns AND the free-text columns that carry
+	// identifiers inside them — every one of these was found raw by review
+	// and hashed by hand during this branch, so the guard has to include
+	// them or it protects only the leaks nobody made.
+	mustBeHashed := []string{
+		"database", "table", "name", "user", "path", "host_name", "host_address",
+		"last_exception", "postpone_reason", "last_error_message",
+		"partition", "origin", "replica_name", "comment", "source",
+	}
 
 	// Documented exemptions: the column name collides with an identifier
-	// but the value is not customer data.
+	// but the value is not customer data. Keyed by BASE name so a future
+	// version-directory copy (queries.gov/25.x/system.errors.sql) keeps the
+	// exemption instead of failing spuriously.
 	exempt := map[string]map[string]bool{
 		// system.errors.name is a ClickHouse error constant (UNKNOWN_TABLE,
 		// TOO_MANY_PARTS, …), not a schema identifier.
@@ -101,16 +111,19 @@ func TestGovQueries_NoRawIdentifiersOrDDL(t *testing.T) {
 				}
 			}
 			for _, id := range mustBeHashed {
-				if exempt[rel][id] {
+				if exempt[filepath.Base(rel)][id] {
 					continue
 				}
-				// Matches the identifier as its own projection, whether on its
-				// own line (how every gov file is formatted) or inline in a
-				// comma-separated list — so an onprem file pasted in as
-				// "SELECT database, table, engine" can't slip past the check
-				// that exists to catch exactly that copy-paste.
+				// Matches the identifier as its own projection. Both ends need
+				// alternatives beyond "own line":
+				//   leading  — line start, a comma, or SELECT (the first item
+				//              of an inline list is preceded by neither).
+				//   trailing — a comma, end of line, or FROM (the last item of
+				//              a single-line query is followed by neither).
+				// Without both, "SELECT database FROM system.databases" slips
+				// through entirely — which it did until this was widened.
 				projected := regexp.MustCompile(
-					`(?m)(?:^|,)\s*` + id + `\s*(?:,|$)`).MatchString(body)
+					`(?mi)(?:^|,|\bSELECT\b)\s*` + id + `\s*(?:,|$|\s+FROM\b)`).MatchString(body)
 				// "Hashed" means some SHA256 expression is aliased to this
 				// name — covers both the direct form
 				// (SHA256(concat(database, …)) AS database) and hashing a

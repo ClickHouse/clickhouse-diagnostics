@@ -277,27 +277,36 @@ func main() {
 	// hash. Shipping it would defeat gov-mode hashing, so it is refused for
 	// the same reason query analysis is. Hashing every dashboard panel is
 	// the follow-up that would restore it.
-	if mode == "gov" {
+	dashboardWritten := false
+	switch {
+	case mode == "gov":
 		fmt.Println("Skipping HTML dashboard in gov mode: its panels select raw identifiers " +
 			"(table names, disk paths, users, exception text) that cannot be hashed, and the " +
 			"dashboard is part of the support-bound archive.")
-		// The dashboard is the only consumer of alertResults, so without a
-		// substitute a gov archive would carry no alert record at all.
-		// Write rule-level metadata only — name/title/severity/state and the
-		// instance COUNT, never the matched rows, whose columns are
-		// rule-defined and would carry raw identifiers.
-		if !skipAlerts && len(alertResults) > 0 {
-			if err := alert.WriteSummaryJSON(finalOutputDir, alertResults); err != nil {
-				fmt.Printf("Warning: alert summary could not be written: %v\n", err)
-			} else {
-				fmt.Println("Wrote alerts_summary.json (rule outcomes and instance counts; " +
-					"matched rows omitted in gov mode).")
-			}
-		}
-	} else if !skipDashboard {
+	case skipDashboard:
+		fmt.Println("Skipping HTML dashboard (--skip-dashboard).")
+	default:
 		gen := dashboard.NewGenerator(client, mode).WithServerVersion(serverVersion).WithAnalysis(analysisOpts, analysisDir)
 		if err := gen.Generate(finalOutputDir, alertResults); err != nil {
 			fmt.Printf("Warning: dashboard generation failed: %v\n", err)
+		} else {
+			dashboardWritten = true
+		}
+	}
+
+	// The dashboard is the only OTHER consumer of alertResults, so whenever it
+	// isn't produced — gov mode, --skip-dashboard, or a generation failure —
+	// the archive would carry no alert record at all: the rules ran, a
+	// critical one may have fired, and the artifact the customer ships back
+	// says nothing. Write rule-level metadata instead: name/title/severity/
+	// state and the instance COUNT, never the matched rows (their columns are
+	// rule-defined, so in gov mode they would carry raw identifiers).
+	if !skipAlerts && !dashboardWritten && len(alertResults) > 0 {
+		if err := alert.WriteSummaryJSON(finalOutputDir, alertResults, mode); err != nil {
+			fmt.Printf("Warning: alert summary could not be written: %v\n", err)
+		} else {
+			fmt.Println("Wrote alerts_summary.json (rule outcomes and instance counts; " +
+				"matched rows are never included).")
 		}
 	}
 

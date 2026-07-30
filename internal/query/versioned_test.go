@@ -250,7 +250,7 @@ func TestRealRepoLadders_Monotonic(t *testing.T) {
 		ver  internal.Version
 		dir  string
 	}
-	for _, dir := range []string{"../../queries.onprem", "../../queries.gov", "../../queries.query_analysis"} {
+	for _, dir := range []string{"../../queries.onprem", "../../queries.gov", "../../queries.cloud", "../../queries.query_analysis"} {
 		t.Run(filepath.Base(dir), func(t *testing.T) {
 			if _, err := os.Stat(dir); os.IsNotExist(err) {
 				t.Skipf("%s not present", dir)

@@ -334,6 +334,12 @@ func (g *Generator) tablesListSQL() string {
 // and `last_exception` — these can carry connection strings, file
 // paths, exception text and user comments that reveal schema or
 // infrastructure details that gov mode is otherwise hashing.
+//
+// NOTE: currently unreachable — cmd/main.go refuses to generate the
+// dashboard in gov mode at all, because the other ~20 panels select raw
+// identifiers this redaction doesn't cover. Kept (like the gov branches
+// in the async panel and collectAnalysis) for the hashed-gov-dashboard
+// follow-up that would restore it; it is NOT a live guarantee today.
 func (g *Generator) dictionariesSQL() string {
 	exceptionCol, sourceCol, originCol, commentCol := "last_exception", "source", "origin", "comment"
 	if g.mode == "gov" {

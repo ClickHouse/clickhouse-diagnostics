@@ -228,13 +228,16 @@ func (ev *Evaluator) RunAll(dir string, serverVersion internal.Version) []Result
 // rule with its identity, outcome and instance COUNT — deliberately NOT
 // the matched rows.
 //
-// This is the gov-mode substitute for the HTML dashboard (the dashboard is
-// the only other consumer of alert results, and it isn't produced in gov
-// mode). Row contents are omitted because an alert's columns are defined
-// by the rule, so they routinely carry raw database/table names that gov
-// mode hashes everywhere else — a count plus the rule's own message
-// template gives support the signal without the identifiers.
-func WriteSummaryJSON(dir string, results []Result) error {
+// Written whenever the HTML dashboard isn't (gov mode, --skip-dashboard, or
+// a generation failure), because the dashboard is the only other consumer
+// of alert results — without this the archive would record nothing about
+// rules that ran and possibly fired.
+//
+// Row contents are always omitted: an alert's columns are defined by the
+// rule, so they routinely carry raw database/table names that gov mode
+// hashes everywhere else. A count plus the rule's own message template
+// gives support the signal without the identifiers.
+func WriteSummaryJSON(dir string, results []Result, mode string) error {
 	type entry struct {
 		Name     string `json:"name"`
 		Title    string `json:"title"`
@@ -259,7 +262,7 @@ func WriteSummaryJSON(dir string, results []Result) error {
 		Fired:         fired,
 		Errored:       errored,
 		NotApplicable: skipped,
-		Note:          "gov mode: rule outcomes and instance counts only; matched rows are omitted because their columns can contain unhashed identifiers",
+		Note:          summaryNote(mode),
 	}
 	for _, r := range results {
 		e := entry{Name: r.Name, Title: r.Title, Severity: r.Severity, File: r.File,
@@ -281,6 +284,18 @@ func WriteSummaryJSON(dir string, results []Result) error {
 		return err
 	}
 	return os.WriteFile(filepath.Join(dir, "alerts_summary.json"), blob, 0600)
+}
+
+// summaryNote explains the file's scope to whoever opens the archive. In
+// gov mode the omission of rows is a privacy requirement; elsewhere it's
+// simply the substitute-for-the-dashboard scope.
+func summaryNote(mode string) string {
+	if strings.ToLower(mode) == "gov" {
+		return "gov mode: rule outcomes and instance counts only; matched rows are omitted " +
+			"because their columns can contain unhashed identifiers"
+	}
+	return "rule outcomes and instance counts only (written because the HTML dashboard was " +
+		"not generated); matched rows are omitted — see the dashboard for row-level detail"
 }
 
 // Summarize counts results for reporting. Single source of truth for
