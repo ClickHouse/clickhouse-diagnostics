@@ -289,8 +289,11 @@ func TestWriteSummaryJSON(t *testing.T) {
 				NotApplicable int `json:"not_applicable"`
 				Note          string
 				Rules         []struct {
-					Name, State, Reason string
-					Count               int `json:"instance_count"`
+					Name, State string
+					// Also needs a tag — the key is skip_reason, so an
+					// untagged Reason would silently stay empty.
+					Reason string `json:"skip_reason"`
+					Count  int    `json:"instance_count"`
 				}
 			}
 			if err := json.Unmarshal(blob, &got); err != nil {
@@ -302,9 +305,16 @@ func TestWriteSummaryJSON(t *testing.T) {
 			}
 			states := map[string]string{}
 			counts := map[string]int{}
+			reasons := map[string]string{}
 			for _, r := range got.Rules {
 				states[r.Name] = r.State
 				counts[r.Name] = r.Count
+				reasons[r.Name] = r.Reason
+			}
+			// The skip reason is what the dashboard's "not applicable" note
+			// renders from, so it has to survive serialisation.
+			if reasons["skipped_rule"] != "table not present" {
+				t.Errorf("skipped_rule skip_reason = %q, want %q", reasons["skipped_rule"], "table not present")
 			}
 			for name, want := range map[string]string{
 				"fired_rule": "fired", "clean_rule": "clean",

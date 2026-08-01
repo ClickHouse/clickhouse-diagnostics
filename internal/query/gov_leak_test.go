@@ -134,13 +134,28 @@ func TestGovQueries_NoRawIdentifiersOrDDL(t *testing.T) {
 				//                of a single-line query is followed by neither).
 				projected := regexp.MustCompile(
 					`(?mi)(?:^|,|\bSELECT\b)\s*(?:\w+\.)?` + id + `\s*(?:,|$|\s+FROM\b)`).MatchString(body)
+
+				// An ALIASED projection satisfies none of the trailing
+				// alternatives above, so it needs its own pattern — and the
+				// shape is real: `t.database AS database` /
+				// `t.name AS table_name` is verbatim
+				// queries.query_analysis/tables_for_query.sql, i.e. a paste
+				// source inside this very repo.
+				//
+				// A separate regex rather than an optional alias group,
+				// because RE2 has no lookahead and an optional `\s+\w+` would
+				// swallow `ORDER BY …, path ASC`. Requiring the explicit AS
+				// keyword also keeps `partition_id AS …` from reading as
+				// `partition` (the char after the id must be whitespace).
+				aliased := regexp.MustCompile(
+					`(?mi)(?:^|,|\bSELECT\b)\s*(?:\w+\.)?` + id + `\s+AS\s+\w+`).MatchString(body)
 				// "Hashed" means some SHA256 expression is aliased to this
 				// name — covers both the direct form
 				// (SHA256(concat(database, …)) AS database) and hashing a
 				// derived expression (… concat(splitByChar('.', tables)[1],
 				// …) as database), which query_log_details uses.
 				hashed := regexp.MustCompile(`(?i)SHA256\(.*\)\s*AS\s+` + id + `\b`).MatchString(body)
-				if projected && !hashed {
+				if (projected || aliased) && !hashed {
 					t.Errorf("projects identifier %q but never hashes it — looks like an unhashed copy of the onprem/cloud variant", id)
 				}
 			}

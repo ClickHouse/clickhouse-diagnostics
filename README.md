@@ -661,7 +661,7 @@ clickhouse_results/
 │   ├── ...
 │   ├── query_analysis/                                      #   only with --query-id / --hash
 │   ├── dashboard.html                                       #   unless -skip-dashboard or gov
-│   └── alerts_summary.json                                  #   when dashboard.html is absent
+│   └── alerts_summary.json                                  #   when alerts ran but dashboard.html is absent
 └── clickhouse_backup_YYYYMMDD_HHMMSS_gov_name_mapping.csv   # → LOCAL only (gov mode)
 configuration/                                               # → archived (unless -skip-config)
 └── *.xml                                                    #   sanitised configs
