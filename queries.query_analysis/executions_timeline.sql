@@ -25,7 +25,11 @@ SELECT
     read_rows,
     read_bytes,
     formatReadableSize(read_bytes)                          AS read_bytes_human,
-    hostname,
+    -- Root variant: the hostname COLUMN was added to query_log in 23.11
+    -- (see 23.11.1.0/). hostName() is evaluated on whichever server
+    -- serves the row, so it labels rows correctly even through
+    -- clusterAllReplicas.
+    hostName()                                              AS hostname,
     user
 FROM {sys.query_log}
 WHERE normalized_query_hash = {normalized_query_hash}

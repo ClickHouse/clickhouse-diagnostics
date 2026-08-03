@@ -1,6 +1,6 @@
 SELECT 
   hex(SHA256(concat(user, '%salt%'))) AS user,
-  hex(SHA256(concat(address, '%salt%'))) AS address,
+  hex(SHA256(concat(toString(address), '%salt%'))) AS address,
   elapsed,
   read_rows,
   read_bytes,

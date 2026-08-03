@@ -5,7 +5,6 @@ SELECT
     part_name,
     partition_id,
     concat(database, '.', table) AS table_name,
-    part_name,
     error,
     any(exception),
     sum(peak_memory_usage) AS peak_memory_usage,

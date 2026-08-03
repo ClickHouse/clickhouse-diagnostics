@@ -7,50 +7,59 @@
 // YAML rule format
 // ────────────────
 //
-//   name:        unique_snake_case_id
-//   title:       "Human-readable title"
-//   severity:    critical | warning | info        (default: warning)
-//   description: |
-//     Multi-line explanation of what the alert means
-//     and what to do about it.
-//   tags:
-//     - mutations
-//     - performance
-//   query: |
-//     SELECT database, table, mutation_id,
-//            dateDiff('hour', create_time, now()) AS hours_running,
-//            parts_to_do
-//     FROM {sys.mutations}                 -- placeholder, see below
-//     WHERE parts_to_do > 0
-//       AND is_killed = 0
-//       AND dateDiff('hour', create_time, now()) > 3
-//     ORDER BY hours_running DESC
-//   message: "Mutation {mutation_id} on {database}.{table} running {hours_running}h"
+//	name:        unique_snake_case_id
+//	title:       "Human-readable title"
+//	severity:    critical | warning | info        (default: warning)
+//	description: |
+//	  Multi-line explanation of what the alert means
+//	  and what to do about it.
+//	tags:
+//	  - mutations
+//	  - performance
+//	query: |
+//	  SELECT database, table, mutation_id,
+//	         dateDiff('hour', create_time, now()) AS hours_running,
+//	         parts_to_do
+//	  FROM {sys.mutations}                 -- placeholder, see below
+//	  WHERE parts_to_do > 0
+//	    AND dateDiff('hour', create_time, now()) > 3
+//	  ORDER BY hours_running DESC
+//	message: "Mutation {mutation_id} on {database}.{table} running {hours_running}h"
+//
+//	Keep root rules to columns/syntax available on the oldest supported
+//	server (22.8); gate anything newer behind a version subdirectory. For
+//	example system.mutations.is_killed (24.1+) lives in
+//	alerts/24.1.1.0/mutation_running_too_long.yaml, not the root rule.
 //
 // System-table placeholder
 // ────────────────────────
-//   Use {sys.<table>} in your query instead of a hard-coded table path.
-//   The evaluator substitutes the right reference based on the run mode:
 //
-//     {sys.query_log}  →  system.query_log                                  (onprem / gov)
-//                      →  clusterAllReplicas(default, system.query_log)     (cloud, per-replica)
-//     {sys.parts}      →  system.parts                                      (all modes)
+//	Use {sys.<table>} in your query instead of a hard-coded table path.
+//	The evaluator substitutes the right reference based on the run mode:
 //
-//   Tables whose contents are shared across replicas (parts, tables,
-//   replicas, replication_queue, mutations, dictionaries, detached_parts,
-//   columns, databases) are queried directly even in cloud mode: each
-//   replica sees the same rows, so clusterAllReplicas would duplicate them.
+//	  {sys.query_log}  →  system.query_log                                  (onprem / gov)
+//	                   →  clusterAllReplicas(default, system.query_log)     (cloud, per-replica)
+//	  {sys.parts}      →  system.parts                                      (all modes)
+//
+//	Tables whose contents are shared across replicas (parts, tables,
+//	replicas, replication_queue, mutations, detached_parts, columns,
+//	databases) are queried directly even in cloud mode: each replica
+//	sees the same rows, so clusterAllReplicas would duplicate them.
+//	(system.dictionaries is deliberately NOT in that list — its runtime
+//	state is per-replica; see internal/query/template.go.)
 //
 // Message template
 // ────────────────
-//   Use {column_name} in the message string; the evaluator substitutes the
-//   column value from each result row.  One alert instance is created per row.
+//
+//	Use {column_name} in the message string; the evaluator substitutes the
+//	column value from each result row.  One alert instance is created per row.
 //
 // Security
 // ────────
-//   All alert queries are validated by ValidateQueryContent before execution.
-//   Only SELECT / WITH queries are accepted; INSERT, ALTER, DROP, etc. are
-//   rejected with an error and the alert is skipped.
+//
+//	All alert queries are validated by ValidateQueryContent before execution.
+//	Only SELECT / WITH queries are accepted; INSERT, ALTER, DROP, etc. are
+//	rejected with an error and the alert is skipped.
 package alert
 
 import (
@@ -58,11 +67,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
 
+	"clickhouse-diagnostic/internal"
 	"clickhouse-diagnostic/internal/query"
 	"clickhouse-diagnostic/pkg"
 )
@@ -98,10 +110,25 @@ type Result struct {
 	FiredAt     string                   `json:"fired_at"`
 	Error       string                   `json:"error,omitempty"`
 	File        string                   `json:"file"`
+	// Skipped marks a rule that did not run because it is not applicable
+	// on this server — e.g. the system table it queries doesn't exist
+	// (crash_log with no crash, or a config-disabled text_log/query_log).
+	// A skipped rule is neither fired nor errored; it must NOT be counted
+	// as "evaluated", or the dashboard would claim a check passed when it
+	// never ran.
+	Skipped bool   `json:"skipped,omitempty"`
+	Reason  string `json:"skip_reason,omitempty"`
 }
 
-// Fired returns true when the alert triggered (rows > 0) or had a query error.
-func (r Result) Fired() bool { return len(r.Rows) > 0 || r.Error != "" }
+// Notable reports whether this result deserves the reader's attention —
+// it matched rows OR failed to run. Used only to decide what to DISPLAY.
+//
+// Deliberately not called "Fired": treating an error as a fire is what
+// produced the "11 fired" line on a server where all eleven rules failed
+// on permissions. For counting, use Summarize, which separates fired /
+// errored / skipped. Anything reporting numbers to a human must use
+// Summarize, not this.
+func (r Result) Notable() bool { return len(r.Rows) > 0 || r.Error != "" }
 
 // FormattedMessages returns one message string per result row, with
 // {column_name} placeholders substituted from that row's values.
@@ -121,6 +148,24 @@ func (r Result) FormattedMessages() []string {
 type Evaluator struct {
 	client *pkg.ClickHouseClient
 	mode   string
+	// queryFn, when set, replaces the client for auxiliary probe queries.
+	// Exists so the cloud not-applicable logic — which decides whether a
+	// critical crash alert is hidden or surfaced — can be unit-tested
+	// without a live cluster. Nil in production; see query().
+	queryFn func(string) (string, error)
+}
+
+// query runs an auxiliary probe query through the injected seam if present,
+// otherwise the real client. Returns an error when neither is available so
+// callers fail toward surfacing rather than silently skipping.
+func (ev *Evaluator) query(sql string) (string, error) {
+	if ev.queryFn != nil {
+		return ev.queryFn(sql)
+	}
+	if ev.client == nil {
+		return "", fmt.Errorf("no ClickHouse client available")
+	}
+	return ev.client.ExecuteQueryWithFormat(sql)
 }
 
 // NewEvaluator creates a new Evaluator for the given connection and mode.
@@ -137,46 +182,251 @@ func (ev *Evaluator) expandQuery(sql string) string {
 
 // RunAll loads every .yaml file from dir and evaluates each rule.
 // If the directory does not exist the call is a no-op (returns nil).
-func (ev *Evaluator) RunAll(dir string) []Result {
+//
+// dir follows the same version-directory convention as the query
+// directories: a subdirectory named like a ClickHouse version
+// (e.g. "25.4.1.0") overrides a same-named root rule when the connected
+// server (serverVersion) is at least that version.
+func (ev *Evaluator) RunAll(dir string, serverVersion internal.Version) []Result {
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
 		return nil
 	}
-	entries, err := os.ReadDir(dir)
+	files, err := query.FindVersionedFiles(dir, serverVersion, ".yaml")
 	if err != nil {
 		fmt.Printf("[alerts] cannot read %s: %v\n", dir, err)
 		return nil
 	}
 
 	var results []Result
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(strings.ToLower(e.Name()), ".yaml") {
-			continue
+	for _, f := range files {
+		r := ev.evalFile(f.FullPath)
+		// Preserve the version-override context in the reported filename
+		// (mirrors analysis.go) so support engineers can tell which variant
+		// fired — e.g. "22.11.1.0/detached_parts_exist.yaml".
+		if f.DirName != "" {
+			r.File = f.DirName + "/" + f.Name
 		}
-		results = append(results, ev.evalFile(filepath.Join(dir, e.Name())))
+		// Surface any genuine failure (read / yaml / query / parse) once,
+		// here, using the version-aware File — evalFile only stores it in
+		// Result.Error, which otherwise never reaches stdout, so a broken
+		// rule would look identical to a healthy one. The security case is
+		// skipped: evalFile already prints "[alert] BLOCKED". Missing-table
+		// skips carry no Error, so they're excluded automatically.
+		if r.Error != "" && !strings.HasPrefix(r.Error, "security:") {
+			fmt.Printf("  [alert] ERROR %s: %s\n", r.File, r.Error)
+		}
+		results = append(results, r)
 	}
 
-	fired := 0
+	evaluated, fired, errored, skipped := Summarize(results)
+	fmt.Printf("[alerts] evaluated %d rule(s), %d fired, %d errored, %d skipped (not applicable)\n",
+		evaluated, fired, errored, skipped)
+	return results
+}
+
+// WriteSummaryJSON writes alerts_summary.json into dir: one entry per
+// rule with its identity, outcome and instance COUNT — deliberately NOT
+// the matched rows.
+//
+// Written whenever the HTML dashboard isn't (gov mode, --skip-dashboard, or
+// a generation failure), because the dashboard is the only other consumer
+// of alert results — without this the archive would record nothing about
+// rules that ran and possibly fired.
+//
+// Row contents are always omitted: an alert's columns are defined by the
+// rule, so they routinely carry raw database/table names that gov mode
+// hashes everywhere else. A count plus the rule's own message template
+// gives support the signal without the identifiers.
+func WriteSummaryJSON(dir string, results []Result, mode string) error {
+	type entry struct {
+		Name     string `json:"name"`
+		Title    string `json:"title"`
+		Severity string `json:"severity"`
+		File     string `json:"file"`
+		State    string `json:"state"` // fired | clean | skipped | error
+		Count    int    `json:"instance_count"`
+		Reason   string `json:"skip_reason,omitempty"`
+		Error    string `json:"error,omitempty"`
+		FiredAt  string `json:"checked_at"`
+	}
+	evaluated, fired, errored, skipped := Summarize(results)
+	out := struct {
+		Evaluated     int     `json:"evaluated"`
+		Fired         int     `json:"fired"`
+		Errored       int     `json:"errored"`
+		NotApplicable int     `json:"not_applicable"`
+		Note          string  `json:"note"`
+		Rules         []entry `json:"rules"`
+	}{
+		Evaluated:     evaluated,
+		Fired:         fired,
+		Errored:       errored,
+		NotApplicable: skipped,
+		Note:          summaryNote(mode),
+	}
 	for _, r := range results {
-		if r.Fired() {
+		e := entry{Name: r.Name, Title: r.Title, Severity: r.Severity, File: r.File,
+			Count: len(r.Rows), Reason: r.Reason, Error: r.Error, FiredAt: r.FiredAt}
+		switch {
+		case r.Skipped:
+			e.State = "skipped"
+		case r.Error != "":
+			e.State = "error"
+		case len(r.Rows) > 0:
+			e.State = "fired"
+		default:
+			e.State = "clean"
+		}
+		out.Rules = append(out.Rules, e)
+	}
+	blob, err := json.MarshalIndent(out, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, "alerts_summary.json"), blob, 0600)
+}
+
+// summaryNote explains the file's scope to whoever opens the archive. In
+// gov mode the omission of rows is a privacy requirement; elsewhere it's
+// simply the substitute-for-the-dashboard scope.
+func summaryNote(mode string) string {
+	if strings.ToLower(mode) == "gov" {
+		return "gov mode: rule outcomes and instance counts only; matched rows are omitted " +
+			"because their columns can contain unhashed identifiers"
+	}
+	// Don't point the reader at dashboard.html: this file exists precisely
+	// because that artifact is NOT in this archive, so "see the dashboard"
+	// reads as a missing attachment. Give an action instead.
+	return "rule outcomes and instance counts only, written because the HTML dashboard was " +
+		"not generated for this run; matched rows are omitted — re-run without --skip-dashboard " +
+		"(or resolve the dashboard generation error above) for row-level detail"
+}
+
+// Summarize counts results for reporting. Single source of truth for
+// RunAll's summary and cmd/main.go's completion line.
+//
+// Three distinctions matter, because each means something different to
+// the person reading the archive:
+//   - "evaluated" counts only rules that actually produced an answer, so
+//     it excludes BOTH skipped and errored rules. A rule that never ran
+//     — whether because its table is absent here or because the query
+//     failed — must not read as a check that passed.
+//   - "fired" counts only rules that matched rows, i.e. real findings.
+//   - "errored" is counted separately from fired. Folding the two
+//     together is actively misleading: a user missing SELECT grants makes
+//     every rule fail, and the summary then reads "11 fired" — eleven
+//     apparent production problems that are really one permissions issue
+//     (observed against a restricted ClickHouse Cloud user, which is also
+//     where "11 checked" was shown to overstate what had been verified).
+func Summarize(results []Result) (evaluated, fired, errored, skipped int) {
+	for _, r := range results {
+		switch {
+		case r.Skipped:
+			skipped++
+		case r.Error != "":
+			errored++
+		case len(r.Rows) > 0:
 			fired++
 		}
 	}
-	fmt.Printf("[alerts] evaluated %d rule(s), %d fired\n", len(results), fired)
-	return results
+	return len(results) - skipped - errored, fired, errored, skipped
+}
+
+// isMissingTable reports whether err is a ClickHouse "table doesn't
+// exist" error (code 60 / UNKNOWN_TABLE). It deliberately does NOT match
+// UNKNOWN_IDENTIFIER (a missing column) — that must stay a genuine error
+// so the version-gating detector still catches the is_killed class of bug.
+func isMissingTable(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "UNKNOWN_TABLE")
+}
+
+// reMissingTable pulls the table out of the UNKNOWN_TABLE message so a
+// cluster-wide existence check can be targeted at it.
+//
+// The wording is NOT stable across versions — 22.8 emits "Table
+// system.crash_log doesn't exist." while 26.2 emits "... does not
+// exist." — so both spellings are accepted. (Found the hard way: matching
+// only the older form made the cloud probe silently unreachable on 26.2.)
+var reMissingTable = regexp.MustCompile(`Table ([A-Za-z_][\w.]*) (?:doesn'?t|does not) exist`)
+
+// notApplicable reports whether err means "this rule does not apply to
+// this server" (as opposed to "this rule is broken").
+//
+// Single-node modes: a local UNKNOWN_TABLE is conclusive.
+//
+// Cloud: per-replica tables are read through clusterAllReplicas, so
+// UNKNOWN_TABLE is ambiguous — it can come from a table that is absent
+// everywhere (genuinely not applicable) OR from one that exists on only
+// SOME replicas, where treating it as not-applicable would hide a real
+// finding (system.crash_log materialises on the node that crashed).
+// Rather than guess, ask: count the replicas that have the table. Zero
+// means absent cluster-wide, so skipping is correct; any other answer
+// (including a failed probe) means we cannot rule out partial presence,
+// so the error surfaces.
+//
+// Measured on a 3-replica Cloud 26.2 service: crash_log and text_log are
+// pre-created on every replica, so the fan-out returns 0 rows instead of
+// UNKNOWN_TABLE and this path isn't reached at all there.
+func (ev *Evaluator) notApplicable(err error) bool {
+	if !isMissingTable(err) {
+		return false
+	}
+	if ev.mode != "cloud" {
+		return true
+	}
+	m := reMissingTable.FindStringSubmatch(err.Error())
+	if m == nil {
+		return false // can't identify the table → surface it
+	}
+	// Keep the database the error named instead of assuming "system", so a
+	// rule against mydb.foo isn't checked against system.foo.
+	db, name := "system", m[1]
+	if i := strings.LastIndex(name, "."); i >= 0 {
+		db, name = name[:i], name[i+1:]
+	}
+	count := func(where string) (int64, bool) {
+		raw, qErr := ev.query(fmt.Sprintf(
+			"SELECT count() AS c FROM clusterAllReplicas(default, system.tables) WHERE %s", where))
+		if qErr != nil {
+			return 0, false
+		}
+		rows, parseErr := parseJSONCompact(raw)
+		if parseErr != nil || len(rows) == 0 {
+			return 0, false
+		}
+		n, convErr := strconv.ParseInt(strings.TrimSpace(fmt.Sprintf("%v", rows[0]["c"])), 10, 64)
+		return n, convErr == nil
+	}
+	// Same privilege-blindness guard the dashboard probes use: system.tables
+	// is filtered by grant WITHOUT erroring, so a bare zero can mean "no
+	// permission" rather than "absent". A database we can query always has
+	// SOME visible table, so require that before trusting the specific zero.
+	if n, ok := count(fmt.Sprintf("database='%s'", db)); !ok || n == 0 {
+		return false
+	}
+	n, ok := count(fmt.Sprintf("database='%s' AND name='%s'", db, name))
+	return ok && n == 0
 }
 
 // evalFile loads, validates, and executes one alert rule file.
 func (ev *Evaluator) evalFile(path string) Result {
 	now := time.Now().UTC().Format(time.RFC3339)
 
+	// On read/yaml failures there is no parsed definition, so derive the
+	// identity fields from the filename — otherwise the dashboard renders
+	// an untitled error card ((a.title||a.name) both empty) and the
+	// operator can't tell which rule broke.
+	base := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return Result{File: filepath.Base(path), Error: fmt.Sprintf("read: %v", err), FiredAt: now}
+		return Result{Name: base, Title: base, Severity: SeverityWarning,
+			File: filepath.Base(path), Error: fmt.Sprintf("read: %v", err), FiredAt: now}
 	}
 
 	var def Definition
 	if err := yaml.Unmarshal(raw, &def); err != nil {
-		return Result{File: filepath.Base(path), Error: fmt.Sprintf("yaml: %v", err), FiredAt: now}
+		return Result{Name: base, Title: base, Severity: SeverityWarning,
+			File: filepath.Base(path), Error: fmt.Sprintf("yaml: %v", err), FiredAt: now}
 	}
 
 	r := Result{
@@ -202,9 +452,27 @@ func (ev *Evaluator) evalFile(path string) Result {
 		return r
 	}
 
-	fmt.Printf("  [alert] evaluating %q...\n", def.Name)
 	resp, err := ev.client.ExecuteQueryWithFormat(sql)
 	if err != nil {
+		// A missing table means the rule is not applicable on this server
+		// (e.g. system.crash_log only exists after a crash; system.text_log
+		// / system.query_log may be disabled) — as does a typo'd table name,
+		// which the *_FilesAreValid tests and review are expected to catch.
+		// Either way it is not a broken rule: return a Skipped result (not
+		// fired, not errored) so it neither trips "[alert] ERROR" — which
+		// must stay reserved for genuine breakage like a missing column
+		// (UNKNOWN_IDENTIFIER) — nor gets counted as an evaluated check that
+		// found nothing. RunAll prints genuine errors.
+		//
+		// In cloud mode a clusterAllReplicas fan-out makes UNKNOWN_TABLE
+		// ambiguous, so notApplicable() resolves it by counting the
+		// replicas that actually have the table — see its doc comment.
+		if ev.notApplicable(err) {
+			r.Skipped = true
+			r.Reason = "table not present"
+			fmt.Printf("  [alert] skipped %q (table not present)\n", def.Name)
+			return r
+		}
 		r.Error = fmt.Sprintf("query: %v", err)
 		return r
 	}

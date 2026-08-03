@@ -103,6 +103,16 @@ func TestBuildHTML_SampleData(t *testing.T) {
 			Rows:     []map[string]interface{}{},
 			FiredAt:  firedAt,
 		},
+		// A skipped (not-applicable) rule: its table doesn't exist on this
+		// server. Must NOT count as evaluated and must render in the
+		// muted "not applicable" note, not as a fired/passed check.
+		{
+			Name:    "text_log_alert",
+			Title:   "Text log errors",
+			Skipped: true,
+			Reason:  "table not present",
+			FiredAt: firedAt,
+		},
 	}
 
 	html := buildHTML(data)
@@ -133,6 +143,13 @@ func TestBuildHTML_SampleData(t *testing.T) {
 		"renderAlerts",
 		"alerts-panel",
 		"crash_log_entries",
+		// skipped (not-applicable) alert plumbing: the JS filter, the
+		// muted note style, and the skipped rule's payload fields.
+		"a.skipped",
+		"alert-skipped",
+		"not applicable",
+		`"skipped":true`,
+		"text_log_alert",
 	}
 	for _, want := range mustContain {
 		if !strings.Contains(html, want) {
@@ -168,8 +185,8 @@ func TestBuildHTML_SampleData(t *testing.T) {
 	if !ok {
 		t.Fatalf("alerts is not a slice, got %T", alertsRaw)
 	}
-	if len(alertsSlice) != 2 {
-		t.Errorf("expected 2 alert results, got %d", len(alertsSlice))
+	if len(alertsSlice) != 3 {
+		t.Errorf("expected 3 alert results (fired + clean + skipped), got %d", len(alertsSlice))
 	}
 
 	if err := os.WriteFile("/tmp/dashboard_test.html", []byte(html), 0644); err == nil {

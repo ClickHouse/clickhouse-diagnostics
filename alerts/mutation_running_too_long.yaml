@@ -19,6 +19,12 @@ tags:
 # clause. In CH 25+ the analyzer resolves identifiers against SELECT
 # aliases, so `dateDiff('hour', create_time, now())` against an
 # aliased-as-String create_time would raise ILLEGAL_TYPE_OF_ARGUMENT.
+#
+# Root variant for the oldest supported servers (22.8–23.11):
+# system.mutations.is_killed was added in 24.1, so this variant omits the
+# `is_killed = 0` filter (it would raise UNKNOWN_IDENTIFIER on older
+# servers). See 24.1.1.0/mutation_running_too_long.yaml for the variant
+# that excludes already-killed mutations.
 query: |
   SELECT
     database,
@@ -30,7 +36,6 @@ query: |
     parts_to_do
   FROM {sys.mutations}
   WHERE parts_to_do > 0
-    AND is_killed = 0
     AND dateDiff('hour', create_time, now()) > 3
   ORDER BY hours_running DESC
 

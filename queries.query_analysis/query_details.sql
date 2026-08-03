@@ -1,5 +1,11 @@
 -- Full query_log row for the focus query_id.
 -- Run when --query-id is set.
+--
+-- Root variant for the oldest supported servers (22.8+). Columns that
+-- arrived later are added by version overrides:
+--   23.8.1.0/  → query_cache_usage      (added 23.8)
+--   23.9.1.0/  → peak_threads_usage     (added 23.9)
+--   23.11.1.0/ → hostname column        (added 23.11; root uses hostName())
 SELECT
     event_time_microseconds                                AS ts,
     query_id,
@@ -8,7 +14,7 @@ SELECT
     user,
     initial_user,
     is_initial_query,
-    hostname,
+    hostName()                                             AS hostname,
     address,
     initial_address,
     read_rows,
@@ -19,12 +25,10 @@ SELECT
     query_duration_ms,
     memory_usage                                           AS memory_usage_bytes,
     formatReadableSize(memory_usage)                       AS memory_usage_human,
-    peak_threads_usage,
     projections,
     databases,
     tables,
     used_dictionaries,
-    query_cache_usage,
     exception_code,
     exception,
     log_comment,

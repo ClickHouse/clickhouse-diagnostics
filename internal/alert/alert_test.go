@@ -1,11 +1,14 @@
 package alert
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
+	"clickhouse-diagnostic/internal"
 	"clickhouse-diagnostic/internal/query"
 	"gopkg.in/yaml.v3"
 )
@@ -84,26 +87,26 @@ func TestFormattedMessages_MultiRow(t *testing.T) {
 	}
 }
 
-// ── Fired ────────────────────────────────────────────────────────────────────
+// ── Notable ────────────────────────────────────────────────────────────────────
 
-func TestFired_NoRows(t *testing.T) {
+func TestNotable_NoRows(t *testing.T) {
 	r := Result{Rows: []map[string]interface{}{}}
-	if r.Fired() {
-		t.Error("empty rows should not be fired")
+	if r.Notable() {
+		t.Error("empty rows must not be Notable")
 	}
 }
 
-func TestFired_WithRows(t *testing.T) {
+func TestNotable_WithRows(t *testing.T) {
 	r := Result{Rows: []map[string]interface{}{{"x": "1"}}}
-	if !r.Fired() {
-		t.Error("rows present should be fired")
+	if !r.Notable() {
+		t.Error("rows present must be Notable")
 	}
 }
 
-func TestFired_WithError(t *testing.T) {
+func TestNotable_WithError(t *testing.T) {
 	r := Result{Error: "connection refused"}
-	if !r.Fired() {
-		t.Error("error result should be fired")
+	if !r.Notable() {
+		t.Error("an errored result must be Notable (it needs display) — but Summarize must not count it as fired")
 	}
 }
 
@@ -138,7 +141,7 @@ func TestParseJSONCompact_Empty(t *testing.T) {
 
 func TestRunAll_MissingDir(t *testing.T) {
 	ev := &Evaluator{mode: "onprem"}
-	results := ev.RunAll("/nonexistent/dir/that/does/not/exist")
+	results := ev.RunAll("/nonexistent/dir/that/does/not/exist", internal.Version{Major: 25, Minor: 4, Patch: 1, Build: 0})
 	if results != nil {
 		t.Errorf("expected nil for missing dir, got %v", results)
 	}
@@ -203,7 +206,7 @@ func TestRunAll_IgnoresNonYAML(t *testing.T) {
 
 	// Empty client is OK here because no .yaml files exist so RunAll returns early.
 	ev := &Evaluator{mode: "onprem"}
-	results := ev.RunAll(dir)
+	results := ev.RunAll(dir, internal.Version{Major: 25, Minor: 4, Patch: 1, Build: 0})
 	if len(results) != 0 {
 		t.Errorf("expected 0 results (no yaml files), got %d", len(results))
 	}
@@ -211,24 +214,373 @@ func TestRunAll_IgnoresNonYAML(t *testing.T) {
 
 // ── Real alert YAML files from the alerts/ directory ─────────────────────────
 
+// TestSummarize asserts the load-bearing reporting invariant: skipped
+// rules (table not present) are excluded from "evaluated" — a check that
+// never ran must not read as a check that passed.
+func TestSummarize(t *testing.T) {
+	results := []Result{
+		{Name: "fired", Rows: []map[string]interface{}{{"a": 1}}}, // fired
+		{Name: "clean"},                         // evaluated, not fired
+		{Name: "errored", Error: "query: boom"}, // errored, NOT fired
+		{Name: "skipped", Skipped: true, Reason: "table not present"}, // not evaluated
+	}
+	evaluated, fired, errored, skipped := Summarize(results)
+	// evaluated = produced an answer. Both the skipped rule (never ran) and
+	// the errored rule (ran, got nothing) are excluded — reporting either as
+	// "checked" claims verification that didn't happen.
+	if evaluated != 2 {
+		t.Errorf("evaluated = %d, want 2 (skipped AND errored rules must be excluded)", evaluated)
+	}
+	// fired counts real findings only. Folding errors in here would report
+	// a permissions problem as N production findings — observed live
+	// against a restricted Cloud user where all 11 rules errored.
+	if fired != 1 {
+		t.Errorf("fired = %d, want 1 (matched rows only, NOT errors)", fired)
+	}
+	if errored != 1 {
+		t.Errorf("errored = %d, want 1 (counted separately from fired)", errored)
+	}
+	if skipped != 1 {
+		t.Errorf("skipped = %d, want 1", skipped)
+	}
+	// A skipped result is neither fired nor errored.
+	if results[3].Notable() {
+		t.Error("a Skipped result must not report Notable()")
+	}
+}
+
+// TestWriteSummaryJSON covers the one artifact a support engineer reads
+// when there is no dashboard: the four states must map correctly, and
+// matched ROWS must never appear — their columns are rule-defined, so in
+// gov mode they would carry the identifiers gov hashes everywhere else.
+func TestWriteSummaryJSON(t *testing.T) {
+	results := []Result{
+		{Name: "fired_rule", Title: "Fired", Severity: SeverityCritical,
+			Rows: []map[string]interface{}{
+				{"database": "secretdb", "table": "customer_pii"},
+				{"database": "secretdb", "table": "other"},
+			}},
+		{Name: "clean_rule", Title: "Clean", Severity: SeverityWarning},
+		{Name: "errored_rule", Title: "Errored", Severity: SeverityWarning, Error: "query: boom"},
+		{Name: "skipped_rule", Title: "Skipped", Skipped: true, Reason: "table not present"},
+	}
+
+	for _, mode := range []string{"onprem", "gov"} {
+		t.Run(mode, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := WriteSummaryJSON(dir, results, mode); err != nil {
+				t.Fatal(err)
+			}
+			blob, err := os.ReadFile(filepath.Join(dir, "alerts_summary.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Row contents must not leak, in ANY mode.
+			for _, leak := range []string{"secretdb", "customer_pii"} {
+				if strings.Contains(string(blob), leak) {
+					t.Errorf("row content %q leaked into alerts_summary.json", leak)
+				}
+			}
+			var got struct {
+				Evaluated int `json:"evaluated"`
+				Fired     int `json:"fired"`
+				Errored   int `json:"errored"`
+				// Needs the tag: Go won't map not_applicable → NotApplicable.
+				NotApplicable int `json:"not_applicable"`
+				Note          string
+				Rules         []struct {
+					Name, State string
+					// Also needs a tag — the key is skip_reason, so an
+					// untagged Reason would silently stay empty.
+					Reason string `json:"skip_reason"`
+					Count  int    `json:"instance_count"`
+				}
+			}
+			if err := json.Unmarshal(blob, &got); err != nil {
+				t.Fatal(err)
+			}
+			if got.Evaluated != 2 || got.Fired != 1 || got.Errored != 1 || got.NotApplicable != 1 {
+				t.Errorf("counts = evaluated %d / fired %d / errored %d / n-a %d; want 2/1/1/1",
+					got.Evaluated, got.Fired, got.Errored, got.NotApplicable)
+			}
+			states := map[string]string{}
+			counts := map[string]int{}
+			reasons := map[string]string{}
+			for _, r := range got.Rules {
+				states[r.Name] = r.State
+				counts[r.Name] = r.Count
+				reasons[r.Name] = r.Reason
+			}
+			// The skip reason is what the dashboard's "not applicable" note
+			// renders from, so it has to survive serialisation.
+			if reasons["skipped_rule"] != "table not present" {
+				t.Errorf("skipped_rule skip_reason = %q, want %q", reasons["skipped_rule"], "table not present")
+			}
+			for name, want := range map[string]string{
+				"fired_rule": "fired", "clean_rule": "clean",
+				"errored_rule": "error", "skipped_rule": "skipped",
+			} {
+				if states[name] != want {
+					t.Errorf("%s: state %q, want %q", name, states[name], want)
+				}
+			}
+			// The count is the substitute for the omitted rows.
+			if counts["fired_rule"] != 2 {
+				t.Errorf("fired_rule instance_count = %d, want 2", counts["fired_rule"])
+			}
+			// The note must not send the reader to an artifact that isn't there.
+			if strings.Contains(got.Note, "see the dashboard") {
+				t.Errorf("note points at a dashboard this archive lacks: %q", got.Note)
+			}
+			if mode == "gov" && !strings.Contains(got.Note, "gov") {
+				t.Errorf("gov note should state the privacy reason: %q", got.Note)
+			}
+		})
+	}
+}
+
+// TestRunAll_OverrideFilePrefix asserts that a rule served from a version
+// directory reports its File with the directory prefix (mirrors
+// analysis.go), so support engineers can tell which variant ran. Uses
+// security-blocked rules: evalFile returns before touching the client, so
+// no ClickHouse connection is needed.
+func TestRunAll_OverrideFilePrefix(t *testing.T) {
+	dir := t.TempDir()
+	blocked := []byte("name: r\ntitle: t\nquery: |\n  DROP TABLE x\nmessage: m\n")
+	if err := os.WriteFile(filepath.Join(dir, "r.yaml"), blocked, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "22.11.1.0"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "22.11.1.0", "r.yaml"), blocked, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	ev := &Evaluator{mode: "onprem"}
+	// New server → the 22.11.1.0 override wins.
+	results := ev.RunAll(dir, internal.Version{Major: 25, Minor: 4, Patch: 1, Build: 0})
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result (override shadows root), got %d", len(results))
+	}
+	if results[0].File != "22.11.1.0/r.yaml" {
+		t.Errorf("File = %q, want %q", results[0].File, "22.11.1.0/r.yaml")
+	}
+	// Old server → the root rule, no prefix.
+	results = ev.RunAll(dir, internal.Version{Major: 22, Minor: 8, Patch: 1, Build: 0})
+	if len(results) != 1 || results[0].File != "r.yaml" {
+		t.Errorf("root run: got %+v, want single result with File=r.yaml", results)
+	}
+}
+
+// TestNotApplicable_ModeAware pins the single-node half of the rule: a
+// local UNKNOWN_TABLE is conclusive ("not applicable"), while a missing
+// COLUMN never is. In cloud the answer is not mode-derived — it comes from
+// counting replicas that have the table; see
+// TestNotApplicable_CloudClusterProbe for those branches.
+func TestNotApplicable_ModeAware(t *testing.T) {
+	missing := errString("Code: 60. DB::Exception: Table system.crash_log doesn't exist. (UNKNOWN_TABLE) (version 24.8.1.1)")
+	badColumn := errString("Code: 47. DB::Exception: Missing columns: 'is_killed' (UNKNOWN_IDENTIFIER)")
+
+	for _, mode := range []string{"onprem", "gov"} {
+		ev := &Evaluator{mode: mode}
+		if !ev.notApplicable(missing) {
+			t.Errorf("%s: a locally missing table should be not-applicable", mode)
+		}
+		if ev.notApplicable(badColumn) {
+			t.Errorf("%s: a missing COLUMN must stay a genuine error", mode)
+		}
+	}
+
+	// Cloud resolves the ambiguity by counting replicas that have the table
+	// (clusterAllReplicas over system.tables). With no client the probe
+	// can't run, so it must refuse to claim "not applicable" and let the
+	// error surface — never silently hide a possible real finding.
+	cloud := &Evaluator{mode: "cloud"}
+	if cloud.notApplicable(missing) {
+		t.Error("cloud: without a verifiable cluster-wide absence check, UNKNOWN_TABLE must NOT " +
+			"be treated as not-applicable — it can mean the table exists on another replica (a real crash)")
+	}
+	if cloud.notApplicable(badColumn) {
+		t.Error("cloud: a missing COLUMN must stay a genuine error")
+	}
+}
+
+// TestNotApplicable_CloudClusterProbe covers the branch the whole cloud
+// design rests on — and the one that decides whether a critical crash
+// alert is hidden or surfaced. Uses the queryFn seam so no live cluster is
+// needed. Every uncertain outcome must fail toward SURFACING.
+func TestNotApplicable_CloudClusterProbe(t *testing.T) {
+	missing := errString("Code: 60. DB::Exception: Table system.crash_log does not exist. (UNKNOWN_TABLE)")
+	// count() responses keyed by whether the query targets the specific table.
+	resp := func(n string) string {
+		return `{"meta":[{"name":"c"}],"data":[["` + n + `"]],"rows":1}`
+	}
+
+	cases := []struct {
+		name string
+		fn   func(string) (string, error)
+		want bool // true ⇒ treated as not-applicable (skipped)
+	}{
+		{
+			name: "absent cluster-wide → skip",
+			fn: func(sql string) (string, error) {
+				if strings.Contains(sql, "name='crash_log'") {
+					return resp("0"), nil // no replica has it
+				}
+				return resp("120"), nil // but the database is visible
+			},
+			want: true,
+		},
+		{
+			name: "present on some replicas → surface (a real crash must not be hidden)",
+			fn: func(sql string) (string, error) {
+				if strings.Contains(sql, "name='crash_log'") {
+					return resp("1"), nil // one replica has it
+				}
+				return resp("120"), nil
+			},
+			want: false,
+		},
+		{
+			name: "privilege-blind (database itself invisible) → surface, never claim absent",
+			fn: func(sql string) (string, error) {
+				return resp("0"), nil // even the database check returns 0
+			},
+			want: false,
+		},
+		{
+			name: "probe query fails → surface",
+			fn: func(string) (string, error) {
+				return "", errString("connection reset")
+			},
+			want: false,
+		},
+		{
+			name: "unparseable probe response → surface",
+			fn: func(string) (string, error) {
+				return "not json", nil
+			},
+			want: false,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ev := &Evaluator{mode: "cloud", queryFn: c.fn}
+			if got := ev.notApplicable(missing); got != c.want {
+				t.Errorf("notApplicable = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+// TestNotApplicable_CloudKeepsDatabase asserts the probe checks the database
+// the error named, not a hard-coded "system" — otherwise a rule against
+// mydb.foo would be validated against system.foo and wrongly skipped.
+func TestNotApplicable_CloudKeepsDatabase(t *testing.T) {
+	var seen []string
+	ev := &Evaluator{mode: "cloud", queryFn: func(sql string) (string, error) {
+		seen = append(seen, sql)
+		return `{"meta":[{"name":"c"}],"data":[["5"]],"rows":1}`, nil
+	}}
+	ev.notApplicable(errString("Table mydb.foo does not exist. (UNKNOWN_TABLE)"))
+	joined := strings.Join(seen, " | ")
+	if !strings.Contains(joined, "database='mydb'") {
+		t.Errorf("probe should target the named database; queries were: %s", joined)
+	}
+	if strings.Contains(joined, "database='system' AND name='foo'") {
+		t.Errorf("probe must not fall back to system for a qualified name: %s", joined)
+	}
+}
+
+func TestMissingTableNameExtraction(t *testing.T) {
+	// Both wordings must parse: 22.8 emits "doesn't exist", 26.2 emits
+	// "does not exist". Matching only the older form made the cloud
+	// cluster-wide probe silently unreachable on newer servers (observed
+	// live on Cloud 26.2.1.525).
+	cases := map[string]string{
+		"Code: 60. DB::Exception: Table system.crash_log doesn't exist. (UNKNOWN_TABLE) (version 22.8.21.38)":    "crash_log",
+		"Code: 60. DB::Exception: Table system.no_such_log does not exist. (UNKNOWN_TABLE) (version 26.2.1.525)": "no_such_log",
+		"Table system.text_log doesn't exist. (UNKNOWN_TABLE)":                                                   "text_log",
+		"Code: 47. Missing columns: 'x' (UNKNOWN_IDENTIFIER)":                                                    "",
+	}
+	for errText, want := range cases {
+		m := reMissingTable.FindStringSubmatch(errText)
+		got := ""
+		if m != nil {
+			got = m[1]
+			if i := strings.LastIndex(got, "."); i >= 0 {
+				got = got[i+1:]
+			}
+		}
+		if got != want {
+			t.Errorf("from %q: got %q, want %q", errText, got, want)
+		}
+	}
+}
+
+func TestIsMissingTable(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"unknown table (crash_log)", errString("non-OK status: 404, body: Code: 60. DB::Exception: Table system.crash_log doesn't exist. (UNKNOWN_TABLE) (version 22.8.21.38 (official build))"), true},
+		{"unknown identifier (missing column) must NOT match", errString("Code: 47. DB::Exception: Missing columns: 'is_killed' … (UNKNOWN_IDENTIFIER) (version 23.8...)"), false},
+		{"transport error", errString("dial tcp: connection refused"), false},
+		{"nil", nil, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := isMissingTable(c.err); got != c.want {
+				t.Errorf("isMissingTable(%v) = %v, want %v", c.err, got, c.want)
+			}
+		})
+	}
+}
+
+// errString is a trivial error whose message is the given string.
+type errString string
+
+func (e errString) Error() string { return string(e) }
+
 func TestAlertYAML_FilesAreValid(t *testing.T) {
 	alertsDir := "../../alerts"
 	if _, err := os.Stat(alertsDir); os.IsNotExist(err) {
 		t.Skip("alerts/ directory not present")
 	}
 
+	// Validate every rule at the root AND one level down (version-override
+	// directories), so override rules get the same required-field and
+	// security checks as root rules — not just the ones in the root.
+	type yfile struct{ display, path string }
+	var files []yfile
 	entries, err := os.ReadDir(alertsDir)
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	ev := &Evaluator{mode: "onprem"}
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(strings.ToLower(e.Name()), ".yaml") {
+		if e.IsDir() {
+			sub, err := os.ReadDir(filepath.Join(alertsDir, e.Name()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, s := range sub {
+				if !s.IsDir() && strings.HasSuffix(strings.ToLower(s.Name()), ".yaml") {
+					files = append(files, yfile{e.Name() + "/" + s.Name(), filepath.Join(alertsDir, e.Name(), s.Name())})
+				}
+			}
 			continue
 		}
-		t.Run(e.Name(), func(t *testing.T) {
-			raw, err := os.ReadFile(filepath.Join(alertsDir, e.Name()))
+		if strings.HasSuffix(strings.ToLower(e.Name()), ".yaml") {
+			files = append(files, yfile{e.Name(), filepath.Join(alertsDir, e.Name())})
+		}
+	}
+
+	ev := &Evaluator{mode: "onprem"}
+	for _, f := range files {
+		t.Run(f.display, func(t *testing.T) {
+			raw, err := os.ReadFile(f.path)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -245,11 +597,102 @@ func TestAlertYAML_FilesAreValid(t *testing.T) {
 			if def.Query == "" {
 				t.Error("alert has no query")
 			}
+			// Severity must be one of the three known values (empty is fine —
+			// evalFile defaults it to warning). Anything else passes straight
+			// through to the dashboard, where the severity chips and the nav
+			// badge only count critical/warning/info: a rule with
+			// `severity: high` that genuinely FIRES would be counted nowhere
+			// and be invisible in both summary surfaces. Cheaper to make the
+			// "we control the severities" assumption enforced than assumed.
+			switch def.Severity {
+			case "", SeverityCritical, SeverityWarning, SeverityInfo:
+			default:
+				t.Errorf("severity %q is not one of %q/%q/%q — a firing rule with an "+
+					"unknown severity is counted in neither the badge nor any chip",
+					def.Severity, SeverityCritical, SeverityWarning, SeverityInfo)
+			}
 			// Security: expanded query must pass validation
 			expanded := ev.expandQuery(def.Query)
 			if err := query.ValidateQueryContent(expanded); err != nil {
 				t.Errorf("security validation failed: %v", err)
 			}
 		})
+	}
+}
+
+// TestAlertYAML_OverridesMatchRoot guards against root/override drift: a
+// version-directory rule (e.g. alerts/24.1.1.0/foo.yaml) is a near-copy of
+// its root twin differing only in the query, so a future edit could easily
+// land in one and not the other. Assert every override has a root twin with
+// the same identity metadata (name/title/severity/tags), and that its name
+// matches the filename (a rename silently creates a second rule instead of
+// an override — see the README note).
+func TestAlertYAML_OverridesMatchRoot(t *testing.T) {
+	alertsDir := "../../alerts"
+	if _, err := os.Stat(alertsDir); os.IsNotExist(err) {
+		t.Skip("alerts/ directory not present")
+	}
+	load := func(path string) (Definition, error) {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return Definition{}, err
+		}
+		var d Definition
+		return d, yaml.Unmarshal(raw, &d)
+	}
+	entries, err := os.ReadDir(alertsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		verDir := filepath.Join(alertsDir, e.Name())
+		files, err := os.ReadDir(verDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, f := range files {
+			if f.IsDir() || !strings.HasSuffix(strings.ToLower(f.Name()), ".yaml") {
+				continue
+			}
+			name := f.Name()
+			t.Run(e.Name()+"/"+name, func(t *testing.T) {
+				ov, err := load(filepath.Join(verDir, name))
+				if err != nil {
+					t.Fatal(err)
+				}
+				// The load-bearing check: an override's name must match its
+				// filename. A mismatch means a rename that silently turns the
+				// override into a separate rule. Applies to every override.
+				if base := strings.TrimSuffix(name, ".yaml"); ov.Name != base {
+					t.Errorf("name %q does not match filename %q", ov.Name, base)
+				}
+				// A file that exists only in a version directory (no root
+				// twin) is a supported pattern — skipped on older servers,
+				// see the README. There's nothing to compare metadata against.
+				rootPath := filepath.Join(alertsDir, name)
+				if _, err := os.Stat(rootPath); err != nil {
+					return
+				}
+				rt, err := load(rootPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if ov.Name != rt.Name {
+					t.Errorf("name drift: override %q vs root %q", ov.Name, rt.Name)
+				}
+				if ov.Title != rt.Title {
+					t.Errorf("title drift: override %q vs root %q", ov.Title, rt.Title)
+				}
+				if ov.Severity != rt.Severity {
+					t.Errorf("severity drift: override %q vs root %q", ov.Severity, rt.Severity)
+				}
+				if !reflect.DeepEqual(ov.Tags, rt.Tags) {
+					t.Errorf("tags drift: override %v vs root %v", ov.Tags, rt.Tags)
+				}
+			})
+		}
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"clickhouse-diagnostic/internal"
 	"clickhouse-diagnostic/internal/alert"
 	"clickhouse-diagnostic/internal/query"
 	"clickhouse-diagnostic/pkg"
@@ -16,15 +17,26 @@ import (
 
 // Generator creates offline HTML diagnostic dashboards from ClickHouse data.
 type Generator struct {
-	client      *pkg.ClickHouseClient
-	mode        string
-	analysis    query.AnalysisOpts
-	analysisDir string
+	client        *pkg.ClickHouseClient
+	mode          string
+	serverVersion internal.Version
+	analysis      query.AnalysisOpts
+	analysisDir   string
+	probeCache    map[string]bool // memoized hasColumn/hasTable results
 }
 
 // NewGenerator creates a new Generator.
 func NewGenerator(client *pkg.ClickHouseClient, mode string) *Generator {
 	return &Generator{client: client, mode: strings.ToLower(mode)}
+}
+
+// WithServerVersion records the connected server version so the
+// query-analysis section resolves the same version-directory overrides
+// as AnalysisCollector.Collect (see collectAnalysis). Returns the
+// receiver for chaining.
+func (g *Generator) WithServerVersion(v internal.Version) *Generator {
+	g.serverVersion = v
+	return g
 }
 
 // WithAnalysis attaches query-analysis options + the directory holding
@@ -113,6 +125,156 @@ func (g *Generator) safeQuery(label, sql string) []map[string]interface{} {
 	return res.records()
 }
 
+// scalarCount runs sql (expected to return a single count()) and returns
+// the value. count() is UInt64, JSON-rendered as a quoted string, so both
+// string and numeric forms are parsed.
+func (g *Generator) scalarCount(sql string) (int64, error) {
+	r, err := g.execJSON(sql)
+	if err != nil {
+		return 0, err
+	}
+	if r == nil || r.Rows == 0 || len(r.Data) == 0 || len(r.Data[0]) == 0 {
+		return 0, nil
+	}
+	var s string
+	if json.Unmarshal(r.Data[0][0], &s) == nil {
+		n, _ := strconv.ParseInt(s, 10, 64)
+		return n, nil
+	}
+	var f float64
+	if json.Unmarshal(r.Data[0][0], &f) == nil {
+		return int64(f), nil
+	}
+	return 0, nil
+}
+
+// probe runs a schema-existence count query (memoized by key) and reports
+// whether the object exists.
+//
+// On a probe ERROR it fails OPEN — assumes the object is present and prints
+// a [dashboard] warning. A transient probe failure must not silently
+// downgrade the dashboard to its oldest-server shape (this tool exists to
+// diagnose; a silent downgrade would be the wrong default). If the object
+// really is absent, the subsequent full query fails through safeQuery,
+// which surfaces its own visible warning. A genuine zero count means
+// "absent" and selects the fallback.
+func (g *Generator) probe(key, sql string) bool {
+	// No client to probe with (e.g. unit tests building SQL in isolation):
+	// assume present so we emit the full, modern query.
+	if g.client == nil {
+		return true
+	}
+	if g.probeCache == nil {
+		g.probeCache = map[string]bool{}
+	}
+	if v, ok := g.probeCache[key]; ok {
+		return v
+	}
+	n, err := g.scalarCount(sql)
+	if err != nil {
+		fmt.Printf("  [dashboard] schema probe %q failed: %v (assuming present)\n", key, err)
+		g.probeCache[key] = true
+		return true
+	}
+	present := n > 0
+	g.probeCache[key] = present
+	return present
+}
+
+// hasColumn / hasTable let the dashboard's live queries stay compatible
+// across the supported version range (ClickHouse 22.8+) without
+// hard-coding per-column "added-in" versions. The dashboard builds its
+// SQL dynamically (unlike the .sql query files, which use the
+// version-directory mechanism), so a runtime schema check is both
+// simpler and more robust — it also covers optional tables that may be
+// disabled by config on any version. Schema is identical across
+// replicas, so these check the local system tables directly.
+func (g *Generator) hasColumn(table, column string) bool {
+	// Guard against a privilege-blind probe. ClickHouse filters
+	// system.columns by grant SILENTLY — a user without SELECT on
+	// system.<table> gets zero rows, not ACCESS_DENIED. That reads as
+	// "column absent" and would degrade every gated panel to its
+	// oldest-server shape on a modern server, with no warning (observed
+	// on a Cloud 26.2 service with only database-level grants).
+	//
+	// A table that really exists always has columns, so "I can't see ANY
+	// column of this table" means the probe cannot answer — fail open.
+	if !g.probeCanSeeColumns(table) {
+		return true
+	}
+	return g.probe(table+"."+column, fmt.Sprintf(
+		"SELECT count() FROM system.columns WHERE database='system' AND table='%s' AND name='%s'",
+		table, column))
+}
+
+// probeCanSeeColumns reports whether system.columns exposes any column of
+// the given system table to the current user. Warns once per table when it
+// cannot, since every hasColumn() answer for that table is then a guess.
+func (g *Generator) probeCanSeeColumns(table string) bool {
+	key := "visible:" + table
+	if g.probeCache != nil {
+		if v, ok := g.probeCache[key]; ok {
+			return v
+		}
+	}
+	visible := g.probe(key, fmt.Sprintf(
+		"SELECT count() FROM system.columns WHERE database='system' AND table='%s'", table))
+	if !visible {
+		// Don't attribute the cause: this probe reads the LOCAL
+		// system.columns, so zero rows can mean a missing SELECT grant OR —
+		// in cloud — a table that only exists on a remote replica. Both lead
+		// to the same fail-open, so state the effect and let the operator
+		// judge the cause.
+		fmt.Printf("  [dashboard] cannot inspect columns of system.%s locally "+
+			"— assuming modern columns are present\n", table)
+	}
+	return visible
+}
+
+func (g *Generator) hasTable(table string) bool {
+	// Unlike column schema (identical across replicas), a table's
+	// *existence* can be per-replica — system.crash_log only materialises
+	// on the node that crashed. In cloud mode we probe every replica so a
+	// crash on a non-serving node is at least DETECTED (the probe returns
+	// true and the panel query runs).
+	//
+	// Honest limit: in that partial-existence case the guarded panel
+	// query — clusterAllReplicas(default, system.<table>) — still raises
+	// UNKNOWN_TABLE on the replicas that lack the table, so the outcome
+	// is a visible [dashboard] error rather than the crashed node's rows.
+	// That is the intended "surface, don't hide" tradeoff: rendering the
+	// rows would need a fault-tolerant per-node fan-out.
+	//
+	// (system.tables is listed in SharedSystemTables — see
+	// internal/query/template.go — because its user-table rows are the
+	// same everywhere; that's about row contents, not the existence of
+	// per-node system log tables, which is what we probe here.)
+	tablesRef := "system.tables"
+	if g.mode == "cloud" {
+		tablesRef = "clusterAllReplicas(default, system.tables)"
+	}
+	// Same privilege-blindness guard as hasColumn: system.tables is
+	// filtered by grant without erroring, and a server always has SOME
+	// system tables — so zero rows means the probe can't answer. Fail open
+	// and let the panel query surface its own error.
+	//
+	// Warn only on the first table, not once per guarded panel: the probe is
+	// memoized but a bare Printf after it would repeat the same line for
+	// crash_log, asynchronous_insert_log, …
+	const visKey = "visible:system-tables"
+	_, alreadyProbed := g.probeCache[visKey]
+	if !g.probe(visKey, fmt.Sprintf(
+		"SELECT count() FROM %s WHERE database='system'", tablesRef)) {
+		if !alreadyProbed {
+			fmt.Printf("  [dashboard] cannot read %s — assuming the system log "+
+				"tables exist (check SELECT grants if panels look empty)\n", tablesRef)
+		}
+		return true
+	}
+	return g.probe("table:"+table, fmt.Sprintf(
+		"SELECT count() FROM %s WHERE database='system' AND name='%s'", tablesRef, table))
+}
+
 // Generate produces dashboard.html inside outputDir.
 // alertResults may be nil or empty if alert evaluation was skipped.
 func (g *Generator) Generate(outputDir string, alertResults []alert.Result) error {
@@ -165,12 +327,19 @@ func (g *Generator) tablesListSQL() string {
 // we can label each row with the pod that produced it.
 //
 // Column choice tracks the system.dictionaries reference:
-//   https://clickhouse.com/docs/operations/system-tables/dictionaries
+//
+//	https://clickhouse.com/docs/operations/system-tables/dictionaries
 //
 // In gov mode we additionally redact `source`, `origin`, `comment`
 // and `last_exception` — these can carry connection strings, file
 // paths, exception text and user comments that reveal schema or
 // infrastructure details that gov mode is otherwise hashing.
+//
+// NOTE: currently unreachable — cmd/main.go refuses to generate the
+// dashboard in gov mode at all, because the other ~20 panels select raw
+// identifiers this redaction doesn't cover. Kept (like the gov branches
+// in the async panel and collectAnalysis) for the hashed-gov-dashboard
+// follow-up that would restore it; it is NOT a live guarantee today.
 func (g *Generator) dictionariesSQL() string {
 	exceptionCol, sourceCol, originCol, commentCol := "last_exception", "source", "origin", "comment"
 	if g.mode == "gov" {
@@ -179,13 +348,19 @@ func (g *Generator) dictionariesSQL() string {
 		originCol = "'' AS origin"
 		commentCol = "'' AS comment"
 	}
+	// error_count was added to system.dictionaries after 22.8; fall back
+	// to 0 so the dashboard column still renders on older servers.
+	errorCountCol := "error_count"
+	if !g.hasColumn("dictionaries", "error_count") {
+		errorCountCol = "0 AS error_count"
+	}
 	return fmt.Sprintf(`
 		SELECT
 			hostname()                                          AS hostname,
 			database, name, status, type, toString(uuid)        AS uuid,
 			bytes_allocated,
 			formatReadableSize(bytes_allocated)                 AS bytes_allocated_human,
-			element_count, query_count, error_count,
+			element_count, query_count, %s,
 			round(hit_rate * 100, 2)                            AS hit_rate_pct,
 			round(found_rate * 100, 2)                          AS found_rate_pct,
 			round(load_factor, 4)                               AS load_factor,
@@ -200,7 +375,7 @@ func (g *Generator) dictionariesSQL() string {
 			%s, %s, %s, %s
 		FROM %s
 		ORDER BY database, name, hostname`,
-		sourceCol, originCol, commentCol, exceptionCol, g.sysTable("dictionaries"))
+		errorCountCol, sourceCol, originCol, commentCol, exceptionCol, g.sysTable("dictionaries"))
 }
 
 // collect gathers all metrics from ClickHouse and returns a JSON-ready map.
@@ -393,13 +568,20 @@ func (g *Generator) collect() map[string]interface{} {
 
 	// ── Crash log ─────────────────────────────────────────────────────────────
 
-	p["crash_log"] = g.safeQuery("crash_log", fmt.Sprintf(
-		`SELECT toString(event_time) AS event_time,
-				signal, toString(thread_id) AS thread_id,
-				query_id, version
-		 FROM %s ORDER BY event_time DESC LIMIT 100`,
-		g.sysTable("crash_log"),
-	))
+	// system.crash_log only exists once the server has recorded a crash,
+	// so it is absent on a healthy instance of any version — skip the
+	// panel rather than emit a spurious "table doesn't exist" warning.
+	if g.hasTable("crash_log") {
+		p["crash_log"] = g.safeQuery("crash_log", fmt.Sprintf(
+			`SELECT toString(event_time) AS event_time,
+					signal, toString(thread_id) AS thread_id,
+					query_id, version
+			 FROM %s ORDER BY event_time DESC LIMIT 100`,
+			g.sysTable("crash_log"),
+		))
+	} else {
+		p["crash_log"] = []map[string]interface{}{}
+	}
 
 	// ── Pending work ──────────────────────────────────────────────────────────
 
@@ -417,23 +599,35 @@ func (g *Generator) collect() map[string]interface{} {
 		g.sysTable("parts"),
 	))
 
+	// is_killed was added to system.mutations after 22.8; only filter on
+	// it when present, otherwise show all in-progress mutations.
+	killedFilter := ""
+	if g.hasColumn("mutations", "is_killed") {
+		killedFilter = "AND is_killed = 0"
+	}
 	p["mutations"] = g.safeQuery("mutations", fmt.Sprintf(
 		`SELECT database, table, mutation_id, command,
 				toString(create_time) AS create_time, parts_to_do
 		 FROM %s
-		 WHERE parts_to_do > 0 AND is_killed = 0
+		 WHERE parts_to_do > 0 %s
 		 ORDER BY parts_to_do DESC LIMIT 20`,
-		g.sysTable("mutations"),
+		g.sysTable("mutations"), killedFilter,
 	))
 
+	// bytes_on_disk was added to system.detached_parts in 22.11; fall
+	// back to a count-only view (no size) on older servers.
+	detachedSize, detachedOrder := "formatReadableSize(sum(bytes_on_disk)) AS size", "sum(bytes_on_disk)"
+	if !g.hasColumn("detached_parts", "bytes_on_disk") {
+		detachedSize, detachedOrder = "'n/a' AS size", "count()"
+	}
 	p["detached"] = g.safeQuery("detached", fmt.Sprintf(
 		`SELECT database, table, count() AS count,
-				formatReadableSize(sum(bytes_on_disk)) AS size,
+				%s,
 				arrayStringConcat(groupUniqArray(reason), ', ') AS reasons
 		 FROM %s
 		 GROUP BY database, table
-		 ORDER BY sum(bytes_on_disk) DESC LIMIT 20`,
-		g.sysTable("detached_parts"),
+		 ORDER BY %s DESC LIMIT 20`,
+		detachedSize, g.sysTable("detached_parts"), detachedOrder,
 	))
 
 	// cluster nodes (cloud only)
@@ -470,8 +664,14 @@ func (g *Generator) collect() map[string]interface{} {
 
 	// ── Disk usage ────────────────────────────────────────────────────────────
 
+	// system.disks is per-replica, so in cloud mode this fans out and every
+	// replica contributes its own (largely identical) disk list — measured
+	// 11 disks → 33 rows on a 3-replica service. Without a host label those
+	// read as duplicates. hostName() is evaluated on the replica that
+	// produced the row, exactly as dictionariesSQL does.
 	p["disks"] = g.safeQuery("disks", fmt.Sprintf(
-		`SELECT name, path, type,
+		`SELECT hostName() AS hostname,
+			 name, path, type,
 			 free_space, total_space,
 			 formatReadableSize(free_space)       AS free_space_human,
 			 formatReadableSize(total_space)      AS total_space_human,
@@ -479,20 +679,38 @@ func (g *Generator) collect() map[string]interface{} {
 			    round(free_space / total_space * 100, 1),
 			    0) AS free_pct
 		 FROM %s
-		 ORDER BY total_space DESC`,
+		 ORDER BY hostname, total_space DESC`,
 		g.sysTable("disks"),
 	))
 
 	// ── Server errors (cumulative error counters) ──────────────────────────────
 
-	p["server_errors"] = g.safeQuery("server_errors",
-		`SELECT name, code, value,
-			 toString(last_error_time) AS last_error_time,
-			 left(last_error_message, 300) AS last_error_message
-		 FROM system.errors
-		 WHERE value > 0
+	// system.errors holds PER-REPLICA counters, so hard-coding system.errors
+	// here showed only the serving node's errors and hid the other replicas'
+	// entirely (measured on a 3-replica Cloud service). Fan out via
+	// sysTable, then aggregate to cluster-wide totals: this panel renders as
+	// one bar per error, so emitting a row per replica would produce
+	// duplicate same-labelled bars instead of a single meaningful count.
+	p["server_errors"] = g.safeQuery("server_errors", fmt.Sprintf(
+		// Aggregate under a NON-colliding alias in a subquery, then rename to
+		// `value` outside. Aliasing sum(value) AS value in the same SELECT
+		// shadows the source column, and the analyzer then resolves the bare
+		// `value` inside argMax()/WHERE against the aggregate →
+		// ILLEGAL_AGGREGATION. Same subquery trick as
+		// alerts/disk_space_low.yaml.
+		`SELECT name, code, total AS value, last_error_time, last_error_message
+		 FROM (
+			 SELECT name, code,
+				 sum(value)                                   AS total,
+				 toString(max(last_error_time))               AS last_error_time,
+				 left(argMax(last_error_message, value), 300) AS last_error_message
+			 FROM %s
+			 GROUP BY name, code
+			 HAVING total > 0
+		 )
 		 ORDER BY value DESC LIMIT 30`,
-	)
+		g.sysTable("errors"),
+	))
 
 	// ── High part-count tables (potential "too many parts") ───────────────────
 
@@ -525,23 +743,37 @@ func (g *Generator) collect() map[string]interface{} {
 
 	// ── Async insert activity (last 24 h, skip gov) ───────────────────────────
 
-	if g.mode != "gov" {
+	// system.asynchronous_insert_log was added in 22.10; skip the panel
+	// on older servers where the table doesn't exist.
+	if g.mode != "gov" && g.hasTable("asynchronous_insert_log") {
 		asyncTable := "system.asynchronous_insert_log"
 		if g.mode == "cloud" {
 			asyncTable = "clusterAllReplicas(default, merge(system, '^asynchronous_insert_log'))"
 		}
-		// flush_time_microseconds is DateTime64(6) in CH 25.x and can't be
-		// passed to avg() directly (ILLEGAL_TYPE_OF_ARGUMENT). Compute the
-		// queue→flush latency in milliseconds via dateDiff instead.
+		// total_bytes exists since the table's inception (22.10); the `rows`
+		// column was added in 23.4 (absent on 22.10–23.3). Always report
+		// bytes and add rows when available, so no rendered column is ever
+		// blank (the front-end shows both); 'n/a' reads more honestly than a
+		// literal 0 when the column is unavailable.
+		rowsCol := "'n/a' AS total_rows"
+		if g.hasColumn("asynchronous_insert_log", "rows") {
+			rowsCol = "toString(sum(rows)) AS total_rows"
+		}
+		// Queue→flush latency in ms. We avoid dateDiff('millisecond', …):
+		// the sub-second unit errors on older servers (22.12: BAD_ARGUMENTS).
+		// event_time_microseconds / flush_time_microseconds are DateTime64(6)
+		// and exist since 22.10, so subtracting them as floats gives true
+		// sub-second latency across the whole supported range.
 		p["async_inserts"] = g.safeQuery("async_inserts", fmt.Sprintf(
 			`SELECT toString(toStartOfHour(event_time)) AS hour,
 				 status, count() AS flushes,
-				 sum(rows) AS total_rows,
-				 round(avg(dateDiff('millisecond', event_time, flush_time)), 0) AS avg_flush_ms
+				 %s,
+				 formatReadableSize(sum(bytes)) AS total_bytes,
+				 round(avg((toFloat64(flush_time_microseconds) - toFloat64(event_time_microseconds)) * 1000), 0) AS avg_flush_ms
 			 FROM %s
 			 WHERE event_time > now() - INTERVAL 24 HOUR
 			 GROUP BY hour, status ORDER BY hour`,
-			asyncTable,
+			rowsCol, asyncTable,
 		))
 	} else {
 		p["async_inserts"] = []map[string]interface{}{}
@@ -570,6 +802,15 @@ func (g *Generator) collectAnalysis(p map[string]interface{}) {
 	if !g.analysis.Enabled() || g.analysisDir == "" {
 		return
 	}
+	// A zero server version sorts below every version directory, so
+	// FindVersionedFiles would return only root files and the dashboard
+	// would run the 22.8 baseline on a modern server (the round-1
+	// regression). cmd/main.go always calls WithServerVersion after a
+	// successful version probe, so this only trips if a future caller
+	// forgets — warn loudly rather than silently degrade.
+	if g.serverVersion == (internal.Version{}) {
+		fmt.Println("  [dashboard] warning: server version unknown; query-analysis panels fall back to the oldest (root) query variants")
+	}
 	vars := query.Vars{
 		Mode:                g.mode,
 		QueryID:             g.analysis.QueryID,
@@ -594,9 +835,42 @@ func (g *Generator) collectAnalysis(p map[string]interface{}) {
 		"qa_failed":           "failed_queries.sql",
 		"qa_executions":       "executions_timeline.sql",
 	}
+
+	// Resolve version-directory overrides exactly as AnalysisCollector
+	// does, so the dashboard renders the SAME variant that the archive
+	// writes to disk. Reading the root file directly would run the
+	// downgraded 22.8 baseline on modern servers. (On a resolver ERROR
+	// the two paths intentionally differ: Collect aborts the archive
+	// bundle, while the dashboard warns and degrades to root files so
+	// the section isn't entirely blank.)
+	resolved := map[string]string{} // base name → full path
+	vf, err := query.FindVersionedFiles(g.analysisDir, g.serverVersion, ".sql")
+	if err != nil {
+		// Don't silently blank the whole Query Analysis section on a
+		// resolver error (unreadable dir, broken symlink, …): warn and
+		// fall back to the root files below.
+		fmt.Printf("  [dashboard] query-analysis file resolution failed: %v (falling back to root files)\n", err)
+	}
+	for _, f := range vf {
+		resolved[f.Name] = f.FullPath
+	}
 	for key, fname := range files {
-		raw, err := os.ReadFile(filepath.Join(g.analysisDir, fname))
+		path, ok := resolved[fname]
+		if !ok {
+			// Fall back to the root file. For a version-dir-only file
+			// gated above this server there is no root, so os.ReadFile
+			// fails below and we skip it — matching Collect().
+			path = filepath.Join(g.analysisDir, fname)
+		}
+		raw, err := os.ReadFile(path)
 		if err != nil {
+			// A resolved path failing to read (deleted/permissions race)
+			// is diagnostic-worthy — log like Collect does. A version-dir-
+			// only file below its gate simply has no root path and lands
+			// here silently by design.
+			if ok {
+				fmt.Printf("  [dashboard] %s: read %s: %v\n", key, path, err)
+			}
 			continue
 		}
 		sql := query.Apply(string(raw), vars)
@@ -731,6 +1005,7 @@ footer{text-align:center;color:#aaa;font-size:12px;padding:20px;margin-top:8px}
 @media(max-width:700px){.charts-grid{grid-template-columns:1fr}}
 /* alerts */
 .alert-ok{background:#e8f5e9;border:1px solid #a5d6a7;border-left:4px solid #4CAF50;padding:14px 20px;border-radius:8px;color:#2e7d32;font-weight:600;font-size:14px}
+.alert-skipped{background:#f5f5f5;border:1px solid #e0e0e0;border-left:4px solid #9e9e9e;padding:10px 20px;border-radius:8px;color:#616161;font-size:13px;margin-top:8px}
 .alert-item{background:#fff;border-radius:8px;padding:14px 18px;margin-bottom:10px;border-left:4px solid #ccc;box-shadow:0 1px 3px rgba(0,0,0,.08)}
 .alert-item.alert-critical{border-left-color:#f44336}
 .alert-item.alert-warning{border-left-color:#FF9800}
@@ -752,6 +1027,7 @@ footer{text-align:center;color:#aaa;font-size:12px;padding:20px;margin-top:8px}
 .alert-summary-bar{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:14px}
 .alert-summary-chip{padding:6px 14px;border-radius:20px;font-size:13px;font-weight:600}
 .chip-critical{background:#ffebee;color:#c62828}
+.chip-error{background:#ede7f6;color:#5e35b1}
 .chip-warning{background:#fff3e0;color:#e65100}
 .chip-info{background:#e3f2fd;color:#1565c0}
 </style>
@@ -1243,14 +1519,31 @@ function dictStatusBadge(status){
 function renderAlerts(){
   const alerts=DATA.alerts||[];
   const fired=alerts.filter(a=>(a.rows&&a.rows.length>0)||a.error);
+  const skipped=alerts.filter(a=>a.skipped);
+  // Mirror alert.Summarize exactly: "evaluated" excludes BOTH skipped and
+  // errored rules, so this number can never disagree with the CLI's.
+  // (Today the banner using it only renders when erroredRules is empty, so
+  // the subtraction is a no-op there — but keeping two different
+  // definitions of one number is how the "11 fired" bug happened.)
+  const evaluated=alerts.length-skipped.length-alerts.filter(a=>a.error).length;
+  const skipNote=skipped.length
+    ? '<div class="alert-skipped">ℹ️ '+skipped.length+' rule(s) not applicable on this server (table not present): '+skipped.map(a=>a.name).join(', ')+'</div>'
+    : '';
   const panel=document.getElementById('alerts-panel');
   const bar=document.getElementById('alerts-summary-bar');
   const navLink=document.getElementById('nav-alerts');
 
-  // summary chips
+  // summary chips. Rules that ERRORED are counted separately from real
+  // findings — bucketing them by severity would report e.g. a missing
+  // SELECT grant as N critical/warning production problems.
   const counts={critical:0,warning:0,info:0};
-  fired.forEach(a=>{const s=a.severity||'warning';if(counts[s]!==undefined)counts[s]++;});
-  const total=fired.length;
+  const erroredRules=fired.filter(a=>a.error);
+  fired.filter(a=>!a.error).forEach(a=>{const s=a.severity||'warning';if(counts[s]!==undefined)counts[s]++;});
+  // The badge counts real findings only. Including errored rules would
+  // render a red "11" identical to eleven critical findings when the true
+  // state is one permissions problem — the same conflation the CLI's
+  // fired/errored split removed. Broken rules get the ⚠ chip instead.
+  const total=counts.critical+counts.warning+counts.info;
 
   // badge the nav link
   if(total>0){
@@ -1262,12 +1555,13 @@ function renderAlerts(){
   if(counts.critical) barHtml+='<span class="alert-summary-chip chip-critical">🔴 '+counts.critical+' Critical</span>';
   if(counts.warning)  barHtml+='<span class="alert-summary-chip chip-warning">🟡 '+counts.warning+' Warning</span>';
   if(counts.info)     barHtml+='<span class="alert-summary-chip chip-info">🔵 '+counts.info+' Info</span>';
+  if(erroredRules.length) barHtml+='<span class="alert-summary-chip chip-error">⚠ '+erroredRules.length+' Could not run</span>';
   if(bar) bar.innerHTML=barHtml?'<div class="alert-summary-bar">'+barHtml+'</div>':'';
 
   if(!panel) return;
 
   if(!fired.length){
-    panel.innerHTML='<div class="alert-ok">✅ All '+alerts.length+' alert rule(s) evaluated — no issues detected</div>';
+    panel.innerHTML='<div class="alert-ok">✅ '+evaluated+' alert rule(s) evaluated — no issues detected</div>'+skipNote;
     return;
   }
 
@@ -1278,7 +1572,9 @@ function renderAlerts(){
   let html='';
   sorted.forEach(a=>{
     const sev=a.severity||'warning';
-    const icon=SEV_ICON[sev]||'🟡';
+    // A rule whose QUERY broke is not a severity-N finding — show ⚠ so it
+    // can't be misread as a red critical at the top of the list.
+    const icon=a.error?'⚠':(SEV_ICON[sev]||'🟡');
     const cls=a.error?'alert-error':'alert-'+sev;
     const cnt=a.error?'error':(a.rows||[]).length;
     const cntLabel=a.error?'query error':cnt+' instance'+(cnt===1?'':'s');
@@ -1306,7 +1602,7 @@ function renderAlerts(){
 
     html+='</div>'; // item
   });
-  panel.innerHTML=html;
+  panel.innerHTML=html+skipNote;
 }
 
 // ── main init ─────────────────────────────────────────────────────────────────
@@ -2057,7 +2353,12 @@ document.addEventListener('DOMContentLoaded',function(){
       new Chart(document.getElementById('chart-disk-usage'),{
         type:'bar',
         data:{
-          labels:rows.map(r=>r.name),
+          // In cloud mode system.disks fans out, so the same disk appears
+          // once per replica (measured 11 disks → 33 rows on 3 replicas).
+          // Qualify the label with the short hostname, matching the
+          // hostname column the table below now shows — otherwise the
+          // chart is 33 bars under 11 duplicate labels.
+          labels:rows.map(r=>r.hostname?r.name+' @ '+String(r.hostname).split('.')[0]:r.name),
           datasets:[
             {label:'Used',data:rows.map(r=>Number(r.total_space||0)-Number(r.free_space||0)),
               backgroundColor:rows.map(r=>Number(r.free_pct||100)<CRIT_PCT?alpha('#f44336',.8):Number(r.free_pct||100)<WARN_PCT?alpha('#FF9800',.8):alpha('#2196F3',.75)),
@@ -2073,8 +2374,9 @@ document.addEventListener('DOMContentLoaded',function(){
           plugins:{legend:{position:'top'},tooltip:{callbacks:{
             label:ctx=>{
               const r=rows[ctx.dataIndex];
-              if(ctx.datasetIndex===0)return' Used: '+r.total_space_human+' total, '+r.free_pct+'% free';
-              return' Free: '+r.free_space_human;
+              const host=r.hostname?' ('+String(r.hostname).split('.')[0]+')':'';
+              if(ctx.datasetIndex===0)return' Used: '+r.total_space_human+' total, '+r.free_pct+'% free'+host;
+              return' Free: '+r.free_space_human+host;
             }
           }}},
           scales:{x:{stacked:true},y:{stacked:true,beginAtZero:true,
@@ -2083,7 +2385,7 @@ document.addEventListener('DOMContentLoaded',function(){
       });
     }
     renderTable('tbl-disks',rows,
-      ['name','type','free_space_human','total_space_human','free_pct','path'],
+      ['hostname','name','type','free_space_human','total_space_human','free_pct','path'],
       r=>Number(r.free_pct||100)<CRIT_PCT?'error-row':Number(r.free_pct||100)<WARN_PCT?'alert-row':'');
   })();
 
@@ -2137,7 +2439,7 @@ document.addEventListener('DOMContentLoaded',function(){
         scales:{x:{stacked:true,ticks:{maxRotation:45}},y:{stacked:true,beginAtZero:true}}}
     });
     renderTable('tbl-async-inserts',rows,
-      ['hour','status','flushes','total_rows','avg_flush_ms']);
+      ['hour','status','flushes','total_rows','total_bytes','avg_flush_ms']);
   })();
 });
 </script>

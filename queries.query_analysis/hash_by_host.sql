@@ -2,7 +2,10 @@
 -- slower than the rest" patterns in cloud clusters.
 -- Run when --normalized-query-hash is set (auto-derived from --query-id).
 SELECT
-    hostname,
+    -- Root variant: the hostname COLUMN was added to query_log in 23.11
+    -- (see 23.11.1.0/). hostName() runs on the serving replica, so the
+    -- per-host split still works through clusterAllReplicas.
+    hostName()                                              AS hostname,
     count()                                                 AS executions,
     max(query_duration_ms)                                  AS max_duration_ms,
     min(query_duration_ms)                                  AS min_duration_ms,

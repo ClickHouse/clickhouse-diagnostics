@@ -34,14 +34,14 @@ func main() {
 	skipConfigFlag := flag.Bool("skip-config", false, "Skip collecting configuration files")
 	skipArchiveFlag := flag.Bool("skip-archive", false, "Skip creating archive of results and configuration")
 	skipDashboardFlag := flag.Bool("skip-dashboard", false, "Skip generating HTML dashboard")
-	skipAlertsFlag    := flag.Bool("skip-alerts", false, "Skip evaluating alert rules")
-	alertsDirFlag     := flag.String("alerts-dir", "./alerts", "Directory containing alert YAML rule files")
-	saltFlag          := flag.String("salt", "", "Gov-mode hashing salt (8–64 alphanumeric chars; prompts interactively if empty)")
-	queryIDFlag       := flag.String("query-id", "", "Run query analysis focused on this query_id (UUID)")
+	skipAlertsFlag := flag.Bool("skip-alerts", false, "Skip evaluating alert rules")
+	alertsDirFlag := flag.String("alerts-dir", "./alerts", "Directory containing alert YAML rule files")
+	saltFlag := flag.String("salt", "", "Gov-mode hashing salt (8–64 alphanumeric chars; prompts interactively if empty)")
+	queryIDFlag := flag.String("query-id", "", "Run query analysis focused on this query_id (UUID)")
 	normalizedHashFlag := flag.String("normalized-query-hash", "", "Run query analysis focused on this normalized_query_hash (uint64)")
-	fromFlag          := flag.String("from", "", "Time-window start for query analysis (RFC3339 or YYYY-MM-DD)")
-	toFlag            := flag.String("to", "", "Time-window end for query analysis (RFC3339 or YYYY-MM-DD)")
-	analysisDirFlag   := flag.String("analysis-dir", "./queries.query_analysis", "Directory containing query-analysis SQL files")
+	fromFlag := flag.String("from", "", "Time-window start for query analysis (RFC3339 or YYYY-MM-DD)")
+	toFlag := flag.String("to", "", "Time-window end for query analysis (RFC3339 or YYYY-MM-DD)")
+	analysisDirFlag := flag.String("analysis-dir", "./queries.query_analysis", "Directory containing query-analysis SQL files")
 	dryRunFlag := flag.Bool("dry-run", false, "List every query the tool would execute (with the system tables each touches and an EXPLAIN ESTIMATE per SELECT) and exit. Does NOT write results or create an archive. EXPLAIN ESTIMATE is a read-only metadata query — it reports the rows/marks/parts the SELECT WOULD scan without reading any data.")
 
 	// Parse command line flags
@@ -49,26 +49,26 @@ func main() {
 
 	// Initialize variables with defaults
 	var (
-		host            = *hostFlag
-		port            = *portFlag
-		username        = *userFlag
-		password        = *passwordFlag
-		protocol        = *protocolFlag
-		mode            = *modeFlag
-		outputDir       = *outputDirFlag
-		configDir       = *configDirFlag
-		skipConfig      = *skipConfigFlag
-		skipArchive     = *skipArchiveFlag
-		dryRun          = *dryRunFlag
-		skipDashboard = *skipDashboardFlag
-		skipAlerts    = *skipAlertsFlag
-		alertsDir     = *alertsDirFlag
-		govSalt       = *saltFlag
-		queryID       = *queryIDFlag
+		host           = *hostFlag
+		port           = *portFlag
+		username       = *userFlag
+		password       = *passwordFlag
+		protocol       = *protocolFlag
+		mode           = *modeFlag
+		outputDir      = *outputDirFlag
+		configDir      = *configDirFlag
+		skipConfig     = *skipConfigFlag
+		skipArchive    = *skipArchiveFlag
+		dryRun         = *dryRunFlag
+		skipDashboard  = *skipDashboardFlag
+		skipAlerts     = *skipAlertsFlag
+		alertsDir      = *alertsDirFlag
+		govSalt        = *saltFlag
+		queryID        = *queryIDFlag
 		normalizedHash = *normalizedHashFlag
-		fromStr       = *fromFlag
-		toStr         = *toFlag
-		analysisDir = *analysisDirFlag
+		fromStr        = *fromFlag
+		toStr          = *toFlag
+		analysisDir    = *analysisDirFlag
 	)
 	// --dry-run is read-only by definition — silence the side effects
 	// that would write empty/garbage artefacts to disk.
@@ -132,6 +132,19 @@ func main() {
 
 	fmt.Printf("ClickHouse server version: %d.%d.%d.%d\n",
 		serverVersion.Major, serverVersion.Minor, serverVersion.Patch, serverVersion.Build)
+
+	// Query analysis is not available in gov mode: its results embed raw
+	// query text, exception messages, identifiers and full DDL
+	// (query_details, failed_queries, tables_for_query, text_log slices),
+	// which gov-mode hashing cannot cover — the archive would leak the
+	// names gov exists to protect. Refuse the flags rather than silently
+	// producing an unhashed bundle. Checked before the dry-run banner so
+	// an unsupported combination fails immediately.
+	if mode == "gov" && (queryID != "" || normalizedHash != "") {
+		fmt.Println("Error: --query-id / --normalized-query-hash are not supported in gov mode " +
+			"(query-analysis output contains raw query text and identifiers that cannot be hashed)")
+		return
+	}
 
 	// Dry-run: activate AFTER the version probe so version detection
 	// still works, but BEFORE everything else. resolveAnalysisOpts
@@ -204,6 +217,20 @@ func main() {
 		return
 	}
 
+	// Query analysis bundle (only when --query-id or
+	// --normalized-query-hash was set). Runs the .sql files under
+	// analysisDir against the focus parameters and writes results into
+	// <finalOutputDir>/query_analysis/. Runs BEFORE the dry-run summary
+	// so --dry-run previews the analysis SQL too (Collect's IsDryRun
+	// handling prints each file instead of writing results) — otherwise
+	// "list every query the tool would execute" would omit the bundle.
+	if analysisOpts.Enabled() {
+		coll := query.NewAnalysisCollector(client, mode)
+		if _, _, err := coll.Collect(analysisOpts, analysisDir, finalOutputDir, serverVersion); err != nil {
+			fmt.Printf("Warning: query analysis failed: %v\n", err)
+		}
+	}
+
 	if dryRun {
 		fmt.Println("\n=== DRY RUN SUMMARY ===")
 		fmt.Println("Above are the queries that would be executed.")
@@ -222,36 +249,67 @@ func main() {
 		}
 	}
 
-	// Query analysis bundle (only when --query-id or
-	// --normalized-query-hash was set). Runs the .sql files under
-	// analysisDir against the focus parameters and writes results into
-	// <finalOutputDir>/query_analysis/.
-	if analysisOpts.Enabled() {
-		coll := query.NewAnalysisCollector(client, mode)
-		if _, _, err := coll.Collect(analysisOpts, analysisDir, finalOutputDir); err != nil {
-			fmt.Printf("Warning: query analysis failed: %v\n", err)
-		}
-	}
-
 	// Evaluate alert rules if not skipped
 	var alertResults []alert.Result
 	if !skipAlerts {
 		fmt.Println("Evaluating alert rules...")
-		alertResults = alert.NewEvaluator(client, mode).RunAll(alertsDir)
-		fired := 0
-		for _, r := range alertResults {
-			if r.Fired() {
-				fired++
-			}
+		alertResults = alert.NewEvaluator(client, mode).RunAll(alertsDir, serverVersion)
+		// "checked" counts only rules that produced an answer: both skipped
+		// (table not present here) and errored (query failed) rules are
+		// excluded, because reporting either as checked would imply a
+		// verification that never happened. See alert.Summarize.
+		evaluated, fired, errored, skipped := alert.Summarize(alertResults)
+		fmt.Printf("Alert evaluation complete: %d rule(s) checked, %d fired, %d errored, %d not applicable\n",
+			evaluated, fired, errored, skipped)
+		if errored > 0 {
+			fmt.Printf("  (%d rule(s) could not run — see the [alert] ERROR lines above; "+
+				"these are NOT findings)\n", errored)
 		}
-		fmt.Printf("Alert evaluation complete: %d rule(s) checked, %d fired\n", len(alertResults), fired)
 	}
 
-	// Generate HTML dashboard if not skipped
-	if !skipDashboard {
-		gen := dashboard.NewGenerator(client, mode).WithAnalysis(analysisOpts, analysisDir)
+	// Generate HTML dashboard if not skipped.
+	//
+	// Not produced in gov mode: dashboard.html lands in the same archive as
+	// the hashed .native files, but its queries are built in Go and select
+	// raw identifiers (database/table names for up to 2000 tables, disk
+	// paths, users, plus server-generated text like last_exception and
+	// last_error_message) — the very values the queries.gov/*.sql files
+	// hash. Shipping it would defeat gov-mode hashing, so it is refused for
+	// the same reason query analysis is. Hashing every dashboard panel is
+	// the follow-up that would restore it.
+	dashboardWritten := false
+	switch {
+	// An explicit --skip-dashboard is reported first: a user who asked to
+	// skip it should be told their flag was honoured, not that gov policy
+	// withheld it. Same outcome either way (dashboardWritten stays false).
+	case skipDashboard:
+		fmt.Println("Skipping HTML dashboard (--skip-dashboard).")
+	case mode == "gov":
+		fmt.Println("Skipping HTML dashboard in gov mode: its panels select raw identifiers " +
+			"(table names, disk paths, users, exception text) that cannot be hashed, and the " +
+			"dashboard is part of the support-bound archive.")
+	default:
+		gen := dashboard.NewGenerator(client, mode).WithServerVersion(serverVersion).WithAnalysis(analysisOpts, analysisDir)
 		if err := gen.Generate(finalOutputDir, alertResults); err != nil {
 			fmt.Printf("Warning: dashboard generation failed: %v\n", err)
+		} else {
+			dashboardWritten = true
+		}
+	}
+
+	// The dashboard is the only OTHER consumer of alertResults, so whenever it
+	// isn't produced — gov mode, --skip-dashboard, or a generation failure —
+	// the archive would carry no alert record at all: the rules ran, a
+	// critical one may have fired, and the artifact the customer ships back
+	// says nothing. Write rule-level metadata instead: name/title/severity/
+	// state and the instance COUNT, never the matched rows (their columns are
+	// rule-defined, so in gov mode they would carry raw identifiers).
+	if !skipAlerts && !dashboardWritten && len(alertResults) > 0 {
+		if err := alert.WriteSummaryJSON(finalOutputDir, alertResults, mode); err != nil {
+			fmt.Printf("Warning: alert summary could not be written: %v\n", err)
+		} else {
+			fmt.Println("Wrote alerts_summary.json (rule outcomes and instance counts; " +
+				"matched rows are never included).")
 		}
 	}
 

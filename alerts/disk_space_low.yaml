@@ -22,21 +22,29 @@ tags:
 # `formatReadableSize(free_space) AS free_space` shadows the source
 # UInt64 column in the WHERE clause, and `free_space / total_space`
 # becomes a String/String divide → ILLEGAL_TYPE_OF_ARGUMENT.
+#
+# {sys.disks} — not a hard-coded system.disks. Disks are per-replica, so
+# in cloud mode this must fan out via clusterAllReplicas: otherwise this
+# `critical` rule inspects only the serving node and a replica at 3% free
+# produces a clean run. hostName() attributes each row to the replica
+# that reported it, so a full disk is both detected and actionable.
 query: |
   SELECT
+    hostname,
     disk_name,
     formatReadableSize(free_space_b)               AS free_space,
     formatReadableSize(total_space_b)              AS total_space,
     round(free_space_b / total_space_b * 100, 1)   AS free_pct
   FROM (
     SELECT
+      hostName()                                   AS hostname,
       name                                         AS disk_name,
       free_space                                   AS free_space_b,
       total_space                                  AS total_space_b
-    FROM system.disks
+    FROM {sys.disks}
     WHERE total_space > 0
       AND free_space / total_space < 0.15
   )
   ORDER BY free_pct ASC
 
-message: "Disk '{disk_name}' is only {free_pct}% free ({free_space} of {total_space})"
+message: "Disk '{disk_name}' on {hostname} is only {free_pct}% free ({free_space} of {total_space})"

@@ -2,7 +2,9 @@ SELECT
   hex(SHA256(concat(database, '%salt%'))) AS database,
   hex(SHA256(concat(name, '%salt%'))) AS name,
   status,
-  origin,
+  -- origin is the XML config path (or the qualified DDL identifier) —
+  -- both reveal infrastructure/schema detail, so hash it like the names.
+  hex(SHA256(concat(origin, '%salt%'))) AS origin,
   uuid,
   type,
   bytes_allocated,

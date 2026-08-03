@@ -240,7 +240,7 @@ Sample block of the output:
 |---|---|---|
 | `cloud` | `queries.cloud/` | Uses `clusterAllReplicas(...)` to fan out across replicas |
 | `onprem` | `queries.onprem/` | Single-node `system.*` references |
-| `gov` | `queries.gov/` | Same shape as on-prem but PII columns are hashed |
+| `gov` | `queries.gov/` | On-prem shape with PII columns hashed; omits `crash_log`/`stack_trace` (may contain sensitive symbols) |
 
 > ⚠️ **The `queries.<mode>/` directory MUST exist in the current working directory when you run the binary.** The tool resolves the queries folder as a path *relative to your CWD* (e.g. `./queries.onprem`), not relative to the binary itself. So if you ship the binary to another host, you must ship the matching `queries.<mode>/` folder alongside it and `cd` into the directory containing both before running.
 >
@@ -295,26 +295,110 @@ The mapping CSV (real_name → hashed_name) is written **outside** the timestamp
 
 If you lose the salt, the hashes in past archives are no longer reversible (you can still run a new diagnostic with a fresh salt — but old and new hashes won't compare).
 
+### What gov mode does not produce
+
+Two outputs are deliberately withheld in gov mode, because both are part of the support-bound archive and neither can be hashed meaningfully:
+
+| Output | Why |
+|---|---|
+| `dashboard.html` | Its panels are built in Go and select raw identifiers — database/table names for up to 2000 tables, disk paths, users — plus server-generated text (`last_exception`, `last_error_message`). Hashing every panel is the follow-up that would restore it. |
+| Query analysis (`--query-id` / `--normalized-query-hash`) | The bundle embeds raw query text, exception messages and full DDL. Freeform SQL text can't be hashed without destroying its diagnostic value, so the flags are rejected outright. |
+
+Because the dashboard is the only other consumer of alert results, gov runs instead write **[`alerts_summary.json`](#alerts_summaryjson)** into the archive — so you still get *"`too_many_parts` fired, 12 instances"* without the table names.
+
+Everything else — the per-mode `.native` files — is hashed as described above.
+
 ### Version-specific queries
 
 Inside each mode directory, you can override a query for a specific ClickHouse version by placing it in a subdirectory named `MAJOR.MINOR.PATCH.BUILD`. The tool picks the highest version ≤ the connected server.
 
 ```
-queries.cloud/
-├── system.parts.sql              # default (used if no version override matches)
-├── 23.8.1.0/
-│   └── system.parts.sql          # used for servers 23.8.1.0..23.10.x
-├── 23.10.1.0/
-│   └── system.parts.sql          # used for servers 23.10.1.0..23.11.x
-├── 23.11.1.0/
-└── 25.4.1.0/
+queries.onprem/
+├── system.detached_parts.sql     # default (works from 22.8)
+├── 22.11.1.0/
+│   └── system.detached_parts.sql # adds bytes_on_disk/path (servers ≥ 22.11)
+└── 23.11.1.0/
+    └── system.detached_parts.sql # also adds modification_time (servers ≥ 23.11)
 ```
 
 Directories that don't parse as a version are skipped.
 
+The same convention applies to `queries.query_analysis/` (`.sql` files) and `alerts/` (`.yaml` rules): place a file with the same name in a `MAJOR.MINOR.PATCH.BUILD` subdirectory to override the root version for servers at or above that version.
+
+```
+alerts/
+├── detached_parts_exist.yaml     # default rule (works from 22.8)
+└── 22.11.1.0/
+    └── detached_parts_exist.yaml # adds bytes_on_disk (column added in 22.11)
+```
+
+A file that exists **only** in a version subdirectory (no root counterpart) is simply skipped on older servers — use this for queries against system tables that don't exist yet (e.g. `system.asynchronous_insert_log`, added in 22.10).
+
+> **Overrides match by base filename, case-sensitively.** A file in a version subdirectory overrides a root file only when their names are identical, including case. If you rename the file in the version directory — or just change its case (`Foo.yaml` vs `foo.yaml`) — it is treated as a *separate* query/rule (both run), not an override. Keep the filename byte-for-byte identical to the root when you intend to override it.
+
+### Supported ClickHouse versions
+
+The tool targets **ClickHouse 22.8 and newer** for on-prem servers. Root-level query and alert files stick to columns and syntax available in 22.8; anything newer lives behind a version subdirectory. Current gates (verified against the ClickHouse changelogs):
+
+| Feature | Added in | Gated at |
+|---|---|---|
+| `ARRAY JOIN` over a `Map` (`ProfileEvents`) | after 22.8 | roots use `mapKeys()`/`mapValues()` (all versions) |
+| `system.asynchronous_insert_log` table | 22.10 | `queries.{onprem,gov}/22.10.1.0/` |
+| `system.disks.unreserved_space` | 22.10 | `queries.{onprem,gov}/22.10.1.0/` |
+| `system.detached_parts.bytes_on_disk`, `path` | 22.11 | `queries.{onprem,gov}/22.11.1.0/`, `alerts/22.11.1.0/` (gov gates `bytes_on_disk` only — it never collects `path`/`disk`) |
+| `GROUP BY ALL` syntax | 22.12 | root files use explicit key lists |
+| `dateDiff('millisecond', …)` sub-second unit | after 22.12 | async latency uses float subtraction of `*_microseconds` |
+| `system.text_log.message_format_string` | 23.1 | `queries.query_analysis/23.1.1.0/` |
+| `system.asynchronous_insert_log.rows` | 23.4 | `queries.{onprem,gov}/23.4.1.0/` (22.10–23.3 report `bytes`) |
+| `system.clusters` replicated-db columns (`database_shard_name`, `database_replica_name`, `is_active`, `name`) | 23.5 | `queries.*/23.5.1.0/` |
+| `system.query_log.query_cache_usage` | 23.8 | `queries.query_analysis/23.8.1.0/` |
+| `system.query_log.peak_threads_usage` | 23.9 | `queries.query_analysis/23.9.1.0/` |
+| `hostname` column in system log tables | 23.11 | `queries.*/23.11.1.0/` (roots use `hostName()`) |
+| `system.tables.total_bytes_uncompressed` | 23.12 | `queries.query_analysis/23.12.1.0/` |
+| `system.mutations.is_killed` | 24.1 | `alerts/24.1.1.0/` (root omits the filter) |
+| `system.tables.metadata_version` | 24.2 | `queries.*/24.2.1.0/` |
+| `system.tables.parameterized_view_parameters` | 25.4 | `queries.{onprem,cloud}/25.4.1.0/` (gov: not collected) |
+
+The dashboard (`internal/dashboard/generator.go`) builds its SQL dynamically, so instead of version directories it probes the live schema at runtime (`hasColumn`/`hasTable`) and adapts each panel — covering the same columns (`error_count`, `is_killed`, `bytes_on_disk`, the async table/`rows`, `crash_log`) plus optional tables that may be disabled by config.
+
+`queries.cloud/` targets managed ClickHouse Cloud, which always runs recent versions — it carries the recent rungs (`23.5.1.0/`, `23.11.1.0/`, `24.2.1.0/`, `25.4.1.0/`) but none of the sub-23.5 gating, because Cloud never runs that old. The **22.8 floor applies to `queries.onprem/` and `queries.gov/`** (both are self-hosted — gov is on-prem with hashed PII, and neither uses `clusterAllReplicas`) as well as the shared `queries.query_analysis/` + `alerts/` directories. Note gov's `system.tables` ladder deliberately tops out at `24.2.1.0/` — it does not collect `parameterized_view_parameters` (identifier-like values gov would otherwise have to hash).
+
+Overrides are matched **only** at the top level of each directory; a version subdirectory nested deeper (e.g. `alerts/foo/25.4.1.0/`) is not treated as a nested override of `alerts/foo/`.
+
 ## Alerts
 
 Alert rules are plain YAML files in `alerts/` (override with `-alerts-dir`). Each file defines one read-only SELECT query — if it returns any rows, the alert fires and the rows are surfaced in the dashboard. All alert SQL is validated before execution: only `SELECT` / `WITH` is accepted, anything else (`INSERT`, `ALTER`, `DROP`, …) is rejected and the rule is skipped.
+
+### Rule outcomes
+
+Every run reports four distinct outcomes, because each means something different to whoever reads the archive:
+
+| Outcome | Meaning |
+|---|---|
+| **fired** | The rule ran and matched rows — a real finding. |
+| **clean** | The rule ran and matched nothing. |
+| **errored** | The rule could not run (bad SQL, a column missing on this version, no `SELECT` grant). **Not a finding** — counted and displayed separately, and excluded from "checked". |
+| **not applicable** (skipped) | The system table the rule queries doesn't exist here — `crash_log` on a healthy self-managed instance, or a config-disabled `text_log`/`query_log`. Excluded from "checked" so it never reads as a check that passed. |
+
+```
+Alert evaluation complete: 8 rule(s) checked, 1 fired, 2 errored, 1 not applicable
+```
+
+Only rules that actually produced an answer count as *checked*. The dashboard mirrors this: findings get a severity badge, errored rules get a muted **⚠ N Could not run** chip (never a red severity count), and skipped rules are listed as "not applicable (table not present)".
+
+A missing **column** is always an error, never "not applicable" — that's the signal that a rule needs [version-gating](#version-specific-queries).
+
+### `alerts_summary.json`
+
+The HTML dashboard is the only other place alert results are recorded, so whenever it **isn't** produced the archive would otherwise contain no trace that the rules ran at all. In that case the tool writes `alerts_summary.json` into the output directory instead. It appears when:
+
+- `-mode gov` (the dashboard is [withheld](#what-gov-mode-does-not-produce)),
+- `-skip-dashboard` was passed, or
+- dashboard generation failed.
+
+It records each rule's name, title, severity, file (including the version-override directory, e.g. `24.1.1.0/…`), outcome (`fired` / `clean` / `error` / `skipped`) and **instance count**, plus the run totals. **Matched rows are never included in any mode** — their columns are defined per-rule, so they routinely carry database and table names. The count is the substitute: *"`too_many_parts` fired, 12 instances"*.
+
+> **Cloud caveat.** In `cloud` mode per-replica tables are read through `clusterAllReplicas`, so an `UNKNOWN_TABLE` can mean *absent everywhere* or *present on only some replicas* — and `system.crash_log` exists only on the node that crashed. The tool therefore counts how many replicas actually have the table before deciding: zero means genuinely not applicable, anything else (or an unverifiable answer) surfaces the error rather than risk hiding a real crash.
 
 ### YAML schema
 
@@ -334,7 +418,6 @@ query: |
          parts_to_do
   FROM {sys.mutations}
   WHERE parts_to_do > 0
-    AND is_killed = 0
     AND dateDiff('hour', create_time, now()) > 3
   ORDER BY hours_running DESC
 
@@ -345,12 +428,12 @@ message: "Mutation {mutation_id} on {database}.{table} running {hours_running}h"
 
 Use `{sys.<table>}` in the query — the evaluator rewrites it based on the run mode:
 
-| Mode | `{sys.mutations}` expands to |
+| Mode | `{sys.query_log}` expands to |
 |---|---|
-| `onprem`, `gov` | `system.mutations` |
-| `cloud` | `clusterAllReplicas(default, system.mutations)` |
+| `onprem`, `gov` | `system.query_log` |
+| `cloud` | `clusterAllReplicas(default, system.query_log)` |
 
-This is what lets the same alert work across single-node and Cloud deployments.
+This is what lets the same alert work across single-node and Cloud deployments. Tables whose rows are shared across replicas (`parts`, `tables`, `mutations`, `replicas`, `replication_queue`, `detached_parts`, `columns`, `databases`) are **not** wrapped even in cloud mode — `clusterAllReplicas` would duplicate their rows (see `internal/query/template.go`).
 
 ### Message templating
 
@@ -372,7 +455,7 @@ The repo ships with 11 alert rules in `alerts/`. They are intended as a starting
 | `crash_log_entries` | critical | `system.crash_log` is non-empty (server crashed at least once) |
 | `replica_readonly` | critical | A replicated table is in read-only mode (lost Keeper session, disk full, network partition) |
 | `replication_queue_errors` | critical | Replication queue entries have a non-empty `last_exception` |
-| `disk_space_low` | critical | Any disk has less than 15% free space |
+| `disk_space_low` | critical | Any disk has less than 15% free space — **on any replica** in cloud mode, with the reporting host named in the message |
 | `keeper_exception_spike` | warning | More than 20 KEEPER_EXCEPTION (code 999) errors in the last hour |
 | `high_exception_rate` | warning | More than 50 query exceptions for a single exception code in the last hour |
 | `too_many_simultaneous_queries` | warning | More than 10 code-252 errors in the last hour (`max_concurrent_queries` hit) |
@@ -386,6 +469,8 @@ Every rule is a single `SELECT` against system tables; rows returned become aler
 ## Query analysis mode
 
 When you already know **which** query is the problem — a specific `query_id` from a customer ticket or a `normalized_query_hash` from a slow-query rollup — the tool can collect a focused slice of `query_log`, `text_log`, and `processors_profile_log` so you can understand *why* it was slow without bringing back the whole system. The analysis runs **in addition to** the regular per-mode collection; it does not replace it.
+
+> **Not available in gov mode.** Query-analysis output embeds raw query text, exception messages, identifiers and full DDL — exactly the values gov-mode hashing exists to protect, and they can't be meaningfully hashed inside freeform text. `--query-id` / `--normalized-query-hash` are therefore rejected when `-mode gov` is set.
 
 ### Invoking it
 
@@ -402,7 +487,7 @@ Works in all three modes (`cloud`, `onprem`, `gov`) — table references adapt t
 
 ### What it collects
 
-Eleven `.sql` files under `queries.query_analysis/`, each written to `<backup>/query_analysis/<name>_<ts>.native`:
+Twelve `.sql` files under `queries.query_analysis/`, each written to `<backup>/query_analysis/<name>_<ts>.native`:
 
 **Single-query-id (need `--query-id` or one auto-derived from `--normalized-query-hash`)**
 
@@ -476,8 +561,8 @@ The section is hidden when neither analysis flag is set.
   --query-id 1bc3abaf-968f-4d4f-be3d-f77251b1ff0b \
   --skip-config -skip-archive
 # → Pre-flight: query_id ... → normalized_query_hash 7769688026807387533 (event_time ...)
-# → Query analysis: running 11 file(s) (window <event-time-centred 48h>)
-# → 11 written, 0 skipped
+# → Query analysis: running 12 file(s) (window <event-time-centred 48h>)
+# → 12 written, 0 skipped
 # → dashboard.html now has a "Query Analysis" section
 ```
 
@@ -487,7 +572,10 @@ The section is hidden when neither analysis flag is set.
 ./clickhouse-diagnostic --mode onprem --host prod-ch-01 \
   --normalized-query-hash 7769688026807387533 \
   --from 2026-05-23 --to 2026-05-30
-# → 4 group files written; 7 single-id files skipped (no query_id supplied)
+# → 12 written, 0 skipped — the tool auto-derives a representative
+#   query_id (the slowest execution in the window), so the single-id
+#   files run too. If no execution exists in the window, the 5
+#   single-id files are skipped instead (7 written, 5 skipped).
 ```
 
 ## Dashboard
@@ -498,7 +586,7 @@ When `-skip-dashboard` is not set, the tool generates a single self-contained `d
 
 | # | Section | What it shows |
 |---|---|---|
-| 1 | 🚨 **Alert Summary** | Fired alerts grouped by severity (critical / warning / info), with the row-level message template expanded per instance. A green "no issues" banner appears when nothing fired. |
+| 1 | 🚨 **Alert Summary** | Fired alerts grouped by severity (critical / warning / info), with the row-level message template expanded per instance. Rules that **could not run** appear with a ⚠ marker and a separate "Could not run" chip — they are never counted in the severity badge. Rules that are **not applicable** here are listed in a muted footnote. A green "no issues" banner appears when nothing fired. |
 | 2 | 📈 **Overview** | Top-level counters: server version, uptime, total databases, total tables, active parts, total size |
 | 3 | 📦 **Storage** | Size by database (horizontal bar), table-engine distribution (doughnut), and a top-20-by-size table list |
 | 4 | 📋 **Tables Explorer** | Searchable / paginated table of every user table with engine, parts, rows, size, partition / sorting keys, and storage policy |
@@ -571,7 +659,9 @@ clickhouse_results/
 │   ├── system.parts_YYYYMMDD_HHMMSS.native                  #   one file per query
 │   ├── system.mutations_YYYYMMDD_HHMMSS.native
 │   ├── ...
-│   └── dashboard.html                                       #   unless -skip-dashboard
+│   ├── query_analysis/                                      #   only with --query-id / --hash
+│   ├── dashboard.html                                       #   unless -skip-dashboard or gov
+│   └── alerts_summary.json                                  #   when alerts ran but dashboard.html is absent
 └── clickhouse_backup_YYYYMMDD_HHMMSS_gov_name_mapping.csv   # → LOCAL only (gov mode)
 configuration/                                               # → archived (unless -skip-config)
 └── *.xml                                                    #   sanitised configs

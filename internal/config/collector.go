@@ -40,7 +40,7 @@ func (c *Collector) Collect(configDir string, keepPasswords bool) error {
 	// Walk through the config directory
 	fileCount := 0
 	passwordCount := 0
-	
+
 	err = filepath.Walk(configDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err

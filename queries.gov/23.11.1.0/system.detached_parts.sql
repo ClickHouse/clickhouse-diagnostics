@@ -4,6 +4,7 @@ SELECT
   partition_id,
   bytes_on_disk,
   modification_time,
+  reason,
   min_block_number,
   max_block_number,
   level

@@ -13,6 +13,7 @@ SELECT
     written_rows,
     read_rows,
     read_bytes,
+    query_duration_ms,
     interface,
     normalized_query_hash,
     count,
@@ -45,6 +46,10 @@ SELECT
         FROM system.query_log
         ARRAY JOIN tables
         WHERE (event_time > (now() - toIntervalDay(15)))
-        GROUP BY ALL
+        -- Explicit key list instead of GROUP BY ALL: that syntax needs
+        -- 22.12+ and this root file must run on every supported server
+        -- (22.8+). Keys are the inner non-aggregate projections.
+        GROUP BY time, query_kind, database, table, tables_salted, type,
+                 user, interface, normalized_query_hash, exception_code
     )
 FORMAT Native
