@@ -2,8 +2,6 @@
 
 A Go-based diagnostic tool for ClickHouse that collects system information, runs a curated set of diagnostic queries, evaluates alert rules, and produces an HTML dashboard plus a shareable archive.
 
-## Features
-
 - **Per-environment query sets** — separate query directories for Cloud, on-prem, and government (hashed-PII) deployments, selected via `-mode`
 - **Version-aware query execution** — automatically picks the highest-compatible query variant for the connected server
 - **YAML-driven alerts** — drop a `.yaml` file in `alerts/` and the tool will run it, validate the SQL is read-only, and surface fired alerts in the dashboard
@@ -12,71 +10,9 @@ A Go-based diagnostic tool for ClickHouse that collects system information, runs
 - **Safe config collection** — passwords, tokens, and secrets are stripped from collected XML config files before they leave the host
 - **Archive packaging** — bundles results, sanitised configs, alerts, and the dashboard into a single `tar.gz`
 
-## Installation
-
-### Prerequisites
-
-- Go 1.23 or later (the module declares `go 1.23.9`)
-- `make` (optional — convenience targets only; everything also works with plain `go` commands)
-- Network access to a ClickHouse HTTP(S) interface
-- Read access to the ClickHouse config directory (optional, only if collecting configs)
-
-### Build with Make (recommended)
-
-The repo ships with a `Makefile` that wraps the common workflows. From the repo root:
-
-```bash
-make deps        # go mod download && go mod tidy
-make build       # produces ./bin/clickhouse-diagnostic
-make run         # builds (if needed) and runs the binary interactively
-make test        # go test -v ./...
-make fmt         # go fmt ./...
-make lint        # golangci-lint run  (requires golangci-lint installed)
-make clean       # remove ./bin, ./clickhouse_results, ./configuration, *.tar.gz
-make help        # list every target
-```
-
-### Build with `go` directly
-
-If you don't want to use `make`:
-
-```bash
-# Fetch and tidy dependencies
-go mod download
-go mod tidy
-
-# Build a binary at ./clickhouse-diagnostic
-go build -o clickhouse-diagnostic ./cmd
-
-# Or install into $GOPATH/bin (or $GOBIN) so it's on your PATH
-go install ./cmd
-```
-
-> The examples below use `./clickhouse-diagnostic` for brevity. If you built via `make`, the binary is at `./bin/clickhouse-diagnostic` — either invoke that path directly or symlink it.
-
-### Cross-platform release builds
-
-`make release` produces binaries for the platforms we ship:
-
-```bash
-make release
-# Output (in ./bin/):
-#   clickhouse-diagnostic-linux-amd64
-#   clickhouse-diagnostic-darwin-amd64
-#   clickhouse-diagnostic-darwin-arm64
-#   clickhouse-diagnostic-windows-amd64.exe
-```
-
-To cross-compile for a single target without `make`:
-
-```bash
-GOOS=linux  GOARCH=amd64 go build -o bin/clickhouse-diagnostic-linux-amd64  ./cmd
-GOOS=darwin GOARCH=arm64 go build -o bin/clickhouse-diagnostic-darwin-arm64 ./cmd
-```
-
-Builds are statically linked Go binaries — copy the file to the target host and run, no runtime dependencies required.
-
 ## Usage
+
+> These examples use `./clickhouse-diagnostic`. If you built via `make` the binary is at `./bin/clickhouse-diagnostic` — invoke that path or symlink it. See [Installation](#installation) if you don't have a binary yet.
 
 ### Interactive run
 
@@ -156,40 +92,6 @@ Run `./clickhouse-diagnostic -help` to see the full list. Current flags:
 
 Any flag left empty on the command line is prompted for interactively (except the `-skip-*` toggles and `-output-dir` / `-alerts-dir`, which use their defaults silently).
 
-## Output format
-
-Query results are written one file per query, in the format chosen by `-output-format`. The default is **`jsonl`**.
-
-| Value | ClickHouse format | Extension | |
-|---|---|---|---|
-| `jsonl` *(default)* | `JSONEachRow` | `.jsonl` | One self-describing JSON object per line. `grep`- and `jq`-able, and every row carries its column names — which matters because `system.query_log` has ~60 columns and positional formats leave you counting fields back to a header. |
-| `native` | `Native` | `.native` | The ClickHouse binary format used before v0.3.0. Column-oriented, exactly typed, reloadable with no schema — but unreadable without a ClickHouse to load it into. |
-| `tsv` | `TSVWithNamesAndTypes` | `.tsv` | Names on line 1, **types on line 2**. The most faithful text format for reload, but positional, so it reads poorly for wide tables. |
-
-### Large integers are never rounded
-
-JSON numbers are IEEE-754 doubles in most parsers, so an unquoted `UInt64` above 2^53 is silently corrupted on read — JavaScript turns `18446744073709551615` into `18446744073709552000`, and so does any `jq` expression that does arithmetic on it. This is not hypothetical: `normalized_query_hash` and every `cityHash64` value in `system.query_log` are full-width `UInt64`.
-
-The tool therefore pins `output_format_json_quote_64bit_integers=1` on every request, so 64-bit integers are emitted as **quoted strings** and survive every parser exactly. The setting is writable under `readonly=1`, so a server-side profile could otherwise turn it off — pinning it is what makes the guarantee hold rather than depend on the server's configuration.
-
-`native` and `tsv` are exact by construction. Cast on read when you reload:
-
-```bash
-clickhouse-local -q "SELECT toUInt64(normalized_query_hash) FROM file('x.jsonl','JSONEachRow')"
-```
-
-### Size
-
-The shipped artefact is a `tar.gz`, and JSON's repeated keys compress away almost entirely. Measured on a real bundle (21 queries, ClickHouse 24.8):
-
-| Format | Uncompressed | **Archive (`tar.gz`)** |
-|---|---|---|
-| `jsonl` | 2.20 MB | **225 KB** |
-| `native` | 1.83 MB | 240 KB |
-| `tsv` | 2.12 MB | 272 KB |
-
-`jsonl` is 20% larger on disk but produces the **smallest archive** of the three, so the readable default costs nothing in what you actually send.
-
 ### Examples
 
 Run against a Cloud cluster, no config collection (configs aren't accessible in Cloud):
@@ -233,6 +135,40 @@ Fully non-interactive (CI / automation):
 ```
 
 > **Security:** prefer the interactive password prompt or an environment variable over `-password` — flags appear in `ps`/shell history.
+
+## Output format
+
+Query results are written one file per query, in the format chosen by `-output-format`. The default is **`jsonl`**.
+
+| Value | ClickHouse format | Extension | |
+|---|---|---|---|
+| `jsonl` *(default)* | `JSONEachRow` | `.jsonl` | One self-describing JSON object per line. `grep`- and `jq`-able, and every row carries its column names — which matters because `system.query_log` has ~60 columns and positional formats leave you counting fields back to a header. |
+| `native` | `Native` | `.native` | The ClickHouse binary format used before v0.3.0. Column-oriented, exactly typed, reloadable with no schema — but unreadable without a ClickHouse to load it into. |
+| `tsv` | `TSVWithNamesAndTypes` | `.tsv` | Names on line 1, **types on line 2**. The most faithful text format for reload, but positional, so it reads poorly for wide tables. |
+
+### Large integers are never rounded
+
+JSON numbers are IEEE-754 doubles in most parsers, so an unquoted `UInt64` above 2^53 is silently corrupted on read — JavaScript turns `18446744073709551615` into `18446744073709552000`, and so does any `jq` expression that does arithmetic on it. This is not hypothetical: `normalized_query_hash` and every `cityHash64` value in `system.query_log` are full-width `UInt64`.
+
+The tool therefore pins `output_format_json_quote_64bit_integers=1` on every request, so 64-bit integers are emitted as **quoted strings** and survive every parser exactly. The setting is writable under `readonly=1`, so a server-side profile could otherwise turn it off — pinning it is what makes the guarantee hold rather than depend on the server's configuration.
+
+`native` and `tsv` are exact by construction. Cast on read when you reload:
+
+```bash
+clickhouse-local -q "SELECT toUInt64(normalized_query_hash) FROM file('x.jsonl','JSONEachRow')"
+```
+
+### Size
+
+The shipped artefact is a `tar.gz`, and JSON's repeated keys compress away almost entirely. Measured on a real bundle (21 queries, ClickHouse 24.8):
+
+| Format | Uncompressed | **Archive (`tar.gz`)** |
+|---|---|---|
+| `jsonl` | 2.20 MB | **225 KB** |
+| `native` | 1.83 MB | 240 KB |
+| `tsv` | 2.12 MB | 272 KB |
+
+`jsonl` is 20% larger on disk but produces the **smallest archive** of the three, so the readable default costs nothing in what you actually send.
 
 ## Dry-run mode
 
@@ -815,3 +751,65 @@ The generated `dashboard.html` loads Chart.js from a public CDN. Open it in an e
 
 **"Permission denied" on config files**
 You don't have read access to `-config-dir`. Either run with appropriate privileges or use `-skip-config`.
+
+## Installation
+
+### Prerequisites
+
+- Go 1.23 or later (the module declares `go 1.23.9`)
+- `make` (optional — convenience targets only; everything also works with plain `go` commands)
+- Network access to a ClickHouse HTTP(S) interface
+- Read access to the ClickHouse config directory (optional, only if collecting configs)
+
+### Build with Make (recommended)
+
+The repo ships with a `Makefile` that wraps the common workflows. From the repo root:
+
+```bash
+make deps        # go mod download && go mod tidy
+make build       # produces ./bin/clickhouse-diagnostic
+make run         # builds (if needed) and runs the binary interactively
+make test        # go test -v ./...
+make fmt         # go fmt ./...
+make lint        # golangci-lint run  (requires golangci-lint installed)
+make clean       # remove ./bin, ./clickhouse_results, ./configuration, *.tar.gz
+make help        # list every target
+```
+
+### Build with `go` directly
+
+If you don't want to use `make`:
+
+```bash
+# Fetch and tidy dependencies
+go mod download
+go mod tidy
+
+# Build a binary at ./clickhouse-diagnostic
+go build -o clickhouse-diagnostic ./cmd
+
+# Or install into $GOPATH/bin (or $GOBIN) so it's on your PATH
+go install ./cmd
+```
+
+### Cross-platform release builds
+
+`make release` produces binaries for the platforms we ship:
+
+```bash
+make release
+# Output (in ./bin/):
+#   clickhouse-diagnostic-linux-amd64
+#   clickhouse-diagnostic-darwin-amd64
+#   clickhouse-diagnostic-darwin-arm64
+#   clickhouse-diagnostic-windows-amd64.exe
+```
+
+To cross-compile for a single target without `make`:
+
+```bash
+GOOS=linux  GOARCH=amd64 go build -o bin/clickhouse-diagnostic-linux-amd64  ./cmd
+GOOS=darwin GOARCH=arm64 go build -o bin/clickhouse-diagnostic-darwin-arm64 ./cmd
+```
+
+Builds are statically linked Go binaries — copy the file to the target host and run, no runtime dependencies required.
