@@ -2,6 +2,7 @@ package query
 
 import (
 	"fmt"
+	"time"
 
 	"clickhouse-diagnostic/internal"
 	"clickhouse-diagnostic/pkg"
@@ -12,6 +13,14 @@ type Manager struct {
 	finder   *Finder
 	selector *Selector
 	format   OutputFormat
+	from     time.Time
+	to       time.Time
+}
+
+// WithWindow overrides the time window of every query that declares one.
+func (m *Manager) WithWindow(from, to time.Time) *Manager {
+	m.from, m.to = from, to
+	return m
 }
 
 // WithOutputFormat sets the serialisation format for query results.
@@ -55,7 +64,8 @@ func (m *Manager) ExecuteQueries(client *pkg.ClickHouseClient, queriesDir string
 	fmt.Printf("Found %d unique query files to execute\n", len(selectedQueries))
 
 	// Execute the selected queries and get the specific output directory
-	executor := NewExecutor(client).WithSalt(salt).WithOutputFormat(m.format)
+	executor := NewExecutor(client).WithSalt(salt).WithOutputFormat(m.format).
+		WithWindow(m.from, m.to)
 	finalOutputDir, err := executor.ExecuteQueries(selectedQueries, outputDir)
 	if err != nil {
 		return "", fmt.Errorf("error executing queries: %w", err)

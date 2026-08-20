@@ -45,7 +45,7 @@ SELECT
             exception_code
         FROM system.query_log
         ARRAY JOIN tables
-        WHERE (event_time > (now() - toIntervalDay(15)))
+        WHERE (event_time > {from:15d} AND event_time <= {to:now})
         -- Explicit key list instead of GROUP BY ALL: that syntax needs
         -- 22.12+ and this root file must run on every supported server
         -- (22.8+). Keys are the inner non-aggregate projections.

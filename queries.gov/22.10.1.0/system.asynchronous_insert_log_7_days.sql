@@ -17,7 +17,7 @@ SELECT
     round(avg((toFloat64(flush_time_microseconds) - toFloat64(event_time_microseconds)) * 1000), 0)            AS avg_flush_ms,
     round(quantile(0.9)((toFloat64(flush_time_microseconds) - toFloat64(event_time_microseconds)) * 1000), 0)  AS p90_flush_ms
 FROM system.asynchronous_insert_log
-WHERE event_time > now() - INTERVAL 7 DAY
+WHERE event_time > {from:7d} AND event_time <= {to:now}
 -- Explicit key list instead of GROUP BY ALL (needs 22.12+).
 GROUP BY time, database, table, status
 ORDER BY time, database, table

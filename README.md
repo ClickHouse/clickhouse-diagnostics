@@ -50,22 +50,35 @@ GRANT SELECT ON system.*                 TO sys_read_only;
 
 Neither grant exposes customer data: `SHOW` reveals object *names* and metadata only, and `SELECT` is scoped to `system`.
 
-#### Cloud mode needs one more
+#### Cloud mode needs two more
 
-`cloud` mode wraps its queries in `clusterAllReplicas(...)` so results span every replica rather than only the node you connected to. That table function requires:
+`cloud` mode wraps its queries in `clusterAllReplicas(...)` so results span every replica rather than only the node you connected to. Distributed execution needs two further grants:
 
 ```sql
-GRANT REMOTE ON *.* TO sys_read_only;
+GRANT REMOTE                ON *.* TO sys_read_only;
+GRANT CREATE TEMPORARY TABLE ON *.* TO sys_read_only;
 ```
 
-Without it, cloud-mode queries fail outright (they do not silently truncate):
+So the full set for cloud is:
+
+```
+┌─GRANTS FOR sys_read_only──────────────────────────────────────────────────────────────────┐
+│ GRANT SHOW DATABASES, SHOW TABLES, CREATE TEMPORARY TABLE, REMOTE ON *.* TO sys_read_only │
+│ GRANT SELECT ON system.* TO sys_read_only                                                 │
+└───────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+Unlike the `SHOW` grant, these fail loudly rather than truncating:
 
 ```
 Code: 497. DB::Exception: Not enough privileges. To execute this query,
 it's necessary to have the grant REMOTE ON *.*. (ACCESS_DENIED)
+
+Code: 497. DB::Exception: Not enough privileges. To execute this query,
+it's necessary to have the grant CREATE TEMPORARY TABLE ON *.*. (ACCESS_DENIED)
 ```
 
-Some distributed queries additionally ask for `CREATE TEMPORARY TABLE ON *.*`. `onprem` and `gov` need neither — verified by revoking both and re-running.
+`onprem` and `gov` need neither — verified by revoking both and re-running (21/21 and 19/19 queries, 0 errors).
 
 #### What grants do *not* cover
 
@@ -192,6 +205,48 @@ Fully non-interactive (CI / automation):
 ```
 
 > **Security:** prefer the interactive password prompt or an environment variable over `-password` — flags appear in `ps`/shell history.
+
+## Collection window
+
+Most collection queries look back over a fixed period. Each declares its **own** default, because the cost of a wide scan differs sharply per table — 15 days of `metric_log` is far more expensive than 15 days of `part_log`:
+
+| Query | Default look-back |
+|---|---|
+| `system.query_log_details_7_days` | 15 days |
+| `system.part_log_7_days` | 7 days |
+| `system.metric_log_7_days` | 7 days |
+| `system.asynchronous_insert_log_7_days` | 7 days |
+| `system.text_log` | 1 day |
+
+> The `_7_days` suffixes are historical and not all accurate — `query_log_details_7_days` has always looked back 15 days. The table above is authoritative.
+
+`-from` and `-to` override **every** window at once:
+
+```bash
+# Everything from a specific incident window
+./clickhouse-diagnostic -mode onprem -host prod-ch-01 \
+  -from 2026-08-14T09:00:00Z -to 2026-08-14T13:00:00Z
+
+# Widen the look-back to 30 days instead of each query's default
+./clickhouse-diagnostic -mode onprem -host prod-ch-01 -from 2026-07-21
+```
+
+Either end may be given alone: `-from` with no `-to` runs to now, and `-to` with no `-from` leaves each query's own default start. The resolved window is printed at the start of the run. Times are RFC3339 or `YYYY-MM-DD`, interpreted as UTC.
+
+The same flags also drive [query analysis](#query-analysis-mode) when `-query-id` / `-normalized-query-hash` is set.
+
+> **A narrower window is the first thing to try on a slow or heavy collection.** The defaults are tuned for a general health check; on a busy cluster `-from` with a few hours is dramatically cheaper.
+
+### For query authors
+
+Windows are template placeholders, not literals, so they stay overridable:
+
+```sql
+WHERE event_time >  {from:7d}      -- --from if given, else now() - INTERVAL 7 DAY
+  AND event_time <= {to:now}       -- --to   if given, else now()
+```
+
+Accepted defaults are `now`, and `<N>d` / `<N>h` / `<N>m`. A malformed spec (`{from:7dd}`) is **not** substituted — the query is refused rather than silently run unbounded. A test asserts no shipped query hard-codes an interval, so a new one that does will fail CI rather than quietly ignore the flags.
 
 ## Output format
 

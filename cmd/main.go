@@ -41,8 +41,11 @@ func main() {
 	saltFlag := flag.String("salt", "", "Gov-mode hashing salt (8–64 alphanumeric chars; prompts interactively if empty)")
 	queryIDFlag := flag.String("query-id", "", "Run query analysis focused on this query_id (UUID)")
 	normalizedHashFlag := flag.String("normalized-query-hash", "", "Run query analysis focused on this normalized_query_hash (uint64)")
-	fromFlag := flag.String("from", "", "Time-window start for query analysis (RFC3339 or YYYY-MM-DD)")
-	toFlag := flag.String("to", "", "Time-window end for query analysis (RFC3339 or YYYY-MM-DD)")
+	fromFlag := flag.String("from", "", "Start of the collection window (RFC3339 or YYYY-MM-DD). "+
+		"Overrides the per-query default look-back (15d for query_log, 7d for part_log/metric_log, 1d for text_log). "+
+		"Also sets the query-analysis window")
+	toFlag := flag.String("to", "", "End of the collection window (RFC3339 or YYYY-MM-DD; default: now). "+
+		"Also sets the query-analysis window")
 	analysisDirFlag := flag.String("analysis-dir", "./queries.query_analysis", "Directory containing query-analysis SQL files")
 	hostInfoFlag := flag.String("host-info", "auto", "Collect host OS/kernel/CPU/memory/disk/process facts: auto|on|off. "+
 		"auto = on for onprem, off for cloud (the tool would profile the machine it runs on, not the managed server) "+
@@ -96,6 +99,28 @@ func main() {
 		textLogLevel   = *textLogLevelFlag
 		textLogLimit   = *textLogLimitFlag
 	)
+	// --from / --to narrow the collection window of every query that
+	// declares one. Parsed before anything blocking (the password prompt,
+	// the connection) so a malformed or inverted window fails immediately.
+	//
+	// Parsed separately from analysisOpts: analysis substitutes its own
+	// event-time-centred defaults when the flags are absent, whereas the
+	// collection queries fall back to the per-query defaults they declare.
+	collectFrom, err := query.ParseTimeFlag(fromStr)
+	if err != nil {
+		fmt.Printf("Error: invalid --from: %v\n", err)
+		return
+	}
+	collectTo, err := query.ParseTimeFlag(toStr)
+	if err != nil {
+		fmt.Printf("Error: invalid --to: %v\n", err)
+		return
+	}
+	if !collectFrom.IsZero() && !collectTo.IsZero() && collectTo.Before(collectFrom) {
+		fmt.Println("Error: --to is earlier than --from")
+		return
+	}
+
 	outputFormat, err := query.ParseOutputFormat(*outputFormatFlag)
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
@@ -294,8 +319,13 @@ func main() {
 		govSalt = "DRYRUNPLACEHOLDER"
 	}
 
+	if !collectFrom.IsZero() || !collectTo.IsZero() {
+		fmt.Printf("Collection window: %s\n", describeWindow(collectFrom, collectTo))
+	}
+
 	// Find and execute queries - get the specific folder path
-	queryManager := query.NewManager().WithOutputFormat(outputFormat)
+	queryManager := query.NewManager().WithOutputFormat(outputFormat).
+		WithWindow(collectFrom, collectTo)
 	finalOutputDir, err := queryManager.ExecuteQueries(client, queriesDir, serverVersion, outputDir, govSalt)
 	if err != nil {
 		fmt.Printf("Error executing queries: %v\n", err)
@@ -735,5 +765,20 @@ func resolveLocalCollector(setting, mode, name string) (skip bool, err error) {
 		return mode != "onprem", nil
 	default:
 		return true, fmt.Errorf("--%s must be auto, on or off (got %q)", name, setting)
+	}
+}
+
+// describeWindow renders the resolved --from / --to window for the
+// operator, spelling out which end fell back to the query's own default
+// so a half-specified window is not mistaken for a full one.
+func describeWindow(from, to time.Time) string {
+	const layout = "2006-01-02 15:04:05 UTC"
+	switch {
+	case from.IsZero():
+		return "each query's own default start → " + to.UTC().Format(layout)
+	case to.IsZero():
+		return from.UTC().Format(layout) + " → now"
+	default:
+		return from.UTC().Format(layout) + " → " + to.UTC().Format(layout)
 	}
 }

@@ -22,6 +22,17 @@ type Executor struct {
 	// format is the ClickHouse FORMAT results are serialised in, and the
 	// extension they are written with. Zero value means the default.
 	format OutputFormat
+	// from / to override every query's own {from:…} / {to:…} default when
+	// non-zero. Zero means "each query keeps the window it declares".
+	from time.Time
+	to   time.Time
+}
+
+// WithWindow overrides the time window of every query that declares one.
+// Zero values leave each query's own default in place.
+func (e *Executor) WithWindow(from, to time.Time) *Executor {
+	e.from, e.to = from, to
+	return e
 }
 
 // NewExecutor creates a new query executor
@@ -109,12 +120,22 @@ func (e *Executor) executeQuery(query internal.QueryFile, outputDir, timestamp s
 		return nil
 	}
 
-	// Gov mode: replace the public '%salt%' placeholder in .sql files
-	// with the customer-supplied salt. Salt format is validated upstream
-	// (alphanumeric only), so it cannot break out of the SQL string literal.
-	sqlText := string(queryContent)
-	if e.salt != "" {
-		sqlText = strings.ReplaceAll(sqlText, "'%salt%'", "'"+e.salt+"'")
+	// Bind the template. This resolves the {from:<default>} / {to:<default>}
+	// time windows — to the --from / --to flags when they were given, and
+	// otherwise to the default each query declares for itself — and, in gov
+	// mode, replaces the public '%salt%' marker with the customer salt.
+	// Salt format is validated upstream (alphanumeric only), so it cannot
+	// break out of the SQL string literal.
+	sqlText := Apply(string(queryContent), Vars{
+		From:    e.from,
+		To:      e.to,
+		GovSalt: e.salt,
+	})
+
+	// A placeholder left unbound would reach the server as a literal
+	// brace: either a parse error or, worse, a silently wrong window.
+	if unbound := UnboundPlaceholders(sqlText); len(unbound) > 0 {
+		return fmt.Errorf("query '%s' has unbound placeholder(s) %v", query.Name, unbound)
 	}
 
 	// Serialise in the configured format, replacing any FORMAT the file
