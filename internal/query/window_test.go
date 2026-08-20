@@ -42,17 +42,16 @@ func TestWindowDefaultSQL(t *testing.T) {
 	}
 }
 
-// TestWindowDefaultsPreserveOriginalBehaviour is the important one: with no
-// --from/--to, every query must produce exactly the window it had before
-// the placeholders were introduced.
-func TestWindowDefaultsPreserveOriginalBehaviour(t *testing.T) {
+// TestWindowDefaultExpansion checks the template -> SQL mapping for the
+// shapes the shipped queries actually use.
+func TestWindowDefaultExpansion(t *testing.T) {
 	cases := []struct {
 		templated string
 		original  string
 	}{
 		{
-			"WHERE (event_time > {from:15d} AND event_time <= {to:now})",
-			"WHERE (event_time > now() - INTERVAL 15 DAY AND event_time <= now())",
+			"WHERE (event_time > {from:7d} AND event_time <= {to:now})",
+			"WHERE (event_time > now() - INTERVAL 7 DAY AND event_time <= now())",
 		},
 		{
 			"WHERE event_time > {from:7d} AND event_time <= {to:now}",
@@ -212,4 +211,67 @@ func TestPlaceholderInCommentIgnored(t *testing.T) {
 	if u := UnboundPlaceholders("SELECT 1 WHERE id = {query_id}"); len(u) != 1 {
 		t.Errorf("real unbound placeholder missed: %v", u)
 	}
+}
+
+// TestShippedQueryDefaultWindows pins the default look-back of every
+// shipped query by name. Without this the windows drift silently: they
+// live in 20 files across three mode directories plus version overrides,
+// and nothing else would notice one being edited to a different value.
+//
+// The map is the specification — update it deliberately when a window
+// changes, in the same commit that changes the SQL.
+func TestShippedQueryDefaultWindows(t *testing.T) {
+	want := map[string]string{
+		"system.query_log_details_7_days.sql":       "7d",
+		"system.part_log_7_days.sql":                "7d",
+		"system.metric_log_7_days.sql":              "7d",
+		"system.asynchronous_insert_log_7_days.sql": "7d",
+		"system.text_log.sql":                       "1d",
+	}
+
+	checked := map[string]int{}
+	for _, dir := range []string{"../../queries.onprem", "../../queries.cloud", "../../queries.gov"} {
+		if _, err := os.Stat(dir); err != nil {
+			continue
+		}
+		err := filepath.Walk(dir, func(p string, info os.FileInfo, err error) error {
+			if err != nil || info.IsDir() || !strings.EqualFold(filepath.Ext(p), ".sql") {
+				return err
+			}
+			spec, ok := want[filepath.Base(p)]
+			if !ok {
+				return nil // query has no window; TestShippedQueriesHaveNoHardcodedWindow covers it
+			}
+			b, readErr := os.ReadFile(p)
+			if readErr != nil {
+				t.Fatalf("read %s: %v", p, readErr)
+			}
+			froms := regexp.MustCompile(`\{from:([A-Za-z0-9]+)\}`).FindAllStringSubmatch(string(b), -1)
+			if len(froms) == 0 {
+				t.Errorf("%s: expected a {from:%s} window, found none", p, spec)
+				return nil
+			}
+			for _, m := range froms {
+				if m[1] != spec {
+					t.Errorf("%s: default window is {from:%s}, expected {from:%s}", p, m[1], spec)
+				}
+			}
+			checked[filepath.Base(p)]++
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("walk %s: %v", dir, err)
+		}
+	}
+
+	if len(checked) == 0 {
+		t.Skip("query directories not present")
+	}
+	for name := range want {
+		if checked[name] == 0 {
+			t.Errorf("%s was never found in any mode directory; the guard is not "+
+				"covering it (renamed or deleted?)", name)
+		}
+	}
+	t.Logf("pinned windows across %d query files", len(checked))
 }

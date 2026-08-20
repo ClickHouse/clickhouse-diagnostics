@@ -197,12 +197,12 @@ func UnboundPlaceholders(sql string) []string {
 // reWindowPlaceholder matches a time-window placeholder that carries its
 // own default: {from:15d}, {from:12h}, {to:now}.
 //
-// Each collection query used to hard-code its window (the query_log
-// details query looked back 15 days, part_log 7, text_log 1). Those
-// windows are deliberately different — a 15-day metric_log scan is far
-// more expensive than a 15-day part_log scan — so the default lives in
-// the query that needs it rather than being flattened to one global
-// value. --from / --to override every one of them at once.
+// Each collection query used to hard-code its window as a literal. The
+// default now lives with the query rather than being flattened to one
+// global value, because the cost of a wide scan differs sharply per
+// table — text_log keeps a 1-day default where the other log tables use
+// 7, and a future query needing a longer or shorter reach can say so
+// without affecting the rest. --from / --to override all of them at once.
 var reWindowPlaceholder = regexp.MustCompile(`\{(from|to):([A-Za-z0-9]+)\}`)
 
 // reWindowLeftover finds a window placeholder that expandWindowPlaceholders

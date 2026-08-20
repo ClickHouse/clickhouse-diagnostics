@@ -42,7 +42,7 @@ func main() {
 	queryIDFlag := flag.String("query-id", "", "Run query analysis focused on this query_id (UUID)")
 	normalizedHashFlag := flag.String("normalized-query-hash", "", "Run query analysis focused on this normalized_query_hash (uint64)")
 	fromFlag := flag.String("from", "", "Start of the collection window (RFC3339 or YYYY-MM-DD). "+
-		"Overrides the per-query default look-back (15d for query_log, 7d for part_log/metric_log, 1d for text_log). "+
+		"Overrides the per-query default look-back (7 days for most log tables, 1 day for text_log). "+
 		"Also sets the query-analysis window")
 	toFlag := flag.String("to", "", "End of the collection window (RFC3339 or YYYY-MM-DD; default: now). "+
 		"Also sets the query-analysis window")

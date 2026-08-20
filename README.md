@@ -208,17 +208,17 @@ Fully non-interactive (CI / automation):
 
 ## Collection window
 
-Most collection queries look back over a fixed period. Each declares its **own** default, because the cost of a wide scan differs sharply per table — 15 days of `metric_log` is far more expensive than 15 days of `part_log`:
+Most collection queries look back over a fixed period. Each declares its **own** default, so a query whose scan is unusually expensive (or unusually cheap) can say so without changing the rest:
 
 | Query | Default look-back |
 |---|---|
-| `system.query_log_details_7_days` | 15 days |
+| `system.query_log_details_7_days` | 7 days |
 | `system.part_log_7_days` | 7 days |
 | `system.metric_log_7_days` | 7 days |
 | `system.asynchronous_insert_log_7_days` | 7 days |
 | `system.text_log` | 1 day |
 
-> The `_7_days` suffixes are historical and not all accurate — `query_log_details_7_days` has always looked back 15 days. The table above is authoritative.
+> `system.text_log` is the one exception at 1 day: it is by far the highest-volume table here, and a 7-day slice of it is usually too large to be useful in a support bundle. Use `-from` when you need more.
 
 `-from` and `-to` override **every** window at once:
 

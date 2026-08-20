@@ -24,5 +24,5 @@ SELECT
     any(exception) as exception
 FROM clusterAllReplicas(default, system.query_log)
 ARRAY JOIN tables
-WHERE (event_time > {from:15d} AND event_time <= {to:now})
+WHERE (event_time > {from:7d} AND event_time <= {to:now})
 GROUP BY ALL
