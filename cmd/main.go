@@ -14,6 +14,8 @@ import (
 	"clickhouse-diagnostic/internal/alert"
 	"clickhouse-diagnostic/internal/config"
 	"clickhouse-diagnostic/internal/dashboard"
+	"clickhouse-diagnostic/internal/hostinfo"
+	"clickhouse-diagnostic/internal/logfiles"
 	"clickhouse-diagnostic/internal/query"
 	"clickhouse-diagnostic/internal/version"
 	"clickhouse-diagnostic/pkg"
@@ -42,6 +44,17 @@ func main() {
 	fromFlag := flag.String("from", "", "Time-window start for query analysis (RFC3339 or YYYY-MM-DD)")
 	toFlag := flag.String("to", "", "Time-window end for query analysis (RFC3339 or YYYY-MM-DD)")
 	analysisDirFlag := flag.String("analysis-dir", "./queries.query_analysis", "Directory containing query-analysis SQL files")
+	hostInfoFlag := flag.String("host-info", "auto", "Collect host OS/kernel/CPU/memory/disk/process facts: auto|on|off. "+
+		"auto = on for onprem, off for cloud (the tool would profile the machine it runs on, not the managed server) "+
+		"and off for gov (never collected — hostnames and command lines cannot be hashed)")
+	logsFlag := flag.String("logs", "auto", "Collect ClickHouse server log files from disk: auto|on|off. "+
+		"auto = on for onprem, off for cloud (logs live on the managed nodes, not locally) and off for gov")
+	logsDirFlag := flag.String("logs-dir", "", "Directory holding ClickHouse server logs. Default: discovered from the server configuration's <log>/<errorlog>, falling back to /var/log/clickhouse-server")
+	logsMaxMBFlag := flag.Int("logs-max-mb", 50, "Per-file size cap for collected logs, in MiB. Larger files are tail-truncated (the recent end is kept)")
+	logsArchivesFlag := flag.Bool("logs-include-archives", false, "Also collect rotated log archives (*.gz, *.zst). Off by default — they are often larger than the rest of the bundle combined")
+	collectTextLogFlag := flag.Bool("collect-text-log", false, "Collect a time-bounded slice of system.text_log. Requires --from and --to; not available in gov mode")
+	textLogLevelFlag := flag.String("text-log-level", "", "Minimum severity for --collect-text-log (Fatal|Critical|Error|Warning|Notice|Information|Debug|Trace). Default: all levels")
+	textLogLimitFlag := flag.Int("text-log-limit", 0, fmt.Sprintf("Row cap for --collect-text-log (default %d)", query.DefaultTextLogRowLimit))
 	dryRunFlag := flag.Bool("dry-run", false, "List every query the tool would execute (with the system tables each touches and an EXPLAIN ESTIMATE per SELECT) and exit. Does NOT write results or create an archive. EXPLAIN ESTIMATE is a read-only metadata query — it reports the rows/marks/parts the SELECT WOULD scan without reading any data.")
 
 	// Parse command line flags
@@ -69,12 +82,40 @@ func main() {
 		fromStr        = *fromFlag
 		toStr          = *toFlag
 		analysisDir    = *analysisDirFlag
+		hostInfoMode   = *hostInfoFlag
+		logsMode       = *logsFlag
+		logsDir        = *logsDirFlag
+		logsMaxMB      = *logsMaxMBFlag
+		logsArchives   = *logsArchivesFlag
+		collectTextLog = *collectTextLogFlag
+		textLogLevel   = *textLogLevelFlag
+		textLogLimit   = *textLogLimitFlag
 	)
+	// Resolve the two local-filesystem collectors against the run mode.
+	// Both read the machine the tool is EXECUTING on, which is only the
+	// ClickHouse server in onprem deployments — hence the mode-dependent
+	// default rather than a plain on/off.
+	skipHostInfo, err := resolveLocalCollector(hostInfoMode, mode, "host-info")
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		return
+	}
+	skipLogs, err := resolveLocalCollector(logsMode, mode, "logs")
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		return
+	}
+
 	// --dry-run is read-only by definition — silence the side effects
 	// that would write empty/garbage artefacts to disk.
 	if dryRun {
 		skipConfig = true
 		skipArchive = true
+		// Host facts and log files are filesystem copies, not queries;
+		// there is nothing meaningful to "preview", so skip them rather
+		// than write files a dry run promised not to write.
+		skipHostInfo = true
+		skipLogs = true
 	}
 
 	// Get user input for missing parameters
@@ -144,6 +185,39 @@ func main() {
 		fmt.Println("Error: --query-id / --normalized-query-hash are not supported in gov mode " +
 			"(query-analysis output contains raw query text and identifiers that cannot be hashed)")
 		return
+	}
+
+	// Same reasoning for text_log: its messages are free-form text carrying
+	// raw SQL, identifiers and file paths. Hashing a log line destroys the
+	// only thing that makes it useful, so gov refuses rather than shipping
+	// it unhashed.
+	if mode == "gov" && collectTextLog {
+		fmt.Println("Error: --collect-text-log is not supported in gov mode " +
+			"(log messages embed raw queries and identifiers that cannot be hashed)")
+		return
+	}
+
+	// Fail fast on the required window rather than after the collection run.
+	if collectTextLog && (fromStr == "" || toStr == "") {
+		fmt.Println("Error: --collect-text-log requires both --from and --to " +
+			"(system.text_log is high-volume; an unbounded dump would be very large " +
+			"and would itself load the server)")
+		return
+	}
+
+	// Say why the two local collectors are off, so their absence from the
+	// bundle reads as a deliberate choice rather than a silent failure.
+	// resolveLocalCollector already made the decision; this only reports it.
+	if skipHostInfo && skipLogs && !dryRun {
+		switch mode {
+		case "gov":
+			fmt.Println("Gov mode: not collecting host facts or server log files " +
+				"(hostnames, mount paths, process command lines and log bodies cannot be hashed).")
+		case "cloud":
+			fmt.Println("Cloud mode: not collecting host facts or server log files — they would " +
+				"describe this machine, not the managed service. Pass --host-info=on / --logs=on " +
+				"to override when running on a self-managed node.")
+		}
 	}
 
 	// Dry-run: activate AFTER the version probe so version detection
@@ -217,6 +291,35 @@ func main() {
 		return
 	}
 
+	// Time-bounded system.text_log slice (opt-in, --from/--to required).
+	// Runs before the dry-run summary so --dry-run previews the SQL.
+	if collectTextLog {
+		tlOpts := query.TextLogOpts{
+			From:     analysisOpts.From,
+			To:       analysisOpts.To,
+			Level:    textLogLevel,
+			RowLimit: textLogLimit,
+		}
+		// analysisOpts only carries a window when query analysis is active;
+		// otherwise parse the flags directly.
+		if tlOpts.From.IsZero() || tlOpts.To.IsZero() {
+			f, ferr := query.ParseTimeFlag(fromStr)
+			t, terr := query.ParseTimeFlag(toStr)
+			if ferr != nil || terr != nil {
+				fmt.Printf("Error parsing --from/--to: %v %v\n", ferr, terr)
+				return
+			}
+			tlOpts.From, tlOpts.To = f, t
+		}
+		tlColl := query.NewTextLogCollector(client, mode)
+		path, err := tlColl.Collect(tlOpts, finalOutputDir, serverVersion)
+		if err != nil {
+			fmt.Printf("Warning: text_log collection failed: %v\n", err)
+		} else if path != "" {
+			fmt.Printf("  text_log written to %s\n", path)
+		}
+	}
+
 	// Query analysis bundle (only when --query-id or
 	// --normalized-query-hash was set). Runs the .sql files under
 	// analysisDir against the focus parameters and writes results into
@@ -246,6 +349,42 @@ func main() {
 	if mode == "gov" && !dryRun {
 		if err := internal.PrintGovNameMapping(client, outputDir, finalOutputDir, govSalt); err != nil {
 			fmt.Printf("Warning: gov-mode name mapping failed: %v\n", err)
+		}
+	}
+
+	// Host facts: the OS/kernel/hardware context that explains what the
+	// ClickHouse system tables report. Read from /proc, /sys and /etc — so
+	// it only yields anything when run ON the server, and degrades to
+	// "unavailable" with a note otherwise rather than failing the run.
+	if !skipHostInfo {
+		fmt.Println("Collecting host OS and hardware facts...")
+		report := hostinfo.Collect()
+		if path, err := hostinfo.WriteJSON(finalOutputDir, report); err != nil {
+			fmt.Printf("Warning: host info could not be written: %v\n", err)
+		} else {
+			fmt.Print(report.Summary())
+			for _, n := range report.Notes {
+				fmt.Printf("  note: %s\n", n)
+			}
+			fmt.Printf("  written to %s\n", filepath.Base(path))
+		}
+	}
+
+	// ClickHouse server log files from disk. The directory is discovered
+	// from the server configuration when not given explicitly, because
+	// operators relocate logs far more often than anything else.
+	if !skipLogs {
+		fmt.Println("Collecting ClickHouse server log files...")
+		res, err := logfiles.Collect(finalOutputDir, logfiles.Options{
+			Dir:             logsDir,
+			ConfigDir:       configDir,
+			IncludeArchives: logsArchives,
+			MaxBytesPerFile: int64(logsMaxMB) << 20,
+		})
+		if err != nil {
+			fmt.Printf("Warning: log collection failed: %v\n", err)
+		} else {
+			fmt.Print(res.Summary())
 		}
 	}
 
@@ -547,4 +686,43 @@ func createArchiveWithTimestamp(specificDir string) error {
 
 	// Create the archive with the specific results directory and configuration
 	return internal.CreateArchive(archiveName, specificDir, "./configuration")
+}
+
+// resolveLocalCollector decides whether to run one of the two collectors
+// that read the LOCAL filesystem (host facts, server log files), returning
+// skip=true when it should not run.
+//
+// The default is mode-dependent because these collectors describe the
+// machine the tool executes on:
+//
+//   - onprem — that machine IS the ClickHouse server, so collect (on).
+//   - cloud  — ClickHouse Cloud is managed and reached over the network, so
+//     the local /proc and /var/log describe the operator's laptop or
+//     bastion. Collecting them would put confidently wrong data in a
+//     support archive, which is worse than collecting nothing (off).
+//   - gov    — never, at any setting: hostnames, mount paths, process
+//     command lines and log bodies are exactly what gov hashing protects,
+//     and none of them can be hashed while staying useful.
+//
+// "on" forces collection anyway (e.g. cloud mode against a self-managed
+// node), except in gov where the refusal is absolute.
+func resolveLocalCollector(setting, mode, name string) (skip bool, err error) {
+	switch strings.ToLower(strings.TrimSpace(setting)) {
+	case "off":
+		return true, nil
+	case "on":
+		if mode == "gov" {
+			return true, fmt.Errorf("--%s=on is not allowed in gov mode "+
+				"(host facts and log bodies contain identifiers that cannot be hashed)", name)
+		}
+		if mode == "cloud" {
+			fmt.Printf("Warning: --%s=on in cloud mode collects facts about the machine "+
+				"running this tool, not the managed ClickHouse nodes.\n", name)
+		}
+		return false, nil
+	case "auto", "":
+		return mode != "onprem", nil
+	default:
+		return true, fmt.Errorf("--%s must be auto, on or off (got %q)", name, setting)
+	}
 }

@@ -1,0 +1,155 @@
+package logfiles
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func write(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestLogPathsFromConfig covers the discovery that is the whole point of
+// this collector: following the configured location rather than assuming
+// the packaged one.
+func TestLogPathsFromConfig(t *testing.T) {
+	root := t.TempDir()
+	confD := filepath.Join(root, "config.d")
+	write(t, filepath.Join(root, "config.xml"), `
+<clickhouse>
+  <logger>
+    <level>debug</level>
+    <log>/data/ch/logs/clickhouse-server.log</log>
+    <errorlog>/data/ch/logs/clickhouse-server.err.log</errorlog>
+  </logger>
+</clickhouse>`)
+	write(t, filepath.Join(confD, "override.xml"), `
+<clickhouse><logger>
+  <log>/mnt/big/other.log</log>
+</logger></clickhouse>`)
+	// Must be ignored: unresolved substitution and a relative path.
+	write(t, filepath.Join(confD, "weird.xml"), `
+<clickhouse><logger>
+  <log>{some_macro}/x.log</log>
+  <errorlog>relative/path.log</errorlog>
+</logger></clickhouse>`)
+
+	got := LogPathsFromConfig(confD)
+	want := map[string]bool{
+		"/data/ch/logs/clickhouse-server.log":     true,
+		"/data/ch/logs/clickhouse-server.err.log": true,
+		"/mnt/big/other.log":                      true,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %d absolute paths", got, len(want))
+	}
+	for _, p := range got {
+		if !want[p] {
+			t.Errorf("unexpected path %q (substitutions and relative paths must be skipped)", p)
+		}
+	}
+}
+
+func TestDiscoverDirs_ExplicitDirWins(t *testing.T) {
+	dir := t.TempDir()
+	res := &Result{}
+	got := DiscoverDirs(Options{Dir: dir, ConfigDir: "/nonexistent"}, res)
+	if len(got) != 1 || got[0] != filepath.Clean(dir) {
+		t.Errorf("explicit dir should win, got %v", got)
+	}
+
+	// A bad explicit dir must produce a note, not silently fall back —
+	// otherwise the operator thinks their flag was honoured.
+	res2 := &Result{}
+	if got := DiscoverDirs(Options{Dir: "/no/such/dir"}, res2); len(got) != 0 {
+		t.Errorf("expected no dirs, got %v", got)
+	}
+	if len(res2.Notes) == 0 {
+		t.Error("a non-existent -logs-dir must be reported")
+	}
+}
+
+func TestCollect_CopiesAndTailTruncates(t *testing.T) {
+	src := t.TempDir()
+	dest := t.TempDir()
+
+	write(t, filepath.Join(src, "clickhouse-server.log"), "line one\nline two\n")
+	// Oversized file: 4 KiB of numbered lines, capped to 1 KiB.
+	var big strings.Builder
+	for i := 0; big.Len() < 4096; i++ {
+		big.WriteString("0123456789 filler line to exceed the cap\n")
+	}
+	write(t, filepath.Join(src, "big.log"), big.String())
+	// Non-log files and archives must be skipped by default.
+	write(t, filepath.Join(src, "notes.txt"), "ignore me")
+	write(t, filepath.Join(src, "old.log.gz"), "gzip-ish")
+
+	res, err := Collect(dest, Options{Dir: src, MaxBytesPerFile: 1024})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Copied) != 2 {
+		t.Fatalf("copied %v, want exactly the two .log files", res.Copied)
+	}
+	if len(res.Truncated) != 1 || res.Truncated[0] != "big.log" {
+		t.Errorf("truncated = %v, want [big.log]", res.Truncated)
+	}
+
+	small, err := os.ReadFile(filepath.Join(dest, "logs", "clickhouse-server.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(small) != "line one\nline two\n" {
+		t.Errorf("small file should be copied verbatim, got %q", small)
+	}
+
+	bigOut, err := os.ReadFile(filepath.Join(dest, "logs", "big.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(string(bigOut), "### support-diagnostic: TRUNCATED") {
+		t.Error("truncated file must start with the truncation marker so nobody " +
+			"reads the first surviving line as the start of the log")
+	}
+	// Tail semantics: the END of the original must survive.
+	if !strings.HasSuffix(string(bigOut), "filler line to exceed the cap\n") {
+		t.Error("truncation must keep the tail, not the head")
+	}
+	// And it must resume on a line boundary, not mid-message.
+	body := strings.SplitN(string(bigOut), "\n", 2)[1]
+	if body != "" && !strings.HasPrefix(body, "0123456789") {
+		t.Errorf("expected a clean line boundary after the marker, got %.40q", body)
+	}
+}
+
+func TestCollect_MissingDirIsNoteNotError(t *testing.T) {
+	// Running remotely is normal; a missing log dir must not fail the run.
+	res, err := Collect(t.TempDir(), Options{Dir: "/definitely/not/here"})
+	if err != nil {
+		t.Fatalf("missing dir should not be an error, got %v", err)
+	}
+	if len(res.Copied) != 0 || len(res.Notes) == 0 {
+		t.Errorf("expected 0 copied and an explanatory note, got %+v", res)
+	}
+}
+
+func TestCollect_IncludeArchives(t *testing.T) {
+	src, dest := t.TempDir(), t.TempDir()
+	write(t, filepath.Join(src, "a.log"), "x")
+	write(t, filepath.Join(src, "a.log.gz"), "y")
+	res, err := Collect(dest, Options{Dir: src, IncludeArchives: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Copied) != 2 {
+		t.Errorf("with IncludeArchives both files should be copied, got %v", res.Copied)
+	}
+}

@@ -297,12 +297,15 @@ If you lose the salt, the hashes in past archives are no longer reversible (you 
 
 ### What gov mode does not produce
 
-Two outputs are deliberately withheld in gov mode, because both are part of the support-bound archive and neither can be hashed meaningfully:
+Several outputs are deliberately withheld in gov mode, because each is part of the support-bound archive and none can be hashed meaningfully:
 
 | Output | Why |
 |---|---|
 | `dashboard.html` | Its panels are built in Go and select raw identifiers — database/table names for up to 2000 tables, disk paths, users — plus server-generated text (`last_exception`, `last_error_message`). Hashing every panel is the follow-up that would restore it. |
 | Query analysis (`--query-id` / `--normalized-query-hash`) | The bundle embeds raw query text, exception messages and full DDL. Freeform SQL text can't be hashed without destroying its diagnostic value, so the flags are rejected outright. |
+| **Host facts** (`host_info.json`) | Hostname, mount paths and process command lines are exactly the identifiers gov hashing protects — and a command line can't be hashed while staying useful. |
+| **Server log files** (`logs/`) | Log lines carry raw queries, table names and paths as free text. Hashing a log destroys the reason to collect it. |
+| **`--collect-text-log`** | Same reasoning as the log files: `system.text_log` messages embed raw SQL and identifiers. The flag is rejected in gov mode. |
 
 Because the dashboard is the only other consumer of alert results, gov runs instead write **[`alerts_summary.json`](#alerts_summaryjson)** into the archive — so you still get *"`too_many_parts` fired, 12 instances"* without the table names.
 
@@ -364,6 +367,70 @@ The dashboard (`internal/dashboard/generator.go`) builds its SQL dynamically, so
 `queries.cloud/` targets managed ClickHouse Cloud, which always runs recent versions — it carries the recent rungs (`23.5.1.0/`, `23.11.1.0/`, `24.2.1.0/`, `25.4.1.0/`) but none of the sub-23.5 gating, because Cloud never runs that old. The **22.8 floor applies to `queries.onprem/` and `queries.gov/`** (both are self-hosted — gov is on-prem with hashed PII, and neither uses `clusterAllReplicas`) as well as the shared `queries.query_analysis/` + `alerts/` directories. Note gov's `system.tables` ladder deliberately tops out at `24.2.1.0/` — it does not collect `parameterized_view_parameters` (identifier-like values gov would otherwise have to hash).
 
 Overrides are matched **only** at the top level of each directory; a version subdirectory nested deeper (e.g. `alerts/foo/25.4.1.0/`) is not treated as a nested override of `alerts/foo/`.
+
+## Host facts and server logs
+
+Beyond what ClickHouse reports about itself, the tool collects the surrounding context that usually explains it: the host it runs on, and the log files on that host's disk.
+
+### When these run
+
+Both collectors read the **machine executing the tool**, so `-host-info` and `-logs` take `auto` (the default), `on` or `off` rather than a plain skip flag:
+
+| Mode | `auto` resolves to | Why |
+|---|---|---|
+| `onprem` | **on** | The tool runs on the ClickHouse server, so `/proc` and `/var/log/clickhouse-server` describe that server. |
+| `cloud` | **off** | ClickHouse Cloud is reached over the network. Local host facts and log files would describe your laptop or bastion — confidently wrong data in a support bundle is worse than none. Pass `-host-info=on` / `-logs=on` if you are pointing cloud mode at a self-managed node. |
+| `gov` | **off**, unconditionally | Hostnames, mount paths, process command lines and log bodies are exactly what gov hashing protects, and none of them can be hashed while staying useful. `-host-info=on` is **rejected**, not ignored. |
+
+Both are also skipped under `--dry-run`, which promises to write nothing. The mode matrix is pinned by tests in `cmd/local_collector_test.go`.
+
+### `host_info.json` — OS, kernel and hardware
+
+Read from `/proc`, `/sys` and `/etc` with no external dependencies, so it only yields data when the tool runs **on the ClickHouse host** — which is why `auto` restricts it to onprem. Forced on elsewhere, each section is marked unavailable with a note rather than silently empty.
+
+| Section | Contents |
+|---|---|
+| `os` | hostname, **distro + version** (`/etc/os-release`), kernel version and full banner, arch, uptime |
+| `cpu` | logical CPUs, model, vendor, load average, and the vector flags ClickHouse dispatches on (`avx2`, `avx512f`, … / `asimd`, `sve` on ARM) |
+| `memory` | total / free / available / buffers / cached / swap, in bytes |
+| `disks` | every real mount: device, mount point, fs type, total, free, used % (pseudo- and file-bind mounts filtered out) |
+| `top_processes_by_rss` | top 25 by RSS — pid, ppid, state, threads, RSS, command |
+| `clickhouse_relevant_tunables` | **transparent hugepages** + defrag, `vm.swappiness`, `vm.overcommit_memory`, `vm.max_map_count`, `fs.nr_open`, `fs.file-max`, **cgroup memory/CPU limits**, and the running server's own `LimitNOFILE` |
+
+That last row is the point of the collector: THP set to `always`, a cgroup memory cap far below `MemTotal`, or a low `LimitNOFILE` explain a large share of ClickHouse incidents and are invisible from inside the database.
+
+### `logs/` — server log files
+
+```bash
+./clickhouse-diagnostic -mode onprem -host ch-01           # discovers the log directory
+./clickhouse-diagnostic -mode onprem -logs-dir /data/ch/logs
+```
+
+The directory is resolved in this order:
+
+1. `-logs-dir`, used verbatim (a bad path is reported, never silently replaced)
+2. **`<log>` / `<errorlog>` paths read from the server configuration** — operators relocate logs more often than they change anything else, and this is what stops a bundle from quietly containing none
+3. `/var/log/clickhouse-server`
+
+Both 2 and 3 are collected when they differ. `*.log` is copied by default; `-logs-include-archives` adds rotated `*.gz`/`*.zst`. Files above `-logs-max-mb` (default 50) are **tail**-truncated — the recent end is kept, with a header recording what was dropped so the first surviving line isn't mistaken for the start of the log.
+
+### `--collect-text-log` — a bounded slice of `system.text_log`
+
+**Off by default and requires an explicit window**, because `text_log` is the highest-volume table ClickHouse writes: an unbounded dump would be enormous and would itself load the server.
+
+```bash
+./clickhouse-diagnostic -mode onprem -host ch-01 \
+  -collect-text-log --from 2026-08-20T14:00:00Z --to 2026-08-20T15:00:00Z \
+  -text-log-level Warning
+```
+
+| Flag | Meaning |
+|---|---|
+| `-collect-text-log` | Enable it. **Requires `--from` and `--to`** — the run fails fast otherwise. |
+| `-text-log-level` | Minimum severity (`Fatal`…`Trace`). Omit for all levels. |
+| `-text-log-limit` | Row cap (default 500 000). |
+
+Written as `text_log_<timestamp>.native`. In cloud mode it fans out across replicas; `message_format_string` is only selected on 23.1+. If `system.text_log` is disabled (the ClickHouse default) the tool says so and explains how to enable it, rather than reporting a bare error.
 
 ## Alerts
 
