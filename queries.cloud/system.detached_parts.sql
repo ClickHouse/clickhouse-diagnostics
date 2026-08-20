@@ -10,4 +10,3 @@ SELECT
   max_block_number,
   level
 FROM clusterAllReplicas(default, system.detached_parts)
-FORMAT Native

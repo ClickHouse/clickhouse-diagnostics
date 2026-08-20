@@ -52,4 +52,3 @@ SELECT
         GROUP BY time, query_kind, database, table, tables_salted, type,
                  user, interface, normalized_query_hash, exception_code
     )
-FORMAT Native

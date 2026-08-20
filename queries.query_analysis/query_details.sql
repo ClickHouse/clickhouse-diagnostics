@@ -41,4 +41,3 @@ WHERE query_id = {query_id}
   AND event_time <= {to}
   AND type != 'QueryStart'
 ORDER BY event_time_microseconds DESC
-FORMAT Native

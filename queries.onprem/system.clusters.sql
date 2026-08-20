@@ -17,4 +17,3 @@ SELECT
   slowdowns_count,
   estimated_recovery_time
 FROM system.clusters
-FORMAT Native

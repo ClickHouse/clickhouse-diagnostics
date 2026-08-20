@@ -19,4 +19,3 @@ SELECT
   last_successful_update_time,
   loading_duration
 FROM system.dictionaries
-FORMAT Native

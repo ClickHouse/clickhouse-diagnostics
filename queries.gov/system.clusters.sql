@@ -18,4 +18,3 @@ SELECT
     estimated_recovery_time
 FROM
     system.clusters
-FORMAT Native

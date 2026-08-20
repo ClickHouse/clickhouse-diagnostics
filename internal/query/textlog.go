@@ -62,13 +62,28 @@ var validLevels = func() map[string]bool {
 type TextLogCollector struct {
 	client *pkg.ClickHouseClient
 	mode   string
+	format OutputFormat
+}
+
+// WithOutputFormat sets the serialisation format for the text_log dump.
+func (c *TextLogCollector) WithOutputFormat(f OutputFormat) *TextLogCollector {
+	c.format = f
+	return c
+}
+
+// outputFormat tolerates a zero-value collector (older call sites, tests).
+func (c *TextLogCollector) outputFormat() OutputFormat {
+	if c.format.Clause == "" {
+		return DefaultOutputFormat
+	}
+	return c.format
 }
 
 func NewTextLogCollector(client *pkg.ClickHouseClient, mode string) *TextLogCollector {
 	return &TextLogCollector{client: client, mode: strings.ToLower(mode)}
 }
 
-// Collect writes text_log_<timestamp>.native into outDir and returns the
+// Collect writes text_log_<timestamp>.<ext> into outDir and returns the
 // path. A missing text_log table is reported as "not collected" rather than
 // an error: the table is disabled by default in ClickHouse, so its absence
 // is a configuration fact, not a failure — the same skipped-vs-errored
@@ -100,8 +115,8 @@ func (c *TextLogCollector) Collect(opts TextLogOpts, outDir string, serverVersio
 		return "", nil // the client already printed the SQL; nothing to write
 	}
 
-	path := filepath.Join(outDir, fmt.Sprintf("text_log_%s.native",
-		time.Now().UTC().Format("20060102_150405")))
+	path := filepath.Join(outDir, fmt.Sprintf("text_log_%s%s",
+		time.Now().UTC().Format("20060102_150405"), c.outputFormat().Ext))
 	if err := os.WriteFile(path, []byte(result), 0600); err != nil {
 		return "", fmt.Errorf("write text_log output: %w", err)
 	}
@@ -142,13 +157,14 @@ WHERE event_time >= '%s'
   AND event_time <= '%s'
 %sORDER BY event_time_microseconds ASC
 LIMIT %d
-FORMAT Native`,
+FORMAT %s`,
 		formatCol,
 		SysTable(c.mode, "text_log"),
 		opts.From.UTC().Format("2006-01-02 15:04:05"),
 		opts.To.UTC().Format("2006-01-02 15:04:05"),
 		levelFilter,
-		opts.RowLimit)
+		opts.RowLimit,
+		c.outputFormat().Clause)
 }
 
 // isAtLeast reports whether v >= major.minor.

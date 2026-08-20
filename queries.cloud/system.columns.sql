@@ -7,4 +7,3 @@ select
     default_kind,
     default_expression
 FROM system.columns
-FORMAT Native

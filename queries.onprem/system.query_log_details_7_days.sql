@@ -29,4 +29,3 @@ WHERE (event_time > (now() - toIntervalDay(15)))
 -- and this root file must run on every supported server (22.8+).
 GROUP BY time, query_kind, tables, database, table, type, user,
          interface, normalized_query_hash, exception_code
-FORMAT Native

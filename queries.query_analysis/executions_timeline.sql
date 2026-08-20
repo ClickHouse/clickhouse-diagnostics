@@ -39,4 +39,3 @@ WHERE normalized_query_hash = {normalized_query_hash}
   AND NOT has(databases, 'system')
 ORDER BY event_time DESC
 LIMIT 10000
-FORMAT Native

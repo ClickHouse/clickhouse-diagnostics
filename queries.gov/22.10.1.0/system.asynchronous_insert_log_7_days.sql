@@ -21,4 +21,3 @@ WHERE event_time > now() - INTERVAL 7 DAY
 -- Explicit key list instead of GROUP BY ALL (needs 22.12+).
 GROUP BY time, database, table, status
 ORDER BY time, database, table
-FORMAT Native

@@ -19,4 +19,3 @@ SELECT
   if(last_exception = '', '', hex(SHA256(concat(last_exception, '%salt%')))) AS last_exception,
   merge_type
 FROM system.replication_queue
-FORMAT Native

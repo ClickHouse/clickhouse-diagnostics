@@ -100,8 +100,20 @@ func (c *ClickHouseClient) ExecuteQueryWithFormat(query string) (string, error) 
 // can be used from inside dryRunIntercept (for the EXPLAIN ESTIMATE
 // metadata fetch) without recursion.
 func (c *ClickHouseClient) executeReal(query string) (string, error) {
-	// Build the URL with readonly setting to prevent write operations
-	url := fmt.Sprintf("%s://%s:%s/?readonly=1", c.protocol, c.host, c.port)
+	// Build the URL with readonly setting to prevent write operations.
+	//
+	// output_format_json_quote_64bit_integers=1 is pinned rather than left
+	// to the server default. JSON numbers are IEEE-754 doubles in most
+	// parsers, so an unquoted UInt64 above 2^53 is silently rounded on
+	// read — JavaScript turns 18446744073709551615 into
+	// 18446744073709552000, and so does any jq expression that does
+	// arithmetic. Real columns hit this: normalized_query_hash and every
+	// cityHash64 value are full-width UInt64. The setting is writable
+	// under readonly=1, so a user profile CAN turn it off; pinning it is
+	// what makes the guarantee hold. Quoted integers are exact in every
+	// parser, and the dashboard already expects this form (parseUInt64).
+	url := fmt.Sprintf("%s://%s:%s/?readonly=1&output_format_json_quote_64bit_integers=1",
+		c.protocol, c.host, c.port)
 
 	// Create the request
 	req, err := http.NewRequest("POST", url, bytes.NewBufferString(query))

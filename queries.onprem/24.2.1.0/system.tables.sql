@@ -29,4 +29,3 @@ SELECT
   loading_dependent_database,
   loading_dependent_table
 FROM system.tables
-FORMAT Native

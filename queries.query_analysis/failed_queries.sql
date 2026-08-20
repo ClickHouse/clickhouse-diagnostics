@@ -21,4 +21,3 @@ WHERE normalized_query_hash = {normalized_query_hash}
 GROUP BY tables_touched, error_type, user
 ORDER BY errors DESC
 LIMIT 200
-FORMAT Native

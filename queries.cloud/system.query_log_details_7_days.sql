@@ -26,4 +26,3 @@ FROM clusterAllReplicas(default, system.query_log)
 ARRAY JOIN tables
 WHERE (event_time > (now() - toIntervalDay(15)))
 GROUP BY ALL
-FORMAT Native

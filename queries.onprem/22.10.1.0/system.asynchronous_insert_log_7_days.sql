@@ -23,4 +23,3 @@ WHERE event_time > now() - INTERVAL 7 DAY
 -- must run on 22.10 and 22.11 too.
 GROUP BY time, database, table, status
 ORDER BY time, database, table
-FORMAT Native

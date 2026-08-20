@@ -31,4 +31,3 @@ WHERE (t.database, t.name) IN (
     SELECT db, tbl FROM tables_for_query WHERE db != '' AND tbl != ''
 )
 ORDER BY t.total_bytes DESC
-FORMAT Native

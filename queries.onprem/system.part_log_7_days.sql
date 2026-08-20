@@ -17,4 +17,3 @@ WHERE (event_time > (now() - toIntervalDay(7)))
 -- and this root file must run on every supported server (22.8+).
 GROUP BY time, event_type, merge_reason, part_name, partition_id,
          table_name, error
-FORMAT Native

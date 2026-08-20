@@ -18,4 +18,3 @@ SELECT
   is_active,
   name
 FROM system.clusters
-FORMAT Native

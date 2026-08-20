@@ -6,4 +6,3 @@ select
     position,
     default_kind
 FROM system.columns
-FORMAT Native

@@ -19,13 +19,32 @@ type Executor struct {
 	// gov mode so the hash of database/table names is unique to the
 	// customer's run instead of a publicly known constant.
 	salt string
+	// format is the ClickHouse FORMAT results are serialised in, and the
+	// extension they are written with. Zero value means the default.
+	format OutputFormat
 }
 
 // NewExecutor creates a new query executor
 func NewExecutor(client *pkg.ClickHouseClient) *Executor {
 	return &Executor{
 		client: client,
+		format: DefaultOutputFormat,
 	}
+}
+
+// WithOutputFormat sets the serialisation format for query results.
+func (e *Executor) WithOutputFormat(f OutputFormat) *Executor {
+	e.format = f
+	return e
+}
+
+// outputFormat returns the configured format, tolerating a zero-value
+// Executor built by older call sites or tests.
+func (e *Executor) outputFormat() OutputFormat {
+	if e.format.Clause == "" {
+		return DefaultOutputFormat
+	}
+	return e.format
 }
 
 // WithSalt sets the gov-mode salt used for runtime substitution of the
@@ -98,6 +117,11 @@ func (e *Executor) executeQuery(query internal.QueryFile, outputDir, timestamp s
 		sqlText = strings.ReplaceAll(sqlText, "'%salt%'", "'"+e.salt+"'")
 	}
 
+	// Serialise in the configured format, replacing any FORMAT the file
+	// carries. Done before validation so the validator sees exactly the
+	// text that will be sent to the server.
+	sqlText = e.outputFormat().Apply(sqlText)
+
 	// Security: enforce read-only SELECT before execution.
 	if err := ValidateQueryContent(sqlText); err != nil {
 		return fmt.Errorf("security validation failed for '%s': %w", query.Name, err)
@@ -123,7 +147,7 @@ func (e *Executor) executeQuery(query internal.QueryFile, outputDir, timestamp s
 
 	// Generate output filename
 	baseFileName := strings.TrimSuffix(query.Name, filepath.Ext(query.Name))
-	outputFileName := fmt.Sprintf("%s_%s.native", baseFileName, timestamp)
+	outputFileName := fmt.Sprintf("%s_%s%s", baseFileName, timestamp, e.outputFormat().Ext)
 	outputPath := filepath.Join(outputDir, outputFileName)
 
 	// Save the result to a file

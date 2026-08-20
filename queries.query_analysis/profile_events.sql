@@ -22,4 +22,3 @@ WHERE query_id = {query_id}
   AND type != 'QueryStart'
 ORDER BY value DESC
 LIMIT 1000
-FORMAT Native

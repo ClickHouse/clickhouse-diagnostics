@@ -22,4 +22,3 @@ WHERE normalized_query_hash = {normalized_query_hash}
   AND NOT has(databases, 'system')
 GROUP BY time_bucket
 ORDER BY time_bucket
-FORMAT Native

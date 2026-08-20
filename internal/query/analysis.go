@@ -258,6 +258,21 @@ func PreflightForQueryID(client *pkg.ClickHouseClient, mode, queryID string) (ha
 type AnalysisCollector struct {
 	client *pkg.ClickHouseClient
 	mode   string
+	format OutputFormat
+}
+
+// WithOutputFormat sets the serialisation format for analysis results.
+func (c *AnalysisCollector) WithOutputFormat(f OutputFormat) *AnalysisCollector {
+	c.format = f
+	return c
+}
+
+// outputFormat tolerates a zero-value collector (older call sites, tests).
+func (c *AnalysisCollector) outputFormat() OutputFormat {
+	if c.format.Clause == "" {
+		return DefaultOutputFormat
+	}
+	return c.format
 }
 
 // NewAnalysisCollector returns a collector bound to a connected client.
@@ -267,7 +282,7 @@ func NewAnalysisCollector(client *pkg.ClickHouseClient, mode string) *AnalysisCo
 
 // Collect walks queriesDir for .sql files, applies the template
 // (sys/query_id/normalized_query_hash/from/to placeholders), validates
-// each query, executes it, and writes the result as a `.native` file
+// each query, executes it, and writes the result as one file per query
 // into <backupDir>/query_analysis/.
 //
 // queriesDir follows the same version-directory convention as the mode
@@ -334,6 +349,7 @@ func (c *AnalysisCollector) Collect(opts AnalysisOpts, queriesDir, backupDir str
 			skipped++
 			continue
 		}
+		applied = c.outputFormat().Apply(applied)
 		if validateErr := ValidateQueryContent(applied); validateErr != nil {
 			fmt.Printf("  [analysis] skip %s — validation: %v\n", fname, validateErr)
 			skipped++
@@ -345,9 +361,9 @@ func (c *AnalysisCollector) Collect(opts AnalysisOpts, queriesDir, backupDir str
 			continue
 		}
 		base := strings.TrimSuffix(qf.Name, ".sql")
-		out := filepath.Join(outDir, fmt.Sprintf("%s_%s.native", base, timestamp))
+		out := filepath.Join(outDir, fmt.Sprintf("%s_%s%s", base, timestamp, c.outputFormat().Ext))
 		// In dry-run the result is empty and the client has already
-		// printed the SQL + tables to stdout; writing an empty .native
+		// printed the SQL + tables to stdout; writing an empty result file
 		// just clutters the temp dir.
 		if !c.client.IsDryRun() {
 			if writeErr := os.WriteFile(out, []byte(result), 0600); writeErr != nil {

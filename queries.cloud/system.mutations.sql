@@ -8,4 +8,3 @@ SELECT
   parts_to_do,
   is_killed
 FROM clusterAllReplicas(default, system.mutations)
-FORMAT Native

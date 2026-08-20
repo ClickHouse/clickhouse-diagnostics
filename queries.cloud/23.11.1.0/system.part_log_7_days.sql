@@ -15,4 +15,3 @@ SELECT
 FROM clusterAllReplicas(default, system.part_log)
 WHERE (event_time > (now() - toIntervalDay(7)))
 GROUP BY ALL
-FORMAT Native

@@ -125,6 +125,25 @@ Run `./clickhouse-diagnostic -help` to see the full list. Current flags:
 -to string             Time-window end for query analysis (default: now).
 -analysis-dir string   Directory containing query-analysis SQL files
                        (default "./queries.query_analysis")
+-output-format string  Serialisation format for query results:
+                       jsonl|native|tsv (default "jsonl").
+                       See "Output format" below.
+-host-info string      Collect host OS/CPU/memory/disk/process facts:
+                       auto|on|off (default "auto" — on for onprem only).
+                       See "Host facts and server logs" below.
+-logs string           Collect ClickHouse server log files from disk:
+                       auto|on|off (default "auto" — on for onprem only).
+-logs-dir string       Directory holding server logs (default: discovered
+                       from the server config, then /var/log/clickhouse-server)
+-logs-max-mb int       Per-file cap for collected logs, in MiB (default 50).
+                       Larger files are tail-truncated.
+-logs-include-archives Also collect rotated logs (*.gz, *.zst). Off by default.
+-collect-text-log      Collect a time-bounded slice of system.text_log.
+                       Requires --from and --to; rejected in gov mode.
+-text-log-level string Minimum severity for --collect-text-log
+                       (Fatal|Critical|Error|Warning|Notice|Information|
+                       Debug|Trace). Default: all levels.
+-text-log-limit int    Row cap for --collect-text-log (default 500000)
 -dry-run               List every query that would be executed (with the
                        system tables each touches and a read-only
                        EXPLAIN ESTIMATE per SELECT) and exit. No results,
@@ -136,6 +155,40 @@ Run `./clickhouse-diagnostic -help` to see the full list. Current flags:
 ```
 
 Any flag left empty on the command line is prompted for interactively (except the `-skip-*` toggles and `-output-dir` / `-alerts-dir`, which use their defaults silently).
+
+## Output format
+
+Query results are written one file per query, in the format chosen by `-output-format`. The default is **`jsonl`**.
+
+| Value | ClickHouse format | Extension | |
+|---|---|---|---|
+| `jsonl` *(default)* | `JSONEachRow` | `.jsonl` | One self-describing JSON object per line. `grep`- and `jq`-able, and every row carries its column names — which matters because `system.query_log` has ~60 columns and positional formats leave you counting fields back to a header. |
+| `native` | `Native` | `.native` | The ClickHouse binary format used before v0.3.0. Column-oriented, exactly typed, reloadable with no schema — but unreadable without a ClickHouse to load it into. |
+| `tsv` | `TSVWithNamesAndTypes` | `.tsv` | Names on line 1, **types on line 2**. The most faithful text format for reload, but positional, so it reads poorly for wide tables. |
+
+### Large integers are never rounded
+
+JSON numbers are IEEE-754 doubles in most parsers, so an unquoted `UInt64` above 2^53 is silently corrupted on read — JavaScript turns `18446744073709551615` into `18446744073709552000`, and so does any `jq` expression that does arithmetic on it. This is not hypothetical: `normalized_query_hash` and every `cityHash64` value in `system.query_log` are full-width `UInt64`.
+
+The tool therefore pins `output_format_json_quote_64bit_integers=1` on every request, so 64-bit integers are emitted as **quoted strings** and survive every parser exactly. The setting is writable under `readonly=1`, so a server-side profile could otherwise turn it off — pinning it is what makes the guarantee hold rather than depend on the server's configuration.
+
+`native` and `tsv` are exact by construction. Cast on read when you reload:
+
+```bash
+clickhouse-local -q "SELECT toUInt64(normalized_query_hash) FROM file('x.jsonl','JSONEachRow')"
+```
+
+### Size
+
+The shipped artefact is a `tar.gz`, and JSON's repeated keys compress away almost entirely. Measured on a real bundle (21 queries, ClickHouse 24.8):
+
+| Format | Uncompressed | **Archive (`tar.gz`)** |
+|---|---|---|
+| `jsonl` | 2.20 MB | **225 KB** |
+| `native` | 1.83 MB | 240 KB |
+| `tsv` | 2.12 MB | 272 KB |
+
+`jsonl` is 20% larger on disk but produces the **smallest archive** of the three, so the readable default costs nothing in what you actually send.
 
 ### Examples
 
@@ -279,7 +332,7 @@ In `gov` mode, every database and table name written to the support-bound output
 ```
 clickhouse_results/
 ├── clickhouse_backup_YYYYMMDD_HHMMSS/                       # → goes into the archive
-│   └── *.native                                             # hashed names inside
+│   └── *.jsonl                                              # hashed names inside
 └── clickhouse_backup_YYYYMMDD_HHMMSS_gov_name_mapping.csv   # → stays LOCAL
 ```
 
@@ -309,7 +362,7 @@ Several outputs are deliberately withheld in gov mode, because each is part of t
 
 Because the dashboard is the only other consumer of alert results, gov runs instead write **[`alerts_summary.json`](#alerts_summaryjson)** into the archive — so you still get *"`too_many_parts` fired, 12 instances"* without the table names.
 
-Everything else — the per-mode `.native` files — is hashed as described above.
+Everything else — the per-mode result files — is hashed as described above.
 
 ### Version-specific queries
 
@@ -430,7 +483,7 @@ Both 2 and 3 are collected when they differ. `*.log` is copied by default; `-log
 | `-text-log-level` | Minimum severity (`Fatal`…`Trace`). Omit for all levels. |
 | `-text-log-limit` | Row cap (default 500 000). |
 
-Written as `text_log_<timestamp>.native`. In cloud mode it fans out across replicas; `message_format_string` is only selected on 23.1+. If `system.text_log` is disabled (the ClickHouse default) the tool says so and explains how to enable it, rather than reporting a bare error.
+Written as `text_log_<timestamp>.<ext>`, in the [configured output format](#output-format). In cloud mode it fans out across replicas; `message_format_string` is only selected on 23.1+. If `system.text_log` is disabled (the ClickHouse default) the tool says so and explains how to enable it, rather than reporting a bare error.
 
 ## Alerts
 
@@ -554,7 +607,7 @@ Works in all three modes (`cloud`, `onprem`, `gov`) — table references adapt t
 
 ### What it collects
 
-Twelve `.sql` files under `queries.query_analysis/`, each written to `<backup>/query_analysis/<name>_<ts>.native`:
+Twelve `.sql` files under `queries.query_analysis/`, each written to `<backup>/query_analysis/<name>_<ts>.<ext>`:
 
 **Single-query-id (need `--query-id` or one auto-derived from `--normalized-query-hash`)**
 
@@ -723,8 +776,8 @@ A single run produces:
 ```
 clickhouse_results/
 ├── clickhouse_backup_YYYYMMDD_HHMMSS/                       # → archived
-│   ├── system.parts_YYYYMMDD_HHMMSS.native                  #   one file per query
-│   ├── system.mutations_YYYYMMDD_HHMMSS.native
+│   ├── system.parts_YYYYMMDD_HHMMSS.jsonl                   #   one file per query
+│   ├── system.mutations_YYYYMMDD_HHMMSS.jsonl
 │   ├── ...
 │   ├── query_analysis/                                      #   only with --query-id / --hash
 │   ├── dashboard.html                                       #   unless -skip-dashboard or gov
@@ -735,7 +788,7 @@ configuration/                                               # → archived (unl
 clickhouse_backup_YYYYMMDD_HHMMSS.tar.gz                     # unless -skip-archive
 ```
 
-- **Query results**: ClickHouse `Native` format (`.native`)
+- **Query results**: one file per query, in the format chosen by [`-output-format`](#output-format) (default `jsonl`)
 - **Dashboard**: standalone `dashboard.html`, loads Chart.js from CDN
 - **Archive**: `tar.gz` containing the per-run results directory and the `configuration/` directory
 - **Gov-mode mapping CSV** (gov mode only): sits next to the backup folder, **not inside it** — never goes into the archive. See [Gov mode and hashed names](#gov-mode-and-hashed-names).

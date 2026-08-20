@@ -8,4 +8,3 @@ WHERE event_date >= today() - 1
   AND level IN ('Warning', 'Error', 'Fatal')
 ORDER BY event_time DESC
 LIMIT 2000
-FORMAT Native

@@ -12,4 +12,3 @@ FROM clusterAllReplicas(default, merge(system, '^asynchronous_insert_log'))
 WHERE event_time > now() - INTERVAL 7 DAY
 GROUP BY ALL
 ORDER BY time, database, table
-FORMAT Native

@@ -20,4 +20,3 @@ WHERE normalized_query_hash = {normalized_query_hash}
   AND NOT has(databases, 'system')
 GROUP BY hostname
 ORDER BY max_duration_ms DESC
-FORMAT Native

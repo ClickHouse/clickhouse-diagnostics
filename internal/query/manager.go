@@ -11,6 +11,13 @@ import (
 type Manager struct {
 	finder   *Finder
 	selector *Selector
+	format   OutputFormat
+}
+
+// WithOutputFormat sets the serialisation format for query results.
+func (m *Manager) WithOutputFormat(f OutputFormat) *Manager {
+	m.format = f
+	return m
 }
 
 // NewManager creates a new query manager
@@ -18,6 +25,7 @@ func NewManager() *Manager {
 	return &Manager{
 		finder:   NewFinder(),
 		selector: NewSelector(),
+		format:   DefaultOutputFormat,
 	}
 }
 
@@ -47,7 +55,7 @@ func (m *Manager) ExecuteQueries(client *pkg.ClickHouseClient, queriesDir string
 	fmt.Printf("Found %d unique query files to execute\n", len(selectedQueries))
 
 	// Execute the selected queries and get the specific output directory
-	executor := NewExecutor(client).WithSalt(salt)
+	executor := NewExecutor(client).WithSalt(salt).WithOutputFormat(m.format)
 	finalOutputDir, err := executor.ExecuteQueries(selectedQueries, outputDir)
 	if err != nil {
 		return "", fmt.Errorf("error executing queries: %w", err)

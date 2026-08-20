@@ -19,4 +19,3 @@ FROM system.asynchronous_insert_log
 WHERE event_time > now() - INTERVAL 7 DAY
 GROUP BY time, database, table, status
 ORDER BY time, database, table
-FORMAT Native

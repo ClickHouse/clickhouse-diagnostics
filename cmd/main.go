@@ -55,6 +55,11 @@ func main() {
 	collectTextLogFlag := flag.Bool("collect-text-log", false, "Collect a time-bounded slice of system.text_log. Requires --from and --to; not available in gov mode")
 	textLogLevelFlag := flag.String("text-log-level", "", "Minimum severity for --collect-text-log (Fatal|Critical|Error|Warning|Notice|Information|Debug|Trace). Default: all levels")
 	textLogLimitFlag := flag.Int("text-log-limit", 0, fmt.Sprintf("Row cap for --collect-text-log (default %d)", query.DefaultTextLogRowLimit))
+	outputFormatFlag := flag.String("output-format", query.DefaultOutputFormat.Name,
+		fmt.Sprintf("Serialisation format for query results: %s. jsonl is one self-describing "+
+			"JSON object per line (grep- and jq-able); native is the ClickHouse binary format; "+
+			"tsv carries names and types in its first two lines. 64-bit integers are exact in "+
+			"all three", query.OutputFormatNames()))
 	dryRunFlag := flag.Bool("dry-run", false, "List every query the tool would execute (with the system tables each touches and an EXPLAIN ESTIMATE per SELECT) and exit. Does NOT write results or create an archive. EXPLAIN ESTIMATE is a read-only metadata query — it reports the rows/marks/parts the SELECT WOULD scan without reading any data.")
 
 	// Parse command line flags
@@ -91,6 +96,12 @@ func main() {
 		textLogLevel   = *textLogLevelFlag
 		textLogLimit   = *textLogLimitFlag
 	)
+	outputFormat, err := query.ParseOutputFormat(*outputFormatFlag)
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		return
+	}
+
 	// Resolve the two local-filesystem collectors against the run mode.
 	// Both read the machine the tool is EXECUTING on, which is only the
 	// ClickHouse server in onprem deployments — hence the mode-dependent
@@ -284,7 +295,7 @@ func main() {
 	}
 
 	// Find and execute queries - get the specific folder path
-	queryManager := query.NewManager()
+	queryManager := query.NewManager().WithOutputFormat(outputFormat)
 	finalOutputDir, err := queryManager.ExecuteQueries(client, queriesDir, serverVersion, outputDir, govSalt)
 	if err != nil {
 		fmt.Printf("Error executing queries: %v\n", err)
@@ -311,7 +322,7 @@ func main() {
 			}
 			tlOpts.From, tlOpts.To = f, t
 		}
-		tlColl := query.NewTextLogCollector(client, mode)
+		tlColl := query.NewTextLogCollector(client, mode).WithOutputFormat(outputFormat)
 		path, err := tlColl.Collect(tlOpts, finalOutputDir, serverVersion)
 		if err != nil {
 			fmt.Printf("Warning: text_log collection failed: %v\n", err)
@@ -328,7 +339,7 @@ func main() {
 	// handling prints each file instead of writing results) — otherwise
 	// "list every query the tool would execute" would omit the bundle.
 	if analysisOpts.Enabled() {
-		coll := query.NewAnalysisCollector(client, mode)
+		coll := query.NewAnalysisCollector(client, mode).WithOutputFormat(outputFormat)
 		if _, _, err := coll.Collect(analysisOpts, analysisDir, finalOutputDir, serverVersion); err != nil {
 			fmt.Printf("Warning: query analysis failed: %v\n", err)
 		}

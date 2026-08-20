@@ -11,4 +11,3 @@ FROM system.metric_log
 WHERE event_time > now() - INTERVAL 7 DAY
 GROUP BY time
 ORDER BY time
-FORMAT Native
