@@ -14,6 +14,63 @@ A Go-based diagnostic tool for ClickHouse that collects system information, runs
 
 > These examples use `./clickhouse-diagnostic`. If you built via `make` the binary is at `./bin/clickhouse-diagnostic` — invoke that path or symlink it. See [Installation](#installation) if you don't have a binary yet.
 
+### Required grants
+
+The tool is read-only and never touches customer data — every query reads a `system` table. Two grants are enough for `onprem` and `gov` mode:
+
+```sql
+CREATE USER sys_read_only IDENTIFIED WITH sha256_password BY '<password>';
+
+GRANT SHOW DATABASES, SHOW TABLES ON *.* TO sys_read_only;
+GRANT SELECT ON system.*                 TO sys_read_only;
+```
+
+```
+┌─GRANTS FOR sys_read_only──────────────────────────────────┐
+│ GRANT SHOW DATABASES, SHOW TABLES ON *.* TO sys_read_only │
+│ GRANT SELECT ON system.* TO sys_read_only                 │
+└───────────────────────────────────────────────────────────┘
+```
+
+| Grant | Why it is needed |
+|---|---|
+| `SELECT ON system.*` | Every diagnostic query, alert rule and dashboard panel reads a `system` table. Nothing outside `system` is ever selected. |
+| `SHOW DATABASES, SHOW TABLES ON *.*` | ClickHouse filters the object-listing system tables down to what the user holds *some* privilege on. Without it the tool sees only part of the cluster. |
+
+> **A missing `SHOW` grant does not produce an error — it silently truncates the results.** Every query still reports success; the bundle just describes a fraction of the server. Measured on a test instance with one user database:
+>
+> | Table | With the grant | Without it |
+> |---|---|---|
+> | `system.tables` | 141 | 112 |
+> | `system.databases` | 5 | 1 |
+> | `system.columns` | 3258 | 2520 |
+> | `system.parts` | 102 | 101 |
+>
+> This is the failure mode to watch for: a bundle that looks complete but is missing the customer's own tables. If `system.databases` contains only `system`, the `SHOW` grant is missing.
+
+Neither grant exposes customer data: `SHOW` reveals object *names* and metadata only, and `SELECT` is scoped to `system`.
+
+#### Cloud mode needs one more
+
+`cloud` mode wraps its queries in `clusterAllReplicas(...)` so results span every replica rather than only the node you connected to. That table function requires:
+
+```sql
+GRANT REMOTE ON *.* TO sys_read_only;
+```
+
+Without it, cloud-mode queries fail outright (they do not silently truncate):
+
+```
+Code: 497. DB::Exception: Not enough privileges. To execute this query,
+it's necessary to have the grant REMOTE ON *.*. (ACCESS_DENIED)
+```
+
+Some distributed queries additionally ask for `CREATE TEMPORARY TABLE ON *.*`. `onprem` and `gov` need neither — verified by revoking both and re-running.
+
+#### What grants do *not* cover
+
+Config collection, `host_info.json` and `logs/` read the **local filesystem**, not the database, so they depend on OS permissions instead: read access to `/etc/clickhouse-server/`, `/var/log/clickhouse-server/` and `/proc`. See [Host facts and server logs](#host-facts-and-server-logs).
+
 ### Interactive run
 
 ```bash
