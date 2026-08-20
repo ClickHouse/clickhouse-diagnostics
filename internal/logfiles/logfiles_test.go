@@ -153,3 +153,46 @@ func TestCollect_IncludeArchives(t *testing.T) {
 		t.Errorf("with IncludeArchives both files should be copied, got %v", res.Copied)
 	}
 }
+
+// TestSymlinksNotFollowed: the log directory is typically writable by the
+// clickhouse service account while the diagnostic often runs as root. A
+// planted `evil.log -> /etc/shadow` must not be copied into a bundle that
+// gets shared with support.
+func TestSymlinksNotFollowed(t *testing.T) {
+	logDir := t.TempDir()
+	outDir := t.TempDir()
+
+	secret := filepath.Join(t.TempDir(), "secret.txt")
+	if err := os.WriteFile(secret, []byte("root:$6$hash"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(logDir, "real.log"), []byte("2026.08.20 ok\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(secret, filepath.Join(logDir, "evil.log")); err != nil {
+		t.Skipf("cannot create symlink: %v", err)
+	}
+
+	res, err := Collect(outDir, Options{Dir: logDir, MaxBytesPerFile: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range res.Copied {
+		if strings.Contains(name, "evil") {
+			t.Fatalf("symlink was followed and copied: %v", res.Copied)
+		}
+	}
+	if len(res.Copied) != 1 || !strings.Contains(res.Copied[0], "real") {
+		t.Errorf("expected exactly the real log, got %v", res.Copied)
+	}
+	found := false
+	for _, n := range res.Notes {
+		if strings.Contains(n, "evil.log") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("skipped symlink was not reported in Notes; silent omission " +
+			"reads as a missing log rather than a refusal")
+	}
+}

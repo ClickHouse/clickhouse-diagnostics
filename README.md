@@ -235,6 +235,8 @@ Either end may be given alone: `-from` with no `-to` runs to now, and `-to` with
 
 The same flags also drive [query analysis](#query-analysis-mode) when `-query-id` / `-normalized-query-hash` is set.
 
+[Alert rules](#alerts) deliberately keep their own windows (e.g. *"exception spike in the last hour"*) — an alert's look-back is part of what the rule means, so `-from`/`-to` do not rewrite it.
+
 > **A narrower window is the first thing to try on a slow or heavy collection.** The defaults are tuned for a general health check; on a busy cluster `-from` with a few hours is dramatically cheaper.
 
 ### For query authors

@@ -91,6 +91,17 @@ func Collect(destDir string, opts Options) (*Result, error) {
 			if e.IsDir() || !wanted(e.Name(), opts.IncludeArchives) {
 				continue
 			}
+			// Regular files only. copyTail would follow a symlink, and the
+			// log directory is typically writable by the clickhouse service
+			// account while this tool often runs as root — a planted
+			// `evil.log -> /etc/shadow` must not end up in a bundle that
+			// gets shared with support. Refusing (with a note) rather than
+			// resolving keeps the decision visible in the output.
+			if !e.Type().IsRegular() {
+				res.Notes = append(res.Notes,
+					fmt.Sprintf("%s: skipped (not a regular file)", filepath.Join(dir, e.Name())))
+				continue
+			}
 			src := filepath.Join(dir, e.Name())
 			// Flatten into one directory but keep provenance when the same
 			// filename appears in two log dirs.

@@ -34,6 +34,15 @@ func TestResolveLocalCollector(t *testing.T) {
 		{"ON", "onprem", false, false},
 		{" auto ", "cloud", true, false},
 
+		// mode is normalised INSIDE the resolver too. The call site is
+		// supposed to pass the post-getUserInput value, but this function
+		// gates the gov privacy guarantee — "-mode GOV -host-info=on" once
+		// slipped host facts into a gov bundle via this exact hole.
+		{"on", "GOV", true, true},
+		{"on", " Gov ", true, true},
+		{"auto", "ONPREM", false, false},
+		{"auto", "Cloud", true, false},
+
 		// anything else is a usage error, and must fail closed
 		{"true", "onprem", true, true},
 		{"yes", "onprem", true, true},
@@ -57,10 +66,12 @@ func TestResolveLocalCollector(t *testing.T) {
 // weaken it. No setting may make gov mode collect host facts or log files.
 func TestResolveLocalCollector_GovNeverCollects(t *testing.T) {
 	for _, setting := range []string{"auto", "on", "ON", "off", "", "garbage"} {
-		for _, name := range []string{"host-info", "logs"} {
-			if skip, _ := resolveLocalCollector(setting, "gov", name); !skip {
-				t.Errorf("gov mode collected %s with --%s=%q; gov must never "+
-					"read the local filesystem", name, name, setting)
+		for _, mode := range []string{"gov", "GOV", " gov ", "Gov"} {
+			for _, name := range []string{"host-info", "logs"} {
+				if skip, _ := resolveLocalCollector(setting, mode, name); !skip {
+					t.Errorf("gov mode (as %q) collected %s with --%s=%q; gov must "+
+						"never read the local filesystem", mode, name, name, setting)
+				}
 			}
 		}
 	}

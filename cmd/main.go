@@ -127,10 +127,28 @@ func main() {
 		return
 	}
 
+	// --dry-run is read-only by definition — silence the side effects
+	// that would write empty/garbage artefacts to disk.
+	if dryRun {
+		skipConfig = true
+		skipArchive = true
+	}
+
+	// Get user input for missing parameters
+	if err := getUserInput(&protocol, &host, &port, &username, &password, &mode, &configDir, skipConfig); err != nil {
+		fmt.Printf("Error getting user input: %v\n", err)
+		return
+	}
+
 	// Resolve the two local-filesystem collectors against the run mode.
 	// Both read the machine the tool is EXECUTING on, which is only the
 	// ClickHouse server in onprem deployments — hence the mode-dependent
 	// default rather than a plain on/off.
+	//
+	// This MUST run after getUserInput: that call normalises the mode
+	// (lowercasing "-mode GOV") and lets an interactive user change it at
+	// the prompt. Resolving against the raw flag value allowed
+	// `-mode GOV -host-info=on` to slip host facts into a gov bundle.
 	skipHostInfo, err := resolveLocalCollector(hostInfoMode, mode, "host-info")
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
@@ -141,23 +159,12 @@ func main() {
 		fmt.Printf("Error: %v\n", err)
 		return
 	}
-
-	// --dry-run is read-only by definition — silence the side effects
-	// that would write empty/garbage artefacts to disk.
 	if dryRun {
-		skipConfig = true
-		skipArchive = true
 		// Host facts and log files are filesystem copies, not queries;
 		// there is nothing meaningful to "preview", so skip them rather
 		// than write files a dry run promised not to write.
 		skipHostInfo = true
 		skipLogs = true
-	}
-
-	// Get user input for missing parameters
-	if err := getUserInput(&protocol, &host, &port, &username, &password, &mode, &configDir, skipConfig); err != nil {
-		fmt.Printf("Error getting user input: %v\n", err)
-		return
 	}
 
 	// Map mode to queries directory
@@ -748,6 +755,11 @@ func createArchiveWithTimestamp(specificDir string) error {
 // "on" forces collection anyway (e.g. cloud mode against a self-managed
 // node), except in gov where the refusal is absolute.
 func resolveLocalCollector(setting, mode, name string) (skip bool, err error) {
+	// Normalise the mode here as well as at the call site. The caller is
+	// expected to pass the post-getUserInput value, but this function
+	// gates a gov privacy guarantee — it must not depend on every future
+	// caller remembering that ("GOV" once slipped past the == "gov" check).
+	mode = strings.ToLower(strings.TrimSpace(mode))
 	switch strings.ToLower(strings.TrimSpace(setting)) {
 	case "off":
 		return true, nil
