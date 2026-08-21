@@ -129,3 +129,39 @@ func TestTextLogSQL_NoLevelFilterWhenUnset(t *testing.T) {
 		t.Error("no --text-log-level should mean no level filter")
 	}
 }
+
+// TestLevelCanonicalisation pins the case-insensitive level handling that
+// replaced the deprecated strings.Title round-trip: any casing of a real
+// level resolves to the exact enum spelling, and only that proven spelling
+// is ever spliced into the SQL.
+func TestLevelCanonicalisation(t *testing.T) {
+	for in, want := range map[string]string{
+		"error": "Error", "ERROR": "Error", "eRrOr": "Error",
+		"information": "Information", "FATAL": "Fatal",
+	} {
+		got, ok := canonicalLevel(in)
+		if !ok || got != want {
+			t.Errorf("canonicalLevel(%q) = %q,%v; want %q,true", in, got, ok, want)
+		}
+	}
+	for _, bad := range []string{"", "err", "warn", "Errors", "critical1"} {
+		if got, ok := canonicalLevel(bad); ok {
+			t.Errorf("canonicalLevel(%q) accepted as %q; must reject non-members", bad, got)
+		}
+	}
+
+	// End to end: a lowercase flag value must reach the SQL in enum spelling.
+	opts := TextLogOpts{
+		From:  time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC),
+		To:    time.Date(2026, 8, 2, 0, 0, 0, 0, time.UTC),
+		Level: "warning",
+	}
+	if err := opts.Validate(); err != nil {
+		t.Fatalf("lowercase level rejected: %v", err)
+	}
+	c := NewTextLogCollector(nil, "onprem")
+	sql := c.buildSQL(opts, internal.Version{Major: 24, Minor: 8})
+	if !strings.Contains(sql, "level <= 'Warning'") {
+		t.Errorf("SQL does not carry the canonical spelling:\n%s", sql)
+	}
+}

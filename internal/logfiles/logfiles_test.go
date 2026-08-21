@@ -3,6 +3,8 @@ package logfiles
 import (
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -194,5 +196,58 @@ func TestSymlinksNotFollowed(t *testing.T) {
 	if !found {
 		t.Error("skipped symlink was not reported in Notes; silent omission " +
 			"reads as a missing log rather than a refusal")
+	}
+}
+
+// TestTruncationHeaderIsExact pins the two claims the header makes after
+// the copilot-review fix: the "kept last N bytes" figure must equal the
+// actual payload that follows it (line alignment shaves up to one line off
+// the nominal cap), and Result.TotalBytes must count what was written to
+// the bundle — header included — not what was read from the source.
+func TestTruncationHeaderIsExact(t *testing.T) {
+	src := t.TempDir()
+	dest := t.TempDir()
+
+	var big strings.Builder
+	for big.Len() < 4096 {
+		big.WriteString("0123456789 filler line to exceed the cap\n")
+	}
+	write(t, filepath.Join(src, "big.log"), big.String())
+
+	res, err := Collect(dest, Options{Dir: src, MaxBytesPerFile: 1024})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := os.ReadFile(filepath.Join(dest, "logs", "big.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	head, payload, found := strings.Cut(string(out), "###\n")
+	if !found {
+		t.Fatalf("no truncation header in %q", string(out)[:80])
+	}
+	m := regexp.MustCompile(`original (\d+) bytes, kept last (\d+) bytes`).FindStringSubmatch(head)
+	if m == nil {
+		t.Fatalf("header shape changed: %q", head)
+	}
+	original, _ := strconv.Atoi(m[1])
+	kept, _ := strconv.Atoi(m[2])
+
+	if original != big.Len() {
+		t.Errorf("header says original %d bytes, source was %d", original, big.Len())
+	}
+	if kept != len(payload) {
+		t.Errorf("header says kept %d bytes, payload is actually %d", kept, len(payload))
+	}
+	if kept > 1024 {
+		t.Errorf("kept %d exceeds the 1024-byte cap", kept)
+	}
+	if !strings.HasPrefix(payload, "0123456789") {
+		t.Errorf("payload does not start on a line boundary: %q", payload[:40])
+	}
+	if res.TotalBytes != int64(len(out)) {
+		t.Errorf("TotalBytes = %d, bundle file is %d bytes (header must be counted)",
+			res.TotalBytes, len(out))
 	}
 }

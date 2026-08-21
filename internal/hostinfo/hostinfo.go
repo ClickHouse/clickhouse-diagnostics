@@ -97,18 +97,22 @@ type Process struct {
 // Tunables are host settings that materially affect ClickHouse. Each is a
 // raw string so an unreadable value is distinguishable from a set one.
 type Tunables struct {
-	TransparentHugepages  string `json:"transparent_hugepages,omitempty"`
-	THPDefrag             string `json:"transparent_hugepages_defrag,omitempty"`
-	Swappiness            string `json:"vm_swappiness,omitempty"`
-	OvercommitMemory      string `json:"vm_overcommit_memory,omitempty"`
-	MaxMapCount           string `json:"vm_max_map_count,omitempty"`
-	FsNrOpen              string `json:"fs_nr_open,omitempty"`
-	FsFileMax             string `json:"fs_file_max,omitempty"`
-	CgroupMemoryLimit     string `json:"cgroup_memory_limit_bytes,omitempty"`
-	CgroupCPUMax          string `json:"cgroup_cpu_max,omitempty"`
-	ClickHouseNofileSoft  string `json:"clickhouse_open_files_soft,omitempty"`
-	ClickHouseNofileHard  string `json:"clickhouse_open_files_hard,omitempty"`
-	ClickHouseMaxThreads  string `json:"clickhouse_max_threads,omitempty"`
+	TransparentHugepages string `json:"transparent_hugepages,omitempty"`
+	THPDefrag            string `json:"transparent_hugepages_defrag,omitempty"`
+	Swappiness           string `json:"vm_swappiness,omitempty"`
+	OvercommitMemory     string `json:"vm_overcommit_memory,omitempty"`
+	MaxMapCount          string `json:"vm_max_map_count,omitempty"`
+	FsNrOpen             string `json:"fs_nr_open,omitempty"`
+	FsFileMax            string `json:"fs_file_max,omitempty"`
+	CgroupMemoryLimit    string `json:"cgroup_memory_limit_bytes,omitempty"`
+	CgroupCPUMax         string `json:"cgroup_cpu_max,omitempty"`
+	ClickHouseNofileSoft string `json:"clickhouse_open_files_soft,omitempty"`
+	ClickHouseNofileHard string `json:"clickhouse_open_files_hard,omitempty"`
+	// ClickHouseNprocSoft is the "Max processes" soft limit from
+	// /proc/<pid>/limits — RLIMIT_NPROC, the OS cap on tasks (processes
+	// AND threads) for the service account. It is NOT the ClickHouse
+	// max_threads setting; the old name/key said it was.
+	ClickHouseNprocSoft   string `json:"clickhouse_nproc_soft,omitempty"`
 	ClickHouseProcessName string `json:"clickhouse_process,omitempty"`
 }
 
@@ -385,7 +389,7 @@ func collectTunables(procs []Process) Tunables {
 				}
 			case strings.HasPrefix(line, "Max processes"):
 				if f := strings.Fields(line); len(f) >= 4 {
-					t.ClickHouseMaxThreads = f[2]
+					t.ClickHouseNprocSoft = f[2]
 				}
 			}
 		}

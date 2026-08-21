@@ -41,22 +41,32 @@ func (o *TextLogOpts) Validate() error {
 	if o.RowLimit <= 0 {
 		o.RowLimit = DefaultTextLogRowLimit
 	}
-	if o.Level != "" && !validLevels[strings.Title(strings.ToLower(o.Level))] {
-		return fmt.Errorf("--text-log-level %q is not a ClickHouse log level (%s)",
-			o.Level, strings.Join(levelNames, ", "))
+	if o.Level != "" {
+		canonical, ok := canonicalLevel(o.Level)
+		if !ok {
+			return fmt.Errorf("--text-log-level %q is not a ClickHouse log level (%s)",
+				o.Level, strings.Join(levelNames, ", "))
+		}
+		o.Level = canonical
 	}
 	return nil
 }
 
 var levelNames = []string{"Fatal", "Critical", "Error", "Warning", "Notice", "Information", "Debug", "Trace"}
 
-var validLevels = func() map[string]bool {
-	m := make(map[string]bool, len(levelNames))
+// canonicalLevel resolves a user-typed level ("error", "ERROR") to the
+// exact enum spelling text_log uses, case-insensitively. Only a value from
+// levelNames can come back, which is what makes splicing it into SQL safe.
+// (Replaces a strings.Title round-trip — deprecated, and it derived the
+// spelling instead of proving membership.)
+func canonicalLevel(s string) (string, bool) {
 	for _, l := range levelNames {
-		m[l] = true
+		if strings.EqualFold(s, l) {
+			return l, true
+		}
 	}
-	return m
-}()
+	return "", false
+}
 
 // TextLogCollector dumps a time-bounded slice of system.text_log.
 type TextLogCollector struct {
@@ -139,7 +149,12 @@ func (c *TextLogCollector) buildSQL(opts TextLogOpts, serverVersion internal.Ver
 		// text_log.level is an Enum8 ordered most-severe-first, so "at least
 		// this severe" is <=. Comparing against the string lets ClickHouse
 		// resolve the enum without us hardcoding numeric values.
-		levelFilter = fmt.Sprintf("  AND level <= '%s'\n", strings.Title(strings.ToLower(opts.Level)))
+		// Validate() has already canonicalised opts.Level, but buildSQL is
+		// reachable on its own (tests, future callers) — resolve again and
+		// splice ONLY the membership-proven spelling, never the input.
+		if canonical, ok := canonicalLevel(opts.Level); ok {
+			levelFilter = fmt.Sprintf("  AND level <= '%s'\n", canonical)
+		}
 	}
 
 	return fmt.Sprintf(`SELECT

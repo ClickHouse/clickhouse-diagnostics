@@ -262,21 +262,30 @@ func copyTail(src, dst string, max int64) (written int64, truncated bool, err er
 		if _, err := in.Seek(fi.Size()-max, io.SeekStart); err != nil {
 			return 0, true, err
 		}
-		header := fmt.Sprintf(
-			"### support-diagnostic: TRUNCATED — original %d bytes, kept last %d bytes (tail) ###\n",
-			fi.Size(), max)
-		if _, err := out.WriteString(header); err != nil {
-			return 0, true, err
-		}
-		// Drop the partial first line so the file starts on a record
-		// boundary rather than mid-message.
+		// Drop the partial first line BEFORE writing the header, so the
+		// header can state the exact number of payload bytes kept rather
+		// than the nominal cap (the alignment shaves up to one line off).
 		if err := discardPartialLine(in); err != nil {
 			return 0, true, err
 		}
+		pos, err := in.Seek(0, io.SeekCurrent)
+		if err != nil {
+			return 0, true, err
+		}
+		header := fmt.Sprintf(
+			"### support-diagnostic: TRUNCATED — original %d bytes, kept last %d bytes (tail) ###\n",
+			fi.Size(), fi.Size()-pos)
+		hn, err := out.WriteString(header)
+		if err != nil {
+			return 0, true, err
+		}
+		written += int64(hn)
 	}
 
+	// written includes the truncation header: it reports bytes produced in
+	// the bundle (what Result.TotalBytes sums), not bytes read from src.
 	n, err := io.Copy(out, in)
-	return n, truncated, err
+	return written + n, truncated, err
 }
 
 func discardPartialLine(f *os.File) error {
