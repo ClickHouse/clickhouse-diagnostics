@@ -342,7 +342,10 @@ func lengthToNewline(f *os.File) (int64, error) {
 			consumed += int64(n)
 		}
 		if err != nil {
-			return consumed, nil // EOF: nothing left to align
+			if err == io.EOF {
+				return consumed, nil // EOF: nothing left to align
+			}
+			return consumed, err
 		}
 	}
 	return bound, nil
