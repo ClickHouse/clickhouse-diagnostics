@@ -26,4 +26,3 @@ SELECT
   loading_dependent_table,
   parameterized_view_parameters
 FROM system.tables
-FORMAT Native

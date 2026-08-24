@@ -40,4 +40,3 @@ WHERE (query_id = slow_id OR query_id = fast_id)
 GROUP BY metric
 ORDER BY abs(delta) DESC, metric ASC
 LIMIT 1000
-FORMAT Native

@@ -21,4 +21,3 @@ SELECT
   last_exception,
   comment
 FROM clusterAllReplicas(default, system.dictionaries)
-FORMAT Native

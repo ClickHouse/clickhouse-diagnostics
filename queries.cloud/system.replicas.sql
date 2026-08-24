@@ -19,4 +19,3 @@ SELECT
     active_replicas
 FROM clusterAllReplicas(default, system.replicas)
 ORDER BY absolute_delay DESC, database, table
-FORMAT Native

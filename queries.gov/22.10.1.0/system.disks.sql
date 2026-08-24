@@ -22,4 +22,3 @@ FROM (
     FROM system.disks
 )
 ORDER BY total_space_b DESC
-FORMAT Native

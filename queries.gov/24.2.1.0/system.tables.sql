@@ -17,4 +17,3 @@ SELECT
   storage_policy,
   has_own_data
 FROM system.tables
-FORMAT Native

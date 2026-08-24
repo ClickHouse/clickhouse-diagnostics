@@ -9,4 +9,3 @@ FROM clusterAllReplicas(default, system.errors)
 WHERE value > 0
 ORDER BY value DESC
 LIMIT 100
-FORMAT Native

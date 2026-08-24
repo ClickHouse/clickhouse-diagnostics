@@ -19,13 +19,53 @@ type Executor struct {
 	// gov mode so the hash of database/table names is unique to the
 	// customer's run instead of a publicly known constant.
 	salt string
+	// format is the ClickHouse FORMAT results are serialised in, and the
+	// extension they are written with. Zero value means the default.
+	format OutputFormat
+	// from / to override every query's own {from:…} / {to:…} default when
+	// non-zero. Zero means "each query keeps the window it declares".
+	from time.Time
+	to   time.Time
+	// mode feeds {sys.<table>} expansion (cloud wraps per-replica tables
+	// in clusterAllReplicas). Empty leaves such placeholders unexpanded,
+	// which the unbound check below then refuses.
+	mode string
+}
+
+// WithMode sets the topology mode used for {sys.<table>} expansion.
+func (e *Executor) WithMode(mode string) *Executor {
+	e.mode = mode
+	return e
+}
+
+// WithWindow overrides the time window of every query that declares one.
+// Zero values leave each query's own default in place.
+func (e *Executor) WithWindow(from, to time.Time) *Executor {
+	e.from, e.to = from, to
+	return e
 }
 
 // NewExecutor creates a new query executor
 func NewExecutor(client *pkg.ClickHouseClient) *Executor {
 	return &Executor{
 		client: client,
+		format: DefaultOutputFormat,
 	}
+}
+
+// WithOutputFormat sets the serialisation format for query results.
+func (e *Executor) WithOutputFormat(f OutputFormat) *Executor {
+	e.format = f
+	return e
+}
+
+// outputFormat returns the configured format, tolerating a zero-value
+// Executor built by older call sites or tests.
+func (e *Executor) outputFormat() OutputFormat {
+	if e.format.Clause == "" {
+		return DefaultOutputFormat
+	}
+	return e.format
 }
 
 // WithSalt sets the gov-mode salt used for runtime substitution of the
@@ -90,13 +130,29 @@ func (e *Executor) executeQuery(query internal.QueryFile, outputDir, timestamp s
 		return nil
 	}
 
-	// Gov mode: replace the public '%salt%' placeholder in .sql files
-	// with the customer-supplied salt. Salt format is validated upstream
-	// (alphanumeric only), so it cannot break out of the SQL string literal.
-	sqlText := string(queryContent)
-	if e.salt != "" {
-		sqlText = strings.ReplaceAll(sqlText, "'%salt%'", "'"+e.salt+"'")
+	// Bind the template. This resolves the {from:<default>} / {to:<default>}
+	// time windows — to the --from / --to flags when they were given, and
+	// otherwise to the default each query declares for itself — and, in gov
+	// mode, replaces the public '%salt%' marker with the customer salt.
+	// Salt format is validated upstream (alphanumeric only), so it cannot
+	// break out of the SQL string literal.
+	sqlText := Apply(string(queryContent), Vars{
+		Mode:    e.mode,
+		From:    e.from,
+		To:      e.to,
+		GovSalt: e.salt,
+	})
+
+	// A placeholder left unbound would reach the server as a literal
+	// brace: either a parse error or, worse, a silently wrong window.
+	if unbound := UnboundPlaceholders(sqlText); len(unbound) > 0 {
+		return fmt.Errorf("query '%s' has unbound placeholder(s) %v", query.Name, unbound)
 	}
+
+	// Serialise in the configured format, replacing any FORMAT the file
+	// carries. Done before validation so the validator sees exactly the
+	// text that will be sent to the server.
+	sqlText = e.outputFormat().Apply(sqlText)
 
 	// Security: enforce read-only SELECT before execution.
 	if err := ValidateQueryContent(sqlText); err != nil {
@@ -123,7 +179,7 @@ func (e *Executor) executeQuery(query internal.QueryFile, outputDir, timestamp s
 
 	// Generate output filename
 	baseFileName := strings.TrimSuffix(query.Name, filepath.Ext(query.Name))
-	outputFileName := fmt.Sprintf("%s_%s.native", baseFileName, timestamp)
+	outputFileName := fmt.Sprintf("%s_%s%s", baseFileName, timestamp, e.outputFormat().Ext)
 	outputPath := filepath.Join(outputDir, outputFileName)
 
 	// Save the result to a file

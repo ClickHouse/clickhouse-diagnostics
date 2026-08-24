@@ -31,4 +31,3 @@ WHERE query_id = {query_id}
   )
 ORDER BY event_time_microseconds ASC
 LIMIT 300
-FORMAT Native

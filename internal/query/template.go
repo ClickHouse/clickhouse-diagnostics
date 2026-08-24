@@ -91,6 +91,8 @@ type Vars struct {
 //	{query_id}                — 'uuid' (quoted)
 //	{normalized_query_hash}   — 12345 (unquoted numeric)
 //	{from}, {to}              — 'YYYY-MM-DD HH:MM:SS' UTC (quoted)
+//	{from:15d}, {to:now}      — the flag value if given, else the
+//	                            query's own default window
 //	'%salt%'                  — '<gov-salt>'
 //
 // Placeholders whose corresponding Vars field is empty are left intact
@@ -98,6 +100,7 @@ type Vars struct {
 // query, preventing leakage of unbound templates to the server.
 func Apply(sql string, vars Vars) string {
 	sql = expandSysPlaceholders(sql, vars.Mode)
+	sql = expandWindowPlaceholders(sql, vars.From, vars.To)
 
 	if vars.QueryID != "" {
 		sql = strings.ReplaceAll(sql, "{query_id}", "'"+vars.QueryID+"'")
@@ -106,12 +109,10 @@ func Apply(sql string, vars Vars) string {
 		sql = strings.ReplaceAll(sql, "{normalized_query_hash}", vars.NormalizedQueryHash)
 	}
 	if !vars.From.IsZero() {
-		sql = strings.ReplaceAll(sql, "{from}",
-			"'"+vars.From.UTC().Format("2006-01-02 15:04:05")+"'")
+		sql = strings.ReplaceAll(sql, "{from}", utcLiteral(vars.From))
 	}
 	if !vars.To.IsZero() {
-		sql = strings.ReplaceAll(sql, "{to}",
-			"'"+vars.To.UTC().Format("2006-01-02 15:04:05")+"'")
+		sql = strings.ReplaceAll(sql, "{to}", utcLiteral(vars.To))
 	}
 	if vars.GovSalt != "" {
 		sql = strings.ReplaceAll(sql, "'%salt%'", "'"+vars.GovSalt+"'")
@@ -124,6 +125,14 @@ func Apply(sql string, vars Vars) string {
 // the placeholder shape is fixed and trivial — keeps the dependency
 // surface in this package small.
 func expandSysPlaceholders(sql, mode string) string {
+	// No mode, no expansion. Expanding with "" would quietly behave like
+	// onprem — the first {sys.query_log} written into queries.cloud/ would
+	// collect one replica instead of fanning out, with nothing failing.
+	// Leaving the placeholder makes UnboundPlaceholders refuse the query,
+	// which points at the wiring bug instead of shipping a wrong bundle.
+	if strings.TrimSpace(mode) == "" {
+		return sql
+	}
 	out := sql
 	for {
 		start := strings.Index(out, "{sys.")
@@ -161,7 +170,19 @@ var rePlaceholder = regexp.MustCompile(`\{[A-Za-z0-9_.]+\}`)
 // substitutes when GovSalt is set (gov mode), so its presence after
 // Apply is expected and not an error in non-gov modes.
 func UnboundPlaceholders(sql string) []string {
-	matches := rePlaceholder.FindAllString(sql, -1)
+	// Scan with comments stripped. Query files legitimately mention
+	// ClickHouse macros in prose — queries.gov/system.replication_queue.sql
+	// explains that replica_name "is conventionally the {replica} macro" —
+	// and flagging those would refuse a query over a comment. The stripped
+	// copy is used for detection only; the SQL sent is untouched.
+	scan := reLineComment.ReplaceAllString(reBlockComment.ReplaceAllString(sql, " "), " ")
+
+	matches := rePlaceholder.FindAllString(scan, -1)
+	// A window placeholder whose default spec is malformed (e.g.
+	// {from:7dd}) is left untouched by expandWindowPlaceholders. It does
+	// not match rePlaceholder because of the colon, so report it here —
+	// otherwise a typo would reach the server as a literal brace.
+	matches = append(matches, reWindowLeftover.FindAllString(scan, -1)...)
 	if len(matches) == 0 {
 		return nil
 	}
@@ -177,4 +198,94 @@ func UnboundPlaceholders(sql string) []string {
 		out = append(out, m)
 	}
 	return out
+}
+
+// reWindowPlaceholder matches a time-window placeholder that carries its
+// own default: {from:15d}, {from:12h}, {to:now}.
+//
+// Each collection query used to hard-code its window as a literal. The
+// default now lives with the query rather than being flattened to one
+// global value, because the cost of a wide scan differs sharply per
+// table — text_log keeps a 1-day default where the other log tables use
+// 7, and a future query needing a longer or shorter reach can say so
+// without affecting the rest. --from / --to override all of them at once.
+var reWindowPlaceholder = regexp.MustCompile(`\{(from|to):([A-Za-z0-9]+)\}`)
+
+// reWindowLeftover finds a window placeholder that expandWindowPlaceholders
+// declined to replace, i.e. one whose default spec is malformed. Reported
+// by UnboundPlaceholders so the executor refuses the query instead of
+// sending a literal brace to the server.
+var reWindowLeftover = regexp.MustCompile(`\{(?:from|to):[^{}]*\}`)
+
+// windowDefaultSQL turns a placeholder's default spec into SQL.
+//
+//	now  -> now()
+//	15d  -> now() - INTERVAL 15 DAY
+//	12h  -> now() - INTERVAL 12 HOUR
+//	30m  -> now() - INTERVAL 30 MINUTE
+//
+// Returns ok=false for anything else, which leaves the placeholder in
+// place to be caught as unbound rather than silently widening a window.
+func windowDefaultSQL(spec string) (string, bool) {
+	if spec == "now" {
+		return "now()", true
+	}
+	if len(spec) < 2 {
+		return "", false
+	}
+	n, unit := spec[:len(spec)-1], spec[len(spec)-1]
+	for _, c := range n {
+		if c < '0' || c > '9' {
+			return "", false
+		}
+	}
+	if n == "" || strings.TrimLeft(n, "0") == "" {
+		return "", false // a zero-length window is never intended
+	}
+	var interval string
+	switch unit {
+	case 'd':
+		interval = "DAY"
+	case 'h':
+		interval = "HOUR"
+	case 'm':
+		interval = "MINUTE"
+	default:
+		return "", false
+	}
+	return fmt.Sprintf("now() - INTERVAL %s %s", n, interval), true
+}
+
+// utcLiteral renders a flag-supplied timestamp as SQL. The timezone is
+// spelled out because ClickHouse parses a BARE string literal in the
+// DateTime column's timezone — the server's, not UTC. On a server with
+// <timezone>America/New_York</timezone>, a bare '2026-03-01 10:30:00'
+// lands five hours away from the UTC instant the operator asked for,
+// and nothing fails: the window is silently shifted. Verified live:
+// bare vs explicit differ by exactly the zone offset.
+func utcLiteral(t time.Time) string {
+	return "toDateTime('" + t.UTC().Format("2006-01-02 15:04:05") + "', 'UTC')"
+}
+
+// expandWindowPlaceholders replaces {from:<default>} / {to:<default>}
+// with the flag value when one was supplied, and with the query's own
+// default otherwise. The substituted flag value is a quoted UTC literal,
+// matching the bare {from} / {to} form used by query analysis.
+func expandWindowPlaceholders(sql string, from, to time.Time) string {
+	return reWindowPlaceholder.ReplaceAllStringFunc(sql, func(match string) string {
+		g := reWindowPlaceholder.FindStringSubmatch(match)
+		name, spec := g[1], g[2]
+
+		bound := from
+		if name == "to" {
+			bound = to
+		}
+		if !bound.IsZero() {
+			return utcLiteral(bound)
+		}
+		if def, ok := windowDefaultSQL(spec); ok {
+			return def
+		}
+		return match // malformed — leave it for UnboundPlaceholders
+	})
 }

@@ -43,4 +43,3 @@ SELECT
   `move_ttl_info.min`,
   `move_ttl_info.max`
 FROM system.parts
-FORMAT Native

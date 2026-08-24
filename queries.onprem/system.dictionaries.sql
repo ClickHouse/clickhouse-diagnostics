@@ -20,4 +20,3 @@ SELECT
   last_exception,
   comment
 FROM system.dictionaries
-FORMAT Native

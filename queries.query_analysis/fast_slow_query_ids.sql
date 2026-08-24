@@ -21,4 +21,3 @@ WHERE normalized_query_hash = {normalized_query_hash}
   AND event_time <= {to}
   AND type = 'QueryFinish'
   AND NOT has(databases, 'system')
-FORMAT Native

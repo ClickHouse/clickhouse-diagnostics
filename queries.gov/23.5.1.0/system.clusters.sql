@@ -19,4 +19,3 @@ SELECT
     hex(SHA256(concat(name, '%salt%'))) AS name
 FROM
     system.clusters
-FORMAT Native

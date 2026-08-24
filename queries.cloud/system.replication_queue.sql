@@ -9,4 +9,3 @@ SELECT
   last_exception,
   merge_type
 FROM clusterAllReplicas(default, system.replication_queue)
-FORMAT Native

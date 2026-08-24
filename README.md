@@ -2,8 +2,6 @@
 
 A Go-based diagnostic tool for ClickHouse that collects system information, runs a curated set of diagnostic queries, evaluates alert rules, and produces an HTML dashboard plus a shareable archive.
 
-## Features
-
 - **Per-environment query sets** — separate query directories for Cloud, on-prem, and government (hashed-PII) deployments, selected via `-mode`
 - **Version-aware query execution** — automatically picks the highest-compatible query variant for the connected server
 - **YAML-driven alerts** — drop a `.yaml` file in `alerts/` and the tool will run it, validate the SQL is read-only, and surface fired alerts in the dashboard
@@ -12,71 +10,79 @@ A Go-based diagnostic tool for ClickHouse that collects system information, runs
 - **Safe config collection** — passwords, tokens, and secrets are stripped from collected XML config files before they leave the host
 - **Archive packaging** — bundles results, sanitised configs, alerts, and the dashboard into a single `tar.gz`
 
-## Installation
-
-### Prerequisites
-
-- Go 1.23 or later (the module declares `go 1.23.9`)
-- `make` (optional — convenience targets only; everything also works with plain `go` commands)
-- Network access to a ClickHouse HTTP(S) interface
-- Read access to the ClickHouse config directory (optional, only if collecting configs)
-
-### Build with Make (recommended)
-
-The repo ships with a `Makefile` that wraps the common workflows. From the repo root:
-
-```bash
-make deps        # go mod download && go mod tidy
-make build       # produces ./bin/clickhouse-diagnostic
-make run         # builds (if needed) and runs the binary interactively
-make test        # go test -v ./...
-make fmt         # go fmt ./...
-make lint        # golangci-lint run  (requires golangci-lint installed)
-make clean       # remove ./bin, ./clickhouse_results, ./configuration, *.tar.gz
-make help        # list every target
-```
-
-### Build with `go` directly
-
-If you don't want to use `make`:
-
-```bash
-# Fetch and tidy dependencies
-go mod download
-go mod tidy
-
-# Build a binary at ./clickhouse-diagnostic
-go build -o clickhouse-diagnostic ./cmd
-
-# Or install into $GOPATH/bin (or $GOBIN) so it's on your PATH
-go install ./cmd
-```
-
-> The examples below use `./clickhouse-diagnostic` for brevity. If you built via `make`, the binary is at `./bin/clickhouse-diagnostic` — either invoke that path directly or symlink it.
-
-### Cross-platform release builds
-
-`make release` produces binaries for the platforms we ship:
-
-```bash
-make release
-# Output (in ./bin/):
-#   clickhouse-diagnostic-linux-amd64
-#   clickhouse-diagnostic-darwin-amd64
-#   clickhouse-diagnostic-darwin-arm64
-#   clickhouse-diagnostic-windows-amd64.exe
-```
-
-To cross-compile for a single target without `make`:
-
-```bash
-GOOS=linux  GOARCH=amd64 go build -o bin/clickhouse-diagnostic-linux-amd64  ./cmd
-GOOS=darwin GOARCH=arm64 go build -o bin/clickhouse-diagnostic-darwin-arm64 ./cmd
-```
-
-Builds are statically linked Go binaries — copy the file to the target host and run, no runtime dependencies required.
-
 ## Usage
+
+> These examples use `./clickhouse-diagnostic`. If you built via `make` the binary is at `./bin/clickhouse-diagnostic` — invoke that path or symlink it. See [Installation](#installation) if you don't have a binary yet.
+
+### Required grants
+
+The tool is read-only and never touches customer data — every query reads a `system` table. Two grants are enough for `onprem` and `gov` mode:
+
+```sql
+CREATE USER sys_read_only IDENTIFIED WITH sha256_password BY '<password>';
+
+GRANT SHOW DATABASES, SHOW TABLES ON *.* TO sys_read_only;
+GRANT SELECT ON system.*                 TO sys_read_only;
+```
+
+```
+┌─GRANTS FOR sys_read_only──────────────────────────────────┐
+│ GRANT SHOW DATABASES, SHOW TABLES ON *.* TO sys_read_only │
+│ GRANT SELECT ON system.* TO sys_read_only                 │
+└───────────────────────────────────────────────────────────┘
+```
+
+| Grant | Why it is needed |
+|---|---|
+| `SELECT ON system.*` | Every diagnostic query, alert rule and dashboard panel reads a `system` table. Nothing outside `system` is ever selected. |
+| `SHOW DATABASES, SHOW TABLES ON *.*` | ClickHouse filters the object-listing system tables down to what the user holds *some* privilege on. Without it the tool sees only part of the cluster. |
+
+> **A missing `SHOW` grant does not produce an error — it silently truncates the results.** Every query still reports success; the bundle just describes a fraction of the server. Measured on a test instance with one user database:
+>
+> | Table | With the grant | Without it |
+> |---|---|---|
+> | `system.tables` | 141 | 112 |
+> | `system.databases` | 5 | 1 |
+> | `system.columns` | 3258 | 2520 |
+> | `system.parts` | 102 | 101 |
+>
+> This is the failure mode to watch for: a bundle that looks complete but is missing the customer's own tables. If `system.databases` contains only `system`, the `SHOW` grant is missing.
+
+Neither grant exposes customer data: `SHOW` reveals object *names* and metadata only, and `SELECT` is scoped to `system`.
+
+#### Cloud mode needs two more
+
+`cloud` mode wraps its queries in `clusterAllReplicas(...)` so results span every replica rather than only the node you connected to. Distributed execution needs two further grants:
+
+```sql
+GRANT REMOTE                ON *.* TO sys_read_only;
+GRANT CREATE TEMPORARY TABLE ON *.* TO sys_read_only;
+```
+
+So the full set for cloud is:
+
+```
+┌─GRANTS FOR sys_read_only──────────────────────────────────────────────────────────────────┐
+│ GRANT SHOW DATABASES, SHOW TABLES, CREATE TEMPORARY TABLE, REMOTE ON *.* TO sys_read_only │
+│ GRANT SELECT ON system.* TO sys_read_only                                                 │
+└───────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+Unlike the `SHOW` grant, these fail loudly rather than truncating:
+
+```
+Code: 497. DB::Exception: Not enough privileges. To execute this query,
+it's necessary to have the grant REMOTE ON *.*. (ACCESS_DENIED)
+
+Code: 497. DB::Exception: Not enough privileges. To execute this query,
+it's necessary to have the grant CREATE TEMPORARY TABLE ON *.*. (ACCESS_DENIED)
+```
+
+`onprem` and `gov` need neither — verified by revoking both and re-running (21/21 and 19/19 queries, 0 errors).
+
+#### What grants do *not* cover
+
+Config collection, `host_info.json` and `logs/` read the **local filesystem**, not the database, so they depend on OS permissions instead: read access to `/etc/clickhouse-server/`, `/var/log/clickhouse-server/` and `/proc`. See [Host facts and server logs](#host-facts-and-server-logs).
 
 ### Interactive run
 
@@ -125,6 +131,25 @@ Run `./clickhouse-diagnostic -help` to see the full list. Current flags:
 -to string             Time-window end for query analysis (default: now).
 -analysis-dir string   Directory containing query-analysis SQL files
                        (default "./queries.query_analysis")
+-output-format string  Serialisation format for query results:
+                       jsonl|native|tsv (default "jsonl").
+                       See "Output format" below.
+-host-info string      Collect host OS/CPU/memory/disk/process facts:
+                       auto|on|off (default "auto" — on for onprem only).
+                       See "Host facts and server logs" below.
+-logs string           Collect ClickHouse server log files from disk:
+                       auto|on|off (default "auto" — on for onprem only).
+-logs-dir string       Directory holding server logs (default: discovered
+                       from the server config, then /var/log/clickhouse-server)
+-logs-max-mb int       Per-file cap for collected logs, in MiB (default 50).
+                       Larger files are tail-truncated.
+-logs-include-archives Also collect rotated logs (*.gz, *.zst). Off by default.
+-collect-text-log      Collect a time-bounded slice of system.text_log.
+                       Requires --from and --to; rejected in gov mode.
+-text-log-level string Minimum severity for --collect-text-log
+                       (Fatal|Critical|Error|Warning|Notice|Information|
+                       Debug|Trace). Default: all levels.
+-text-log-limit int    Row cap for --collect-text-log (default 500000)
 -dry-run               List every query that would be executed (with the
                        system tables each touches and a read-only
                        EXPLAIN ESTIMATE per SELECT) and exit. No results,
@@ -180,6 +205,84 @@ Fully non-interactive (CI / automation):
 ```
 
 > **Security:** prefer the interactive password prompt or an environment variable over `-password` — flags appear in `ps`/shell history.
+
+## Collection window
+
+Most collection queries look back over a fixed period. Each declares its **own** default, so a query whose scan is unusually expensive (or unusually cheap) can say so without changing the rest:
+
+| Query | Default look-back |
+|---|---|
+| `system.query_log_details_7_days` | 7 days |
+| `system.part_log_7_days` | 7 days |
+| `system.metric_log_7_days` | 7 days |
+| `system.asynchronous_insert_log_7_days` | 7 days |
+| `system.text_log` | 1 day |
+
+> `system.text_log` is the one exception at 1 day: it is by far the highest-volume table here, and a 7-day slice of it is usually too large to be useful in a support bundle. Use `-from` when you need more.
+
+`-from` and `-to` override **every** window at once:
+
+```bash
+# Everything from a specific incident window
+./clickhouse-diagnostic -mode onprem -host prod-ch-01 \
+  -from 2026-08-14T09:00:00Z -to 2026-08-14T13:00:00Z
+
+# Widen the look-back to 30 days instead of each query's default
+./clickhouse-diagnostic -mode onprem -host prod-ch-01 -from 2026-07-21
+```
+
+Either end may be given alone: `-from` with no `-to` runs to now, and `-to` with no `-from` leaves each query's own default start. The resolved window is printed at the start of the run. Times are RFC3339 or `YYYY-MM-DD`, interpreted as UTC.
+
+The same flags also drive [query analysis](#query-analysis-mode) when `-query-id` / `-normalized-query-hash` is set.
+
+[Alert rules](#alerts) deliberately keep their own windows (e.g. *"exception spike in the last hour"*) — an alert's look-back is part of what the rule means, so `-from`/`-to` do not rewrite it.
+
+> **A narrower window is the first thing to try on a slow or heavy collection.** The defaults are tuned for a general health check; on a busy cluster `-from` with a few hours is dramatically cheaper.
+
+### For query authors
+
+Windows are template placeholders, not literals, so they stay overridable:
+
+```sql
+WHERE event_time >  {from:7d}      -- --from if given, else now() - INTERVAL 7 DAY
+  AND event_time <= {to:now}       -- --to   if given, else now()
+```
+
+Accepted defaults are `now`, and `<N>d` / `<N>h` / `<N>m`. A malformed spec (`{from:7dd}`) is **not** substituted — the query is refused rather than silently run unbounded. A test asserts no shipped query hard-codes an interval, so a new one that does will fail CI rather than quietly ignore the flags.
+
+## Output format
+
+Query results are written one file per query, in the format chosen by `-output-format`. The default is **`jsonl`**.
+
+| Value | ClickHouse format | Extension | |
+|---|---|---|---|
+| `jsonl` *(default)* | `JSONEachRow` | `.jsonl` | One self-describing JSON object per line. `grep`- and `jq`-able, and every row carries its column names — which matters because `system.query_log` has ~60 columns and positional formats leave you counting fields back to a header. |
+| `native` | `Native` | `.native` | The ClickHouse binary format used before v0.3.0. Column-oriented, exactly typed, reloadable with no schema — but unreadable without a ClickHouse to load it into. |
+| `tsv` | `TSVWithNamesAndTypes` | `.tsv` | Names on line 1, **types on line 2**. The most faithful text format for reload, but positional, so it reads poorly for wide tables. |
+
+### Large integers are never rounded
+
+JSON numbers are IEEE-754 doubles in most parsers, so an unquoted `UInt64` above 2^53 is silently corrupted on read — JavaScript turns `18446744073709551615` into `18446744073709552000`, and so does any `jq` expression that does arithmetic on it. This is not hypothetical: `normalized_query_hash` and every `cityHash64` value in `system.query_log` are full-width `UInt64`.
+
+The tool therefore pins `output_format_json_quote_64bit_integers=1` on every request, so 64-bit integers are emitted as **quoted strings** and survive every parser exactly. The setting is writable under `readonly=1`, so a server-side profile could otherwise turn it off — pinning it is what makes the guarantee hold rather than depend on the server's configuration.
+
+`native` and `tsv` are exact by construction. Cast on read when you reload:
+
+```bash
+clickhouse-local -q "SELECT toUInt64(normalized_query_hash) FROM file('x.jsonl','JSONEachRow')"
+```
+
+### Size
+
+The shipped artefact is a `tar.gz`, and JSON's repeated keys compress away almost entirely. Measured on a real bundle (21 queries, ClickHouse 24.8):
+
+| Format | Uncompressed | **Archive (`tar.gz`)** |
+|---|---|---|
+| `jsonl` | 2.20 MB | **225 KB** |
+| `native` | 1.83 MB | 240 KB |
+| `tsv` | 2.12 MB | 272 KB |
+
+`jsonl` is 20% larger on disk but produces the **smallest archive** of the three, so the readable default costs nothing in what you actually send.
 
 ## Dry-run mode
 
@@ -279,7 +382,7 @@ In `gov` mode, every database and table name written to the support-bound output
 ```
 clickhouse_results/
 ├── clickhouse_backup_YYYYMMDD_HHMMSS/                       # → goes into the archive
-│   └── *.native                                             # hashed names inside
+│   └── *.jsonl                                              # hashed names inside
 └── clickhouse_backup_YYYYMMDD_HHMMSS_gov_name_mapping.csv   # → stays LOCAL
 ```
 
@@ -297,16 +400,19 @@ If you lose the salt, the hashes in past archives are no longer reversible (you 
 
 ### What gov mode does not produce
 
-Two outputs are deliberately withheld in gov mode, because both are part of the support-bound archive and neither can be hashed meaningfully:
+Several outputs are deliberately withheld in gov mode, because each is part of the support-bound archive and none can be hashed meaningfully:
 
 | Output | Why |
 |---|---|
 | `dashboard.html` | Its panels are built in Go and select raw identifiers — database/table names for up to 2000 tables, disk paths, users — plus server-generated text (`last_exception`, `last_error_message`). Hashing every panel is the follow-up that would restore it. |
 | Query analysis (`--query-id` / `--normalized-query-hash`) | The bundle embeds raw query text, exception messages and full DDL. Freeform SQL text can't be hashed without destroying its diagnostic value, so the flags are rejected outright. |
+| **Host facts** (`host_info.json`) | Hostname, mount paths and process command lines are exactly the identifiers gov hashing protects — and a command line can't be hashed while staying useful. |
+| **Server log files** (`logs/`) | Log lines carry raw queries, table names and paths as free text. Hashing a log destroys the reason to collect it. |
+| **`--collect-text-log`** | Same reasoning as the log files: `system.text_log` messages embed raw SQL and identifiers. The flag is rejected in gov mode. |
 
 Because the dashboard is the only other consumer of alert results, gov runs instead write **[`alerts_summary.json`](#alerts_summaryjson)** into the archive — so you still get *"`too_many_parts` fired, 12 instances"* without the table names.
 
-Everything else — the per-mode `.native` files — is hashed as described above.
+Everything else — the per-mode result files — is hashed as described above.
 
 ### Version-specific queries
 
@@ -364,6 +470,70 @@ The dashboard (`internal/dashboard/generator.go`) builds its SQL dynamically, so
 `queries.cloud/` targets managed ClickHouse Cloud, which always runs recent versions — it carries the recent rungs (`23.5.1.0/`, `23.11.1.0/`, `24.2.1.0/`, `25.4.1.0/`) but none of the sub-23.5 gating, because Cloud never runs that old. The **22.8 floor applies to `queries.onprem/` and `queries.gov/`** (both are self-hosted — gov is on-prem with hashed PII, and neither uses `clusterAllReplicas`) as well as the shared `queries.query_analysis/` + `alerts/` directories. Note gov's `system.tables` ladder deliberately tops out at `24.2.1.0/` — it does not collect `parameterized_view_parameters` (identifier-like values gov would otherwise have to hash).
 
 Overrides are matched **only** at the top level of each directory; a version subdirectory nested deeper (e.g. `alerts/foo/25.4.1.0/`) is not treated as a nested override of `alerts/foo/`.
+
+## Host facts and server logs
+
+Beyond what ClickHouse reports about itself, the tool collects the surrounding context that usually explains it: the host it runs on, and the log files on that host's disk.
+
+### When these run
+
+Both collectors read the **machine executing the tool**, so `-host-info` and `-logs` take `auto` (the default), `on` or `off` rather than a plain skip flag:
+
+| Mode | `auto` resolves to | Why |
+|---|---|---|
+| `onprem` | **on** | The tool runs on the ClickHouse server, so `/proc` and `/var/log/clickhouse-server` describe that server. |
+| `cloud` | **off** | ClickHouse Cloud is reached over the network. Local host facts and log files would describe your laptop or bastion — confidently wrong data in a support bundle is worse than none. Pass `-host-info=on` / `-logs=on` if you are pointing cloud mode at a self-managed node. |
+| `gov` | **off**, unconditionally | Hostnames, mount paths, process command lines and log bodies are exactly what gov hashing protects, and none of them can be hashed while staying useful. `-host-info=on` is **rejected**, not ignored. |
+
+Both are also skipped under `--dry-run`, which promises to write nothing. The mode matrix is pinned by tests in `cmd/local_collector_test.go`.
+
+### `host_info.json` — OS, kernel and hardware
+
+Read from `/proc`, `/sys` and `/etc` with no external dependencies, so it only yields data when the tool runs **on the ClickHouse host** — which is why `auto` restricts it to onprem. Forced on elsewhere, each section is marked unavailable with a note rather than silently empty.
+
+| Section | Contents |
+|---|---|
+| `os` | hostname, **distro + version** (`/etc/os-release`), kernel version and full banner, arch, uptime |
+| `cpu` | logical CPUs, model, vendor, load average, and the vector flags ClickHouse dispatches on (`avx2`, `avx512f`, … / `asimd`, `sve` on ARM) |
+| `memory` | total / free / available / buffers / cached / swap, in bytes |
+| `disks` | every real mount: device, mount point, fs type, total, free, used % (pseudo- and file-bind mounts filtered out) |
+| `top_processes_by_rss` | top 25 by RSS — pid, ppid, state, threads, RSS, command |
+| `clickhouse_relevant_tunables` | **transparent hugepages** + defrag, `vm.swappiness`, `vm.overcommit_memory`, `vm.max_map_count`, `fs.nr_open`, `fs.file-max`, **cgroup memory/CPU limits**, and the running server's own `LimitNOFILE` |
+
+That last row is the point of the collector: THP set to `always`, a cgroup memory cap far below `MemTotal`, or a low `LimitNOFILE` explain a large share of ClickHouse incidents and are invisible from inside the database.
+
+### `logs/` — server log files
+
+```bash
+./clickhouse-diagnostic -mode onprem -host ch-01           # discovers the log directory
+./clickhouse-diagnostic -mode onprem -logs-dir /data/ch/logs
+```
+
+The directory is resolved in this order:
+
+1. `-logs-dir`, used verbatim (a bad path is reported, never silently replaced)
+2. **`<log>` / `<errorlog>` paths read from the server configuration** — operators relocate logs more often than they change anything else, and this is what stops a bundle from quietly containing none
+3. `/var/log/clickhouse-server`
+
+Both 2 and 3 are collected when they differ. `*.log` is copied by default; `-logs-include-archives` adds rotated `*.gz`/`*.zst`. Files above `-logs-max-mb` (default 50) are **tail**-truncated — the recent end is kept, with a header recording what was dropped so the first surviving line isn't mistaken for the start of the log.
+
+### `--collect-text-log` — a bounded slice of `system.text_log`
+
+**Off by default and requires an explicit window**, because `text_log` is the highest-volume table ClickHouse writes: an unbounded dump would be enormous and would itself load the server.
+
+```bash
+./clickhouse-diagnostic -mode onprem -host ch-01 \
+  -collect-text-log --from 2026-08-20T14:00:00Z --to 2026-08-20T15:00:00Z \
+  -text-log-level Warning
+```
+
+| Flag | Meaning |
+|---|---|
+| `-collect-text-log` | Enable it. **Requires `--from` and `--to`** — the run fails fast otherwise. |
+| `-text-log-level` | Minimum severity (`Fatal`…`Trace`). Omit for all levels. |
+| `-text-log-limit` | Row cap (default 500 000). |
+
+Written as `text_log_<timestamp>.<ext>`, in the [configured output format](#output-format). In cloud mode it fans out across replicas; `message_format_string` is only selected on 23.1+. If `system.text_log` is disabled (the ClickHouse default) the tool says so and explains how to enable it, rather than reporting a bare error.
 
 ## Alerts
 
@@ -487,7 +657,7 @@ Works in all three modes (`cloud`, `onprem`, `gov`) — table references adapt t
 
 ### What it collects
 
-Twelve `.sql` files under `queries.query_analysis/`, each written to `<backup>/query_analysis/<name>_<ts>.native`:
+Twelve `.sql` files under `queries.query_analysis/`, each written to `<backup>/query_analysis/<name>_<ts>.<ext>`:
 
 **Single-query-id (need `--query-id` or one auto-derived from `--normalized-query-hash`)**
 
@@ -656,8 +826,8 @@ A single run produces:
 ```
 clickhouse_results/
 ├── clickhouse_backup_YYYYMMDD_HHMMSS/                       # → archived
-│   ├── system.parts_YYYYMMDD_HHMMSS.native                  #   one file per query
-│   ├── system.mutations_YYYYMMDD_HHMMSS.native
+│   ├── system.parts_YYYYMMDD_HHMMSS.jsonl                   #   one file per query
+│   ├── system.mutations_YYYYMMDD_HHMMSS.jsonl
 │   ├── ...
 │   ├── query_analysis/                                      #   only with --query-id / --hash
 │   ├── dashboard.html                                       #   unless -skip-dashboard or gov
@@ -668,7 +838,7 @@ configuration/                                               # → archived (unl
 clickhouse_backup_YYYYMMDD_HHMMSS.tar.gz                     # unless -skip-archive
 ```
 
-- **Query results**: ClickHouse `Native` format (`.native`)
+- **Query results**: one file per query, in the format chosen by [`-output-format`](#output-format) (default `jsonl`)
 - **Dashboard**: standalone `dashboard.html`, loads Chart.js from CDN
 - **Archive**: `tar.gz` containing the per-run results directory and the `configuration/` directory
 - **Gov-mode mapping CSV** (gov mode only): sits next to the backup folder, **not inside it** — never goes into the archive. See [Gov mode and hashed names](#gov-mode-and-hashed-names).
@@ -695,3 +865,65 @@ The generated `dashboard.html` loads Chart.js from a public CDN. Open it in an e
 
 **"Permission denied" on config files**
 You don't have read access to `-config-dir`. Either run with appropriate privileges or use `-skip-config`.
+
+## Installation
+
+### Prerequisites
+
+- Go 1.23 or later (the module declares `go 1.23.9`)
+- `make` (optional — convenience targets only; everything also works with plain `go` commands)
+- Network access to a ClickHouse HTTP(S) interface
+- Read access to the ClickHouse config directory (optional, only if collecting configs)
+
+### Build with Make (recommended)
+
+The repo ships with a `Makefile` that wraps the common workflows. From the repo root:
+
+```bash
+make deps        # go mod download && go mod tidy
+make build       # produces ./bin/clickhouse-diagnostic
+make run         # builds (if needed) and runs the binary interactively
+make test        # go test -v ./...
+make fmt         # go fmt ./...
+make lint        # golangci-lint run  (requires golangci-lint installed)
+make clean       # remove ./bin, ./clickhouse_results, ./configuration, *.tar.gz
+make help        # list every target
+```
+
+### Build with `go` directly
+
+If you don't want to use `make`:
+
+```bash
+# Fetch and tidy dependencies
+go mod download
+go mod tidy
+
+# Build a binary at ./clickhouse-diagnostic
+go build -o clickhouse-diagnostic ./cmd
+
+# Or install into $GOPATH/bin (or $GOBIN) so it's on your PATH
+go install ./cmd
+```
+
+### Cross-platform release builds
+
+`make release` produces binaries for the platforms we ship:
+
+```bash
+make release
+# Output (in ./bin/):
+#   clickhouse-diagnostic-linux-amd64
+#   clickhouse-diagnostic-darwin-amd64
+#   clickhouse-diagnostic-darwin-arm64
+#   clickhouse-diagnostic-windows-amd64.exe
+```
+
+To cross-compile for a single target without `make`:
+
+```bash
+GOOS=linux  GOARCH=amd64 go build -o bin/clickhouse-diagnostic-linux-amd64  ./cmd
+GOOS=darwin GOARCH=arm64 go build -o bin/clickhouse-diagnostic-darwin-arm64 ./cmd
+```
+
+Builds are statically linked Go binaries — copy the file to the target host and run, no runtime dependencies required.

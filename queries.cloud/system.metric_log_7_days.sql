@@ -8,7 +8,6 @@ SELECT
     sum(ProfileEvent_ZooKeeperHardwareExceptions)            AS zk_hw_exceptions,
     avg(CurrentMetric_MemoryTracking)                        AS avg_memory_tracking_bytes
 FROM clusterAllReplicas(default, merge(system, '^metric_log'))
-WHERE event_time > now() - INTERVAL 7 DAY
+WHERE event_time > {from:7d} AND event_time <= {to:now}
 GROUP BY time
 ORDER BY time
-FORMAT Native

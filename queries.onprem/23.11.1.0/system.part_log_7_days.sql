@@ -13,6 +13,5 @@ SELECT
     sum(size_in_bytes) AS size_in_bytes,
     count() as count
 FROM system.part_log
-WHERE (event_time > (now() - toIntervalDay(7)))
+WHERE (event_time > {from:7d} AND event_time <= {to:now})
 GROUP BY ALL
-FORMAT Native

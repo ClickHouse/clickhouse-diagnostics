@@ -10,4 +10,3 @@ SELECT
   is_cancelled,
   is_all_data_sent
 FROM clusterAllReplicas(default, system.processes)
-FORMAT Native

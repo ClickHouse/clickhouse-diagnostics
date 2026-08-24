@@ -17,4 +17,3 @@ SELECT
   merge_type,
   merge_algorithm
 FROM system.merges
-FORMAT Native

@@ -19,4 +19,3 @@ WHERE query_id = {query_id}
   AND event_time <= {to}
 ORDER BY event_time_microseconds ASC
 LIMIT 5000
-FORMAT Native
