@@ -109,12 +109,10 @@ func Apply(sql string, vars Vars) string {
 		sql = strings.ReplaceAll(sql, "{normalized_query_hash}", vars.NormalizedQueryHash)
 	}
 	if !vars.From.IsZero() {
-		sql = strings.ReplaceAll(sql, "{from}",
-			"'"+vars.From.UTC().Format("2006-01-02 15:04:05")+"'")
+		sql = strings.ReplaceAll(sql, "{from}", utcLiteral(vars.From))
 	}
 	if !vars.To.IsZero() {
-		sql = strings.ReplaceAll(sql, "{to}",
-			"'"+vars.To.UTC().Format("2006-01-02 15:04:05")+"'")
+		sql = strings.ReplaceAll(sql, "{to}", utcLiteral(vars.To))
 	}
 	if vars.GovSalt != "" {
 		sql = strings.ReplaceAll(sql, "'%salt%'", "'"+vars.GovSalt+"'")
@@ -127,6 +125,14 @@ func Apply(sql string, vars Vars) string {
 // the placeholder shape is fixed and trivial — keeps the dependency
 // surface in this package small.
 func expandSysPlaceholders(sql, mode string) string {
+	// No mode, no expansion. Expanding with "" would quietly behave like
+	// onprem — the first {sys.query_log} written into queries.cloud/ would
+	// collect one replica instead of fanning out, with nothing failing.
+	// Leaving the placeholder makes UnboundPlaceholders refuse the query,
+	// which points at the wiring bug instead of shipping a wrong bundle.
+	if strings.TrimSpace(mode) == "" {
+		return sql
+	}
 	out := sql
 	for {
 		start := strings.Index(out, "{sys.")
@@ -250,6 +256,17 @@ func windowDefaultSQL(spec string) (string, bool) {
 	return fmt.Sprintf("now() - INTERVAL %s %s", n, interval), true
 }
 
+// utcLiteral renders a flag-supplied timestamp as SQL. The timezone is
+// spelled out because ClickHouse parses a BARE string literal in the
+// DateTime column's timezone — the server's, not UTC. On a server with
+// <timezone>America/New_York</timezone>, a bare '2026-03-01 10:30:00'
+// lands five hours away from the UTC instant the operator asked for,
+// and nothing fails: the window is silently shifted. Verified live:
+// bare vs explicit differ by exactly the zone offset.
+func utcLiteral(t time.Time) string {
+	return "toDateTime('" + t.UTC().Format("2006-01-02 15:04:05") + "', 'UTC')"
+}
+
 // expandWindowPlaceholders replaces {from:<default>} / {to:<default>}
 // with the flag value when one was supplied, and with the query's own
 // default otherwise. The substituted flag value is a quoted UTC literal,
@@ -264,7 +281,7 @@ func expandWindowPlaceholders(sql string, from, to time.Time) string {
 			bound = to
 		}
 		if !bound.IsZero() {
-			return "'" + bound.UTC().Format("2006-01-02 15:04:05") + "'"
+			return utcLiteral(bound)
 		}
 		if def, ok := windowDefaultSQL(spec); ok {
 			return def

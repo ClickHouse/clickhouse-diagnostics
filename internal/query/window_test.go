@@ -75,7 +75,7 @@ func TestWindowFlagsOverrideDefaults(t *testing.T) {
 	to := time.Date(2026, 3, 2, 11, 0, 0, 0, time.UTC)
 
 	got := Apply("WHERE event_time > {from:15d} AND event_time <= {to:now}", Vars{From: from, To: to})
-	want := "WHERE event_time > '2026-03-01 10:30:00' AND event_time <= '2026-03-02 11:00:00'"
+	want := "WHERE event_time > toDateTime('2026-03-01 10:30:00', 'UTC') AND event_time <= toDateTime('2026-03-02 11:00:00', 'UTC')"
 	if got != want {
 		t.Errorf("both flags:\n got: %s\nwant: %s", got, want)
 	}
@@ -83,15 +83,41 @@ func TestWindowFlagsOverrideDefaults(t *testing.T) {
 	// One end supplied: the other must still fall back to its default,
 	// not to a zero timestamp (which would select nothing).
 	got = Apply("WHERE event_time > {from:7d} AND event_time <= {to:now}", Vars{From: from})
-	want = "WHERE event_time > '2026-03-01 10:30:00' AND event_time <= now()"
+	want = "WHERE event_time > toDateTime('2026-03-01 10:30:00', 'UTC') AND event_time <= now()"
 	if got != want {
 		t.Errorf("only --from:\n got: %s\nwant: %s", got, want)
 	}
 
 	got = Apply("WHERE event_time > {from:7d} AND event_time <= {to:now}", Vars{To: to})
-	want = "WHERE event_time > now() - INTERVAL 7 DAY AND event_time <= '2026-03-02 11:00:00'"
+	want = "WHERE event_time > now() - INTERVAL 7 DAY AND event_time <= toDateTime('2026-03-02 11:00:00', 'UTC')"
 	if got != want {
 		t.Errorf("only --to:\n got: %s\nwant: %s", got, want)
+	}
+}
+
+// TestFlagTimestampsCarryExplicitUTC pins the blocking finding from PR
+// review: ClickHouse parses a BARE datetime literal in the column's
+// timezone (the server's), so an un-annotated '2026-03-01 10:30:00' on a
+// <timezone>America/New_York</timezone> server selects a window five
+// hours away from the UTC instant the operator asked for — silently.
+// Every flag-supplied timestamp must therefore reach the SQL wrapped in
+// toDateTime('…', 'UTC'). Defaults (now() arithmetic) are epoch-based and
+// need no annotation.
+func TestFlagTimestampsCarryExplicitUTC(t *testing.T) {
+	ts := time.Date(2026, 3, 1, 10, 30, 0, 0, time.UTC)
+	bare := regexp.MustCompile(`[^(]'\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}'`)
+
+	for name, sql := range map[string]string{
+		"window": Apply("t > {from:7d} AND t <= {to:now}", Vars{From: ts, To: ts}),
+		"bare":   Apply("t >= {from} AND t <= {to}", Vars{From: ts, To: ts}),
+	} {
+		if bare.MatchString(sql) {
+			t.Errorf("%s: flag timestamp emitted as a bare literal (server-timezone "+
+				"parse): %s", name, sql)
+		}
+		if strings.Count(sql, "toDateTime('2026-03-01 10:30:00', 'UTC')") != 2 {
+			t.Errorf("%s: expected both bounds as explicit-UTC toDateTime:\n%s", name, sql)
+		}
 	}
 }
 
@@ -274,4 +300,23 @@ func TestShippedQueryDefaultWindows(t *testing.T) {
 		}
 	}
 	t.Logf("pinned windows across %d query files", len(checked))
+}
+
+// TestSysPlaceholderWithoutModeIsRefused pins review finding #3: expanding
+// {sys.<table>} with an empty mode would quietly behave like onprem — the
+// first {sys.query_log} written into queries.cloud/ would collect one
+// replica instead of fanning out. With no mode the placeholder must
+// survive Apply and be reported unbound, so the executor refuses.
+func TestSysPlaceholderWithoutModeIsRefused(t *testing.T) {
+	sql := Apply("SELECT 1 FROM {sys.query_log}", Vars{})
+	if !strings.Contains(sql, "{sys.query_log}") {
+		t.Fatalf("empty-mode expansion silently produced: %s", sql)
+	}
+	if u := UnboundPlaceholders(sql); len(u) == 0 {
+		t.Fatal("unexpanded {sys.} placeholder not reported as unbound")
+	}
+	// And with a mode it must expand as before.
+	if got := Apply("SELECT 1 FROM {sys.query_log}", Vars{Mode: "cloud"}); !strings.Contains(got, "clusterAllReplicas") {
+		t.Errorf("cloud expansion broken: %s", got)
+	}
 }

@@ -15,6 +15,13 @@ type Manager struct {
 	format   OutputFormat
 	from     time.Time
 	to       time.Time
+	mode     string
+}
+
+// WithMode sets the topology mode used for {sys.<table>} expansion.
+func (m *Manager) WithMode(mode string) *Manager {
+	m.mode = mode
+	return m
 }
 
 // WithWindow overrides the time window of every query that declares one.
@@ -65,7 +72,7 @@ func (m *Manager) ExecuteQueries(client *pkg.ClickHouseClient, queriesDir string
 
 	// Execute the selected queries and get the specific output directory
 	executor := NewExecutor(client).WithSalt(salt).WithOutputFormat(m.format).
-		WithWindow(m.from, m.to)
+		WithWindow(m.from, m.to).WithMode(m.mode)
 	finalOutputDir, err := executor.ExecuteQueries(selectedQueries, outputDir)
 	if err != nil {
 		return "", fmt.Errorf("error executing queries: %w", err)

@@ -168,8 +168,8 @@ func (c *TextLogCollector) buildSQL(opts TextLogOpts, serverVersion internal.Ver
     source_line,
     query_id
 FROM %s
-WHERE event_time >= '%s'
-  AND event_time <= '%s'
+WHERE event_time >= toDateTime('%s', 'UTC')
+  AND event_time <= toDateTime('%s', 'UTC')
 %sORDER BY event_time_microseconds ASC
 LIMIT %d
 FORMAT %s`,

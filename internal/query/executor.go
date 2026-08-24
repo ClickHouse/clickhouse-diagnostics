@@ -26,6 +26,16 @@ type Executor struct {
 	// non-zero. Zero means "each query keeps the window it declares".
 	from time.Time
 	to   time.Time
+	// mode feeds {sys.<table>} expansion (cloud wraps per-replica tables
+	// in clusterAllReplicas). Empty leaves such placeholders unexpanded,
+	// which the unbound check below then refuses.
+	mode string
+}
+
+// WithMode sets the topology mode used for {sys.<table>} expansion.
+func (e *Executor) WithMode(mode string) *Executor {
+	e.mode = mode
+	return e
 }
 
 // WithWindow overrides the time window of every query that declares one.
@@ -127,6 +137,7 @@ func (e *Executor) executeQuery(query internal.QueryFile, outputDir, timestamp s
 	// Salt format is validated upstream (alphanumeric only), so it cannot
 	// break out of the SQL string literal.
 	sqlText := Apply(string(queryContent), Vars{
+		Mode:    e.mode,
 		From:    e.from,
 		To:      e.to,
 		GovSalt: e.salt,

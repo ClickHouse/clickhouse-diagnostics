@@ -15,6 +15,7 @@
 package logfiles
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -162,10 +163,15 @@ func LogPathsFromConfig(configDir string) []string {
 		return nil
 	}
 	var candidates []string
-	// config.d/ typically sits beside config.xml; check both.
 	candidates = append(candidates, configDir)
-	if parent := filepath.Dir(filepath.Clean(configDir)); parent != "." {
-		candidates = append(candidates, parent)
+	// config.d/ sits beside config.xml, so the parent is worth scanning —
+	// but ONLY for a *.d directory. For "-config-dir /etc/clickhouse-server"
+	// the parent is /etc, and any unrelated /etc/*.xml with a <log> element
+	// would volunteer a directory whose files then land in the bundle.
+	if base := filepath.Base(filepath.Clean(configDir)); strings.HasSuffix(base, ".d") {
+		if parent := filepath.Dir(filepath.Clean(configDir)); parent != "." {
+			candidates = append(candidates, parent)
+		}
 	}
 
 	seen := map[string]bool{}
@@ -240,7 +246,11 @@ func uniqueName(dir, name string) string {
 // recent lines; a header records that data was dropped so nobody reads the
 // first surviving line as the start of the log.
 func copyTail(src, dst string, max int64) (written int64, truncated bool, err error) {
-	in, err := os.Open(src)
+	// O_NOFOLLOW (unix) closes the race left by the directory-scan check:
+	// the same threat model that motivated refusing symlinks — a log dir
+	// writable by the service account, the tool running as root — permits
+	// swapping a symlink in between the scan and this open.
+	in, err := openNoFollow(src)
 	if err != nil {
 		return 0, false, err
 	}
@@ -250,31 +260,57 @@ func copyTail(src, dst string, max int64) (written int64, truncated bool, err er
 	if err != nil {
 		return 0, false, err
 	}
+	// fstat on the open fd — unraceable. Catches a FIFO, device or
+	// directory swapped in; a symlink is already refused by openNoFollow.
+	// A HARDLINK to a sensitive file is a regular file and passes both
+	// checks — Linux fs.protected_hardlinks=1 (the default) prevents an
+	// unprivileged user creating one, but that is a default, not a
+	// guarantee this code can provide.
+	if !fi.Mode().IsRegular() {
+		return 0, false, fmt.Errorf("%s: not a regular file", src)
+	}
 
 	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
 	if err != nil {
 		return 0, false, err
 	}
-	defer out.Close()
+	defer func() {
+		if cerr := out.Close(); err == nil {
+			err = cerr
+		}
+		// A half-written file would be archived while appearing in neither
+		// Copied nor TotalBytes; remove it so failure is visible as absence
+		// plus a note, not as a silently short log.
+		if err != nil {
+			os.Remove(dst)
+		}
+	}()
 
+	// Copy a SNAPSHOT: limit to the size we measured, so an actively
+	// written log cannot push the copy past the cap (or past what the
+	// truncation header claims).
+	limit := fi.Size()
 	if fi.Size() > max {
 		truncated = true
-		if _, err := in.Seek(fi.Size()-max, io.SeekStart); err != nil {
+		start := fi.Size() - max
+		if _, err := in.Seek(start, io.SeekStart); err != nil {
 			return 0, true, err
 		}
 		// Drop the partial first line BEFORE writing the header, so the
-		// header can state the exact number of payload bytes kept rather
+		// header states the exact number of payload bytes kept rather
 		// than the nominal cap (the alignment shaves up to one line off).
-		if err := discardPartialLine(in); err != nil {
-			return 0, true, err
-		}
-		pos, err := in.Seek(0, io.SeekCurrent)
+		skip, err := lengthToNewline(in)
 		if err != nil {
 			return 0, true, err
 		}
+		// lengthToNewline read ahead; reposition to the line boundary.
+		if _, err := in.Seek(start+skip, io.SeekStart); err != nil {
+			return 0, true, err
+		}
+		limit = fi.Size() - (start + skip)
 		header := fmt.Sprintf(
 			"### support-diagnostic: TRUNCATED — original %d bytes, kept last %d bytes (tail) ###\n",
-			fi.Size(), fi.Size()-pos)
+			fi.Size(), limit)
 		hn, err := out.WriteString(header)
 		if err != nil {
 			return 0, true, err
@@ -284,22 +320,32 @@ func copyTail(src, dst string, max int64) (written int64, truncated bool, err er
 
 	// written includes the truncation header: it reports bytes produced in
 	// the bundle (what Result.TotalBytes sums), not bytes read from src.
-	n, err := io.Copy(out, in)
+	n, err := io.Copy(out, io.LimitReader(in, limit))
 	return written + n, truncated, err
 }
 
-func discardPartialLine(f *os.File) error {
-	buf := make([]byte, 1)
-	for i := 0; i < 64<<10; i++ { // bounded: don't scan forever on a binary file
+// lengthToNewline returns how many bytes lie between the current position
+// and the end of the current line (newline included), scanning at most
+// 64 KiB in buffered chunks. If no newline appears within the bound (a
+// binary or single-line file), the whole bound is skipped. The caller must
+// re-Seek afterwards: reads here advance the fd past the answer.
+func lengthToNewline(f *os.File) (int64, error) {
+	const bound = 64 << 10
+	buf := make([]byte, 8<<10)
+	var consumed int64
+	for consumed < bound {
 		n, err := f.Read(buf)
-		if err != nil || n == 0 {
-			return nil // EOF is fine — nothing left to align
+		if n > 0 {
+			if i := bytes.IndexByte(buf[:n], '\n'); i >= 0 {
+				return consumed + int64(i) + 1, nil
+			}
+			consumed += int64(n)
 		}
-		if buf[0] == '\n' {
-			return nil
+		if err != nil {
+			return consumed, nil // EOF: nothing left to align
 		}
 	}
-	return nil
+	return bound, nil
 }
 
 // Summary renders a short operator-facing report.

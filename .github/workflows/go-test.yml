@@ -1,0 +1,45 @@
+# Runs the Go test suite on every push and pull request.
+#
+# Until this workflow existed, `go test` had never run in CI: the repo's
+# guards (gov PII leak checks, version-ladder monotonicity, window pinning,
+# collector mode gating, …) only ran on whichever machine happened to run
+# them locally. The tests ARE the review contract for this repo — this
+# makes them gate merges.
+name: Go tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: gofmt
+        run: |
+          out=$(gofmt -l ./cmd ./internal ./pkg)
+          if [ -n "$out" ]; then
+            echo "gofmt needed on:" && echo "$out" && exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test ./...
+
+      - name: go build (all platforms we release)
+        run: |
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64; do
+            GOOS=${target%/*} GOARCH=${target#*/} go build ./... || exit 1
+          done

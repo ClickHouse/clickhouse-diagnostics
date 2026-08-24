@@ -251,3 +251,36 @@ func TestTruncationHeaderIsExact(t *testing.T) {
 			res.TotalBytes, len(out))
 	}
 }
+
+// TestConfigParentScanOnlyForDotD pins review finding #8: with
+// -config-dir /etc/clickhouse-server the parent is /etc, and any unrelated
+// /etc/*.xml carrying a <log> element would volunteer a directory whose
+// files then land in the bundle. The parent is only scanned when the given
+// directory is a *.d overlay (which legitimately sits beside config.xml).
+func TestConfigParentScanOnlyForDotD(t *testing.T) {
+	parent := t.TempDir()
+	confDir := filepath.Join(parent, "clickhouse-server")
+	write(t, filepath.Join(confDir, "config.xml"), "<clickhouse><logger><log>/data/ch/a.log</log></logger></clickhouse>")
+	// An unrelated file in the PARENT (think /etc/foo.xml) with a log path.
+	write(t, filepath.Join(parent, "unrelated.xml"), "<clickhouse><logger><log>/tmp/stolen.log</log></logger></clickhouse>")
+
+	got := LogPathsFromConfig(confDir)
+	for _, p := range got {
+		if p == "/tmp/stolen.log" {
+			t.Fatalf("parent of a non-.d config dir was scanned: %v", got)
+		}
+	}
+	if len(got) != 1 || got[0] != "/data/ch/a.log" {
+		t.Errorf("expected only the config dir's own path, got %v", got)
+	}
+
+	// But for a config.d directory, the parent (which holds config.xml)
+	// must still be scanned — that is where the main log path usually is.
+	confD := filepath.Join(confDir, "config.d")
+	write(t, filepath.Join(confD, "override.xml"), "<clickhouse><logger><log>/data/ch/b.log</log></logger></clickhouse>")
+	got = LogPathsFromConfig(confD)
+	want := map[string]bool{"/data/ch/a.log": true, "/data/ch/b.log": true}
+	if len(got) != 2 || !want[got[0]] || !want[got[1]] {
+		t.Errorf("config.d must scan its parent too, got %v", got)
+	}
+}

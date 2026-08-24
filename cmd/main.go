@@ -248,18 +248,29 @@ func main() {
 		return
 	}
 
-	// Say why the two local collectors are off, so their absence from the
-	// bundle reads as a deliberate choice rather than a silent failure.
-	// resolveLocalCollector already made the decision; this only reports it.
-	if skipHostInfo && skipLogs && !dryRun {
-		switch mode {
-		case "gov":
-			fmt.Println("Gov mode: not collecting host facts or server log files " +
-				"(hostnames, mount paths, process command lines and log bodies cannot be hashed).")
-		case "cloud":
-			fmt.Println("Cloud mode: not collecting host facts or server log files — they would " +
-				"describe this machine, not the managed service. Pass --host-info=on / --logs=on " +
-				"to override when running on a self-managed node.")
+	// Say why a local collector is off, so its absence from the bundle
+	// reads as a deliberate choice rather than a silent failure.
+	// resolveLocalCollector already made the decision; this only reports
+	// it — per collector, since one can be off while the other runs.
+	if !dryRun {
+		var off []string
+		if skipHostInfo {
+			off = append(off, "host facts")
+		}
+		if skipLogs {
+			off = append(off, "server log files")
+		}
+		if len(off) > 0 {
+			what := strings.Join(off, " or ")
+			switch mode {
+			case "gov":
+				fmt.Printf("Gov mode: not collecting %s "+
+					"(hostnames, mount paths, process command lines and log bodies cannot be hashed).\n", what)
+			case "cloud":
+				fmt.Printf("Cloud mode: not collecting %s — they would describe this machine, "+
+					"not the managed service. Pass --host-info=on / --logs=on to override "+
+					"when running on a self-managed node.\n", what)
+			}
 		}
 	}
 
@@ -332,7 +343,7 @@ func main() {
 
 	// Find and execute queries - get the specific folder path
 	queryManager := query.NewManager().WithOutputFormat(outputFormat).
-		WithWindow(collectFrom, collectTo)
+		WithWindow(collectFrom, collectTo).WithMode(mode)
 	finalOutputDir, err := queryManager.ExecuteQueries(client, queriesDir, serverVersion, outputDir, govSalt)
 	if err != nil {
 		fmt.Printf("Error executing queries: %v\n", err)
@@ -342,22 +353,13 @@ func main() {
 	// Time-bounded system.text_log slice (opt-in, --from/--to required).
 	// Runs before the dry-run summary so --dry-run previews the SQL.
 	if collectTextLog {
+		// collectFrom/collectTo were parsed and validated with the other
+		// flags, and --collect-text-log has already insisted both are set.
 		tlOpts := query.TextLogOpts{
-			From:     analysisOpts.From,
-			To:       analysisOpts.To,
+			From:     collectFrom,
+			To:       collectTo,
 			Level:    textLogLevel,
 			RowLimit: textLogLimit,
-		}
-		// analysisOpts only carries a window when query analysis is active;
-		// otherwise parse the flags directly.
-		if tlOpts.From.IsZero() || tlOpts.To.IsZero() {
-			f, ferr := query.ParseTimeFlag(fromStr)
-			t, terr := query.ParseTimeFlag(toStr)
-			if ferr != nil || terr != nil {
-				fmt.Printf("Error parsing --from/--to: %v %v\n", ferr, terr)
-				return
-			}
-			tlOpts.From, tlOpts.To = f, t
 		}
 		tlColl := query.NewTextLogCollector(client, mode).WithOutputFormat(outputFormat)
 		path, err := tlColl.Collect(tlOpts, finalOutputDir, serverVersion)
@@ -457,7 +459,7 @@ func main() {
 	// Generate HTML dashboard if not skipped.
 	//
 	// Not produced in gov mode: dashboard.html lands in the same archive as
-	// the hashed .native files, but its queries are built in Go and select
+	// the hashed result files, but its queries are built in Go and select
 	// raw identifiers (database/table names for up to 2000 tables, disk
 	// paths, users, plus server-generated text like last_exception and
 	// last_error_message) — the very values the queries.gov/*.sql files

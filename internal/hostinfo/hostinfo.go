@@ -19,10 +19,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // Report is the whole collected picture, written as host_info.json.
@@ -315,6 +317,18 @@ func collectProcesses() ([]Process, error) {
 		if cmd := readCmdline(filepath.Join(procDir, e.Name(), "cmdline")); cmd != "" {
 			p.Command = cmd
 		}
+		// Full command lines are kept only for ClickHouse's own binaries.
+		// Everything else is reduced to argv[0]: these are OTHER PEOPLE'S
+		// processes, argv routinely carries secrets (--password=…, tokens),
+		// and the bundle is shared with support. ClickHouse argv is kept
+		// (it is what we are diagnosing) but redacted just in case.
+		if !strings.Contains(p.Command, "clickhouse") {
+			if i := strings.IndexByte(p.Command, ' '); i > 0 {
+				p.Command = p.Command[:i]
+			}
+		} else {
+			p.Command = redactArgs(p.Command)
+		}
 		procs = append(procs, p)
 	}
 	sort.Slice(procs, func(i, j int) bool { return procs[i].RSSBytes > procs[j].RSSBytes })
@@ -329,13 +343,13 @@ func collectProcesses() ([]Process, error) {
 // parentheses, so fields cannot simply be split on whitespace. Anchor on
 // the LAST ')' instead.
 func parseProcStat(raw string, pid int, pageSize int64) (Process, bool) {
-	close := strings.LastIndex(raw, ")")
-	open := strings.Index(raw, "(")
-	if close < 0 || open < 0 || close < open {
+	closeIdx := strings.LastIndex(raw, ")")
+	openIdx := strings.Index(raw, "(")
+	if closeIdx < 0 || openIdx < 0 || closeIdx < openIdx {
 		return Process{}, false
 	}
-	comm := raw[open+1 : close]
-	rest := strings.Fields(raw[close+1:])
+	comm := raw[openIdx+1 : closeIdx]
+	rest := strings.Fields(raw[closeIdx+1:])
 	// rest[0]=state rest[1]=ppid … rest[17]=num_threads rest[21]=rss(pages)
 	if len(rest) < 22 {
 		return Process{}, false
@@ -363,22 +377,19 @@ func collectTunables(procs []Process) Tunables {
 		FsNrOpen:             trimmed(readFile("/proc/sys/fs/nr_open")),
 		FsFileMax:            trimmed(readFile("/proc/sys/fs/file-max")),
 	}
-	// cgroup v2 first, then v1 — a containerised ClickHouse is limited by
-	// these, not by MemTotal, which is the usual source of "why did it OOM
-	// at 8 GB when the box has 64".
-	t.CgroupMemoryLimit = firstNonEmpty(
-		trimmed(readFile("/sys/fs/cgroup/memory.max")),
-		trimmed(readFile("/sys/fs/cgroup/memory/memory.limit_in_bytes")))
-	t.CgroupCPUMax = firstNonEmpty(
-		trimmed(readFile("/sys/fs/cgroup/cpu.max")),
-		trimmed(readFile("/sys/fs/cgroup/cpu/cpu.cfs_quota_us")))
-
 	// Per-process limits for the running server: the global fs.nr_open is
 	// often fine while the unit's own LimitNOFILE is the binding constraint.
+	// Matching is strict — clickhouse-server or "clickhouse server", never
+	// this diagnostic tool (its own name contains "clickhouse"), keeper or
+	// a client. Getting this wrong reports the limits of the wrong process
+	// with nothing in the JSON to say so.
+	serverPID := 0
+	selfPID := os.Getpid()
 	for _, p := range procs {
-		if !strings.Contains(p.Command, "clickhouse") {
+		if !isClickHouseServer(p, selfPID) {
 			continue
 		}
+		serverPID = p.PID
 		t.ClickHouseProcessName = p.Command
 		limits := readFile(filepath.Join(procDir, strconv.Itoa(p.PID), "limits"))
 		for _, line := range strings.Split(limits, "\n") {
@@ -395,7 +406,67 @@ func collectTunables(procs []Process) Tunables {
 		}
 		break
 	}
+
+	// Cgroup limits for the SERVER's cgroup, resolved via /proc/<pid>/cgroup.
+	// Reading the cgroupfs root only works inside a container namespace; on a
+	// systemd-managed host — exactly where -host-info defaults to on — the
+	// root has no memory.max and a MemoryMax= on clickhouse-server.service
+	// would never show up, which is the headline case for this field.
+	t.CgroupMemoryLimit, t.CgroupCPUMax = cgroupLimits(serverPID)
 	return t
+}
+
+// cgroupLimits resolves the memory and CPU limits binding on pid's cgroup,
+// walking UP the v2 hierarchy to the first ancestor that sets one (a limit
+// anywhere up the tree binds the leaf). pid 0, an unreadable tree, or a
+// non-Linux host all degrade to the container-root fallback, then to "".
+func cgroupLimits(pid int) (mem, cpu string) {
+	if pid != 0 {
+		for _, line := range strings.Split(readFile(filepath.Join(procDir, strconv.Itoa(pid), "cgroup")), "\n") {
+			// v2: "0::<path>"
+			if rest, ok := strings.CutPrefix(line, "0::"); ok {
+				for p := strings.TrimPrefix(rest, "/"); ; p = filepath.Dir(p) {
+					dir := filepath.Join("/sys/fs/cgroup", p)
+					if mem == "" {
+						if v := trimmed(readFile(filepath.Join(dir, "memory.max"))); v != "" && v != "max" {
+							mem = v
+						}
+					}
+					if cpu == "" {
+						if v := trimmed(readFile(filepath.Join(dir, "cpu.max"))); v != "" && !strings.HasPrefix(v, "max") {
+							cpu = v
+						}
+					}
+					if p == "." || p == "/" || p == "" {
+						break
+					}
+				}
+			}
+			// v1: "<n>:memory:<path>" / "<n>:cpu,cpuacct:<path>"
+			if f := strings.SplitN(line, ":", 3); len(f) == 3 {
+				ctrl, path := f[1], f[2]
+				if strings.Contains(ctrl, "memory") && mem == "" {
+					mem = trimmed(readFile(filepath.Join("/sys/fs/cgroup/memory", path, "memory.limit_in_bytes")))
+				}
+				if strings.Contains(ctrl, "cpu") && !strings.Contains(ctrl, "cpuset") && cpu == "" {
+					cpu = trimmed(readFile(filepath.Join("/sys/fs/cgroup/cpu", path, "cpu.cfs_quota_us")))
+				}
+			}
+		}
+	}
+	// Fallback: the cgroupfs root — correct inside a container namespace,
+	// where the "root" is the container's own limit.
+	if mem == "" {
+		mem = firstNonEmpty(
+			trimmed(readFile("/sys/fs/cgroup/memory.max")),
+			trimmed(readFile("/sys/fs/cgroup/memory/memory.limit_in_bytes")))
+	}
+	if cpu == "" {
+		cpu = firstNonEmpty(
+			trimmed(readFile("/sys/fs/cgroup/cpu.max")),
+			trimmed(readFile("/sys/fs/cgroup/cpu/cpu.cfs_quota_us")))
+	}
+	return mem, cpu
 }
 
 // ── small helpers ────────────────────────────────────────────────────────
@@ -418,9 +489,57 @@ func readCmdline(path string) string {
 	cmd := strings.Join(parts, " ")
 	const max = 300
 	if len(cmd) > max {
-		cmd = cmd[:max] + "…"
+		cut := max
+		// Do not slice mid-rune: encoding/json would replace the torn
+		// UTF-8 sequence with U+FFFD.
+		for cut > 0 && !utf8.RuneStart(cmd[cut]) {
+			cut--
+		}
+		cmd = cmd[:cut] + "…"
 	}
 	return cmd
+}
+
+// reSecretArg matches an argv token whose NAME suggests a secret. The value
+// part (after =) is replaced; for the separated form ("--password s3cret")
+// redactArgs also blanks the FOLLOWING token.
+var reSecretArg = regexp.MustCompile(`(?i)^--?[^=]*(password|secret|token|credential|access[-_]?key|api[-_]?key)[^=]*`)
+
+// redactArgs strips likely secrets from a command line before it is stored
+// in the bundle.
+func redactArgs(cmd string) string {
+	parts := strings.Split(cmd, " ")
+	for i, a := range parts {
+		if !reSecretArg.MatchString(a) {
+			continue
+		}
+		if eq := strings.IndexByte(a, '='); eq >= 0 {
+			parts[i] = a[:eq+1] + "[redacted]"
+		} else if i+1 < len(parts) {
+			parts[i+1] = "[redacted]"
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+// isClickHouseServer reports whether p is the ClickHouse SERVER process —
+// not this diagnostic tool (whose own name contains "clickhouse"), not
+// clickhouse-keeper, not a stray clickhouse-client. Both launch styles are
+// recognised: the dedicated clickhouse-server binary and the multi-tool
+// form "clickhouse server".
+func isClickHouseServer(p Process, selfPID int) bool {
+	if p.PID == selfPID {
+		return false
+	}
+	f := strings.Fields(p.Command)
+	if len(f) == 0 {
+		return false
+	}
+	base := filepath.Base(f[0])
+	if strings.HasPrefix(base, "clickhouse-server") {
+		return true
+	}
+	return base == "clickhouse" && len(f) > 1 && f[1] == "server"
 }
 
 func parseKeyValueFile(path, sep string) map[string]string {
