@@ -189,11 +189,9 @@ func main() {
 	}
 	fmt.Printf("Using query mode: %s (queries from: %s)\n", mode, queriesDir)
 
-	// Collect configuration files if not skipped
-	if !skipConfig {
-		configCollector := config.NewCollector()
-		configCollector.Collect(configDir, false)
-	}
+	// Configuration files are collected further down, alongside the other
+	// on-disk collectors, because they are written into the run's results
+	// directory and that does not exist until ExecuteQueries creates it.
 
 	// Create ClickHouse client
 	client := pkg.NewClickHouseClient(protocol, host, port, username, password)
@@ -435,6 +433,20 @@ func main() {
 			fmt.Printf("Warning: log collection failed: %v\n", err)
 		} else {
 			fmt.Print(res.Summary())
+		}
+	}
+
+	// ClickHouse configuration files from disk. Written under the run
+	// directory so the archive only ever contains configs from this host
+	// and this run.
+	if !skipConfig {
+		configDest := filepath.Join(finalOutputDir, "configuration")
+		if err := config.NewCollector().Collect(configDir, configDest, false); err != nil {
+			// Reading /etc/clickhouse-server/config.d/ usually needs root or
+			// the clickhouse group, so an unprivileged run fails here. Warn
+			// rather than fail the run — the query results are still worth
+			// having — but never leave it silent.
+			fmt.Printf("Warning: configuration collection failed: %v\n", err)
 		}
 	}
 
@@ -734,8 +746,9 @@ func createArchiveWithTimestamp(specificDir string) error {
 		archiveName += ".tar.gz"
 	}
 
-	// Create the archive with the specific results directory and configuration
-	return internal.CreateArchive(archiveName, specificDir, "./configuration")
+	// One directory: configuration/ now lives inside the run directory
+	// along with every other artefact, so there is nothing else to add.
+	return internal.CreateArchive(archiveName, specificDir)
 }
 
 // resolveLocalCollector decides whether to run one of the two collectors

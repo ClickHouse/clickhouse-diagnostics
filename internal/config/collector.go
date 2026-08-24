@@ -20,8 +20,15 @@ func NewCollector() *Collector {
 	}
 }
 
-// Collect collects configuration files from the specified directory
-func (c *Collector) Collect(configDir string, keepPasswords bool) error {
+// Collect collects configuration files from configDir into destDir.
+//
+// destDir is supplied by the caller rather than fixed here so that
+// configs land inside the run's own results directory, like every other
+// artefact the tool produces. A process-wide directory would persist
+// between runs, and since files are written by name, a second run
+// against a different host would archive whatever the first run left
+// behind — under the second run's timestamp, with nothing to flag it.
+func (c *Collector) Collect(configDir, destDir string, keepPasswords bool) error {
 	fmt.Printf("Collecting configuration files from '%s'...\n", configDir)
 
 	// Check if the source directory exists
@@ -32,7 +39,6 @@ func (c *Collector) Collect(configDir string, keepPasswords bool) error {
 	}
 
 	// Create the destination directory
-	destDir := "./configuration"
 	if err := os.MkdirAll(destDir, 0750); err != nil {
 		return fmt.Errorf("error creating configuration directory: %w", err)
 	}
@@ -85,13 +91,25 @@ func (c *Collector) Collect(configDir string, keepPasswords bool) error {
 			sanitizedContent = content
 		}
 
-		// Get the base filename
-		fileName := filepath.Base(path)
-		destPath := filepath.Join(destDir, fileName)
+		// Mirror the tree below configDir rather than flattening to the
+		// base name. config.d/storage.xml and users.d/storage.xml are both
+		// ordinary names; flattening silently overwrites one with the
+		// other, and drops the directory each came from — which is what
+		// determines ClickHouse's config merge order.
+		relPath, err := filepath.Rel(configDir, path)
+		if err != nil {
+			fmt.Printf("Error resolving path for '%s': %v\n", path, err)
+			return nil
+		}
+		destPath := filepath.Join(destDir, relPath)
+		if err := os.MkdirAll(filepath.Dir(destPath), 0750); err != nil {
+			fmt.Printf("Error creating directory for '%s': %v\n", relPath, err)
+			return nil
+		}
 
 		// Write the file to the destination
 		if err := os.WriteFile(destPath, sanitizedContent, 0600); err != nil {
-			fmt.Printf("Error saving config file '%s': %v\n", fileName, err)
+			fmt.Printf("Error saving config file '%s': %v\n", relPath, err)
 			return nil
 		}
 
