@@ -76,3 +76,19 @@ func TestResolveLocalCollector_GovNeverCollects(t *testing.T) {
 		}
 	}
 }
+
+// TestGovWithholdsConfig: configuration files embed raw hostnames
+// (macros, remote_servers, zookeeper), so gov must never collect them —
+// under any casing of the mode, the lesson of the -mode GOV bypass.
+func TestGovWithholdsConfig(t *testing.T) {
+	for _, mode := range []string{"gov", "GOV", " Gov ", "gOV"} {
+		if !govWithholdsConfig(mode) {
+			t.Errorf("govWithholdsConfig(%q) = false; gov must never collect configs", mode)
+		}
+	}
+	for _, mode := range []string{"onprem", "cloud", "ONPREM", ""} {
+		if govWithholdsConfig(mode) {
+			t.Errorf("govWithholdsConfig(%q) = true; only gov withholds configs", mode)
+		}
+	}
+}

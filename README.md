@@ -406,6 +406,7 @@ Several outputs are deliberately withheld in gov mode, because each is part of t
 |---|---|
 | `dashboard.html` | Its panels are built in Go and select raw identifiers — database/table names for up to 2000 tables, disk paths, users — plus server-generated text (`last_exception`, `last_error_message`). Hashing every panel is the follow-up that would restore it. |
 | Query analysis (`--query-id` / `--normalized-query-hash`) | The bundle embeds raw query text, exception messages and full DDL. Freeform SQL text can't be hashed without destroying its diagnostic value, so the flags are rejected outright. |
+| **Configuration files** (`configuration/`) | The XML embeds raw hostnames — `<macros>` shard/replica names, `<remote_servers>`, `<zookeeper>` hosts. Sanitisation strips credentials, not identifiers, and an XML tree can't be hashed while remaining mergeable. |
 | **Host facts** (`host_info.json`) | Hostname, mount paths and process command lines are exactly the identifiers gov hashing protects — and a command line can't be hashed while staying useful. |
 | **Server log files** (`logs/`) | Log lines carry raw queries, table names and paths as free text. Hashing a log destroys the reason to collect it. |
 | **`--collect-text-log`** | Same reasoning as the log files: `system.text_log` messages embed raw SQL and identifiers. The flag is rejected in gov mode. |
@@ -785,9 +786,9 @@ A sticky top nav at the page header lets you jump straight to any section. Secti
 
 ## Configuration Collection
 
-When `-skip-config` is not set, the tool reads files from `-config-dir` (default `/etc/clickhouse-server/config.d/`) and writes sanitised copies into `./configuration/`.
+When `-skip-config` is not set, the tool reads files from `-config-dir` (default `/etc/clickhouse-server/config.d/`) and writes sanitised copies into the run's `configuration/` directory (inside `clickhouse_backup_<timestamp>/`), mirroring the source tree — `config.d/storage.xml` and `users.d/storage.xml` stay distinct, and the directory a file came from (which determines ClickHouse's merge order) is preserved.
 
-Sanitisation runs in two layers — proper XML / YAML parsing first, then a heuristic byte-pattern pass over the result. If a file cannot be parsed, the tool **fails closed**: a warning is logged and the file is skipped from `./configuration/` rather than shipped un-sanitised.
+Sanitisation runs in two layers — proper XML / YAML parsing first, then a heuristic byte-pattern pass over the result. If a file cannot be parsed, the tool **fails closed**: a warning is logged and the file is skipped rather than shipped un-sanitised.
 
 ### What gets sanitised
 
@@ -817,7 +818,7 @@ Sanitisation runs in two layers — proper XML / YAML parsing first, then a heur
 - Non-security configuration
 - Prose mentioning credential keywords without an actual value (e.g. `password requirements are documented elsewhere`)
 
-The heuristic intentionally favours over-redaction over under-redaction — a stray flagged hash in the output is harmless, a leaked credential is not. Always review the contents of `./configuration/` before sharing the archive.
+The heuristic intentionally favours over-redaction over under-redaction — a stray flagged hash in the output is harmless, a leaked credential is not. Always review the contents of the run's `configuration/` directory before sharing the archive.
 
 ## Output Layout
 
@@ -829,18 +830,20 @@ clickhouse_results/
 │   ├── system.parts_YYYYMMDD_HHMMSS.jsonl                   #   one file per query
 │   ├── system.mutations_YYYYMMDD_HHMMSS.jsonl
 │   ├── ...
+│   ├── configuration/                                       #   sanitised configs, tree preserved (unless -skip-config; never in gov)
+│   │   ├── config.xml
+│   │   ├── config.d/…
+│   │   └── users.d/…
 │   ├── query_analysis/                                      #   only with --query-id / --hash
 │   ├── dashboard.html                                       #   unless -skip-dashboard or gov
 │   └── alerts_summary.json                                  #   when alerts ran but dashboard.html is absent
 └── clickhouse_backup_YYYYMMDD_HHMMSS_gov_name_mapping.csv   # → LOCAL only (gov mode)
-configuration/                                               # → archived (unless -skip-config)
-└── *.xml                                                    #   sanitised configs
 clickhouse_backup_YYYYMMDD_HHMMSS.tar.gz                     # unless -skip-archive
 ```
 
 - **Query results**: one file per query, in the format chosen by [`-output-format`](#output-format) (default `jsonl`)
 - **Dashboard**: standalone `dashboard.html`, loads Chart.js from CDN
-- **Archive**: `tar.gz` containing the per-run results directory and the `configuration/` directory
+- **Archive**: `tar.gz` containing the per-run results directory — `configuration/` now lives *inside* it, tree intact, so a bundle can only ever contain this run's configs. (Before v0.3.0 it was a flat, process-wide `./configuration` beside the run directory; anything parsing bundles by that path needs updating.)
 - **Gov-mode mapping CSV** (gov mode only): sits next to the backup folder, **not inside it** — never goes into the archive. See [Gov mode and hashed names](#gov-mode-and-hashed-names).
 
 ## Troubleshooting

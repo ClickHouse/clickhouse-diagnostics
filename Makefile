@@ -44,7 +44,7 @@ clean:
 	rm -rf $(BUILD_DIR)
 	rm -rf $(DIST_DIR)
 	rm -rf clickhouse_results
-	rm -rf configuration
+	rm -rf configuration  # pre-v0.3.0 runs wrote configs here; harmless now, kept to clean old leftovers
 	rm -f *.tar.gz
 	@echo "Cleaned build artifacts"
 
