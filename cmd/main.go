@@ -140,6 +140,17 @@ func main() {
 		return
 	}
 
+	// Gov never collects configuration files: they embed raw hostnames —
+	// <macros> shard/replica names, <remote_servers>, <zookeeper> hosts —
+	// which are exactly the identifiers gov hashing protects, and an XML
+	// tree cannot be hashed while remaining mergeable or comparable.
+	// Unconditional, like the host-facts and log refusals below.
+	if govWithholdsConfig(mode) && !skipConfig {
+		skipConfig = true
+		fmt.Println("Gov mode: not collecting configuration files " +
+			"(they embed raw hostnames — macros, remote_servers, zookeeper — that cannot be hashed).")
+	}
+
 	// Resolve the two local-filesystem collectors against the run mode.
 	// Both read the machine the tool is EXECUTING on, which is only the
 	// ClickHouse server in onprem deployments — hence the mode-dependent
@@ -601,7 +612,7 @@ func getUserInput(protocol, host, port, username, password, mode, configDir *str
 	fmt.Printf("Available modes: %s\n", strings.Join(validModes, ", "))
 
 	// Get config directory if not provided and not skipping config collection
-	if *configDir == "" && !skipConfig {
+	if *configDir == "" && !skipConfig && *mode != "gov" {
 		fmt.Print("Enter ClickHouse config directory to collect [default: /etc/clickhouse-server/config.d/]: ")
 		input, _ := reader.ReadString('\n')
 		*configDir = strings.TrimSpace(input)
@@ -808,4 +819,12 @@ func describeWindow(from, to time.Time) string {
 	default:
 		return from.UTC().Format(layout) + " → " + to.UTC().Format(layout)
 	}
+}
+
+// govWithholdsConfig reports whether configuration collection must be
+// withheld for this mode. Separate and mode-normalising for the same
+// reason as resolveLocalCollector: it gates a gov privacy guarantee, and
+// "-mode GOV" once slipped a collector past a bare == "gov" comparison.
+func govWithholdsConfig(mode string) bool {
+	return strings.ToLower(strings.TrimSpace(mode)) == "gov"
 }
