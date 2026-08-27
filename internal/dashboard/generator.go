@@ -1394,13 +1394,21 @@ try{var _t=localStorage.getItem("chdiag-theme");if(_t)document.documentElement.s
 
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:var(--click-font-regular);background:var(--surface-page);color:var(--ink);font-size:var(--click-font-size-2);line-height:var(--click-line-height-1)}
-header{background:var(--header-bg);color:var(--header-ink);padding:var(--click-space-3) var(--click-space-6);display:flex;align-items:center;gap:var(--click-space-3);position:sticky;top:0;z-index:100}
+/* Header and nav stick as ONE band. They used to stick separately, with the
+   nav pinned at a hardcoded top:53px that had to equal the header's height —
+   it did not (the header measures ~74px), so once scrolled the header covered
+   the top 21px of the nav and its labels were sliced in half. A single sticky
+   wrapper removes the constant instead of re-tuning it. --topbar-h is measured
+   at runtime and drives scroll-margin and the scroll-spy, so nothing else
+   hardcodes this height either. */
+.topbar{position:sticky;top:0;z-index:100}
+header{background:var(--header-bg);color:var(--header-ink);padding:var(--click-space-3) var(--click-space-6);display:flex;align-items:center;gap:var(--click-space-3)}
 header .logo{font-size:var(--click-font-size-5);font-weight:var(--click-font-weight-4);color:var(--header-logo);letter-spacing:-.5px}
 header h1{font-size:var(--click-font-size-4);font-weight:var(--click-font-weight-3);line-height:1.3}
 header .meta{margin-left:auto;text-align:right;font-size:var(--click-font-size-1);opacity:.75;line-height:var(--click-line-height-2)}
 #theme-toggle{margin-left:var(--click-space-4);background:transparent;color:var(--header-ink);border:var(--click-border-width-1) solid rgba(255,255,255,.25);border-radius:var(--click-radii-full);padding:var(--click-space-1) var(--click-space-3);font:inherit;font-size:var(--click-font-size-1);cursor:pointer;white-space:nowrap;transition:background var(--click-transition-smooth)}
 #theme-toggle:hover{background:rgba(255,255,255,.12)}
-nav{background:var(--surface-card);border-bottom:var(--click-border-width-1) solid var(--stroke);padding:0 var(--click-space-6);display:flex;overflow-x:auto;position:sticky;top:53px;z-index:99}
+nav{background:var(--surface-card);border-bottom:var(--click-border-width-1) solid var(--stroke);padding:0 var(--click-space-6);display:flex;overflow-x:auto}
 nav a{padding:var(--click-space-3) var(--click-space-4);color:var(--ink-muted);text-decoration:none;font-size:var(--click-font-size-1);font-weight:var(--click-font-weight-2);white-space:nowrap;border-bottom:2px solid transparent;display:block}
 nav a:hover,nav a.active{color:var(--ink);border-bottom-color:var(--ink)}
 .badge{display:inline-block;padding:2px var(--click-space-2);border-radius:var(--click-radii-full);font-size:var(--click-font-size-0);font-weight:var(--click-font-weight-3);text-transform:uppercase;letter-spacing:.5px;margin-top:2px}
@@ -1408,7 +1416,7 @@ nav a:hover,nav a.active{color:var(--ink);border-bottom-color:var(--ink)}
 .badge-onprem{background:var(--status-good);color:#fff}
 .badge-gov{background:#8800CC;color:#fff}
 main{max-width:1600px;margin:0 auto;padding:var(--click-space-5) var(--click-space-5) var(--click-space-7)}
-section{margin-bottom:var(--click-space-6);scroll-margin-top:110px}
+section{margin-bottom:var(--click-space-6);scroll-margin-top:calc(var(--topbar-h, 124px) + var(--click-space-2))}
 section h2{font-size:var(--click-font-size-3);font-weight:var(--click-font-weight-3);color:var(--ink);margin-bottom:var(--click-space-3);padding-bottom:var(--click-space-2);border-bottom:var(--click-border-width-1) solid var(--stroke);display:flex;align-items:center;gap:var(--click-space-2)}
 .stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(155px,1fr));gap:var(--click-space-3);margin-bottom:var(--click-space-5)}
 .stat-card{background:var(--surface-card);border:var(--click-border-width-1) solid var(--stroke);border-radius:var(--click-radii-2);padding:var(--click-space-4);box-shadow:var(--click-shadow-5)}
@@ -1488,6 +1496,7 @@ footer{text-align:center;color:var(--ink-muted);font-size:var(--click-font-size-
 </head>
 <body>
 
+<div class="topbar">
 <header>
   <div class="logo">ClickHouse</div>
   <div>
@@ -1520,6 +1529,7 @@ footer{text-align:center;color:var(--ink-muted);font-size:var(--click-font-size-
   <a href="#sec-server-errors">Server Errors</a>
   <a href="#sec-async-inserts" id="nav-async-inserts" style="display:none">Async Inserts</a>
 </nav>
+</div><!-- .topbar -->
 
 <main>
 
@@ -2620,12 +2630,41 @@ document.addEventListener('DOMContentLoaded',function(){
   renderAlerts();
   renderQueryAnalysis();
 
+  // Publish the sticky band's real height so anchor offsets and the
+  // scroll-spy threshold follow it instead of hardcoding a guess. Re-measured
+  // on resize because the header's meta column wraps at narrow widths.
+  // Observe rather than measure once: the band's height changes AFTER this
+  // runs (hdr-meta's two lines land below, nav links for optional sections
+  // un-hide, the webfont swaps) and again whenever the viewport resizes and
+  // the header's meta column rewraps. Measuring a single time read 104px for
+  // a band that settles at ~123px, which left anchor jumps tucking each
+  // heading under the nav.
+  const topbar=document.querySelector('.topbar');
+  let topbarH=124;
+  function measureTopbar(){
+    if(!topbar) return;
+    const h=Math.round(topbar.getBoundingClientRect().height);
+    if(h && h!==topbarH){
+      topbarH=h;
+      document.documentElement.style.setProperty('--topbar-h', h+'px');
+    }
+  }
+  measureTopbar();
+  if(window.ResizeObserver){
+    new ResizeObserver(measureTopbar).observe(topbar);
+  } else {
+    window.addEventListener('resize', measureTopbar, {passive:true});
+  }
+
   // nav active highlight on scroll
   const secs=[...document.querySelectorAll('section[id]')];
   const navLinks=[...document.querySelectorAll('nav a')];
   window.addEventListener('scroll',function(){
     let cur='';
-    secs.forEach(s=>{if(s.getBoundingClientRect().top<=130)cur=s.id;});
+    // A section counts as current once its top reaches the underside of the
+    // band, so the highlight matches what the reader can actually see.
+    const line=topbarH+8;
+    secs.forEach(s=>{if(s.getBoundingClientRect().top<=line)cur=s.id;});
     navLinks.forEach(a=>{
       a.classList.toggle('active',a.getAttribute('href')==='#'+cur);
     });

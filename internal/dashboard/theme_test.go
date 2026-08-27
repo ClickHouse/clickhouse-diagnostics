@@ -146,3 +146,43 @@ func TestSampleQueryCol_GovIsRedacted(t *testing.T) {
 		t.Errorf("non-gov should sample the query text, got %q", got)
 	}
 }
+
+// Header and nav must stick as ONE band.
+//
+// They used to stick separately, with the nav pinned at a hardcoded top:53px
+// that had to equal the header's height. It did not — the header measures
+// ~74px — so once the page scrolled the header covered the top 21px of the
+// nav and its labels were sliced in half. Three separate constants were
+// guessing that same height (nav top, section scroll-margin, the scroll-spy
+// threshold); all three are now derived from one measured value.
+func TestTemplate_TopbarSticksAsOneBand(t *testing.T) {
+	if !strings.Contains(htmlTemplate, ".topbar{position:sticky;top:0;") {
+		t.Error("header and nav must be wrapped in one sticky .topbar")
+	}
+	if !strings.Contains(htmlTemplate, `<div class="topbar">`) {
+		t.Error("the .topbar wrapper is missing from the markup")
+	}
+
+	// No component may re-introduce a hardcoded offset for the band's height.
+	for _, banned := range []string{"top:53px", "top:57px", "scroll-margin-top:110px", "top<=130"} {
+		// Skip the explanatory comment, which names the old value on purpose.
+		for _, line := range strings.Split(htmlTemplate, "\n") {
+			if strings.Contains(line, banned) && !strings.Contains(line, "hardcoded") {
+				t.Errorf("hardcoded band offset %q is back: %q", banned, strings.TrimSpace(line))
+			}
+		}
+	}
+
+	// Anchor offsets and the scroll-spy both read the measured height.
+	if !strings.Contains(htmlTemplate, "scroll-margin-top:calc(var(--topbar-h") {
+		t.Error("section scroll-margin-top must derive from --topbar-h")
+	}
+	// Measured by observation, not once: the band grows after init (hdr-meta's
+	// second line, optional nav links un-hiding, webfont swap) and on resize.
+	if !strings.Contains(htmlTemplate, "new ResizeObserver(measureTopbar)") {
+		t.Error("--topbar-h must be re-measured via ResizeObserver, not set once")
+	}
+	if !strings.Contains(htmlTemplate, "const line=topbarH+8;") {
+		t.Error("the scroll-spy threshold must follow the measured band height")
+	}
+}
