@@ -1,0 +1,148 @@
+package dashboard
+
+import (
+	"strings"
+	"testing"
+)
+
+// The dashboard is themed off the Click UI token layer. These guard the
+// properties that were expensive to establish and are easy to undo by reflex.
+
+func TestTemplate_UsesClickUITokens(t *testing.T) {
+	for _, want := range []string{
+		"--click-global-color-background-default",
+		"--click-global-color-text-muted",
+		"--click-global-color-stroke-default",
+		`:root[data-cui-theme="dark"]`,
+		"prefers-color-scheme:dark",
+	} {
+		if !strings.Contains(htmlTemplate, want) {
+			t.Errorf("template lost the Click UI token layer: missing %q", want)
+		}
+	}
+}
+
+// Every hex below is a Click UI token and the five-slot order was chosen by
+// running the palette validator over candidate orderings. Editing one by hand
+// invalidates that: adjacent CVD dE 20.1 and normal-vision dE 31.3, both modes.
+// The dark tokens are declared twice (OS media query + explicit toggle stamp)
+// and have already drifted once: --link landed only in the media block, so a
+// toggled dark theme kept the unreadable light link colour.
+func TestTemplate_DarkTokenBlocksDoNotDrift(t *testing.T) {
+	if got := strings.Count(htmlTemplate, "--link:#A1BEF7"); got != 2 {
+		t.Errorf("--link dark override must appear in BOTH dark scopes (media query + data-cui-theme), found %d", got)
+	}
+}
+
+func TestTemplate_ValidatedPalette(t *testing.T) {
+	for _, hex := range []string{"#089B83", "#AA00FF", "#B28800", "#CC0099", "#959900"} {
+		if !strings.Contains(htmlTemplate, hex) {
+			t.Errorf("categorical slot %s missing — re-run validate_palette.js before changing the palette", hex)
+		}
+	}
+	// The set is deliberately mode-invariant; that is what lets a theme switch
+	// be a Chart.update() instead of a rebuild.
+	if strings.Contains(htmlTemplate, "C[i%C.length]") {
+		t.Error("palette is being cycled: a generated 6th hue is indistinguishable under CVD — fold into OTHER instead")
+	}
+	// Material leftovers from the pre-Click-UI palette.
+	for _, stale := range []string{"#4CAF50", "#2196F3", "#E91E63", "#f44336", "#FC4F05", "#FFB627", "#9C27B0"} {
+		if strings.Contains(htmlTemplate, stale) {
+			t.Errorf("non-token colour %s is back in the template", stale)
+		}
+	}
+}
+
+func TestTemplate_NoDualAxisOrPieCharts(t *testing.T) {
+	// Two y-scales on one plot align arbitrarily and invent a correlation the
+	// data does not contain.
+	if strings.Contains(htmlTemplate, "yAxisID") {
+		t.Error("a dual-axis chart is back: split it into two single-axis charts instead")
+	}
+	// Donuts cap the palette at three all-pairs-safe slots and hide close values.
+	for _, bad := range []string{"type:'doughnut'", "type:'pie'"} {
+		if strings.Contains(htmlTemplate, bad) {
+			t.Errorf("%s is back: use a bar for magnitude comparison", bad)
+		}
+	}
+}
+
+// Bar fills must be solid. The contrast leg of the palette validation assumes
+// opaque marks; an alpha fill sits lighter over the surface and can drop below
+// the 3:1 floor, and it lets the gridlines show through the data.
+func TestTemplate_BarFillsAreOpaque(t *testing.T) {
+	for _, bad := range []string{"alpha(C[0]", "alpha(C[1]", "alpha(C[2]", "alpha(STATUS."} {
+		if strings.Contains(htmlTemplate, bad) {
+			t.Errorf("translucent mark fill %q — the palette was validated on solid hexes", bad)
+		}
+	}
+}
+
+// The hash is the one thing a reader wants to copy out of these panels — it is
+// what you grep query_log with — so it must never be truncated for display.
+func TestTemplate_ShowsFullQueryHash(t *testing.T) {
+	if strings.Contains(htmlTemplate, "shortHash") {
+		t.Error("the hash is being truncated again; show the full normalized_query_hash")
+	}
+	if !strings.Contains(htmlTemplate, "function fullHash(") {
+		t.Error("fullHash helper missing")
+	}
+	// When the SQL is unknown the label must fall back to the whole hash.
+	if !strings.Contains(htmlTemplate, "return fullHash(r.hash)") {
+		t.Error("queryLabel must fall back to the full hash when sample_query is absent")
+	}
+	for _, want := range []string{"function queryLabel(", "function bindQueryPeek(", "peek-slow-queries", "peek-heavy-reads"} {
+		if !strings.Contains(htmlTemplate, want) {
+			t.Errorf("query-text affordance missing: %q", want)
+		}
+	}
+}
+
+// normalized_query_hash is a UInt64. Sent as a JSON number it would be rounded
+// past 2^53 by JavaScript and the displayed hash would silently be wrong.
+func TestQueryPanelSQL_HashIsAString(t *testing.T) {
+	for name, sql := range map[string]string{
+		"querySlowSQL":  (&Generator{mode: "onprem"}).querySlowSQL(),
+		"queryHeavySQL": (&Generator{mode: "onprem"}).queryHeavySQL(),
+	} {
+		if !strings.Contains(sql, "toString(normalized_query_hash) AS hash") {
+			t.Errorf("%s must stringify the hash or JS will round it:\n%s", name, sql)
+		}
+		if !strings.Contains(sql, "AS sample_query") {
+			t.Errorf("%s should carry a representative query text", name)
+		}
+	}
+
+	// query_heavy aggregates cost, so it must be QueryFinish-only or every
+	// QueryStart row (read_bytes=0) dilutes the averages and the ranking.
+	heavy := (&Generator{mode: "onprem"}).queryHeavySQL()
+	if !strings.Contains(heavy, "AND type = 'QueryFinish'") {
+		t.Error("queryHeavySQL must filter to QueryFinish or QueryStart rows dilute every average")
+	}
+
+	// query_slow counts errors, so exception rows must be IN its window —
+	// failures are never logged as QueryFinish (same defect class as
+	// queryByUserSQL had).
+	slow := (&Generator{mode: "onprem"}).querySlowSQL()
+	for _, want := range []string{"ExceptionWhileProcessing", "ExceptionBeforeStart",
+		"countIf(type = 'QueryFinish') AS executions"} {
+		if !strings.Contains(slow, want) {
+			t.Errorf("querySlowSQL missing %q — its errors column would be structurally always 0", want)
+		}
+	}
+	if strings.Contains(slow, "avgIf(") {
+		t.Error("querySlowSQL must use sum/greatest, not avgIf: avgIf yields nan for an all-failure shape")
+	}
+}
+
+// Gov never ships a dashboard (see cmd.dashboardDecision), but the redaction
+// stays as defence in depth: query_log.query is the raw SQL against the very
+// names queries.gov/*.sql hashes.
+func TestSampleQueryCol_GovIsRedacted(t *testing.T) {
+	if got := (&Generator{mode: "gov"}).sampleQueryCol(); !strings.HasPrefix(got, "''") {
+		t.Errorf("gov must not select raw query text, got %q", got)
+	}
+	if got := (&Generator{mode: "onprem"}).sampleQueryCol(); !strings.Contains(got, "any(query)") {
+		t.Errorf("non-gov should sample the query text, got %q", got)
+	}
+}

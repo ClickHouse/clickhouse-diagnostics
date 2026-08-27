@@ -45,12 +45,16 @@ func TestBuildHTML_SampleData(t *testing.T) {
 			{"query_kind": "Insert", "count": 3200, "avg_duration_ms": 120, "avg_memory_mb": 8.2},
 		},
 		"query_slow": []map[string]interface{}{
-			{"hash": "12345678901234", "query_kind": "Select", "user": "default", "executions": 500, "avg_duration_ms": 4200, "max_duration_ms": 18000, "avg_read_mb": 350.5, "avg_memory_mb": 128.3, "errors": 0},
-			{"hash": "98765432109876", "query_kind": "Select", "user": "analyst", "executions": 120, "avg_duration_ms": 1800, "max_duration_ms": 5200, "avg_read_mb": 820.0, "avg_memory_mb": 256.0, "errors": 2},
+			{"hash": "12345678901234567890", "query_kind": "Select", "user": "default", "executions": 500, "avg_duration_ms": 4200, "max_duration_ms": 18000, "avg_read_mb": 350.5, "avg_memory_mb": 128.3, "errors": 0,
+				"sample_query": "SELECT event_type, count() FROM production.events WHERE created_at >= now() - INTERVAL 7 DAY GROUP BY event_type ORDER BY count() DESC LIMIT 100"},
+			{"hash": "98765432109876543210", "query_kind": "Select", "user": "analyst", "executions": 120, "avg_duration_ms": 1800, "max_duration_ms": 5200, "avg_read_mb": 820.0, "avg_memory_mb": 256.0, "errors": 2,
+				"sample_query": "SELECT * FROM analytics.sessions FINAL WHERE user_id IN (SELECT user_id FROM production.events) ORDER BY started_at DESC"},
 		},
 		"query_heavy": []map[string]interface{}{
-			{"hash": "98765432109876", "query_kind": "Select", "user": "analyst", "executions": 120, "avg_read_mb": 820.0, "total_read": "98.40 GiB", "avg_duration_ms": 1800},
-			{"hash": "12345678901234", "query_kind": "Select", "user": "default", "executions": 500, "avg_read_mb": 350.5, "total_read": "175.25 GiB", "avg_duration_ms": 4200},
+			{"hash": "98765432109876543210", "query_kind": "Select", "user": "analyst", "executions": 120, "avg_read_mb": 820.0, "total_read": "98.40 GiB", "avg_duration_ms": 1800,
+				"sample_query": "SELECT * FROM analytics.sessions FINAL WHERE user_id IN (SELECT user_id FROM production.events) ORDER BY started_at DESC"},
+			// No sample_query: the label must fall back to the FULL hash, never a truncated one.
+			{"hash": "12345678901234567890", "query_kind": "Select", "user": "default", "executions": 500, "avg_read_mb": 350.5, "total_read": "175.25 GiB", "avg_duration_ms": 4200},
 		},
 		"query_by_user": []map[string]interface{}{
 			{"user": "default", "executions": 15000, "avg_duration_ms": 45, "total_read_gb": 175.25, "total_memory_gb": 12.5, "error_count": 5},
@@ -235,5 +239,55 @@ func TestDictionariesSQL_GovOmitsException(t *testing.T) {
 	sql2 := cloudGen.dictionariesSQL()
 	if !strings.Contains(sql2, "last_exception") {
 		t.Error("non-gov mode should include last_exception")
+	}
+}
+
+// Row counts must not be rendered with the byte formatter. formatReadableSize
+// turned diag_demo.events (1,992,000 rows) into the string "1.90 MiB" in both
+// the Tables Explorer and the Top Tables panel.
+func TestRowCountsUseQuantityFormatter(t *testing.T) {
+	g := &Generator{mode: "onprem"}
+	for name, sql := range map[string]string{
+		"tablesListSQL": g.tablesListSQL(),
+		"topTablesSQL":  g.topTablesSQL(),
+	} {
+		if !strings.Contains(sql, "formatReadableQuantity") {
+			t.Errorf("%s: row count must use formatReadableQuantity, got:\n%s", name, sql)
+		}
+		if strings.Contains(sql, "formatReadableSize(sum(rows))") ||
+			strings.Contains(sql, "formatReadableSize(coalesce(p.total_rows") {
+			t.Errorf("%s: row count is still formatted as bytes", name)
+		}
+	}
+}
+
+// error_count was structurally unreachable: it counted exception_code != 0
+// inside a WHERE type = 'QueryFinish' window, and a failed query is never
+// logged as QueryFinish.
+func TestQueryByUserSQL_CountsExceptionRows(t *testing.T) {
+	sql := (&Generator{mode: "onprem"}).queryByUserSQL()
+
+	for _, want := range []string{"ExceptionWhileProcessing", "ExceptionBeforeStart"} {
+		if !strings.Contains(sql, want) {
+			t.Errorf("query_by_user must include %s rows or error_count is always 0:\n%s", want, sql)
+		}
+	}
+	if strings.Contains(sql, "AND type = 'QueryFinish'") {
+		t.Error("query_by_user must not scope the whole window to QueryFinish")
+	}
+	// The cost aggregates must still be QueryFinish-only so their meaning is
+	// unchanged by widening the window.
+	for _, want := range []string{
+		"countIf(type = 'QueryFinish') AS executions",
+		"sumIf(read_bytes, type = 'QueryFinish')",
+		"sumIf(memory_usage, type = 'QueryFinish')",
+	} {
+		if !strings.Contains(sql, want) {
+			t.Errorf("query_by_user lost QueryFinish scoping on cost aggregate %q:\n%s", want, sql)
+		}
+	}
+	// avgIf over an all-failure user yields nan, which does not survive JSON.
+	if strings.Contains(sql, "avgIf(query_duration_ms") {
+		t.Error("use sum/greatest(count,1) instead of avgIf: avgIf yields nan for an all-failure user")
 	}
 }
