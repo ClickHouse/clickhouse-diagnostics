@@ -188,14 +188,12 @@ func TestFindVersionedFiles_RealRepoDirs(t *testing.T) {
 	versionOnly := map[string]bool{
 		"queries.onprem/system.asynchronous_insert_log_7_days.sql": true,
 		"queries.gov/system.asynchronous_insert_log_7_days.sql":    true,
-		// system.server_settings was added in 23.3. Unlike the
-		// asynchronous_insert_log case above, this reason applies to all
-		// three trees equally: every root file in queries.cloud still
-		// declares itself "22.8+" compatible, so cloud gets no root twin
-		// either.
+		// system.server_settings was added in 23.3, so onprem/gov (floor
+		// 22.8) have no root variant. Cloud is excluded for exactly the
+		// reason given above: its floor is 23.5, so it carries a root file
+		// and must keep failing this check if that file ever goes missing.
 		"queries.onprem/system.server_settings.sql": true,
 		"queries.gov/system.server_settings.sql":    true,
-		"queries.cloud/system.server_settings.sql":  true,
 	}
 	dirs := map[string]string{
 		"../../queries.onprem":         ".sql",
