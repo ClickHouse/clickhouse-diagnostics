@@ -456,7 +456,9 @@ The tool targets **ClickHouse 22.8 and newer** for on-prem servers. Root-level q
 | `GROUP BY ALL` syntax | 22.12 | root files use explicit key lists |
 | `dateDiff('millisecond', …)` sub-second unit | after 22.12 | async latency uses float subtraction of `*_microseconds` |
 | `system.text_log.message_format_string` | 23.1 | `queries.query_analysis/23.1.1.0/` |
+| `system.server_settings` table | 23.3 | `queries.*/23.4.1.0/` (no root file — skipped below 23.4) |
 | `system.asynchronous_insert_log.rows` | 23.4 | `queries.{onprem,gov}/23.4.1.0/` (22.10–23.3 report `bytes`) |
+| `system.settings.default` | 23.4 | `queries.*/23.4.1.0/` (roots collect `value`/`changed` only) |
 | `system.clusters` replicated-db columns (`database_shard_name`, `database_replica_name`, `is_active`, `name`) | 23.5 | `queries.*/23.5.1.0/` |
 | `system.query_log.query_cache_usage` | 23.8 | `queries.query_analysis/23.8.1.0/` |
 | `system.query_log.peak_threads_usage` | 23.9 | `queries.query_analysis/23.9.1.0/` |

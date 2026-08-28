@@ -69,6 +69,17 @@ func TestGovQueries_NoRawIdentifiersOrDDL(t *testing.T) {
 		// system.errors.name is a ClickHouse error constant (UNKNOWN_TABLE,
 		// TOO_MANY_PARTS, …), not a schema identifier.
 		"system.errors.sql": {"name": true},
+		// system.settings.name / system.server_settings.name are ClickHouse
+		// setting names (max_threads, background_pool_size, …), not customer
+		// identifiers, and hashing them would make the collector unreadable:
+		// the whole point is seeing WHICH settings deviate. The values are
+		// still hashed when String-typed.
+		//
+		// Caveat worth a reviewer's eye: a customer-defined custom setting
+		// appears here under a name they chose, so the name column is not
+		// categorically ClickHouse-controlled the way system.errors.name is.
+		"system.settings.sql":        {"name": true},
+		"system.server_settings.sql": {"name": true},
 	}
 
 	var files []string
