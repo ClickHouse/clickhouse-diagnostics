@@ -41,3 +41,11 @@ SELECT
   `move_ttl_info.min`,
   `move_ttl_info.max`
 FROM system.parts
+-- Bounded so the collector cannot dominate the run on the cluster that
+-- most needs it: a TOO_MANY_PARTS box is exactly where system.parts has
+-- exploded, and the result is fully buffered in memory before it is
+-- written. Inactive parts are dropped, the largest parts come first, and
+-- the row cap keeps the worst case to tens of MB rather than GB.
+WHERE active = 1
+ORDER BY bytes_on_disk DESC
+LIMIT 50000
