@@ -9,6 +9,18 @@ import (
 	"time"
 )
 
+// DefaultQueryTimeout bounds each query server-side. It is deliberately
+// lower than the HTTP client timeout: when the server enforces the limit
+// the query fails with a clean Code: 159 that lands in the customer's
+// query_log, whereas a client-side timeout just drops the connection and
+// leaves the server executing.
+const DefaultQueryTimeout = 240 * time.Second
+
+// clientTimeoutMargin is how much longer the HTTP client waits than the
+// server-side limit, so the server always wins the race and we get a real
+// error instead of a silent disconnect.
+const clientTimeoutMargin = 60 * time.Second
+
 // ClickHouseClient represents a ClickHouse HTTP client
 type ClickHouseClient struct {
 	protocol   string
@@ -17,6 +29,11 @@ type ClickHouseClient struct {
 	username   string
 	password   string
 	httpClient *http.Client
+
+	// queryTimeout is sent as max_execution_time on every request. Zero
+	// means no server-side limit, in which case the HTTP client is also
+	// left unbounded so the two stay consistent.
+	queryTimeout time.Duration
 
 	// Dry-run state. When dryRun is true, ExecuteQuery prints the SQL
 	// and the system tables it would touch to dryOut, then returns an
@@ -42,8 +59,25 @@ func NewClickHouseClient(protocol, host, port, username, password string) *Click
 		port:       port,
 		username:   username,
 		password:   password,
-		httpClient: &http.Client{Timeout: 5 * time.Minute},
+		httpClient: &http.Client{Timeout: DefaultQueryTimeout + clientTimeoutMargin},
+
+		queryTimeout: DefaultQueryTimeout,
 	}
+}
+
+// SetQueryTimeout sets the server-side max_execution_time and moves the
+// HTTP client timeout with it, preserving the invariant that the client
+// outlives the server limit. A zero duration disables both: the server
+// runs the query unbounded and the client waits indefinitely, which is
+// only sensible when the operator has asked for it explicitly.
+func (c *ClickHouseClient) SetQueryTimeout(d time.Duration) {
+	c.queryTimeout = d
+	if d <= 0 {
+		c.queryTimeout = 0
+		c.httpClient.Timeout = 0
+		return
+	}
+	c.httpClient.Timeout = d + clientTimeoutMargin
 }
 
 // SetDryRun enables dry-run mode. While enabled, ExecuteQuery does NOT
@@ -112,8 +146,36 @@ func (c *ClickHouseClient) executeReal(query string) (string, error) {
 	// under readonly=1, so a user profile CAN turn it off; pinning it is
 	// what makes the guarantee hold. Quoted integers are exact in every
 	// parser, and the dashboard already expects this form (parseUInt64).
-	url := fmt.Sprintf("%s://%s:%s/?readonly=1&output_format_json_quote_64bit_integers=1",
-		c.protocol, c.host, c.port)
+	//
+	// max_execution_time bounds the query on the SERVER. Without it the
+	// only bound is the HTTP client timeout, and the two have no
+	// relationship: when the client gives up, Go closes the connection and
+	// moves to the next query while the server keeps executing. On a slow
+	// cluster that accumulates abandoned queries, each still burning CPU
+	// and memory, while the collector stacks more on top.
+	//
+	// cancel_http_readonly_queries_on_client_close makes the server drop
+	// the query when we disconnect. It only takes effect under readonly>0,
+	// which is why it belongs next to readonly=1. Caveat: it does not fire
+	// over HTTPS today — on a graceful close the server's liveness peek
+	// sees the TLS close_notify bytes and concludes the peer is still
+	// there (ClickHouse/ClickHouse#96737). So it helps on plain http and
+	// max_execution_time remains the limit we actually rely on.
+	//
+	// enable_http_compression lets the server gzip the response. Go's
+	// transport already sends Accept-Encoding: gzip and decompresses
+	// transparently — but ONLY while we do not set that header ourselves.
+	// If anyone adds it by hand, transparent decompression switches off
+	// and raw gzip lands in the output files.
+	//
+	// All of these are applied by the server as one batch of setting
+	// changes alongside readonly=1, so listing readonly first does not
+	// block them (src/Server/HTTPHandler.cpp builds a single
+	// SettingsChanges and checks constraints once).
+maxExecSeconds := int64((c.queryTimeout + time.Second - 1) / time.Second) // round up to avoid truncation
+url := fmt.Sprintf("%s://%s:%s/?readonly=1&output_format_json_quote_64bit_integers=1"+
+	"&max_execution_time=%d&cancel_http_readonly_queries_on_client_close=1&enable_http_compression=1",
+	c.protocol, c.host, c.port, maxExecSeconds)
 
 	// Create the request
 	req, err := http.NewRequest("POST", url, bytes.NewBufferString(query))
