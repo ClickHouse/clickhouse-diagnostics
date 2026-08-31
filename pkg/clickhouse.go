@@ -172,9 +172,10 @@ func (c *ClickHouseClient) executeReal(query string) (string, error) {
 	// changes alongside readonly=1, so listing readonly first does not
 	// block them (src/Server/HTTPHandler.cpp builds a single
 	// SettingsChanges and checks constraints once).
-	url := fmt.Sprintf("%s://%s:%s/?readonly=1&output_format_json_quote_64bit_integers=1"+
-		"&max_execution_time=%d&cancel_http_readonly_queries_on_client_close=1&enable_http_compression=1",
-		c.protocol, c.host, c.port, int64(c.queryTimeout.Seconds()))
+maxExecSeconds := int64((c.queryTimeout + time.Second - 1) / time.Second) // round up to avoid truncation
+url := fmt.Sprintf("%s://%s:%s/?readonly=1&output_format_json_quote_64bit_integers=1"+
+	"&max_execution_time=%d&cancel_http_readonly_queries_on_client_close=1&enable_http_compression=1",
+	c.protocol, c.host, c.port, maxExecSeconds)
 
 	// Create the request
 	req, err := http.NewRequest("POST", url, bytes.NewBufferString(query))
