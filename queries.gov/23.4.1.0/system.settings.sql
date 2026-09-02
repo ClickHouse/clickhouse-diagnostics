@@ -2,19 +2,18 @@
 -- changed = 1 from a bare flag into a readable diff (value vs default).
 -- The root system.settings.sql is the 22.8-compatible variant.
 --
--- Gov: String-typed values are hashed with the run salt — see the root
--- file for why. `default` is hashed on the same rule, so a hashed value
--- and its hashed default still compare equal when unchanged.
+-- Gov: nothing here is hashed, and this file is deliberately identical
+-- to the onprem variant — see the root file for why.
+--
+-- `readonly` is deliberately not collected: it reports this session's
+-- readonly=1 (pkg/clickhouse.go:176), so it is 1 for every row on every
+-- run and would read as "a profile has locked every setting". Real
+-- per-profile constraints live in system.settings_profile_elements.
 SELECT
     name,
-    if(type = 'String' AND value != '',
-       hex(SHA256(concat(value, '%salt%'))),
-       value)                                       AS value,
-    if(type = 'String' AND `default` != '',
-       hex(SHA256(concat(`default`, '%salt%'))),
-       `default`)                                   AS `default`,
+    value,
+    `default`,
     changed,
-    readonly,
     type
 FROM system.settings
 ORDER BY name

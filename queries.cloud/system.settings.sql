@@ -6,12 +6,16 @@
 -- The effective session-level settings. Config files show what was
 -- written on disk; this shows what the server actually resolved.
 -- changed = 1 marks every setting that deviates from the default.
+--
+-- `readonly` is deliberately not collected: it reports this session's
+-- readonly=1 (pkg/clickhouse.go:176), so it is 1 for every row on every
+-- run and would read as "a profile has locked every setting". Real
+-- per-profile constraints live in system.settings_profile_elements.
 SELECT
     name,
     value,
     `default`,
     changed,
-    readonly,
     type
 FROM system.settings
 ORDER BY name

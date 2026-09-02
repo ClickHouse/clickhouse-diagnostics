@@ -72,8 +72,19 @@ func TestGovQueries_NoRawIdentifiersOrDDL(t *testing.T) {
 		// system.settings.name / system.server_settings.name are ClickHouse
 		// setting names (max_threads, background_pool_size, …), not customer
 		// identifiers, and hashing them would make the collector unreadable:
-		// the whole point is seeing WHICH settings deviate. The values are
-		// still hashed when String-typed.
+		// the whole point is seeing WHICH settings deviate.
+		//
+		// The values are not hashed either, and that is deliberate rather
+		// than an oversight. system.settings emits every value raw: a
+		// setting value is a tuning knob, and a hash of one is unreversible
+		// noise, because PrintGovNameMapping builds the mapping CSV from
+		// system.tables and so covers database and table names only.
+		// system.server_settings hashes just the values that name customer
+		// infrastructure — anything path- or URL-shaped, plus the database,
+		// replica and workload names — and leaves the rest readable. Those
+		// columns are not in mustBeHashed, so this test does not enforce
+		// that narrower rule; the SQL file's header comment is where it is
+		// written down.
 		//
 		// Caveat worth a reviewer's eye: a customer-defined custom setting
 		// appears here under a name they chose, so the name column is not

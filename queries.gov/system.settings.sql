@@ -2,18 +2,27 @@
 -- `default` and `alias_for` were added to system.settings in 23.4 — see
 -- 23.4.1.0/system.settings.sql for the variant that includes `default`.
 --
--- Gov: most settings are numeric or boolean tuning knobs and name
--- nothing, so they are kept as-is. A few carry free-form strings that
--- can name a host, URL or filesystem path
--- (format_avro_schema_registry_url is the clearest example), so
--- String-typed values are hashed with the run salt.
+-- The effective session-level settings. Config files show what was
+-- written on disk; this shows what the server actually resolved.
+-- changed = 1 marks every setting that deviates from this version's
+-- default, which is the fastest read of "what did they tune".
+--
+-- Gov: nothing here is hashed, and this file is deliberately identical
+-- to the onprem variant. A setting value is a ClickHouse tuning knob,
+-- not a customer identifier — and hashing one would be worse than
+-- useless, because the gov name mapping (internal/gov_mapping.go) is
+-- built from system.tables and covers database and table names only.
+-- Support would receive hex it has no way to decode, in place of the
+-- one thing this collector exists to show. Do not "restore" the hash.
+--
+-- `readonly` is deliberately not collected: it reports this session's
+-- readonly=1 (pkg/clickhouse.go:176), so it is 1 for every row on every
+-- run and would read as "a profile has locked every setting". Real
+-- per-profile constraints live in system.settings_profile_elements.
 SELECT
     name,
-    if(type = 'String' AND value != '',
-       hex(SHA256(concat(value, '%salt%'))),
-       value)                                       AS value,
+    value,
     changed,
-    readonly,
     type
 FROM system.settings
 ORDER BY name
