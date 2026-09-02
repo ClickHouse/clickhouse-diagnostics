@@ -260,6 +260,14 @@ Query results are written one file per query, in the format chosen by `-output-f
 | `native` | `Native` | `.native` | The ClickHouse binary format used before v0.3.0. Column-oriented, exactly typed, reloadable with no schema — but unreadable without a ClickHouse to load it into. |
 | `tsv` | `TSVWithNamesAndTypes` | `.tsv` | Names on line 1, **types on line 2**. The most faithful text format for reload, but positional, so it reads poorly for wide tables. |
 
+### Queries are bounded on the server
+
+The only bound used to be client-side: a 5-minute HTTP timeout. That timeout and the server had no relationship — when it fired, Go closed the connection and the tool moved on while the server kept executing. `cancel_http_readonly_queries_on_client_close` defaults to `0` on self-managed, so on a slow cluster you accumulate abandoned queries, each still burning CPU and memory, while the collector stacks more on top. Cloud sets it to `1`, which is why this was invisible in Cloud testing and only bit the self-managed audience the tool is mainly for.
+
+Every request now carries `max_execution_time` (default 240s, set with `-query-timeout`). The server enforces it, so a slow query fails with a clean `Code: 159` that lands in the customer's `query_log` and can be diagnosed, instead of vanishing into a silent disconnect. The HTTP client waits 60s longer than whatever `-query-timeout` says, so the server always wins the race. `-query-timeout=0` disables both.
+
+Two more settings ride along. `cancel_http_readonly_queries_on_client_close=1` tells the server to drop the query when we disconnect — it only applies under `readonly>0`, and note it does **not** fire over HTTPS today: on a graceful close the server's liveness peek sees the TLS `close_notify` bytes and concludes the peer is still there ([ClickHouse#96737](https://github.com/ClickHouse/ClickHouse/issues/96737)). It works on plain `http`, which is why `max_execution_time` is the limit to rely on. `enable_http_compression=1` lets the server gzip the response, which matters on bastion hosts over a slow link; Go's transport requests and decompresses it transparently, and will stop doing so if anyone ever sets `Accept-Encoding` by hand.
+
 ### Large integers are never rounded
 
 JSON numbers are IEEE-754 doubles in most parsers, so an unquoted `UInt64` above 2^53 is silently corrupted on read — JavaScript turns `18446744073709551615` into `18446744073709552000`, and so does any `jq` expression that does arithmetic on it. This is not hypothetical: `normalized_query_hash` and every `cityHash64` value in `system.query_log` are full-width `UInt64`.

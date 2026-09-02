@@ -63,6 +63,10 @@ func main() {
 			"JSON object per line (grep- and jq-able); native is the ClickHouse binary format; "+
 			"tsv carries names and types in its first two lines. 64-bit integers are exact in "+
 			"all three", query.OutputFormatNames()))
+	queryTimeoutFlag := flag.Duration("query-timeout", pkg.DefaultQueryTimeout,
+		"Server-side limit for each collected query (max_execution_time). The HTTP client waits 60s longer, "+
+			"so a slow query fails with a clean Code: 159 in the customer's query_log instead of a silent "+
+			"client disconnect that leaves the server still executing. 0 disables both limits.")
 	dryRunFlag := flag.Bool("dry-run", false, "List every query the tool would execute (with the system tables each touches and an EXPLAIN ESTIMATE per SELECT) and exit. Does NOT write results or create an archive. EXPLAIN ESTIMATE is a read-only metadata query — it reports the rows/marks/parts the SELECT WOULD scan without reading any data.")
 
 	// Parse command line flags
@@ -206,6 +210,15 @@ func main() {
 
 	// Create ClickHouse client
 	client := pkg.NewClickHouseClient(protocol, host, port, username, password)
+	if *queryTimeoutFlag < 0 {
+		fmt.Println("Error: -query-timeout cannot be negative (use 0 to disable the limit).")
+		return
+	}
+	client.SetQueryTimeout(*queryTimeoutFlag)
+	if *queryTimeoutFlag == 0 {
+		fmt.Println("Warning: -query-timeout=0 — queries run unbounded on the server and the client " +
+			"waits indefinitely. A slow query will stall the collection rather than fail.")
+	}
 
 	// Check ClickHouse version
 	fmt.Println("Checking ClickHouse server version...")
