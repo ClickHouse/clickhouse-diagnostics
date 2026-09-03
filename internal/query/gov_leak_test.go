@@ -69,6 +69,29 @@ func TestGovQueries_NoRawIdentifiersOrDDL(t *testing.T) {
 		// system.errors.name is a ClickHouse error constant (UNKNOWN_TABLE,
 		// TOO_MANY_PARTS, …), not a schema identifier.
 		"system.errors.sql": {"name": true},
+		// system.settings.name / system.server_settings.name are ClickHouse
+		// setting names (max_threads, background_pool_size, …), not customer
+		// identifiers, and hashing them would make the collector unreadable:
+		// the whole point is seeing WHICH settings deviate.
+		//
+		// Nothing in these two collectors is hashed — not the names, not
+		// the values — and that is deliberate rather than an oversight. A
+		// setting value is a tuning knob, and a hash of one is unreversible
+		// noise, because PrintGovNameMapping builds the mapping CSV from
+		// system.tables and so covers database and table names only.
+		// system.settings therefore emits every value raw, and
+		// system.server_settings REMOVES the handful that name customer
+		// infrastructure (anything path- or URL-shaped, plus the database,
+		// replica and workload names) rather than salting them: a removed
+		// value cannot leak and needs no key to read. That rule lives in
+		// the SQL file's header comment, not here — mustBeHashed can only
+		// express "hash it", so this test cannot enforce a removal.
+		//
+		// Caveat worth a reviewer's eye: a customer-defined custom setting
+		// appears here under a name they chose, so the name column is not
+		// categorically ClickHouse-controlled the way system.errors.name is.
+		"system.settings.sql":        {"name": true},
+		"system.server_settings.sql": {"name": true},
 	}
 
 	var files []string

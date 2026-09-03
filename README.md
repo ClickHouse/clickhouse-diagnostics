@@ -378,6 +378,8 @@ Alert queries use the same mode — see [Alerts](#alerts).
 
 In `gov` mode, every database and table name written to the support-bound output is replaced with `hex(SHA256(name + salt))`. The salt is supplied by **you** at runtime (via `-salt` or the interactive prompt) — the tool does **not** ship with a default. This is what makes the hashes meaningful: without a per-customer salt, anyone with the source could pre-compute hashes for common names like `users`, `events`, or `orders` and reverse the obfuscation.
 
+**The settings collectors hash nothing** — neither setting names nor values. A setting value is a server tuning knob rather than a customer identifier, and the mapping CSV below is built from `system.tables`, so a hashed setting value would be unreversible noise rather than protection. `system.settings` therefore emits every value as the server reports it. In `system.server_settings`, the few values that name customer infrastructure — anything path- or URL-shaped, plus `default_database`, `default_replica_name`, `interserver_http_host`, `default_profile`, `merge_workload` and `mutation_workload` — are **removed** instead of salted, replaced by `REMOVED` (the same sentinel the config sanitiser uses). The setting name, its ClickHouse default and `changed` all survive, so the archive still shows *that* a path was customised without showing what it is. On a 26.7 server that is 21 of 439 rows removed and 418 readable.
+
 **Salt requirements:**
 
 - 8–64 ASCII alphanumeric characters (`A–Z`, `a–z`, `0–9`)
@@ -464,7 +466,9 @@ The tool targets **ClickHouse 22.8 and newer** for on-prem servers. Root-level q
 | `GROUP BY ALL` syntax | 22.12 | root files use explicit key lists |
 | `dateDiff('millisecond', …)` sub-second unit | after 22.12 | async latency uses float subtraction of `*_microseconds` |
 | `system.text_log.message_format_string` | 23.1 | `queries.query_analysis/23.1.1.0/` |
+| `system.server_settings` table | 23.3 | `queries.{onprem,gov}/23.4.1.0/` (no root file — skipped below 23.4; cloud carries it at root) |
 | `system.asynchronous_insert_log.rows` | 23.4 | `queries.{onprem,gov}/23.4.1.0/` (22.10–23.3 report `bytes`) |
+| `system.settings.default` | 23.4 | `queries.{onprem,gov}/23.4.1.0/` (`default` is the only column their roots omit; the cloud root has it) |
 | `system.clusters` replicated-db columns (`database_shard_name`, `database_replica_name`, `is_active`, `name`) | 23.5 | `queries.*/23.5.1.0/` |
 | `system.query_log.query_cache_usage` | 23.8 | `queries.query_analysis/23.8.1.0/` |
 | `system.query_log.peak_threads_usage` | 23.9 | `queries.query_analysis/23.9.1.0/` |
