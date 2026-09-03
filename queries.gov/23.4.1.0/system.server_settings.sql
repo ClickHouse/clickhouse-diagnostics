@@ -8,41 +8,45 @@
 -- pools, the paths. system.settings covers the session; this covers
 -- the process, and the two answer different questions.
 --
--- Gov: setting names and the numeric tuning values are ClickHouse
--- constants with nothing to protect, so they stay readable — that is
--- the whole point of the collector. What does need protecting is the
--- handful of String values that name customer infrastructure, which is
--- the same exposure gov withholds configuration/ and host_info.json
--- for. On 26.7 the predicate below hashes 22 of 439 rows and leaves
--- the other 417 readable.
+-- Gov: nothing here is hashed — not the setting names, not the values.
+-- Names are ClickHouse constants, and a hashed value would have no
+-- decoder anywhere, because the gov name mapping
+-- (internal/gov_mapping.go) is built from system.tables and so covers
+-- database and table names only. Support would receive 64 hex
+-- characters and no way back.
+--
+-- The handful of values that name customer infrastructure are REMOVED
+-- instead, which is both safer and far easier to reason about than
+-- salting them: a removed value cannot leak and needs no key to read.
+-- 'REMOVED' is the same sentinel the config sanitizer uses for redacted
+-- credentials (internal/collection/heuristics.go). The setting name,
+-- `default` and `changed` all survive, so the archive still shows THAT
+-- a path was customised without showing what it is — which is the part
+-- a support engineer actually needs.
 --
 -- Keyed on the VALUE's shape rather than on a list of setting names,
 -- because the names follow no convention: `config-file`,
 -- `include_from`, `logger.log` and `logger.errorlog` are all
 -- filesystem paths with no "path" in the name, so a name-based
--- allowlist leaks precisely the settings nobody thought of. Any
--- absolute path or URL is hashed; the customer-chosen names that are
--- neither are listed explicitly.
+-- allowlist drops precisely the settings nobody thinks of. Any
+-- absolute path or URL goes, plus the customer-chosen names that are
+-- neither. There is no `type = 'String'` guard because none is needed:
+-- checked on 26.7, every row the shape test matches is already String
+-- (17/17), so leaving the guard off also covers a URI-typed setting
+-- without ever matching a number.
 --
--- The flag is computed in a subquery (the shape system.disks already
--- uses here) because an outer `if(… value …) AS value` that also reads
--- `default` reads as a mutual alias reference — verified to fail with
--- CYCLIC_ALIASES on 23.7. It is decided once for the row so a hashed
--- value still compares equal to its hashed default when the setting is
--- untouched, and so a path default cannot be hashed while an
--- overridden path value is emitted raw.
+-- `default` is ClickHouse's own compiled-in default, not the
+-- customer's, so it stays readable — that is what makes `changed = 1`
+-- with a REMOVED value legible at all.
 --
--- `default_database` hashes to exactly what the gov name mapping CSV
--- carries for that database (internal/gov_mapping.go uses the same
--- concat+SHA256+salt), so support can decode that one.
+-- An empty value stays empty rather than becoming REMOVED. There is
+-- nothing to remove, and 'REMOVED' would imply a path was configured
+-- where none is: interserver_http_host is unset on a stock server and
+-- reading "not configured" is the useful, harmless answer.
 SELECT
     name,
-    if(identifying AND value != '',
-       hex(SHA256(concat(value, '%salt%'))),
-       value)                                       AS value,
-    if(identifying AND `default` != '',
-       hex(SHA256(concat(`default`, '%salt%'))),
-       `default`)                                   AS `default`,
+    if(identifying AND value != '', 'REMOVED', value) AS value,
+    `default`,
     changed,
     type
 FROM (
@@ -52,12 +56,11 @@ FROM (
         `default`,
         changed,
         type,
-        type = 'String'
-        AND (value LIKE '/%' OR value LIKE '%://%'
-             OR `default` LIKE '/%' OR `default` LIKE '%://%'
-             OR name IN ('default_database', 'default_replica_name',
-                         'interserver_http_host', 'default_profile',
-                         'merge_workload', 'mutation_workload'))
+        value LIKE '/%' OR value LIKE '%://%'
+        OR `default` LIKE '/%' OR `default` LIKE '%://%'
+        OR name IN ('default_database', 'default_replica_name',
+                    'interserver_http_host', 'default_profile',
+                    'merge_workload', 'mutation_workload')
                                                     AS identifying
     FROM system.server_settings
 )

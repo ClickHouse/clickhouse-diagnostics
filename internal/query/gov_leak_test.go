@@ -74,17 +74,18 @@ func TestGovQueries_NoRawIdentifiersOrDDL(t *testing.T) {
 		// identifiers, and hashing them would make the collector unreadable:
 		// the whole point is seeing WHICH settings deviate.
 		//
-		// The values are not hashed either, and that is deliberate rather
-		// than an oversight. system.settings emits every value raw: a
+		// Nothing in these two collectors is hashed — not the names, not
+		// the values — and that is deliberate rather than an oversight. A
 		// setting value is a tuning knob, and a hash of one is unreversible
 		// noise, because PrintGovNameMapping builds the mapping CSV from
 		// system.tables and so covers database and table names only.
-		// system.server_settings hashes just the values that name customer
-		// infrastructure — anything path- or URL-shaped, plus the database,
-		// replica and workload names — and leaves the rest readable. Those
-		// columns are not in mustBeHashed, so this test does not enforce
-		// that narrower rule; the SQL file's header comment is where it is
-		// written down.
+		// system.settings therefore emits every value raw, and
+		// system.server_settings REMOVES the handful that name customer
+		// infrastructure (anything path- or URL-shaped, plus the database,
+		// replica and workload names) rather than salting them: a removed
+		// value cannot leak and needs no key to read. That rule lives in
+		// the SQL file's header comment, not here — mustBeHashed can only
+		// express "hash it", so this test cannot enforce a removal.
 		//
 		// Caveat worth a reviewer's eye: a customer-defined custom setting
 		// appears here under a name they chose, so the name column is not
