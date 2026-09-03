@@ -40,37 +40,42 @@ func TestQueryLogDetails_UsesLeftArrayJoin(t *testing.T) {
 	}
 }
 
-// part_name is unique per part, so grouping on it makes the "aggregated"
-// part_log a row-for-row copy of the source table: 868 rows for 868 events on a
-// toy dataset, millions over 7 days of production traffic. It may be sampled
-// with any(part_name) but must never be a group key.
-func TestPartLog_DoesNotGroupByPartName(t *testing.T) {
+// part_name is not collected by the part_log aggregates at all, and this
+// guards both of the ways it could come back.
+//
+// As a GROUP BY key it is fatal: part_name is unique per part, so keying on it
+// makes the "aggregate" a row-for-row copy of the source table — 868 rows for
+// 868 events on a toy dataset, millions over 7 days of production traffic.
+//
+// Sampled with any(part_name) it is merely useless: one arbitrary part out of
+// however many the group covers, with nothing to say why that one was picked.
+// It is not a handle anyone can troubleshoot from, so it was dropped outright
+// rather than demoted to a sample.
+func TestPartLog_DoesNotCollectPartName(t *testing.T) {
 	var seen int
 	for _, path := range realRepoSQLFiles(t) {
 		if !strings.HasPrefix(filepath.Base(path), "system.part_log") {
 			continue
 		}
 		seen++
-		body := readFileForTest(t, path)
 
-		// Bare `part_name,` in the projection = an implicit group key under
-		// GROUP BY ALL and an explicit one everywhere else.
-		for _, line := range strings.Split(body, "\n") {
-			trimmed := strings.TrimSpace(line)
-			if trimmed == "" || strings.HasPrefix(trimmed, "--") {
-				continue
+		// Strip comment text before matching — whole-line AND trailing. Those
+		// files explain at length WHY part_name is absent, and that prose must
+		// not read as a projection. Same approach as gov_leak_test.go.
+		var code []string
+		for _, line := range strings.Split(readFileForTest(t, path), "\n") {
+			if i := strings.Index(line, "--"); i >= 0 {
+				line = line[:i]
 			}
-			if trimmed == "part_name," || trimmed == "part_name" {
-				t.Errorf("%s: part_name is projected bare (group key); use any(part_name) AS part_name", path)
+			if trimmed := strings.TrimSpace(line); trimmed != "" {
+				code = append(code, trimmed)
 			}
 		}
 
-		// And never in an explicit GROUP BY key list.
-		if idx := strings.LastIndex(strings.ToUpper(body), "GROUP BY"); idx >= 0 {
-			keys := body[idx:]
-			if strings.Contains(keys, "part_name") {
-				t.Errorf("%s: part_name appears in the GROUP BY key list", path)
-			}
+		if strings.Contains(strings.Join(code, "\n"), "part_name") {
+			t.Errorf("%s: part_name must not be collected — as a group key it copies "+
+				"the source table row-for-row, and any(part_name) is an arbitrary "+
+				"sample nobody can act on", path)
 		}
 	}
 	if seen == 0 {

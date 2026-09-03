@@ -2,7 +2,6 @@ SELECT
     toStartOfInterval(event_time, toIntervalHour(1)) AS time,
     event_type,
     merge_reason,
-    any(part_name) AS part_name,
     partition_id,
     hostname,
     concat(database, '.', table) AS table_name,
@@ -13,10 +12,17 @@ SELECT
     sum(size_in_bytes) AS size_in_bytes,
     count() as count
 FROM clusterAllReplicas(default, system.part_log)
--- part_name is deliberately NOT a group key: it is unique per part, so keying
--- on it makes this "aggregate" a row-for-row copy of system.part_log (868 rows
--- for 868 events on a toy dataset; millions over 7 days of production). The
--- useful grain is bucket x table x event_type x merge_reason x partition x
--- error; any(part_name) keeps one example per group for follow-up lookups.
+-- part_name is deliberately NOT collected at all, in either form.
+--
+-- As a GROUP BY key it is fatal: it is unique per part, so keying on it turns
+-- this "aggregate" into a row-for-row copy of system.part_log (868 rows for
+-- 868 events on a toy dataset; millions over 7 days of production). That is
+-- the regression this file exists to avoid, so do not add it back as a key.
+--
+-- Sampled with any(part_name) it is merely useless: one arbitrary part out of
+-- however many the group covers, with nothing to say why that one was picked.
+-- It is not a handle you can troubleshoot from. The useful grain is
+-- bucket x table x event_type x merge_reason x partition x error, and
+-- partition_id is the identifier to follow up on.
 WHERE (event_time > {from:7d} AND event_time <= {to:now})
 GROUP BY ALL
