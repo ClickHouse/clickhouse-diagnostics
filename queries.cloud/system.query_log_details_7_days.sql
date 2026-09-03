@@ -24,9 +24,31 @@ SELECT
     min(event_time) as minDate,
     max(event_time) as maxDate,
     exception_code,
-    any(exception) as exception
-FROM clusterAllReplicas(default, system.query_log)
+    any(ql.exception) as exception,
+    uniqExact(ql.exception) as distinct_exceptions
+FROM clusterAllReplicas(default, system.query_log) AS ql
 LEFT ARRAY JOIN tables
+-- distinct_exceptions is the denominator for any(exception). Because the
+-- error code IS a group key, every row in a group shares it, so the sampled
+-- message is representative rather than arbitrary — but the text still varies
+-- with whatever identifier it embeds, and one message cannot say whether it
+-- stands for 1 failure or 400 identical ones. uniqExact gives that in a single
+-- integer, with no extra rows: 40 events / 1 distinct message is one recurring
+-- fault, 40 / 40 is forty different ones that happen to share a code.
+--
+-- any()/uniqExact() read the column through the `ql.` table alias on purpose.
+-- `any(exception) AS exception` puts `exception` in the query's alias scope,
+-- and aliases are global, so a bare `uniqExact(exception)` resolves to that
+-- aggregate rather than the column and the server rejects the query outright:
+-- "Aggregate function any(exception) AS exception is found inside another
+-- aggregate function" (ILLEGAL_AGGREGATION 184, hit on 26.7). Reordering the
+-- projection does not help. Qualifying sidesteps the alias entirely; verified
+-- on 22.8.21.38, 23.7.5.30 and 26.7.5.10.
+--
+-- Deliberately NOT a group key. Verified on 26.7: 8 UNKNOWN_DATABASE events
+-- produced 8 distinct messages (each names its own database), and grouping on
+-- the text turned 13 aggregated events into 13 rows — a row-for-row copy of
+-- the source, the same trap part_name had.
 WHERE (event_time > {from:7d} AND event_time <= {to:now})
 -- LEFT ARRAY JOIN, not ARRAY JOIN: a query that never resolved a table has an
 -- empty `tables` array, and a plain ARRAY JOIN drops those rows entirely. That
