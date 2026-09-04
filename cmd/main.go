@@ -72,6 +72,17 @@ func main() {
 	// Parse command line flags
 	flag.Parse()
 
+	// -mode defaults to onprem, so its VALUE cannot say whether the operator
+	// chose onprem or simply said nothing. flag.Visit reports only the flags
+	// actually present on the command line, which is the distinction
+	// resolveMode needs to fail loudly on a typo while still defaulting.
+	modeExplicit := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "mode" {
+			modeExplicit = true
+		}
+	})
+
 	// Initialize variables with defaults
 	var (
 		host           = *hostFlag
@@ -139,9 +150,12 @@ func main() {
 	}
 
 	// Get user input for missing parameters
-	if err := getUserInput(&protocol, &host, &port, &username, &password, &mode, &configDir, skipConfig); err != nil {
-		fmt.Printf("Error getting user input: %v\n", err)
-		return
+	if err := getUserInput(&protocol, &host, &port, &username, &password, &mode, &configDir, skipConfig, modeExplicit); err != nil {
+		// Exit NON-ZERO. A rejected mode that exits 0 is barely better than the
+		// silent onprem fallback it replaces: the scripted collections this
+		// protects check $?, not stdout. Nothing is deferred this early.
+		fmt.Printf("Error: %v\n", err)
+		os.Exit(1)
 	}
 
 	// Gov never collects configuration files: they embed raw hostnames —
@@ -183,7 +197,11 @@ func main() {
 	}
 
 	// Map mode to queries directory
-	queriesDir := getQueriesDir(mode)
+	queriesDir, err := getQueriesDir(mode)
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		os.Exit(1)
+	}
 
 	// Create the output folder if it doesn't exist
 	if err := os.MkdirAll(outputDir, 0750); err != nil {
@@ -547,7 +565,10 @@ func main() {
 	}
 }
 
-func getUserInput(protocol, host, port, username, password, mode, configDir *string, skipConfig bool) error {
+// modeExplicit reports whether -mode was actually passed. The flag defaults
+// to onprem, so the value alone cannot distinguish "not set" from
+// "deliberately onprem", and the two must behave differently.
+func getUserInput(protocol, host, port, username, password, mode, configDir *string, skipConfig, modeExplicit bool) error {
 	reader := bufio.NewReader(os.Stdin)
 
 	// Get protocol if not provided
@@ -605,24 +626,24 @@ func getUserInput(protocol, host, port, username, password, mode, configDir *str
 		fmt.Println() // Add a newline after password input
 	}
 
-	// Get mode if not provided or validate provided mode
-	validModes := []string{"cloud", "onprem", "gov"}
-	*mode = strings.ToLower(*mode)
-	if !isValidMode(*mode) {
-		fmt.Printf("Select query mode (cloud/onprem/gov) [default: onprem]: ")
-		input, _ := reader.ReadString('\n')
-		*mode = strings.TrimSpace(strings.ToLower(input))
-		if *mode == "" {
-			*mode = "onprem"
-		}
-		if !isValidMode(*mode) {
-			fmt.Printf("Invalid mode '%s'. Using onprem instead.\n", *mode)
-			*mode = "onprem"
-		}
+	// Resolve the mode. An unparseable one is an error, never a quiet
+	// downgrade to onprem — see resolveMode for why the direction matters.
+	resolved, notice, err := resolveMode(*mode, modeExplicit,
+		term.IsTerminal(int(syscall.Stdin)),
+		func() (string, error) {
+			fmt.Print("Select query mode (cloud/onprem/gov) [default: onprem]: ")
+			return reader.ReadString('\n')
+		})
+	if err != nil {
+		return err
+	}
+	*mode = resolved
+	if notice != "" {
+		fmt.Println(notice)
 	}
 
 	// Display available modes for user reference
-	fmt.Printf("Available modes: %s\n", strings.Join(validModes, ", "))
+	fmt.Printf("Available modes: %s\n", strings.Join(canonicalModes, ", "))
 
 	// Get config directory if not provided and not skipping config collection
 	if *configDir == "" && !skipConfig && *mode != "gov" {
@@ -732,29 +753,135 @@ func promptForGovSalt() (string, error) {
 	return strings.TrimSpace(string(saltBytes)), nil
 }
 
-// getQueriesDir maps the mode to the corresponding queries directory
-func getQueriesDir(mode string) string {
-	switch strings.ToLower(mode) {
-	case "cloud":
-		return "./queries.cloud"
-	case "onprem":
-		return "./queries.onprem"
-	case "gov":
-		return "./queries.gov"
-	default:
-		return "./queries.onprem" // fallback to onprem
-	}
+// canonicalModes is the operator-facing list, in the order it is printed.
+var canonicalModes = []string{"cloud", "onprem", "gov"}
+
+// modeAliases maps every spelling we accept onto a canonical mode.
+//
+// gov deliberately has NO alias. It is the protective mode, and the whole
+// point of this table is that a near-miss must be rejected rather than
+// resolved by guesswork — a wrong guess there ships unhashed identifiers.
+var modeAliases = map[string]string{
+	"cloud": "cloud", "ch-cloud": "cloud", "clickhouse-cloud": "cloud",
+
+	"onprem": "onprem", "on-prem": "onprem", "on_prem": "onprem",
+	"onpremise": "onprem", "on-premise": "onprem",
+	"onpremises": "onprem", "on-premises": "onprem",
+	"selfhosted": "onprem", "self-hosted": "onprem", "self_hosted": "onprem",
+
+	"gov": "gov",
 }
 
-// isValidMode checks if the provided mode is valid
-func isValidMode(mode string) bool {
-	validModes := []string{"cloud", "onprem", "gov"}
-	for _, validMode := range validModes {
-		if mode == validMode {
-			return true
+// canonicalMode normalises a spelling to cloud/onprem/gov, or returns "" when
+// it recognises nothing.
+//
+// The TrimSpace is load-bearing, not tidiness: `-mode " gov"` survived the old
+// ToLower, failed the == "gov" comparison, and fell through to onprem.
+func canonicalMode(raw string) string {
+	return modeAliases[strings.ToLower(strings.TrimSpace(raw))]
+}
+
+// nearestMode returns the canonical mode within two edits of raw, or "" when
+// nothing is close enough to be worth suggesting. Two edits catches the
+// realistic slips ("govv", "clod", "onrem") without proposing "gov" for an
+// unrelated word.
+func nearestMode(raw string) string {
+	s := strings.ToLower(strings.TrimSpace(raw))
+	best, bestDist := "", 3
+	for _, m := range canonicalModes {
+		if d := editDistance(s, m); d < bestDist {
+			best, bestDist = m, d
 		}
 	}
-	return false
+	return best
+}
+
+// editDistance is Levenshtein over runes, used only to suggest a mode.
+func editDistance(a, b string) int {
+	ar, br := []rune(a), []rune(b)
+	prev := make([]int, len(br)+1)
+	cur := make([]int, len(br)+1)
+	for j := range prev {
+		prev[j] = j
+	}
+	for i := 1; i <= len(ar); i++ {
+		cur[0] = i
+		for j := 1; j <= len(br); j++ {
+			cost := 1
+			if ar[i-1] == br[j-1] {
+				cost = 0
+			}
+			cur[j] = min(min(cur[j-1]+1, prev[j]+1), prev[j-1]+cost)
+		}
+		prev, cur = cur, prev
+	}
+	return prev[len(br)]
+}
+
+// invalidModeErr names the valid modes and, when one is close, suggests it.
+func invalidModeErr(raw string) error {
+	if s := nearestMode(raw); s != "" {
+		return fmt.Errorf("invalid mode %q — choose %s; did you mean %q?",
+			strings.TrimSpace(raw), strings.Join(canonicalModes, ", "), s)
+	}
+	return fmt.Errorf("invalid mode %q — choose %s",
+		strings.TrimSpace(raw), strings.Join(canonicalModes, ", "))
+}
+
+// resolveMode turns the -mode flag into exactly one of cloud/onprem/gov, or
+// fails. It is a pure function so the policy below is testable without a
+// terminal.
+//
+// The rule that matters is the DIRECTION of the fallback. onprem is the least
+// protective of the three, so guessing it when the operator's intent did not
+// parse is the one answer that can do harm: `-mode govv` used to print a
+// single line and then collect an onprem bundle — unhashed database and table
+// names from a run that asked for gov. With stdin closed, as in any CI job or
+// scripted collection, nothing ever read that line.
+//
+// So an explicitly provided mode is either understood or an error. The default
+// survives only where it is unambiguous: no -mode at all.
+func resolveMode(raw string, explicit, interactive bool, prompt func() (string, error)) (mode, notice string, err error) {
+	if explicit {
+		if m := canonicalMode(raw); m != "" {
+			return m, "", nil
+		}
+		return "", "", invalidModeErr(raw)
+	}
+	// Nothing was asked for and nobody is there to ask. Announce the default
+	// rather than adopting it silently.
+	if !interactive {
+		return "onprem", "No -mode given and stdin is not a terminal; using onprem.", nil
+	}
+	answer, perr := prompt()
+	answer = strings.TrimSpace(answer)
+	if perr != nil && answer == "" {
+		return "", "", fmt.Errorf("reading mode: %w", perr)
+	}
+	// Enter at the prompt accepts the offered default; a typo does not.
+	if answer == "" {
+		return "onprem", "", nil
+	}
+	if m := canonicalMode(answer); m != "" {
+		return m, "", nil
+	}
+	return "", "", invalidModeErr(answer)
+}
+
+// getQueriesDir maps the mode to the corresponding queries directory.
+func getQueriesDir(mode string) (string, error) {
+	switch canonicalMode(mode) {
+	case "cloud":
+		return "./queries.cloud", nil
+	case "onprem":
+		return "./queries.onprem", nil
+	case "gov":
+		return "./queries.gov", nil
+	}
+	// Unreachable once resolveMode has run — which is exactly why it must not
+	// guess. This used to fall back to ./queries.onprem, making it the second
+	// place an unrecognised mode could quietly become an unhashed collection.
+	return "", fmt.Errorf("unrecognised mode %q — cannot choose a queries directory", mode)
 }
 
 // createArchiveWithTimestamp creates an archive of the specific results directory
