@@ -2678,14 +2678,18 @@ document.addEventListener('DOMContentLoaded',function(){
 
   // header
   document.getElementById('hdr-badge').innerHTML=
-    '<span class="badge badge-'+DATA.mode+'">'+DATA.mode+'</span>';
+    '<span class="badge badge-'+esc(DATA.mode)+'">'+esc(DATA.mode)+'</span>';
   document.getElementById('hdr-meta').innerHTML=
     'Generated: '+esc(DATA.generated_at)+'<br>Version: '+esc(DATA.version||'N/A');
 
   // stats
+  // esc() on both arguments: every caller currently passes a number, a
+  // version string or a joined load average, so nothing renders differently
+  // today — but a stat tile is a general helper and the escape-by-default
+  // contract has to hold at the helper, not at each call site.
   const tile=(v,l)=>'<div class="stat-card"><div class="val'
     +(String(v).length>14?' val-sm':String(v).length>8?' val-md':'')
-    +'">'+v+'</div><div class="lbl">'+l+'</div></div>';
+    +'">'+esc(v)+'</div><div class="lbl">'+esc(l)+'</div></div>';
   const sg=document.getElementById('stats-grid');
   sg.innerHTML=[
     // A stat tile is a hero figure: long strings (uptime, long versions) step
@@ -2758,8 +2762,10 @@ document.addEventListener('DOMContentLoaded',function(){
     // A section that could not be read is never left looking healthy.
     const notes=hi.notes||[];
     if(notes.length){
+      // Notes are free text built from OS errors and paths — the one source
+      // of the three that is not a fixed enum, so escape each before joining.
       document.getElementById('host-notes').innerHTML=
-        '<div class="alert-skipped">\u2139 host facts partially unavailable: '+notes.join('; ')+'</div>';
+        '<div class="alert-skipped">\u2139 host facts partially unavailable: '+notes.map(esc).join('; ')+'</div>';
     }
   })();
 

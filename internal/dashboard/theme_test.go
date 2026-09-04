@@ -186,3 +186,38 @@ func TestTemplate_TopbarSticksAsOneBand(t *testing.T) {
 		t.Error("the scroll-spy threshold must follow the measured band height")
 	}
 }
+
+// The template escapes by default, and these three sites are the ones that
+// did not. None was exploitable — mode is a validated CLI enum, and every
+// tile() caller passes a number or a version string — but the contract is
+// worth only what enforces it, and host notes are genuinely free text built
+// from OS errors and paths.
+//
+// Asserted as exact interpolation shapes rather than "contains esc(", because
+// the failure mode is a future edit dropping esc() from one of them while the
+// other two keep the call and the file still greps clean.
+func TestTemplate_InterpolatesThroughEsc(t *testing.T) {
+	for _, want := range []string{
+		// header badge — the mode chip
+		`'<span class="badge badge-'+esc(DATA.mode)+'">'+esc(DATA.mode)+'</span>'`,
+		// stat tile helper — escape at the helper, not per call site
+		`+'">'+esc(v)+'</div><div class="lbl">'+esc(l)+'</div></div>'`,
+		// host facts notes — free text, escaped per element before joining
+		`notes.map(esc).join('; ')`,
+	} {
+		if !strings.Contains(htmlTemplate, want) {
+			t.Errorf("innerHTML site no longer escapes its interpolation: missing %q", want)
+		}
+	}
+
+	// The raw forms must be gone, not merely joined by an escaped twin.
+	for _, forbidden := range []string{
+		"+DATA.mode+",
+		"+'\">'+v+'</div>",
+		"notes.join('; ')",
+	} {
+		if strings.Contains(htmlTemplate, forbidden) {
+			t.Errorf("unescaped interpolation is back: %q", forbidden)
+		}
+	}
+}
