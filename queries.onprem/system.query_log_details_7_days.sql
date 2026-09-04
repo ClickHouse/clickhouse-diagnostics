@@ -20,7 +20,18 @@ SELECT
     -- Truncated so the archive stays small, but present: without it a
     -- normalized_query_hash in this file cannot be mapped back to SQL
     -- once the server is gone.
-    left(any(query), 500) as query,
+    --
+    -- leftUTF8, not left: left() counts BYTES, so a cut landing inside a
+    -- multi-byte character emits a lone continuation byte and the .jsonl
+    -- line stops being valid UTF-8 — the server's response is written to
+    -- disk verbatim (internal/query/executor.go), so nothing downstream
+    -- repairs it. Strict parsers then reject the line outright
+    -- (python json: "invalid continuation byte"); jq is lenient and
+    -- silently substitutes U+FFFD, which corrupts the text just as much
+    -- but quietly. Reachable with any non-ASCII literal in customer SQL
+    -- ('München', CJK identifiers). leftUTF8 counts code points and is
+    -- registered alongside left in 22.8, so it needs no version gate.
+    leftUTF8(any(query), 500) as query,
     min(event_time) as minDate,
     max(event_time) as maxDate,
     exception_code,

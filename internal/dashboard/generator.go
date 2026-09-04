@@ -518,10 +518,16 @@ func (g *Generator) textLogSQL() string {
 	//
 	// Ordering the outer query by the stringified value is still chronological:
 	// 'YYYY-MM-DD hh:mm:ss' sorts lexicographically in time order.
+	//
+	// leftUTF8 rather than left: left() counts bytes, so truncating a message
+	// mid-character leaves invalid UTF-8. json.Marshal masks that as U+FFFD
+	// here rather than breaking the page, but the archived collectors write
+	// the server's bytes straight to disk and cannot afford it, so both use
+	// the same function.
 	return fmt.Sprintf(
 		`SELECT toString(event_time) AS event_time,
 				%s level, logger_name,
-				left(message, %d) AS message
+				leftUTF8(message, %d) AS message
 		 FROM (
 			SELECT event_time, %s level, logger_name, message
 			FROM %s

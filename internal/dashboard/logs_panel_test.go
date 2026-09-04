@@ -12,9 +12,9 @@ import (
 func TestTextLogSQL_IsBounded(t *testing.T) {
 	sql := (&Generator{mode: "onprem"}).textLogSQL()
 	for _, want := range []string{
-		"LIMIT 1000",         // textLogRowCap
-		"left(message, 300)", // textLogMessageCap
-		"INTERVAL 24 HOUR",   // recent only
+		"LIMIT 1000",                              // textLogRowCap
+		"leftUTF8(message, 300)",                  // textLogMessageCap — leftUTF8, so the cap is genuinely characters and a cut cannot split one
+		"INTERVAL 24 HOUR",                        // recent only
 		"'Warning', 'Error', 'Critical', 'Fatal'", // triaged only — and Critical sits between Fatal and Error, so it must be here
 	} {
 		if !strings.Contains(sql, want) {

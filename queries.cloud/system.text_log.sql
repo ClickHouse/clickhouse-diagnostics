@@ -2,7 +2,9 @@ SELECT
     event_time,
     level,
     logger_name,
-    left(message, 500) AS message
+    -- leftUTF8, not left: left() counts bytes, so a cut inside a
+    -- multi-byte character leaves invalid UTF-8 in the .jsonl output.
+    leftUTF8(message, 500) AS message
 FROM clusterAllReplicas(default, system.text_log)
 -- event_date prunes partitions; timezone() converts the window's endpoints
 -- to the SERVER's calendar so pruning can't exclude rows near midnight.
