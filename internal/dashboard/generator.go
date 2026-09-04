@@ -424,7 +424,9 @@ func (g *Generator) sampleQueryCol() string {
 	if g.mode == "gov" {
 		return "'' AS sample_query"
 	}
-	return "left(any(query), 600) AS sample_query"
+	// leftUTF8: byte-wise left() would split a multi-byte character in the
+	// query text and leave invalid UTF-8. Same reason as the collectors.
+	return "leftUTF8(any(query), 600) AS sample_query"
 }
 
 // querySlowSQL builds the slowest-query-patterns panel.
@@ -1013,7 +1015,7 @@ func (g *Generator) collect() map[string]interface{} {
 			 SELECT name, code,
 				 sum(value)                                   AS total,
 				 toString(max(last_error_time))               AS last_error_time,
-				 left(argMax(last_error_message, value), 300) AS last_error_message
+				 leftUTF8(argMax(last_error_message, value), 300) AS last_error_message
 			 FROM %s
 			 GROUP BY name, code
 			 HAVING total > 0

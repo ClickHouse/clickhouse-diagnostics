@@ -1,6 +1,8 @@
 package dashboard
 
 import (
+	"os"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -218,6 +220,34 @@ func TestTemplate_InterpolatesThroughEsc(t *testing.T) {
 	} {
 		if strings.Contains(htmlTemplate, forbidden) {
 			t.Errorf("unescaped interpolation is back: %q", forbidden)
+		}
+	}
+}
+
+// The dashboard builds its own SQL in Go, so the collectors' leftUTF8 guard
+// (internal/query/archive_shape_test.go) does not reach it — and three of the
+// five truncation sites on this branch lived here, not in a .sql file.
+//
+// left() counts bytes, so a cut inside a multi-byte character leaves invalid
+// UTF-8. json.Marshal degrades that to U+FFFD rather than breaking the page,
+// which is exactly why it needs a test: the damage is silent here, and the
+// same expression pasted into a collector corrupts the archive outright.
+func TestGeneratorSQL_TruncatesWithLeftUTF8(t *testing.T) {
+	src, err := os.ReadFile("generator.go")
+	if err != nil {
+		t.Fatalf("read generator.go: %v", err)
+	}
+	// Drop every leftUTF8( first: "left" is a prefix of "leftUTF8", so a word
+	// boundary alone would match both. Then strip comments — these very
+	// lines discuss left() vs leftUTF8() and must not read as call sites.
+	bare := regexp.MustCompile(`\bleft\s*\(`)
+	for i, line := range strings.Split(string(src), "\n") {
+		if j := strings.Index(line, "//"); j >= 0 {
+			line = line[:j]
+		}
+		if bare.MatchString(strings.ReplaceAll(line, "leftUTF8(", "")) {
+			t.Errorf("generator.go:%d truncates with byte-wise left() — use leftUTF8(): %q",
+				i+1, strings.TrimSpace(line))
 		}
 	}
 }
