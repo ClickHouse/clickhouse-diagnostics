@@ -26,6 +26,19 @@ func TestDashboardDecision_GovNeverGenerates(t *testing.T) {
 	}
 }
 
+// The gov refusal must not depend on the caller having normalised the mode.
+// getUserInput lowercases before this is reached today, so these forms are
+// unreachable from main() — that is the point: the guard is here so a future
+// call site cannot reintroduce the leak, and "GOV" already slipped past a bare
+// == "gov" comparison once in this file.
+func TestDashboardDecision_GovIsNormalised(t *testing.T) {
+	for _, mode := range []string{"GOV", "Gov", " gov", "gov ", "\tGOV\n"} {
+		if generate, _ := dashboardDecision(false, mode); generate {
+			t.Errorf("mode %q generated a dashboard — gov must be refused whatever its casing or padding", mode)
+		}
+	}
+}
+
 func TestDashboardDecision_NonGov(t *testing.T) {
 	for _, mode := range []string{"onprem", "cloud"} {
 		if generate, reason := dashboardDecision(false, mode); !generate {

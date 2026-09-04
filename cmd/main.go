@@ -847,7 +847,11 @@ func dashboardDecision(skipDashboard bool, mode string) (generate bool, skipReas
 	if skipDashboard {
 		return false, "Skipping HTML dashboard (--skip-dashboard)."
 	}
-	if mode == "gov" {
+	// Normalise here as well as at the call site, for the same reason
+	// resolveLocalCollector does: this gates a disclosure rule and must not
+	// depend on every future caller having already lowercased the mode
+	// ("GOV" once slipped past a == "gov" check elsewhere in this file).
+	if strings.ToLower(strings.TrimSpace(mode)) == "gov" {
 		return false, "Skipping HTML dashboard in gov mode: its panels select raw identifiers " +
 			"(table names, disk paths, users, exception text) that cannot be hashed, and the " +
 			"dashboard is part of the support-bound archive."
