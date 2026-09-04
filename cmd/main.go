@@ -428,9 +428,13 @@ func main() {
 	// ClickHouse system tables report. Read from /proc, /sys and /etc — so
 	// it only yields anything when run ON the server, and degrades to
 	// "unavailable" with a note otherwise rather than failing the run.
+	// Held beyond the block so the dashboard can render the same facts that
+	// land in host_info.json; nil when host-info was skipped.
+	var hostReport *hostinfo.Report
 	if !skipHostInfo {
 		fmt.Println("Collecting host OS and hardware facts...")
 		report := hostinfo.Collect()
+		hostReport = report
 		if path, err := hostinfo.WriteJSON(finalOutputDir, report); err != nil {
 			fmt.Printf("Warning: host info could not be written: %v\n", err)
 		} else {
@@ -503,18 +507,13 @@ func main() {
 	// the same reason query analysis is. Hashing every dashboard panel is
 	// the follow-up that would restore it.
 	dashboardWritten := false
-	switch {
-	// An explicit --skip-dashboard is reported first: a user who asked to
-	// skip it should be told their flag was honoured, not that gov policy
-	// withheld it. Same outcome either way (dashboardWritten stays false).
-	case skipDashboard:
-		fmt.Println("Skipping HTML dashboard (--skip-dashboard).")
-	case mode == "gov":
-		fmt.Println("Skipping HTML dashboard in gov mode: its panels select raw identifiers " +
-			"(table names, disk paths, users, exception text) that cannot be hashed, and the " +
-			"dashboard is part of the support-bound archive.")
-	default:
-		gen := dashboard.NewGenerator(client, mode).WithServerVersion(serverVersion).WithAnalysis(analysisOpts, analysisDir)
+	if generate, skipReason := dashboardDecision(skipDashboard, mode); !generate {
+		fmt.Println(skipReason)
+	} else {
+		gen := dashboard.NewGenerator(client, mode).
+			WithServerVersion(serverVersion).
+			WithAnalysis(analysisOpts, analysisDir).
+			WithHostInfo(hostReport)
 		if err := gen.Generate(finalOutputDir, alertResults); err != nil {
 			fmt.Printf("Warning: dashboard generation failed: %v\n", err)
 		} else {
@@ -840,4 +839,35 @@ func describeWindow(from, to time.Time) string {
 // "-mode GOV" once slipped a collector past a bare == "gov" comparison.
 func govWithholdsConfig(mode string) bool {
 	return strings.ToLower(strings.TrimSpace(mode)) == "gov"
+}
+
+// dashboardDecision reports whether to build dashboard.html, and why not when
+// the answer is no. Extracted from the call site purely so the gov refusal is
+// testable: it is a disclosure rule, and an inline switch is one careless
+// refactor away from silently shipping a gov dashboard.
+//
+// Gov mode NEVER gets a dashboard. Its panels are built in Go and select raw
+// identifiers — database and table names for up to 2000 tables, disk paths,
+// users, and server-generated text like last_exception and last_error_message —
+// which are exactly the values queries.gov/*.sql hashes. The file lands in the
+// same support-bound archive as those hashed results, so shipping it would
+// defeat the hashing. Hashing every panel is the follow-up that would restore
+// it; until then the answer is no.
+func dashboardDecision(skipDashboard bool, mode string) (generate bool, skipReason string) {
+	// An explicit --skip-dashboard is reported first: a user who asked to skip
+	// it should be told their flag was honoured, not that gov policy withheld
+	// it. Same outcome either way.
+	if skipDashboard {
+		return false, "Skipping HTML dashboard (--skip-dashboard)."
+	}
+	// Normalise here as well as at the call site, for the same reason
+	// resolveLocalCollector does: this gates a disclosure rule and must not
+	// depend on every future caller having already lowercased the mode
+	// ("GOV" once slipped past a == "gov" check elsewhere in this file).
+	if strings.ToLower(strings.TrimSpace(mode)) == "gov" {
+		return false, "Skipping HTML dashboard in gov mode: its panels select raw identifiers " +
+			"(table names, disk paths, users, exception text) that cannot be hashed, and the " +
+			"dashboard is part of the support-bound archive."
+	}
+	return true, ""
 }

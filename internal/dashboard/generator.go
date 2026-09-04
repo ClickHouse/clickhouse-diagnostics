@@ -5,12 +5,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"clickhouse-diagnostic/internal"
 	"clickhouse-diagnostic/internal/alert"
+	"clickhouse-diagnostic/internal/hostinfo"
 	"clickhouse-diagnostic/internal/query"
 	"clickhouse-diagnostic/pkg"
 )
@@ -22,6 +24,7 @@ type Generator struct {
 	serverVersion internal.Version
 	analysis      query.AnalysisOpts
 	analysisDir   string
+	hostInfo      *hostinfo.Report
 	probeCache    map[string]bool // memoized hasColumn/hasTable results
 }
 
@@ -37,6 +40,89 @@ func NewGenerator(client *pkg.ClickHouseClient, mode string) *Generator {
 func (g *Generator) WithServerVersion(v internal.Version) *Generator {
 	g.serverVersion = v
 	return g
+}
+
+// WithHostInfo attaches the host facts already collected for host_info.json,
+// so the dashboard can show the OS/kernel/CPU/memory context beside what the
+// system tables report. Nil (host-info skipped, or a non-Linux run) simply
+// omits the panel. Returns the receiver for chaining.
+func (g *Generator) WithHostInfo(r *hostinfo.Report) *Generator {
+	g.hostInfo = r
+	return g
+}
+
+// hostChecks evaluates the collected tunables against the checks CLICKHOUSE
+// ITSELF makes at startup, and returns one row per check.
+//
+// The bar for a "warning" here is deliberately narrow: the server has to warn
+// about it too. Everything in this list maps to a real check in
+// programs/server/Server.cpp::sanityChecks (or, for max_map_count,
+// src/Common/Exception.cpp), so the dashboard never invents a recommendation
+// ClickHouse does not make.
+//
+// Deliberately NOT flagged: vm.swappiness. It is common tuning folklore for
+// databases, but ClickHouse neither checks it at startup nor documents a
+// target, so it is reported as a plain fact.
+func hostChecks(r *hostinfo.Report) []map[string]interface{} {
+	if r == nil {
+		return nil
+	}
+	t := r.Tunables
+	out := []map[string]interface{}{}
+	add := func(name, value, status, note string) {
+		// A tunable we could not read must never render as a healthy one.
+		if value == "" {
+			value, status = "(unreadable)", "unknown"
+		}
+		out = append(out, map[string]interface{}{
+			"setting": name, "value": value, "status": status, "note": note,
+		})
+	}
+
+	thpStatus, thpNote := "ok", `ClickHouse warns at startup when this is "always"`
+	if strings.Contains(t.TransparentHugepages, "always") {
+		thpStatus = "warning"
+		thpNote = `ClickHouse warns at startup: transparent hugepages set to "always"`
+	}
+	add("transparent_hugepages", t.TransparentHugepages, thpStatus, thpNote)
+	add("transparent_hugepages_defrag", t.THPDefrag, "info", "")
+
+	ocStatus, ocNote := "ok", ""
+	if strings.TrimSpace(t.OvercommitMemory) == "2" {
+		ocStatus = "warning"
+		ocNote = "ClickHouse warns at startup: memory overcommit is disabled (mode 2)"
+	}
+	add("vm.overcommit_memory", t.OvercommitMemory, ocStatus, ocNote)
+
+	add("vm.max_map_count", t.MaxMapCount, "info",
+		"ClickHouse errors when its live mappings exceed 90% of this")
+	add("vm.swappiness", t.Swappiness, "info",
+		"reported as a fact: ClickHouse does not check or document a target")
+	add("fs.nr_open", t.FsNrOpen, "info", "")
+	add("fs.file-max", t.FsFileMax, "info", "")
+	add("cgroup memory limit", t.CgroupMemoryLimit, "info", "")
+	add("cgroup cpu max", t.CgroupCPUMax, "info", "")
+	// Join only when something was read: "" + " / " + "" trims to "/", which
+	// would sneak past add()'s empty-value guard and render as healthy.
+	nofile := ""
+	if t.ClickHouseNofileSoft != "" || t.ClickHouseNofileHard != "" {
+		nofile = strings.TrimSpace(t.ClickHouseNofileSoft + " / " + t.ClickHouseNofileHard)
+	}
+	add("open files (soft/hard)", nofile, "info", "")
+	add("max processes (soft)", t.ClickHouseNprocSoft, "info",
+		"RLIMIT_NPROC — the OS cap on tasks, not the max_threads setting")
+
+	// The one memory check ClickHouse makes at startup.
+	if r.Memory.Available && r.Memory.AvailableBytes > 0 {
+		const twoGiB = 2 << 30
+		status, note := "ok", ""
+		if r.Memory.AvailableBytes < twoGiB {
+			status = "warning"
+			note = "ClickHouse warns at startup: available memory below 2 GiB"
+		}
+		add("available memory", formatBytes(r.Memory.AvailableBytes), status, note)
+	}
+	return out
 }
 
 // WithAnalysis attaches query-analysis options + the directory holding
@@ -280,6 +366,8 @@ func (g *Generator) hasTable(table string) bool {
 func (g *Generator) Generate(outputDir string, alertResults []alert.Result) error {
 	fmt.Println("\nGenerating HTML dashboard...")
 	payload := g.collect()
+	// Needs outputDir, so it happens here rather than in collect().
+	payload["bundle_files"] = collectBundleFiles(outputDir)
 	if alertResults == nil {
 		alertResults = []alert.Result{}
 	}
@@ -301,7 +389,10 @@ func (g *Generator) tablesListSQL() string {
 	return fmt.Sprintf(`
 		SELECT t.database, t.name AS table_name, t.engine,
 			coalesce(p.parts, 0) AS parts,
-			formatReadableSize(coalesce(p.total_rows, 0)) AS total_rows,
+			-- total_rows is a ROW COUNT, not a byte size: formatReadableSize would
+			-- render 1,992,000 rows as "1.90 MiB". formatReadableQuantity exists
+			-- well below the 22.8 floor.
+			formatReadableQuantity(coalesce(p.total_rows, 0)) AS total_rows,
 			formatReadableSize(coalesce(p.bytes_on_disk, 0)) AS size,
 			coalesce(p.bytes_on_disk, 0) AS bytes_on_disk,
 			t.partition_key, t.sorting_key, t.storage_policy
@@ -315,6 +406,261 @@ func (g *Generator) tablesListSQL() string {
 		WHERE t.%s
 		ORDER BY bytes_on_disk DESC
 		LIMIT 2000`, g.sysTable("tables"), g.sysTable("parts"), notSystem)
+}
+
+// sampleQueryCol returns the projection for a representative SQL text per
+// normalized_query_hash — or a redaction stub in gov mode.
+//
+// Every row in one of these groups shares a normalized_query_hash, i.e. the
+// same query SHAPE, so any(query) is a genuine example of the group rather
+// than an arbitrary mix; only the literals belong to whichever execution was
+// picked. It is truncated because a pathological query can be megabytes and
+// this text is embedded directly in the HTML.
+//
+// Gov mode gets a stub: queries.gov/*.sql hashes database and table names, and
+// query_log.query is the raw SQL the customer ran against those same names, so
+// shipping it here would undo the hashing.
+func (g *Generator) sampleQueryCol() string {
+	if g.mode == "gov" {
+		return "'' AS sample_query"
+	}
+	// leftUTF8: byte-wise left() would split a multi-byte character in the
+	// query text and leave invalid UTF-8. Same reason as the collectors.
+	return "leftUTF8(any(query), 600) AS sample_query"
+}
+
+// querySlowSQL builds the slowest-query-patterns panel.
+//
+// hash is the FULL normalized_query_hash, as a string. It is a UInt64, so it
+// must never reach the page as a JSON number: JavaScript rounds past 2^53 and
+// would silently corrupt the identifier the reader is meant to copy.
+func (g *Generator) querySlowSQL() string {
+	// Same window contract as queryByUserSQL: exception rows must be IN the
+	// window or countIf(exception_code != 0) is structurally always zero —
+	// failures log as ExceptionWhileProcessing/ExceptionBeforeStart, never
+	// QueryFinish. Cost aggregates stay QueryFinish-only (sum/greatest rather
+	// than avgIf, so an all-failure shape yields 0, not a JSON-hostile nan).
+	return fmt.Sprintf(
+		`SELECT toString(normalized_query_hash) AS hash,
+				query_kind, user,
+				countIf(type = 'QueryFinish') AS executions,
+				round(sumIf(query_duration_ms, type = 'QueryFinish')
+					  / greatest(countIf(type = 'QueryFinish'), 1), 0) AS avg_duration_ms,
+				maxIf(query_duration_ms, type = 'QueryFinish') AS max_duration_ms,
+				round(sumIf(read_bytes, type = 'QueryFinish')
+					  / greatest(countIf(type = 'QueryFinish'), 1) / 1048576, 2) AS avg_read_mb,
+				round(sumIf(memory_usage, type = 'QueryFinish')
+					  / greatest(countIf(type = 'QueryFinish'), 1) / 1048576, 2) AS avg_memory_mb,
+				countIf(exception_code != 0) AS errors,
+				%s
+		 FROM %s
+		 WHERE event_time > now() - INTERVAL 7 DAY
+		   AND ((type = 'QueryFinish' AND query_duration_ms > 0)
+				OR type IN ('ExceptionWhileProcessing', 'ExceptionBeforeStart'))
+		 GROUP BY hash, query_kind, user
+		 ORDER BY avg_duration_ms DESC LIMIT 20`,
+		g.sampleQueryCol(), g.sysTable("query_log"),
+	)
+}
+
+// queryHeavySQL builds the heaviest-reads panel. Same full-hash and
+// sample-query contract as querySlowSQL.
+func (g *Generator) queryHeavySQL() string {
+	return fmt.Sprintf(
+		`SELECT toString(normalized_query_hash) AS hash,
+				query_kind, user,
+				count() AS executions,
+				round(avg(read_bytes)/1048576, 2) AS avg_read_mb,
+				formatReadableSize(sum(read_bytes)) AS total_read,
+				round(avg(query_duration_ms), 0) AS avg_duration_ms,
+				%s
+		 FROM %s
+		 WHERE event_time > now() - INTERVAL 7 DAY
+		   AND type = 'QueryFinish'
+		 GROUP BY hash, query_kind, user
+		 ORDER BY avg_read_mb DESC LIMIT 20`,
+		g.sampleQueryCol(), g.sysTable("query_log"),
+	)
+}
+
+// textLogRowCap bounds what the Logs panel embeds.
+//
+// This number is the whole reason the panel is safe. The raw server logs are
+// tail-copied into the bundle at up to 50 MiB PER FILE (--logs-max-mb), and
+// inlining that into a self-contained HTML would produce a document the
+// browser must parse as one string literal before it paints anything. So the
+// panel embeds bounded, structured, already-triaged rows from system.text_log
+// and the Collected Files panel links to the raw files.
+const textLogRowCap = 1000
+
+// textLogMessageCap trims each message. system.text_log messages are unbounded
+// (stack traces, whole queries); at the row cap an untrimmed column is the
+// difference between a ~350 KiB payload and a multi-megabyte one.
+const textLogMessageCap = 300
+
+// textLogSQL builds the Logs panel query: recent Warning-and-worse only.
+//
+// Info/Debug/Trace are deliberately excluded. They are the bulk of the volume
+// and the reason a naive log panel is unusable; anyone who needs them wants the
+// raw file, which is linked under Collected Files.
+func (g *Generator) textLogSQL() string {
+	host := ""
+	if g.hasColumn("text_log", "hostname") {
+		host = "hostname,"
+	}
+	// Filter and slice in a SUBQUERY, format in the outer SELECT.
+	//
+	// The analyzer resolves WHERE-clause identifiers against SELECT aliases, so
+	// a flat `SELECT toString(event_time) AS event_time ... WHERE event_time >
+	// now() - INTERVAL 24 HOUR` compares String to DateTime and dies with
+	// NO_COMMON_TYPE (code 386) — verified against 26.4.5.143. That is the same
+	// trap already documented for exception_code in the exceptions panel; here
+	// the inner query keeps event_time a DateTime so the predicate is typed,
+	// and only the outer projection stringifies it.
+	//
+	// Ordering the outer query by the stringified value is still chronological:
+	// 'YYYY-MM-DD hh:mm:ss' sorts lexicographically in time order.
+	//
+	// leftUTF8 rather than left: left() counts bytes, so truncating a message
+	// mid-character leaves invalid UTF-8. json.Marshal masks that as U+FFFD
+	// here rather than breaking the page, but the archived collectors write
+	// the server's bytes straight to disk and cannot afford it, so both use
+	// the same function.
+	return fmt.Sprintf(
+		`SELECT toString(event_time) AS event_time,
+				%s level, logger_name,
+				leftUTF8(message, %d) AS message
+		 FROM (
+			SELECT event_time, %s level, logger_name, message
+			FROM %s
+			WHERE event_time > now() - INTERVAL 24 HOUR
+			  AND level IN ('Warning', 'Error', 'Critical', 'Fatal')
+			ORDER BY event_time DESC
+			LIMIT %d
+		 )
+		 ORDER BY event_time DESC`,
+		host, textLogMessageCap, host, g.sysTable("text_log"), textLogRowCap,
+	)
+}
+
+// collectBundleFiles indexes every file the run wrote next to dashboard.html,
+// so the dashboard can point at the rest of the bundle instead of swallowing
+// it. Nothing here is embedded: the raw server logs alone are tail-copied at up
+// to 50 MiB per file (--logs-max-mb), and inlining that would produce a
+// document the browser cannot open.
+//
+// Paths are bundle-relative, so the links resolve from the extracted archive
+// and simply 404 if someone mails dashboard.html on its own — which is why the
+// panel says the files live beside it.
+func collectBundleFiles(outputDir string) []map[string]interface{} {
+	out := []map[string]interface{}{}
+	err := filepath.Walk(outputDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil //nolint:nilerr // an unreadable entry is skipped, not fatal
+		}
+		rel, relErr := filepath.Rel(outputDir, path)
+		if relErr != nil {
+			return nil
+		}
+		rel = filepath.ToSlash(rel)
+		// The dashboard does not list itself, and OS turds are not artifacts.
+		if rel == "dashboard.html" || strings.HasPrefix(info.Name(), ".") {
+			return nil
+		}
+		dir := path0(rel)
+		out = append(out, map[string]interface{}{
+			"file":  rel,
+			"group": dir,
+			"kind":  strings.TrimPrefix(strings.ToLower(filepath.Ext(rel)), "."),
+			"size":  formatBytes(info.Size()),
+			"bytes": info.Size(),
+			"href":  rel,
+		})
+		return nil
+	})
+	if err != nil {
+		return nil
+	}
+	sort.Slice(out, func(i, j int) bool {
+		gi, gj := out[i]["group"].(string), out[j]["group"].(string)
+		if gi != gj {
+			return gi < gj
+		}
+		return out[i]["file"].(string) < out[j]["file"].(string)
+	})
+	return out
+}
+
+// path0 returns the top-level folder of a bundle-relative path, or "" for a
+// file sitting at the bundle root.
+func path0(rel string) string {
+	if i := strings.Index(rel, "/"); i >= 0 {
+		return rel[:i]
+	}
+	return ""
+}
+
+// formatBytes renders a byte count in the largest sensible unit.
+func formatBytes(b int64) string {
+	const u = 1024
+	if b < u {
+		return fmt.Sprintf("%d B", b)
+	}
+	div, exp := int64(u), 0
+	for n := b / u; n >= u && exp < 3; n /= u {
+		div *= u
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", float64(b)/float64(div), "KMGT"[exp])
+}
+
+// topTablesSQL builds the largest-tables panel.
+//
+// total_rows uses formatReadableQuantity, NOT formatReadableSize: the latter is
+// the byte formatter and renders 1,992,000 rows as "1.90 MiB".
+func (g *Generator) topTablesSQL() string {
+	return fmt.Sprintf(
+		`SELECT database, table, count() AS parts,
+			formatReadableQuantity(sum(rows)) AS total_rows,
+			formatReadableSize(sum(bytes_on_disk)) AS compressed_size,
+			round(if(sum(data_compressed_bytes)>0,
+				sum(data_uncompressed_bytes)/sum(data_compressed_bytes), 0), 2) AS compression_ratio
+		 FROM %s
+		 WHERE active = 1
+		   AND database NOT IN ('system','information_schema','INFORMATION_SCHEMA')
+		 GROUP BY database, table
+		 ORDER BY sum(bytes_on_disk) DESC LIMIT 20`,
+		g.sysTable("parts"),
+	)
+}
+
+// queryByUserSQL builds the per-user activity summary.
+//
+// The window must include the exception types, not just QueryFinish: a failed
+// query is logged as ExceptionWhileProcessing (threw during execution) or
+// ExceptionBeforeStart (threw during parsing/analysis, e.g. UNKNOWN_TABLE) and
+// NEVER as QueryFinish. Scoping the whole query to QueryFinish made
+// countIf(exception_code != 0) structurally always 0, so the panel's error
+// column — and the alert-row highlight keyed on it — could never fire.
+//
+// executions and the cost aggregates stay QueryFinish-only so their meaning is
+// unchanged. Average duration is sum/count rather than avgIf so a user with
+// only failures yields 0 instead of a JSON-hostile nan.
+func (g *Generator) queryByUserSQL() string {
+	return fmt.Sprintf(
+		`SELECT user,
+				countIf(type = 'QueryFinish') AS executions,
+				round(sumIf(query_duration_ms, type = 'QueryFinish')
+					  / greatest(countIf(type = 'QueryFinish'), 1), 0) AS avg_duration_ms,
+				round(sumIf(read_bytes, type = 'QueryFinish')/1073741824, 3) AS total_read_gb,
+				round(sumIf(memory_usage, type = 'QueryFinish')/1073741824, 3) AS total_memory_gb,
+				countIf(exception_code != 0) AS error_count
+		 FROM %s
+		 WHERE event_time > now() - INTERVAL 7 DAY
+		   AND type IN ('QueryFinish', 'ExceptionWhileProcessing', 'ExceptionBeforeStart')
+		 GROUP BY user ORDER BY executions DESC LIMIT 20`,
+		g.sysTable("query_log"),
+	)
 }
 
 // dictionariesSQL builds the dictionaries query, omitting last_exception
@@ -482,52 +828,30 @@ func (g *Generator) collect() map[string]interface{} {
 		g.sysTable("query_log"),
 	))
 
-	// top slow queries (by avg duration, grouped by hash + kind + user)
-	p["query_slow"] = g.safeQuery("query_slow", fmt.Sprintf(
-		`SELECT toString(normalized_query_hash) AS hash,
-				query_kind, user,
-				count() AS executions,
-				round(avg(query_duration_ms), 0) AS avg_duration_ms,
-				max(query_duration_ms) AS max_duration_ms,
-				round(avg(read_bytes)/1048576, 2) AS avg_read_mb,
-				round(avg(memory_usage)/1048576, 2) AS avg_memory_mb,
-				countIf(exception_code != 0) AS errors
-		 FROM %s
-		 WHERE event_time > now() - INTERVAL 7 DAY
-		   AND type = 'QueryFinish' AND query_duration_ms > 0
-		 GROUP BY hash, query_kind, user
-		 ORDER BY avg_duration_ms DESC LIMIT 20`,
-		g.sysTable("query_log"),
-	))
+	// Host facts, straight from the same Report that becomes host_info.json —
+	// round-tripped through JSON so the dashboard shows exactly the shape the
+	// file does rather than a second, drifting projection of it.
+	if g.hostInfo != nil {
+		if raw, err := json.Marshal(g.hostInfo); err == nil {
+			var hi map[string]interface{}
+			if err := json.Unmarshal(raw, &hi); err == nil {
+				p["host_info"] = hi
+			}
+		}
+		p["host_checks"] = hostChecks(g.hostInfo)
+	}
 
-	// top queries by bytes read
-	p["query_heavy"] = g.safeQuery("query_heavy", fmt.Sprintf(
-		`SELECT toString(normalized_query_hash) AS hash,
-				query_kind, user,
-				count() AS executions,
-				round(avg(read_bytes)/1048576, 2) AS avg_read_mb,
-				formatReadableSize(sum(read_bytes)) AS total_read,
-				round(avg(query_duration_ms), 0) AS avg_duration_ms
-		 FROM %s
-		 WHERE event_time > now() - INTERVAL 7 DAY
-		   AND type = 'QueryFinish'
-		 GROUP BY hash, query_kind, user
-		 ORDER BY avg_read_mb DESC LIMIT 20`,
-		g.sysTable("query_log"),
-	))
+	// Logs: bounded Warning+ rows only. text_log is opt-in (it is off by
+	// default in OSS), so an absent table simply hides the panel.
+	if g.hasTable("text_log") {
+		p["text_log"] = g.safeQuery("text_log", g.textLogSQL())
+		p["text_log_row_cap"] = textLogRowCap
+	}
 
-	// per-user summary
-	p["query_by_user"] = g.safeQuery("query_by_user", fmt.Sprintf(
-		`SELECT user, count() AS executions,
-				round(avg(query_duration_ms), 0) AS avg_duration_ms,
-				round(sum(read_bytes)/1073741824, 3) AS total_read_gb,
-				round(sum(memory_usage)/1073741824, 3) AS total_memory_gb,
-				countIf(exception_code != 0) AS error_count
-		 FROM %s
-		 WHERE event_time > now() - INTERVAL 7 DAY AND type = 'QueryFinish'
-		 GROUP BY user ORDER BY executions DESC LIMIT 20`,
-		g.sysTable("query_log"),
-	))
+	p["query_slow"] = g.safeQuery("query_slow", g.querySlowSQL())
+	p["query_heavy"] = g.safeQuery("query_heavy", g.queryHeavySQL())
+
+	p["query_by_user"] = g.safeQuery("query_by_user", g.queryByUserSQL())
 
 	// exceptions — return exception_code as the raw integer. In CH 25.12 the
 	// analyzer resolves WHERE-clause identifiers against SELECT aliases, so
@@ -585,19 +909,7 @@ func (g *Generator) collect() map[string]interface{} {
 
 	// ── Pending work ──────────────────────────────────────────────────────────
 
-	p["top_tables"] = g.safeQuery("top_tables", fmt.Sprintf(
-		`SELECT database, table, count() AS parts,
-			formatReadableSize(sum(rows)) AS total_rows,
-			formatReadableSize(sum(bytes_on_disk)) AS compressed_size,
-			round(if(sum(data_compressed_bytes)>0,
-				sum(data_uncompressed_bytes)/sum(data_compressed_bytes), 0), 2) AS compression_ratio
-		 FROM %s
-		 WHERE active = 1
-		   AND database NOT IN ('system','information_schema','INFORMATION_SCHEMA')
-		 GROUP BY database, table
-		 ORDER BY sum(bytes_on_disk) DESC LIMIT 20`,
-		g.sysTable("parts"),
-	))
+	p["top_tables"] = g.safeQuery("top_tables", g.topTablesSQL())
 
 	// is_killed was added to system.mutations after 22.8; only filter on
 	// it when present, otherwise show all in-progress mutations.
@@ -703,7 +1015,7 @@ func (g *Generator) collect() map[string]interface{} {
 			 SELECT name, code,
 				 sum(value)                                   AS total,
 				 toString(max(last_error_time))               AS last_error_time,
-				 left(argMax(last_error_message, value), 300) AS last_error_message
+				 leftUTF8(argMax(last_error_message, value), 300) AS last_error_message
 			 FROM %s
 			 GROUP BY name, code
 			 HAVING total > 0
@@ -948,99 +1260,259 @@ const htmlTemplate = `<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ClickHouse Diagnostic Dashboard</title>
+<script>/* stamp the saved theme before first paint so the page never flashes */
+try{var _t=localStorage.getItem("chdiag-theme");if(_t)document.documentElement.setAttribute("data-cui-theme",_t);}catch(e){}
+</script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
 <style>
+/* ─────────────────────────────────────────────────────────────────────────────
+   Click UI token layer.
+
+   Click UI ships as a React library (@clickhouse/click-ui + ClickUIProvider),
+   which this report cannot use: it is one self-contained HTML file opened
+   offline from a tarball, with no build step. The design system's documented
+   escape hatch for exactly that case is its token layer — CSS custom
+   properties, themed via data-cui-theme on <html>. So the values below are
+   vendored verbatim from ClickHouse/click-ui tokens/themes/{primitives,light,
+   dark}.json; every hex is a real token, none is eyeballed.
+
+   Surfaces are chosen so charts sit on #ffffff (light) / #1F1F1C (dark) — the
+   two surfaces the categorical palette in the script below was validated
+   against. Do not repoint --surface-card without re-running that validation.
+   ───────────────────────────────────────────────────────────────────────── */
+:root{
+  color-scheme:light;
+  /* primitives actually referenced */
+  --click-palette-neutral-0:#ffffff;
+  --click-palette-neutral-750:#1F1F1C;
+  --click-palette-neutral-725:#282828;
+  --click-palette-neutral-900:#151515;
+  --click-palette-slate-50:#f6f7fa;
+  --click-palette-slate-100:#e6e7e9;
+  --click-palette-slate-600:#696e79;
+  --click-palette-slate-900:#161517;
+  --click-palette-brand-300:#FAFF69;
+
+  /* global semantic tokens (light.json) */
+  --click-global-color-background-default:#ffffff;
+  --click-global-color-background-muted:#f6f7fa;
+  --click-global-color-text-default:#161517;
+  --click-global-color-text-muted:#696e79;
+  --click-global-color-stroke-default:#e6e7e9;
+  --click-global-color-accent-default:#151515;
+
+  /* report-level surface roles, expressed in tokens */
+  --surface-page:var(--click-global-color-background-muted);
+  --surface-card:var(--click-global-color-background-default);
+  --surface-sunken:var(--click-palette-slate-50);
+  --surface-hover:var(--click-palette-slate-50);
+  --ink:var(--click-global-color-text-default);
+  --ink-muted:var(--click-global-color-text-muted);
+  --stroke:var(--click-global-color-stroke-default);
+
+  /* chrome that stays dark in both themes (ClickHouse product header) */
+  --header-bg:var(--click-palette-neutral-900);
+  --header-ink:var(--click-palette-neutral-0);
+  --header-logo:var(--click-palette-brand-300);
+
+  /* status ramp — semantic tokens, reserved meaning, never used for a series */
+  --status-critical:#f10000;        /* danger.500  */
+  --status-warning:#F55A00;         /* warning.500 */
+  --status-good:#008A0B;            /* success.700 */
+  --status-info:#1D64EC;            /* info.500    */
+  --status-neutral:#696e79;         /* slate.600 — "the rule itself errored" */
+  --status-critical-bg:#ffdddd;     /* danger.50   */
+  --status-warning-bg:#FFE2D1;      /* warning.50  */
+  --status-good-bg:#E5FFE8;         /* success.50  */
+  --status-info-bg:#E7EFFD;         /* info.50     */
+  --status-neutral-bg:#f6f7fa;      /* slate.50    */
+  --status-critical-ink:#910000;    /* danger.700  */
+  --status-warning-ink:#A33C00;     /* warning.700 */
+  --status-good-ink:#008A0B;        /* success.700 */
+  --status-info-ink:#0D3E9B;        /* info.700    */
+  --status-neutral-ink:#53575f;     /* slate.700   */
+  --link:#1D64EC;                   /* info.500    */
+
+  /* type (primitives.json → typography.font.*) */
+  --click-font-regular:"Inter","SF Pro Display",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Oxygen,Ubuntu,Cantarell,"Open Sans","Helvetica Neue",sans-serif;
+  --click-font-mono:"Inconsolata",Consolas,"SFMono Regular",ui-monospace,monospace;
+  --click-font-size-0:0.625rem; --click-font-size-1:0.75rem; --click-font-size-2:0.875rem;
+  --click-font-size-3:1rem;     --click-font-size-4:1.125rem; --click-font-size-5:1.25rem;
+  --click-font-size-6:2rem;
+  --click-font-weight-1:400; --click-font-weight-2:500; --click-font-weight-3:600; --click-font-weight-4:700;
+  --click-line-height-1:150%; --click-line-height-2:160%;
+
+  /* space + border + shadow (primitives.json → spaces/border/shadow) */
+  --click-space-1:0.25rem; --click-space-2:0.5rem;  --click-space-3:0.75rem;
+  --click-space-4:1rem;    --click-space-5:1.5rem;  --click-space-6:2rem; --click-space-7:2.5rem;
+  --click-radii-1:0.25rem; --click-radii-2:0.5rem;  --click-radii-3:0.75rem; --click-radii-full:9999px;
+  --click-border-width-1:1px;
+  --click-shadow-1:0 4px 6px -1px rgba(0,0,0,.08), 0 2px 4px -1px rgba(0,0,0,.06);
+  --click-shadow-5:0 2px 2px 0 rgba(0,0,0,.03);
+  --click-transition-smooth:150ms;
+}
+
+/* Dark theme. Declared under both scopes so the OS setting and the in-page
+   toggle each win where they should: :where() keeps the media block at zero
+   specificity so an explicit light stamp beats OS-dark. */
+@media (prefers-color-scheme:dark){
+  :root:where(:not([data-cui-theme="light"])){
+    color-scheme:dark;
+    --click-global-color-background-default:#1F1F1C;
+    --click-global-color-background-muted:#282828;
+    --click-global-color-text-default:#ffffff;
+    --click-global-color-text-muted:#b3b6bd;
+    --click-global-color-stroke-default:#323232;
+    --click-global-color-accent-default:#FAFF69;
+    --surface-page:var(--click-palette-neutral-900);
+    --surface-card:var(--click-global-color-background-default);
+    --surface-sunken:var(--click-global-color-background-muted);
+    --surface-hover:var(--click-global-color-background-muted);
+    --status-neutral:#808691;
+    --status-critical-bg:#300000; --status-warning-bg:#471A00; --status-good-bg:#004206;
+    --status-info-bg:#061C47;     --status-neutral-bg:#282828;
+    --status-critical-ink:#ffbaba; --status-warning-ink:#FFCBAD; --status-good-ink:#99FFA1;
+    --status-info-ink:#A1BEF7;     --status-neutral-ink:#b3b6bd;
+    --link:#A1BEF7;                /* info.200 — info.500 is too dark to read here */
+    --click-shadow-1:0 4px 6px -1px rgba(0,0,0,.5), 0 2px 4px -1px rgba(0,0,0,.4);
+    --click-shadow-5:0 2px 2px 0 rgba(0,0,0,.3);
+  }
+}
+:root[data-cui-theme="dark"]{
+  color-scheme:dark;
+  --click-global-color-background-default:#1F1F1C;
+  --click-global-color-background-muted:#282828;
+  --click-global-color-text-default:#ffffff;
+  --click-global-color-text-muted:#b3b6bd;
+  --click-global-color-stroke-default:#323232;
+  --click-global-color-accent-default:#FAFF69;
+  --surface-page:var(--click-palette-neutral-900);
+  --surface-card:var(--click-global-color-background-default);
+  --surface-sunken:var(--click-global-color-background-muted);
+  --surface-hover:var(--click-global-color-background-muted);
+  --status-neutral:#808691;
+  --status-critical-bg:#300000; --status-warning-bg:#471A00; --status-good-bg:#004206;
+  --status-info-bg:#061C47;     --status-neutral-bg:#282828;
+  --status-critical-ink:#ffbaba; --status-warning-ink:#FFCBAD; --status-good-ink:#99FFA1;
+  --status-info-ink:#A1BEF7;     --status-neutral-ink:#b3b6bd;
+  --link:#A1BEF7;                /* info.200 — info.500 is too dark to read here */
+  --click-shadow-1:0 4px 6px -1px rgba(0,0,0,.5), 0 2px 4px -1px rgba(0,0,0,.4);
+  --click-shadow-5:0 2px 2px 0 rgba(0,0,0,.3);
+}
+
 *{box-sizing:border-box;margin:0;padding:0}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f0f2f5;color:#1a1a2e;font-size:14px}
-header{background:linear-gradient(135deg,#1a1a2e 0%,#16213e 100%);color:#fff;padding:16px 28px;display:flex;align-items:center;gap:14px;box-shadow:0 2px 8px rgba(0,0,0,.3);position:sticky;top:0;z-index:100}
-header .logo{font-size:26px;font-weight:900;color:#FC4F05;letter-spacing:-1px}
-header .logo span{color:#FFB627}
-header h1{font-size:17px;font-weight:600;line-height:1.3}
-header .meta{margin-left:auto;text-align:right;font-size:12px;opacity:.8;line-height:1.6}
-nav{background:#fff;border-bottom:1px solid #e0e0e0;padding:0 28px;display:flex;gap:0;overflow-x:auto;position:sticky;top:57px;z-index:99;box-shadow:0 1px 3px rgba(0,0,0,.05)}
-nav a{padding:12px 16px;color:#555;text-decoration:none;font-size:13px;font-weight:500;white-space:nowrap;border-bottom:3px solid transparent;display:block}
-nav a:hover,nav a.active{color:#FC4F05;border-bottom-color:#FC4F05}
-.badge{display:inline-block;padding:2px 9px;border-radius:12px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;margin-top:2px}
-.badge-cloud{background:#1e88e5;color:#fff}
-.badge-onprem{background:#43a047;color:#fff}
-.badge-gov{background:#8e24aa;color:#fff}
-main{max-width:1600px;margin:0 auto;padding:20px 20px 40px}
-section{margin-bottom:32px;scroll-margin-top:110px}
-section h2{font-size:15px;font-weight:700;color:#1a1a2e;margin-bottom:14px;padding-bottom:8px;border-bottom:2px solid #FC4F05;display:flex;align-items:center;gap:8px}
-.stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(155px,1fr));gap:12px;margin-bottom:28px}
-.stat-card{background:#fff;border-radius:10px;padding:16px 14px;box-shadow:0 1px 4px rgba(0,0,0,.08);border-top:3px solid #FC4F05;text-align:center}
-.stat-card .val{font-size:24px;font-weight:800;color:#1a1a2e;line-height:1.1}
-.stat-card .lbl{font-size:11px;color:#777;text-transform:uppercase;letter-spacing:.5px;margin-top:4px}
-.charts-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(460px,1fr));gap:18px}
-.chart-card{background:#fff;border-radius:10px;padding:18px;box-shadow:0 1px 4px rgba(0,0,0,.08)}
-.chart-card h3{font-size:12px;font-weight:700;color:#555;margin-bottom:12px;text-transform:uppercase;letter-spacing:.5px}
+body{font-family:var(--click-font-regular);background:var(--surface-page);color:var(--ink);font-size:var(--click-font-size-2);line-height:var(--click-line-height-1)}
+/* Header and nav stick as ONE band. They used to stick separately, with the
+   nav pinned at a hardcoded top:53px that had to equal the header's height —
+   it did not (the header measures ~74px), so once scrolled the header covered
+   the top 21px of the nav and its labels were sliced in half. A single sticky
+   wrapper removes the constant instead of re-tuning it. --topbar-h is measured
+   at runtime and drives scroll-margin and the scroll-spy, so nothing else
+   hardcodes this height either. */
+.topbar{position:sticky;top:0;z-index:100}
+header{background:var(--header-bg);color:var(--header-ink);padding:var(--click-space-3) var(--click-space-6);display:flex;align-items:center;gap:var(--click-space-3)}
+header .logo{font-size:var(--click-font-size-5);font-weight:var(--click-font-weight-4);color:var(--header-logo);letter-spacing:-.5px}
+header h1{font-size:var(--click-font-size-4);font-weight:var(--click-font-weight-3);line-height:1.3}
+header .meta{margin-left:auto;text-align:right;font-size:var(--click-font-size-1);opacity:.75;line-height:var(--click-line-height-2)}
+#theme-toggle{margin-left:var(--click-space-4);background:transparent;color:var(--header-ink);border:var(--click-border-width-1) solid rgba(255,255,255,.25);border-radius:var(--click-radii-full);padding:var(--click-space-1) var(--click-space-3);font:inherit;font-size:var(--click-font-size-1);cursor:pointer;white-space:nowrap;transition:background var(--click-transition-smooth)}
+#theme-toggle:hover{background:rgba(255,255,255,.12)}
+nav{background:var(--surface-card);border-bottom:var(--click-border-width-1) solid var(--stroke);padding:0 var(--click-space-6);display:flex;overflow-x:auto}
+nav a{padding:var(--click-space-3) var(--click-space-4);color:var(--ink-muted);text-decoration:none;font-size:var(--click-font-size-1);font-weight:var(--click-font-weight-2);white-space:nowrap;border-bottom:2px solid transparent;display:block}
+nav a:hover,nav a.active{color:var(--ink);border-bottom-color:var(--ink)}
+.badge{display:inline-block;padding:2px var(--click-space-2);border-radius:var(--click-radii-full);font-size:var(--click-font-size-0);font-weight:var(--click-font-weight-3);text-transform:uppercase;letter-spacing:.5px;margin-top:2px}
+.badge-cloud{background:var(--status-info);color:#fff}
+.badge-onprem{background:var(--status-good);color:#fff}
+.badge-gov{background:#8800CC;color:#fff}
+main{max-width:1600px;margin:0 auto;padding:var(--click-space-5) var(--click-space-5) var(--click-space-7)}
+section{margin-bottom:var(--click-space-6);scroll-margin-top:calc(var(--topbar-h, 124px) + var(--click-space-2))}
+section h2{font-size:var(--click-font-size-3);font-weight:var(--click-font-weight-3);color:var(--ink);margin-bottom:var(--click-space-3);padding-bottom:var(--click-space-2);border-bottom:var(--click-border-width-1) solid var(--stroke);display:flex;align-items:center;gap:var(--click-space-2)}
+.stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(155px,1fr));gap:var(--click-space-3);margin-bottom:var(--click-space-5)}
+.stat-card{background:var(--surface-card);border:var(--click-border-width-1) solid var(--stroke);border-radius:var(--click-radii-2);padding:var(--click-space-4);box-shadow:var(--click-shadow-5)}
+.stat-card .val{font-size:var(--click-font-size-6);font-weight:var(--click-font-weight-3);color:var(--ink);line-height:1.15;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.stat-card .val.val-md{font-size:var(--click-font-size-5)}
+.stat-card .val.val-sm{font-size:var(--click-font-size-4)}
+.stat-card .lbl{font-size:var(--click-font-size-1);color:var(--ink-muted);margin-top:var(--click-space-1)}
+.charts-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(460px,1fr));gap:var(--click-space-4)}
+.chart-card{background:var(--surface-card);border:var(--click-border-width-1) solid var(--stroke);border-radius:var(--click-radii-2);padding:var(--click-space-4);box-shadow:var(--click-shadow-5)}
+.chart-card h3{font-size:var(--click-font-size-2);font-weight:var(--click-font-weight-3);color:var(--ink);margin-bottom:var(--click-space-3)}
 .chart-wrap{position:relative}
-.h200{height:200px}.h260{height:260px}.h300{height:300px}.h360{height:360px}.h420{height:420px}
-table.dt{width:100%;border-collapse:collapse;font-size:13px}
-table.dt th{background:#f4f5f7;color:#444;font-weight:600;padding:9px 11px;text-align:left;border-bottom:2px solid #e0e0e0;white-space:nowrap;cursor:pointer;user-select:none}
-table.dt th:hover{background:#ebebeb}
-table.dt td{padding:7px 11px;border-bottom:1px solid #f0f0f0;vertical-align:top;max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-table.dt tr:hover td{background:#fafafa}
+.h200{height:200px}.h220{height:220px}.h260{height:260px}.h300{height:300px}.h360{height:360px}.h420{height:420px}
+table.dt{width:100%;border-collapse:collapse;font-size:var(--click-font-size-1);color:var(--ink)}
+table.dt th{background:var(--surface-sunken);color:var(--ink-muted);font-weight:var(--click-font-weight-3);padding:var(--click-space-2) var(--click-space-3);text-align:left;border-bottom:var(--click-border-width-1) solid var(--stroke);white-space:nowrap;cursor:pointer;user-select:none}
+table.dt th:hover{color:var(--ink)}
+table.dt td{padding:var(--click-space-2) var(--click-space-3);border-bottom:var(--click-border-width-1) solid var(--stroke);vertical-align:top;max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+table.dt tr:hover td{background:var(--surface-hover)}
 table.dt .num{text-align:right;font-variant-numeric:tabular-nums}
-.tbl-wrap{overflow-x:auto;border-radius:8px;border:1px solid #e0e0e0}
-.no-data{color:#aaa;font-style:italic;padding:20px;text-align:center}
-.alert-row td{background:#fff8e1 !important}
-.error-row td{background:#ffebee !important}
-.ok-badge{background:#e8f5e9;color:#2e7d32;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600}
-.err-badge{background:#ffebee;color:#c62828;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600}
-.warn-badge{background:#fff8e1;color:#e65100;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600}
+table.dt a{color:var(--link);text-decoration:none}
+table.dt a:hover{text-decoration:underline}
+.tbl-wrap{overflow-x:auto;border-radius:var(--click-radii-2);border:var(--click-border-width-1) solid var(--stroke);background:var(--surface-card)}
+.no-data{color:var(--ink-muted);font-style:italic;padding:var(--click-space-5);text-align:center}
+.alert-row td{background:var(--status-warning-bg) !important}
+.error-row td{background:var(--status-critical-bg) !important}
+.ok-badge,.err-badge,.warn-badge{padding:2px var(--click-space-2);border-radius:var(--click-radii-full);font-size:var(--click-font-size-0);font-weight:var(--click-font-weight-3);white-space:nowrap}
+.ok-badge{background:var(--status-good-bg);color:var(--status-good-ink)}
+.err-badge{background:var(--status-critical-bg);color:var(--status-critical-ink)}
+.warn-badge{background:var(--status-warning-bg);color:var(--status-warning-ink)}
 /* search / filter bar */
-.filter-bar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:12px;background:#fff;padding:12px 14px;border-radius:8px;box-shadow:0 1px 3px rgba(0,0,0,.07)}
-.filter-bar input[type=text]{flex:1;min-width:200px;padding:7px 12px;border:1px solid #d0d0d0;border-radius:6px;font-size:13px;outline:none}
-.filter-bar input[type=text]:focus{border-color:#FC4F05}
-.filter-bar select{padding:7px 10px;border:1px solid #d0d0d0;border-radius:6px;font-size:13px;background:#fff;outline:none}
-.count-badge{font-size:12px;color:#777;white-space:nowrap}
-.pagination{display:flex;gap:8px;align-items:center;justify-content:center;padding:12px;font-size:13px;color:#555}
-.pagination button{padding:5px 12px;border:1px solid #d0d0d0;border-radius:5px;background:#fff;cursor:pointer;font-size:13px}
-.pagination button:hover{background:#f0f2f5;border-color:#FC4F05;color:#FC4F05}
-.pagination .cur{font-weight:700;color:#FC4F05}
+.filter-bar{display:flex;flex-wrap:wrap;gap:var(--click-space-2);align-items:center;margin-bottom:var(--click-space-3);background:var(--surface-card);border:var(--click-border-width-1) solid var(--stroke);padding:var(--click-space-3);border-radius:var(--click-radii-2)}
+.filter-bar input[type=text],.filter-bar select{padding:var(--click-space-2) var(--click-space-3);border:var(--click-border-width-1) solid var(--stroke);border-radius:var(--click-radii-1);font:inherit;font-size:var(--click-font-size-1);background:var(--surface-card);color:var(--ink);outline:none}
+.filter-bar input[type=text]{flex:1;min-width:200px}
+.filter-bar input[type=text]:focus,.filter-bar select:focus{border-color:var(--ink-muted)}
+.count-badge{font-size:var(--click-font-size-1);color:var(--ink-muted);white-space:nowrap}
+.pagination{display:flex;gap:var(--click-space-2);align-items:center;justify-content:center;padding:var(--click-space-3);font-size:var(--click-font-size-1);color:var(--ink-muted)}
+.pagination button{padding:var(--click-space-1) var(--click-space-3);border:var(--click-border-width-1) solid var(--stroke);border-radius:var(--click-radii-1);background:var(--surface-card);color:var(--ink);cursor:pointer;font:inherit;font-size:var(--click-font-size-1)}
+.pagination button:hover{background:var(--surface-hover)}
+.pagination .cur{font-weight:var(--click-font-weight-3);color:var(--ink)}
 /* subsection title */
-.sub-title{font-size:13px;font-weight:700;color:#444;margin:20px 0 10px;text-transform:uppercase;letter-spacing:.4px}
-footer{text-align:center;color:#aaa;font-size:12px;padding:20px;margin-top:8px}
+#tbl-host-tunables td:last-child,#tbl-host-os td:last-child{white-space:normal;max-width:38ch}
+#tbl-host-procs td:last-child{white-space:normal;max-width:60ch;font-family:var(--click-font-mono);font-size:var(--click-font-size-0)}
+.host-note{color:var(--ink-muted);font-size:var(--click-font-size-1);margin-top:var(--click-space-2)}
+.sql-peek{margin-top:var(--click-space-3);background:var(--surface-sunken);color:var(--ink);border:var(--click-border-width-1) solid var(--stroke);border-radius:var(--click-radii-1);padding:var(--click-space-3);font-family:var(--click-font-mono);font-size:var(--click-font-size-1);line-height:var(--click-line-height-2);white-space:pre-wrap;word-break:break-word;overflow:auto;max-height:220px}
+.sub-title{font-size:var(--click-font-size-2);font-weight:var(--click-font-weight-3);color:var(--ink);margin:var(--click-space-5) 0 var(--click-space-2)}
+footer{text-align:center;color:var(--ink-muted);font-size:var(--click-font-size-1);padding:var(--click-space-5);margin-top:var(--click-space-2)}
 @media(max-width:700px){.charts-grid{grid-template-columns:1fr}}
 /* alerts */
-.alert-ok{background:#e8f5e9;border:1px solid #a5d6a7;border-left:4px solid #4CAF50;padding:14px 20px;border-radius:8px;color:#2e7d32;font-weight:600;font-size:14px}
-.alert-skipped{background:#f5f5f5;border:1px solid #e0e0e0;border-left:4px solid #9e9e9e;padding:10px 20px;border-radius:8px;color:#616161;font-size:13px;margin-top:8px}
-.alert-item{background:#fff;border-radius:8px;padding:14px 18px;margin-bottom:10px;border-left:4px solid #ccc;box-shadow:0 1px 3px rgba(0,0,0,.08)}
-.alert-item.alert-critical{border-left-color:#f44336}
-.alert-item.alert-warning{border-left-color:#FF9800}
-.alert-item.alert-info{border-left-color:#2196F3}
-.alert-item.alert-error{border-left-color:#9c27b0}
-.alert-header{display:flex;align-items:center;gap:10px;margin-bottom:6px;flex-wrap:wrap}
-.alert-title{font-weight:700;font-size:14px}
-.alert-count{font-size:11px;font-weight:700;padding:2px 8px;border-radius:10px}
-.alert-count.badge-critical{background:#ffebee;color:#c62828}
-.alert-count.badge-warning{background:#fff3e0;color:#e65100}
-.alert-count.badge-info{background:#e3f2fd;color:#1565c0}
-.alert-count.badge-error{background:#f3e5f5;color:#6a1b9a}
-.alert-desc{color:#666;font-size:12px;margin-bottom:8px;line-height:1.5}
+.alert-ok{background:var(--status-good-bg);border:var(--click-border-width-1) solid var(--status-good);border-left:4px solid var(--status-good);padding:var(--click-space-3) var(--click-space-5);border-radius:var(--click-radii-2);color:var(--status-good-ink);font-weight:var(--click-font-weight-3)}
+.alert-skipped{background:var(--surface-sunken);border:var(--click-border-width-1) solid var(--stroke);border-left:4px solid var(--status-neutral);padding:var(--click-space-2) var(--click-space-5);border-radius:var(--click-radii-2);color:var(--ink-muted);font-size:var(--click-font-size-1);margin-top:var(--click-space-2)}
+.alert-item{background:var(--surface-card);border:var(--click-border-width-1) solid var(--stroke);border-radius:var(--click-radii-2);padding:var(--click-space-3) var(--click-space-4);margin-bottom:var(--click-space-2);border-left:4px solid var(--status-neutral);box-shadow:var(--click-shadow-5)}
+.alert-item.alert-critical{border-left-color:var(--status-critical)}
+.alert-item.alert-warning{border-left-color:var(--status-warning)}
+.alert-item.alert-info{border-left-color:var(--status-info)}
+.alert-item.alert-error{border-left-color:var(--status-neutral)}
+.alert-header{display:flex;align-items:center;gap:var(--click-space-2);margin-bottom:var(--click-space-1);flex-wrap:wrap}
+.alert-title{font-weight:var(--click-font-weight-3);font-size:var(--click-font-size-2)}
+/* Status never rides on colour alone: every severity ships an icon + label. */
+.alert-icon{font-style:normal;line-height:1}
+.alert-count{font-size:var(--click-font-size-0);font-weight:var(--click-font-weight-3);padding:2px var(--click-space-2);border-radius:var(--click-radii-full)}
+.alert-count.badge-critical{background:var(--status-critical-bg);color:var(--status-critical-ink)}
+.alert-count.badge-warning{background:var(--status-warning-bg);color:var(--status-warning-ink)}
+.alert-count.badge-info{background:var(--status-info-bg);color:var(--status-info-ink)}
+.alert-count.badge-error{background:var(--status-neutral-bg);color:var(--status-neutral-ink)}
+.alert-desc{color:var(--ink-muted);font-size:var(--click-font-size-1);margin-bottom:var(--click-space-2);line-height:var(--click-line-height-2)}
 .alert-messages{padding-left:18px;margin:0}
-.alert-messages li{font-size:12px;color:#333;margin:3px 0;font-family:'SF Mono',monospace,monospace;word-break:break-word;white-space:pre-wrap}
-.alert-err-msg{font-size:12px;color:#9c27b0;margin-top:6px;font-style:italic}
-.alert-tags{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
-.alert-tag{background:#f0f2f5;color:#555;border-radius:10px;padding:1px 8px;font-size:11px}
-.alert-summary-bar{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:14px}
-.alert-summary-chip{padding:6px 14px;border-radius:20px;font-size:13px;font-weight:600}
-.chip-critical{background:#ffebee;color:#c62828}
-.chip-error{background:#ede7f6;color:#5e35b1}
-.chip-warning{background:#fff3e0;color:#e65100}
-.chip-info{background:#e3f2fd;color:#1565c0}
+.alert-messages li{font-size:var(--click-font-size-1);color:var(--ink);margin:3px 0;font-family:var(--click-font-mono);word-break:break-word;white-space:pre-wrap}
+.alert-err-msg{font-size:var(--click-font-size-1);color:var(--ink-muted);margin-top:var(--click-space-1);font-style:italic}
+.alert-tags{display:flex;gap:var(--click-space-1);flex-wrap:wrap;margin-top:var(--click-space-2)}
+.alert-tag{background:var(--surface-sunken);border:var(--click-border-width-1) solid var(--stroke);color:var(--ink-muted);border-radius:var(--click-radii-full);padding:1px var(--click-space-2);font-size:var(--click-font-size-0)}
+.alert-summary-bar{display:flex;gap:var(--click-space-2);flex-wrap:wrap;margin-bottom:var(--click-space-3)}
+.alert-summary-chip{padding:var(--click-space-1) var(--click-space-3);border-radius:var(--click-radii-full);font-size:var(--click-font-size-1);font-weight:var(--click-font-weight-3);display:inline-flex;align-items:center;gap:var(--click-space-1)}
+.chip-critical{background:var(--status-critical-bg);color:var(--status-critical-ink)}
+.chip-error{background:var(--status-neutral-bg);color:var(--status-neutral-ink)}
+.chip-warning{background:var(--status-warning-bg);color:var(--status-warning-ink)}
+.chip-info{background:var(--status-info-bg);color:var(--status-info-ink)}
 </style>
 </head>
 <body>
 
+<div class="topbar">
 <header>
-  <div class="logo">Click<span>House</span></div>
+  <div class="logo">ClickHouse</div>
   <div>
     <h1>Diagnostic Dashboard</h1>
     <div id="hdr-badge"></div>
   </div>
   <div class="meta" id="hdr-meta"></div>
+  <button id="theme-toggle" type="button" aria-label="Toggle colour theme"></button>
 </header>
 
 <nav id="main-nav">
@@ -1060,9 +1532,12 @@ footer{text-align:center;color:#aaa;font-size:12px;padding:20px;margin-top:8px}
   <a href="#sec-replicas" id="nav-replicas" style="display:none">Replicas</a>
   <a href="#sec-clusters" id="nav-clusters" style="display:none">Clusters</a>
   <a href="#sec-disks">Disks</a>
+  <a href="#sec-logs" id="nav-logs" style="display:none">Logs</a>
+  <a href="#sec-files" id="nav-files" style="display:none">Collected Files</a>
   <a href="#sec-server-errors">Server Errors</a>
   <a href="#sec-async-inserts" id="nav-async-inserts" style="display:none">Async Inserts</a>
 </nav>
+</div><!-- .topbar -->
 
 <main>
 
@@ -1076,12 +1551,12 @@ footer{text-align:center;color:#aaa;font-size:12px;padding:20px;margin-top:8px}
 <!-- ── QUERY ANALYSIS ── -->
 <section id="sec-qa" style="display:none">
   <h2>🔍 Query Analysis</h2>
-  <div id="qa-focus" class="alert-item" style="border-left-color:#FC4F05;margin-bottom:18px"></div>
+  <div id="qa-focus" class="alert-item" style="border-left-color:var(--status-info);margin-bottom:var(--click-space-4)"></div>
 
   <!-- Query text card — hidden in gov mode -->
   <div id="qa-query-card" class="chart-card" style="display:none;margin-bottom:18px">
     <h3>Focus query — SQL text</h3>
-    <pre id="qa-query-text" style="background:#1a1a2e;color:#e0e0e0;padding:14px;border-radius:6px;overflow:auto;max-height:280px;font-family:'SF Mono',monospace;font-size:12px;white-space:pre-wrap;line-height:1.4"></pre>
+    <pre id="qa-query-text" style="background:var(--surface-sunken);color:var(--ink);border:var(--click-border-width-1) solid var(--stroke);padding:var(--click-space-3);border-radius:var(--click-radii-1);overflow:auto;max-height:280px;font-family:var(--click-font-mono);font-size:var(--click-font-size-1);white-space:pre-wrap;line-height:var(--click-line-height-2)"></pre>
   </div>
 
   <!-- Per-execution scatters — one dot per individual query execution.
@@ -1153,6 +1628,26 @@ footer{text-align:center;color:#aaa;font-size:12px;padding:20px;margin-top:8px}
 <section id="sec-overview">
   <h2>📈 Overview</h2>
   <div class="stats-grid" id="stats-grid"></div>
+
+  <!-- Host facts: the same content as host_info.json, shown beside what the
+       system tables report so the OS context does not need a second file. -->
+  <div id="host-block" style="display:none">
+    <div class="sub-title">Host &mdash; OS, kernel and hardware</div>
+    <div class="charts-grid">
+      <div class="chart-card">
+        <h3>Machine</h3>
+        <div class="tbl-wrap"><div id="tbl-host-os"></div></div>
+      </div>
+      <div class="chart-card">
+        <h3>ClickHouse-relevant tunables</h3>
+        <div class="tbl-wrap"><div id="tbl-host-tunables"></div></div>
+        <p class="host-note">Only settings ClickHouse itself checks at startup are flagged; the rest are reported as facts.</p>
+      </div>
+    </div>
+    <div class="sub-title">Top processes by resident memory</div>
+    <div class="tbl-wrap"><div id="tbl-host-procs"></div></div>
+    <div id="host-notes"></div>
+  </div>
 </section>
 
 <!-- ── STORAGE ── -->
@@ -1198,8 +1693,12 @@ footer{text-align:center;color:#aaa;font-size:12px;padding:20px;margin-top:8px}
       <div class="chart-wrap h200"><canvas id="chart-query-kind"></canvas></div>
     </div>
     <div class="chart-card">
-      <h3>Avg Duration &amp; Memory by Kind</h3>
+      <h3>Avg Duration by Kind (ms)</h3>
       <div class="chart-wrap h200"><canvas id="chart-query-duration"></canvas></div>
+    </div>
+    <div class="chart-card">
+      <h3>Avg Memory by Kind (MB)</h3>
+      <div class="chart-wrap h200"><canvas id="chart-query-memory"></canvas></div>
     </div>
   </div>
 </section>
@@ -1211,10 +1710,12 @@ footer{text-align:center;color:#aaa;font-size:12px;padding:20px;margin-top:8px}
     <div class="chart-card">
       <h3>Top 20 Slowest Query Patterns (avg duration ms)</h3>
       <div class="chart-wrap h420"><canvas id="chart-slow-queries"></canvas></div>
+      <pre class="sql-peek" id="peek-slow-queries" style="display:none"></pre>
     </div>
     <div class="chart-card">
       <h3>Top 20 Heaviest Reads (avg MB / query)</h3>
       <div class="chart-wrap h420"><canvas id="chart-heavy-reads"></canvas></div>
+      <pre class="sql-peek" id="peek-heavy-reads" style="display:none"></pre>
     </div>
     <div class="chart-card" style="grid-column:1/-1">
       <h3>Activity by User — Executions &amp; Errors (last 7 days)</h3>
@@ -1341,6 +1842,32 @@ footer{text-align:center;color:#aaa;font-size:12px;padding:20px;margin-top:8px}
   <div class="tbl-wrap"><div id="tbl-disks"></div></div>
 </section>
 
+<!-- ── LOGS ── -->
+<section id="sec-logs" style="display:none">
+  <h2>📜 Logs</h2>
+  <p class="host-note" id="logs-scope"></p>
+  <div class="filter-bar">
+    <input type="text" id="log-search" placeholder="Search message or logger…" oninput="logsFilter()">
+    <select id="log-level-filter" onchange="logsFilter()"><option value="">All levels</option></select>
+    <span class="count-badge" id="log-count"></span>
+  </div>
+  <div class="tbl-wrap"><div id="tbl-logs"></div></div>
+  <div class="pagination" id="log-pagination"></div>
+</section>
+
+<!-- ── COLLECTED FILES ── -->
+<section id="sec-files" style="display:none">
+  <h2>📁 Collected Files</h2>
+  <p class="host-note" id="files-scope"></p>
+  <div class="filter-bar">
+    <input type="text" id="file-search" placeholder="Filter by name…" oninput="filesFilter()">
+    <select id="file-group-filter" onchange="filesFilter()"><option value="">All folders</option></select>
+    <span class="count-badge" id="file-count"></span>
+  </div>
+  <div class="tbl-wrap"><div id="tbl-files"></div></div>
+  <p class="host-note">Links open the file from the extracted bundle, beside this page. Nothing here is embedded — the raw server logs alone are tail-copied at up to 50&nbsp;MiB each, which would make this page unopenable.</p>
+</section>
+
 <!-- ── SERVER ERRORS ── -->
 <section id="sec-server-errors">
   <h2>🛑 Server Error Counters</h2>
@@ -1375,16 +1902,164 @@ footer{text-align:center;color:#aaa;font-size:12px;padding:20px;margin-top:8px}
 const DATA = /*DATA*/null;
 
 // ── palette ──────────────────────────────────────────────────────────────────
+//
+// Five categorical slots, every hex a Click UI token. The set is deliberately
+// MODE-INVARIANT — the same five work on the light card (#ffffff) and the dark
+// card (#1F1F1C) — which is what lets a theme switch be a Chart.update() rather
+// than a teardown and rebuild.
+//
+// Validated, not eyeballed (dataviz validate_palette.js, both modes):
+//   lightness band PASS · chroma floor PASS · contrast >=3:1 PASS
+//   adjacent CVD dE 20.1 (target >=8) · normal-vision dE 31.3 (floor >=15)
+// All-pairs forms (scatter, donut, small multiples) only clear the gates for
+// the FIRST THREE slots, so those forms fold past three — see foldSeries.
+//
+// Do not extend this array. A sixth generated hue is indistinguishable from an
+// existing slot under CVD; the tail folds into OTHER instead. Slots are
+// assigned by entity index and never by rank, so filtering cannot repaint the
+// survivors.
 const C = [
-  '#FC4F05','#FFB627','#2196F3','#4CAF50','#9C27B0',
-  '#00BCD4','#FF5722','#607D8B','#E91E63','#3F51B5',
-  '#8BC34A','#FF9800','#795548','#009688','#CDDC39'
+  '#089B83',  // 1 teal     — teal.600
+  '#AA00FF',  // 2 violet   — violet.500
+  '#B28800',  // 3 amber    — sunrise.600
+  '#CC0099',  // 4 fuchsia  — fuchsia.600
+  '#959900'   // 5 olive    — brand.600
 ];
+const OTHER = '#808691';        // slate.500 — the de-emphasis / folded-tail gray
+const ALL_PAIRS_CAP = 3;        // scatter/donut/small-multiple ceiling
+
+// Ordinal ramp for ordered buckets (delay bands). One hue, monotone lightness,
+// stepped per mode so the pale end still clears 2:1 on its own surface —
+// validated with validate_palette.js --ordinal in both modes. This is the one
+// palette that is NOT mode-invariant, so it repaints on a theme switch.
+const ORDINAL = {
+  light:['#6D9BF3','#437EEF','#1D64EC','#104EC6','#0D3E9B'],  // info.300→700
+  dark: ['#A1BEF7','#6D9BF3','#437EEF','#1D64EC','#104EC6']   // info.200→600
+};
+
+// Status ramp. Reserved meaning — never a series colour, and never carried by
+// hue alone (every use ships an icon + label).
+const STATUS = {
+  critical:'#f10000',  // danger.500
+  warning: '#F55A00',  // warning.500
+  good:    '#008A0B',  // success.700
+  info:    '#1D64EC',  // info.500
+  neutral: '#808691'   // slate.500
+};
 const alpha = (h,a) => h + Math.round(a*255).toString(16).padStart(2,'0');
 const DICT_STATUS_COLOR = {
-  LOADED:'#4CAF50', FAILED:'#f44336', LOADING:'#FF9800',
-  NOT_LOADED:'#9E9E9E', UNKNOWN:'#2196F3'
+  LOADED:STATUS.good, FAILED:STATUS.critical, LOADING:STATUS.warning,
+  NOT_LOADED:STATUS.neutral, UNKNOWN:STATUS.info
 };
+
+// Slot by index — folds instead of cycling.
+const slot = (i) => i < C.length ? C[i] : OTHER;
+
+// Keep the top 'cap' categories by weight and fold the rest into "Other", so a
+// chart never needs a sixth hue. Returns the surviving category order.
+function foldSeries(cats, weight, cap){
+  cap = cap || C.length;
+  if(cats.length <= cap) return cats;
+  const keep = [...cats].sort((a,b)=>(weight(b)||0)-(weight(a)||0)).slice(0,cap-1);
+  const ordered = cats.filter(c=>keep.includes(c));
+  ordered.push('Other');
+  return ordered;
+}
+
+// ── theme ─────────────────────────────────────────────────────────────────────
+const themeVar = (n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const CHARTS = [];
+function mkChart(el, cfg){
+  if(!el) return null;
+  const c = new Chart(el, cfg);
+  CHARTS.push(c);
+  return c;
+}
+
+// Chart.js reads these at draw time, so retheming the axes, ticks, legend and
+// grid is a defaults swap plus an update — no chart is rebuilt.
+function applyChartTheme(){
+  const ink=themeVar('--ink-muted'), stroke=themeVar('--stroke');
+  Chart.defaults.color        = ink;
+  Chart.defaults.borderColor  = stroke;
+  Chart.defaults.font.family  = themeVar('--click-font-regular');
+  Chart.defaults.font.size    = 11;
+  // Grid and axis lines are chrome, not data — they take the stroke token and
+  // sit behind the marks. Without this Chart.js falls back to defaults.color
+  // and paints a near-white grid straight over the series in dark mode.
+  Chart.defaults.scale.grid.color       = stroke;
+  Chart.defaults.scale.grid.tickColor   = stroke;
+  Chart.defaults.scale.grid.drawTicks   = false;
+  Chart.defaults.scale.grid.z           = -1;
+  Chart.defaults.scale.border.color     = stroke;
+  Chart.defaults.scale.ticks.color      = ink;
+  Chart.defaults.scale.ticks.padding    = 6;
+  Chart.defaults.plugins.legend.labels.color        = ink;
+  Chart.defaults.plugins.legend.labels.boxWidth     = 10;
+  Chart.defaults.plugins.legend.labels.boxHeight    = 10;
+  Chart.defaults.plugins.legend.labels.usePointStyle= true;
+  Chart.defaults.plugins.tooltip.backgroundColor = themeVar('--surface-card');
+  Chart.defaults.plugins.tooltip.titleColor      = themeVar('--ink');
+  Chart.defaults.plugins.tooltip.bodyColor       = themeVar('--ink');
+  Chart.defaults.plugins.tooltip.borderColor     = stroke;
+  Chart.defaults.plugins.tooltip.borderWidth     = 1;
+  // Thin marks, with the 4px radius on the data end only (the baseline end
+  // stays square so the bar reads as anchored).
+  Chart.defaults.datasets.bar.maxBarThickness = 22;
+  Chart.defaults.datasets.bar.borderSkipped   = 'start';
+  Chart.defaults.datasets.bar.borderRadius    = 4;
+  Chart.defaults.elements.line.borderWidth    = 2;
+  Chart.defaults.elements.point.radius        = 4;
+  Chart.defaults.elements.point.hoverRadius   = 6;
+}
+
+// The 2px spacer between touching fills is painted in the surface colour, so it
+// is the one series-side value that has to follow the theme.
+function repaintSurfaceGaps(){
+  applyChartTheme();
+  const surf=themeVar('--surface-card'), ink=themeVar('--ink-muted'),
+        stroke=themeVar('--stroke'), fg=themeVar('--ink');
+  const ramp = ORDINAL[currentTheme()] || ORDINAL.light;
+  CHARTS.forEach(c=>{
+    Object.values((c.options && c.options.scales) || {}).forEach(sc=>{
+      if(!sc) return;
+      if(sc.grid)   { sc.grid.color=stroke; sc.grid.tickColor=stroke; }
+      if(sc.border) { sc.border.color=stroke; }
+      if(sc.ticks)  { sc.ticks.color=ink; }
+      if(sc.title)  { sc.title.color=ink; }
+    });
+    const pl=(c.options && c.options.plugins) || {};
+    if(pl.legend && pl.legend.labels) pl.legend.labels.color=ink;
+    if(pl.tooltip){
+      pl.tooltip.backgroundColor=surf; pl.tooltip.titleColor=fg;
+      pl.tooltip.bodyColor=fg; pl.tooltip.borderColor=stroke;
+    }
+    c.data.datasets.forEach(ds=>{
+      if(ds._surfaceGap) ds.borderColor=surf;
+      if(ds._ordinal){
+        ds.backgroundColor=ds.data.map((_,i)=>ramp[Math.min(i,ramp.length-1)]);
+        ds.borderColor=ds.backgroundColor;
+      }
+    });
+    c.update('none');
+  });
+}
+
+function currentTheme(){
+  const stamped = document.documentElement.getAttribute('data-cui-theme');
+  if(stamped) return stamped;
+  return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+}
+
+function setTheme(t){
+  document.documentElement.setAttribute('data-cui-theme', t);
+  try{ localStorage.setItem('chdiag-theme', t); }catch(e){}
+  const btn=document.getElementById('theme-toggle');
+  if(btn) btn.textContent = t==='dark' ? '☀ Light' : '☾ Dark';
+  // repaintSurfaceGaps re-applies Chart defaults and updates every chart —
+  // one pass, not the double layout+paint this used to do.
+  repaintSurfaceGaps();
+}
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 function fmt(n){
@@ -1399,40 +2074,117 @@ function fmt(n){
   return String(n);
 }
 
-function shortHash(h){
-  const s=String(h||'');
-  return s.length>8?'…'+s.slice(-8):s;
+// The full normalized_query_hash. It arrives as a string precisely so it can be
+// shown and copied whole — truncating it to the last 8 digits (what this used
+// to do) made it useless for grepping query_log, which is the one thing a
+// reader wants a hash for.
+function fullHash(h){ return String(h==null?'':h); }
+
+// A one-line fingerprint of the query for an axis label. Collapses the SQL onto
+// a single line and clips it; the whole statement is a click away, and the full
+// hash is always in the tooltip, so nothing is lost by clipping here.
+function queryLabel(r, max){
+  const q=String(r.sample_query||'').replace(/\s+/g,' ').trim();
+  if(!q || q==='(redacted in gov mode)') return fullHash(r.hash);
+  return q.length>max ? q.slice(0,max-1)+'…' : q;
 }
 
-// pivot [{timeF, catF, valF}] → Chart.js datasets
+// Show the full SQL for a clicked bar underneath its chart.
+function bindQueryPeek(chart, rows, peekId){
+  const el=document.getElementById(peekId);
+  if(!chart||!el)return;
+  const has=rows.some(r=>r.sample_query && r.sample_query!=='(redacted in gov mode)');
+  if(!has)return;
+  el.textContent='Click a bar to show the query behind it.';
+  el.style.display='';
+  chart.options.onClick=(evt,els)=>{
+    if(!els||!els.length)return;
+    const r=rows[els[0].index];
+    el.textContent='-- normalized_query_hash: '+fullHash(r.hash)
+      +'   user: '+(r.user||'?')+'   executions: '+(r.executions||'?')
+      +'\n-- one representative execution; literals differ between runs\n\n'
+      +String(r.sample_query||'').trim();
+  };
+  chart.canvas.style.cursor='pointer';
+  chart.update('none');
+}
+
+// pivot [{timeF, catF, valF}] → Chart.js datasets.
+//
+// Categories past the palette length fold into "Other" rather than cycling a
+// sixth hue, and each category keeps its slot regardless of magnitude so the
+// colour follows the entity and not its rank.
 function pivot(rows,tf,cf,vf){
   const times=[...new Set(rows.map(r=>r[tf]))].sort();
-  const cats=[...new Set(rows.map(r=>r[cf]))];
+  const raw=[...new Set(rows.map(r=>r[cf]))];
+  const total={};
+  rows.forEach(r=>{ total[r[cf]]=(total[r[cf]]||0)+Number(r[vf]||0); });
+  const cats=foldSeries(raw, c=>total[c], C.length);
+  const kept=new Set(cats);
   const lk={};
-  rows.forEach(r=>{lk[r[tf]+'|'+r[cf]]=r[vf];});
+  rows.forEach(r=>{
+    const c=kept.has(r[cf])?r[cf]:'Other';
+    const k=r[tf]+'|'+c;
+    lk[k]=(lk[k]||0)+Number(r[vf]||0);
+  });
   return{
     labels:times,
     datasets:cats.map((c,i)=>({
-      label:c||'(unknown)',
-      backgroundColor:alpha(C[i%C.length],.75),
-      borderColor:C[i%C.length],
+      label:c===''?'(unknown)':c,
+      backgroundColor:c==='Other'?OTHER:slot(i),
+      borderColor:c==='Other'?OTHER:slot(i),
       borderWidth:1.5,
+      borderRadius:4,
       data:times.map(t=>lk[t+'|'+c]||0)
     }))
   };
 }
 
+// Give a stacked chart the 2px surface spacer between touching segments.
+function stackWithGaps(d){
+  const surf=themeVar('--surface-card');
+  d.datasets.forEach(ds=>{
+    ds.stack='s';
+    ds.borderColor=surf;
+    ds.borderWidth=2;
+    ds.borderRadius=4;
+    ds._surfaceGap=true;
+  });
+  return d;
+}
+
 // render a plain HTML table (with optional row-class callback)
-function renderTable(id, rows, cols, rowClass){
+// Escape everything that reaches the DOM as text.
+//
+// Cell values here are customer-controlled: SQL text, exception messages,
+// table and column names, and now whole log lines. Interpolating those raw
+// (which this did) means a message containing a quote breaks the title
+// attribute and one containing markup is parsed as markup. Nothing in the
+// bundle is trusted input just because it came from the customer's own server.
+function esc(v){
+  return String(v??'')
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+
+// render a plain HTML table (with optional row-class callback).
+//
+// htmlCols names the columns whose values are markup THIS FILE built (a status
+// badge, a link) and must not be escaped. Everything else is escaped. Passing a
+// customer-controlled column in htmlCols is a bug.
+function renderTable(id, rows, cols, rowClass, htmlCols){
   const el=document.getElementById(id);
   if(!el)return;
   if(!rows||rows.length===0){el.innerHTML='<p class="no-data">No data</p>';return;}
   const keys=cols||Object.keys(rows[0]);
-  let h='<table class="dt"><thead><tr>'+keys.map(k=>'<th>'+k+'</th>').join('')+'</tr></thead><tbody>';
+  const raw=new Set(htmlCols||[]);
+  let h='<table class="dt"><thead><tr>'+keys.map(k=>'<th>'+esc(k)+'</th>').join('')+'</tr></thead><tbody>';
   rows.forEach(r=>{
     const cls=rowClass?rowClass(r):'';
-    h+='<tr'+(cls?' class="'+cls+'"':'')+'>'
-      +keys.map(k=>'<td title="'+(r[k]??'')+'">'+(r[k]??'')+'</td>').join('')
+    h+='<tr'+(cls?' class="'+esc(cls)+'"':'')+'>'
+      +keys.map(k=>raw.has(k)
+        ? '<td>'+(r[k]??'')+'</td>'
+        : '<td title="'+esc(r[k])+'">'+esc(r[k])+'</td>').join('')
       +'</tr>';
   });
   h+='</tbody></table>';
@@ -1443,7 +2195,7 @@ function renderTable(id, rows, cols, rowClass){
 function dictStatusBadge(status){
   const cl={'LOADED':'ok-badge','FAILED':'err-badge','LOADING':'warn-badge',
             'NOT_LOADED':'warn-badge'}[status]||'warn-badge';
-  return '<span class="'+cl+'">'+status+'</span>';
+  return '<span class="'+cl+'">'+esc(status)+'</span>';
 }
 
 // ── searchable tables explorer ────────────────────────────────────────────────
@@ -1466,9 +2218,10 @@ function dictStatusBadge(status){
     const start=page*PAGE, end=Math.min(start+PAGE,filtered.length);
     const slice=filtered.slice(start,end);
     let h='<table class="dt"><thead><tr>'
-      +COLS.map(k=>'<th>'+k+'</th>').join('')+'</tr></thead><tbody>';
+      +COLS.map(k=>'<th>'+esc(k)+'</th>').join('')+'</tr></thead><tbody>';
     slice.forEach(r=>{
-      h+='<tr>'+COLS.map(k=>'<td title="'+(r[k]??'')+'">'+(r[k]??'')+'</td>').join('')+'</tr>';
+      // database / table_name / partition_key / sorting_key are customer DDL.
+      h+='<tr>'+COLS.map(k=>'<td title="'+esc(r[k])+'">'+esc(r[k])+'</td>').join('')+'</tr>';
     });
     h+='</tbody></table>';
     el.innerHTML=h;
@@ -1506,10 +2259,10 @@ function dictStatusBadge(status){
     const dbSel=document.getElementById('tbl-db-filter');
     const engSel=document.getElementById('tbl-engine-filter');
     [...new Set(allData.map(r=>r.database))].sort().forEach(d=>{
-      dbSel.innerHTML+='<option value="'+d+'">'+d+'</option>';
+      dbSel.innerHTML+='<option value="'+esc(d)+'">'+esc(d)+'</option>';
     });
     [...new Set(allData.map(r=>r.engine))].sort().forEach(e=>{
-      engSel.innerHTML+='<option value="'+e+'">'+e+'</option>';
+      engSel.innerHTML+='<option value="'+esc(e)+'">'+esc(e)+'</option>';
     });
     render();
   };
@@ -1547,7 +2300,7 @@ function renderAlerts(){
 
   // badge the nav link
   if(total>0){
-    navLink.innerHTML='Alerts <span style="background:#f44336;color:#fff;border-radius:10px;padding:1px 7px;font-size:11px;font-weight:700;margin-left:4px">'+total+'</span>';
+    navLink.innerHTML='Alerts <span style="background:var(--status-critical);color:#fff;border-radius:var(--click-radii-full);padding:1px 7px;font-size:var(--click-font-size-0);font-weight:var(--click-font-weight-3);margin-left:4px">'+total+'</span>';
   }
 
   // summary bar
@@ -1581,21 +2334,25 @@ function renderAlerts(){
 
     html+='<div class="alert-item '+cls+'">';
     html+='<div class="alert-header">';
-    html+=icon+' <span class="alert-title">'+(a.title||a.name)+'</span>';
+    html+=icon+' <span class="alert-title">'+esc(a.title||a.name)+'</span>';
     html+='<span class="alert-count badge-'+(a.error?'error':sev)+'">'+cntLabel+'</span>';
-    if((a.tags||[]).length) html+='<span class="alert-tags">'+a.tags.map(t=>'<span class="alert-tag">'+t+'</span>').join('')+'</span>';
+    if((a.tags||[]).length) html+='<span class="alert-tags">'+a.tags.map(t=>'<span class="alert-tag">'+esc(t)+'</span>').join('')+'</span>';
     html+='</div>'; // header
 
-    if(a.description) html+='<div class="alert-desc">'+a.description.trim().replace(/\n/g,'<br>')+'</div>';
+    if(a.description) html+='<div class="alert-desc">'+esc(a.description.trim()).replace(/\n/g,'<br>')+'</div>';
 
     if(a.error){
-      html+='<div class="alert-err-msg">⚠ '+a.error+'</div>';
+      // a.error is raw server exception text — customer-influenced.
+      html+='<div class="alert-err-msg">⚠ '+esc(a.error)+'</div>';
     } else if(a.message&&(a.rows||[]).length){
       html+='<ul class="alert-messages">';
       (a.rows||[]).forEach(row=>{
         let msg=a.message;
+        // Row values are customer data (table names, partition ids, raw
+        // messages) substituted into the rule's message template — the
+        // template is ours, the values are not. Escape the whole line.
         Object.entries(row).forEach(([k,v])=>{msg=msg.split('{'+k+'}').join(String(v??''));});
-        html+='<li>▸ '+msg+'</li>';
+        html+='<li>▸ '+esc(msg)+'</li>';
       });
       html+='</ul>';
     }
@@ -1658,11 +2415,14 @@ function renderQaScatter(canvasId, rows, opts){
     else { fail.push(pt); }
   });
   const u=opts.yUnit(maxY);
-  new Chart(document.getElementById(canvasId),{
+  mkChart(document.getElementById(canvasId),{
     type:'scatter',
     data:{datasets:[
-      {label:'succeeded',data:succ,backgroundColor:alpha('#4CAF50',.7),borderColor:'#4CAF50',pointRadius:4},
-      {label:'failed',data:fail,backgroundColor:alpha('#E91E63',.85),borderColor:'#E91E63',pointRadius:5,pointStyle:'crossRot'}
+      // Outcome is a state, not an identity, so it wears the reserved status
+      // ramp — and the failure marks carry a distinct glyph so the meaning
+      // never rests on colour alone.
+      {label:'succeeded',data:succ,backgroundColor:STATUS.good,borderColor:STATUS.good,pointRadius:4},
+      {label:'failed',data:fail,backgroundColor:STATUS.critical,borderColor:STATUS.critical,pointRadius:5,pointStyle:'crossRot'}
     ]},
     options:{responsive:true,maintainAspectRatio:false,
       plugins:{
@@ -1711,24 +2471,26 @@ function renderQueryAnalysis(){
   const fast=(DATA.qa_fast_slow||[])[0]||{};
   const focus=document.getElementById('qa-focus');
   let h='<div class="alert-header">';
-  h+='<span class="alert-title">Focus query_id: '+(DATA.qa_query_id||'(none)')+'</span>';
-  h+='<span class="alert-tags"><span class="alert-tag">hash '+(DATA.qa_hash||'')+'</span>';
+  h+='<span class="alert-title">Focus query_id: '+esc(DATA.qa_query_id||'(none)')+'</span>';
+  h+='<span class="alert-tags"><span class="alert-tag">hash '+esc(DATA.qa_hash||'')+'</span>';
   h+='<span class="alert-tag">window '+(DATA.qa_from||'')+' → '+(DATA.qa_to||'')+'</span></span>';
   h+='</div>';
   if(det.query_kind){
     h+='<div class="alert-desc">';
-    h+='kind: <b>'+det.query_kind+'</b> · user: <b>'+(det.user||'?')+'</b> · duration: <b>'+fmt(det.query_duration_ms)+' ms</b>';
-    h+=' · read: <b>'+fmt(det.read_rows)+' rows / '+(det.memory_usage_human||'?')+'</b>';
+    h+='kind: <b>'+esc(det.query_kind)+'</b> · user: <b>'+esc(det.user||'?')+'</b> · duration: <b>'+fmt(det.query_duration_ms)+' ms</b>';
+    h+=' · read: <b>'+fmt(det.read_rows)+' rows / '+esc(det.memory_usage_human||'?')+'</b>';
     if(det.exception_code && Number(det.exception_code)!==0){
-      h+=' · <span style="color:#c62828">exception '+det.exception_code+'</span>';
+      h+=' · <span style="color:var(--status-critical-ink)">exception '+esc(det.exception_code)+'</span>';
     }
     h+='</div>';
   }
   if(fast.slow_query_id){
     h+='<div class="alert-desc">';
     h+='hash executions: <b>'+fmt(fast.executions)+'</b> · ';
-    h+='slowest: <b>'+fmt(fast.slow_duration_ms)+' ms</b> (<code>'+fast.slow_query_id+'</code>) · ';
-    h+='fastest: <b>'+fmt(fast.fast_duration_ms)+' ms</b> (<code>'+fast.fast_query_id+'</code>)';
+    // query_id is CLIENT-settable: a customer can name a query
+    // '<img onerror=...>' and the slowest-execution pick lands it here.
+    h+='slowest: <b>'+fmt(fast.slow_duration_ms)+' ms</b> (<code>'+esc(fast.slow_query_id)+'</code>) · ';
+    h+='fastest: <b>'+fmt(fast.fast_duration_ms)+' ms</b> (<code>'+esc(fast.fast_query_id)+'</code>)';
     if(Number(fast.fast_duration_ms)>0){
       const ratio=(Number(fast.slow_duration_ms)/Number(fast.fast_duration_ms)).toFixed(1);
       h+=' → <b>'+ratio+'×</b> slower';
@@ -1782,13 +2544,13 @@ function renderQueryAnalysis(){
   const sum=DATA.qa_summary||[];
   if(sum.length){
     const labels=sum.map(r=>r.time_bucket);
-    new Chart(document.getElementById('chart-qa-execs'),{
+    mkChart(document.getElementById('chart-qa-execs'),{
       type:'bar',
       data:{labels,datasets:[
         {label:'succeeded',data:sum.map(r=>Number(r.succeeded)),
-          backgroundColor:alpha('#4CAF50',.8),borderColor:'#4CAF50',borderWidth:1,stack:'s'},
+          backgroundColor:STATUS.good,borderColor:STATUS.good,borderWidth:1,borderRadius:4,stack:'s'},
         {label:'failed',data:sum.map(r=>Number(r.failed)),
-          backgroundColor:alpha('#E91E63',.8),borderColor:'#E91E63',borderWidth:1,stack:'s'}
+          backgroundColor:STATUS.critical,borderColor:STATUS.critical,borderWidth:1,borderRadius:4,stack:'s'}
       ]},
       options:{responsive:true,maintainAspectRatio:false,
         interaction:{mode:'index',intersect:false},
@@ -1801,7 +2563,7 @@ function renderQueryAnalysis(){
   if(fot.length){
     const piv=pivot(fot,'time_bucket','error_type','errors');
     piv.datasets.forEach(ds=>{ds.stack='e';});
-    new Chart(document.getElementById('chart-qa-failed'),{
+    mkChart(document.getElementById('chart-qa-failed'),{
       type:'bar',data:piv,
       options:{responsive:true,maintainAspectRatio:false,
         interaction:{mode:'index',intersect:false},
@@ -1813,10 +2575,10 @@ function renderQueryAnalysis(){
   // Top ProfileEvents for the focus (slowest) execution.
   const pe=(DATA.qa_profile||[]).slice(0,30);
   if(pe.length){
-    new Chart(document.getElementById('chart-qa-profile'),{
+    mkChart(document.getElementById('chart-qa-profile'),{
       type:'bar',
       data:{labels:pe.map(r=>r.metric),datasets:[{label:'value',data:pe.map(r=>Number(r.value)),
-        backgroundColor:alpha('#FC4F05',.75),borderColor:'#FC4F05',borderWidth:1}]},
+        backgroundColor:C[0],borderColor:C[0],borderWidth:1,borderRadius:4}]},
       options:{indexAxis:'y',responsive:true,maintainAspectRatio:false,
         plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>' '+fmt(c.raw)}}},
         scales:{x:{beginAtZero:true,ticks:{callback:v=>fmt(v)}}}}
@@ -1826,13 +2588,14 @@ function renderQueryAnalysis(){
   // Fast vs Slow comparison — top 30 by |delta|.
   const cmp=(DATA.qa_pe_compare||[]).slice(0,30);
   if(cmp.length){
-    new Chart(document.getElementById('chart-qa-compare'),{
+    mkChart(document.getElementById('chart-qa-compare'),{
       type:'bar',
       data:{labels:cmp.map(r=>r.metric),datasets:[
+        // Which execution, not good-vs-bad: identity, so categorical slots.
         {label:'slow',data:cmp.map(r=>Number(r.slow_value)),
-          backgroundColor:alpha('#E91E63',.75),borderColor:'#E91E63',borderWidth:1},
+          backgroundColor:C[0],borderColor:C[0],borderWidth:1,borderRadius:4},
         {label:'fast',data:cmp.map(r=>Number(r.fast_value)),
-          backgroundColor:alpha('#4CAF50',.75),borderColor:'#4CAF50',borderWidth:1}
+          backgroundColor:C[1],borderColor:C[1],borderWidth:1,borderRadius:4}
       ]},
       options:{indexAxis:'y',responsive:true,maintainAspectRatio:false,
         plugins:{legend:{position:'top'},tooltip:{callbacks:{label:c=>c.dataset.label+': '+fmt(c.raw)}}},
@@ -1855,17 +2618,61 @@ function renderQueryAnalysis(){
 }
 
 document.addEventListener('DOMContentLoaded',function(){
+  // Theme first: Chart.defaults must be right before the first chart is built.
+  applyChartTheme();
+  const _tbtn=document.getElementById('theme-toggle');
+  if(_tbtn){
+    _tbtn.textContent = currentTheme()==='dark' ? '\u2600 Light' : '\u263e Dark';
+    _tbtn.addEventListener('click',()=>setTheme(currentTheme()==='dark'?'light':'dark'));
+  }
+  // Follow the OS while the viewer has not stamped an explicit preference.
+  if(window.matchMedia){
+    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change',()=>{
+      let stamped=null; try{ stamped=localStorage.getItem('chdiag-theme'); }catch(e){}
+      if(!stamped){ repaintSurfaceGaps(); }
+    });
+  }
+
   if(!DATA){document.body.innerHTML='<p style="padding:40px;color:red">No embedded data.</p>';return;}
 
   renderAlerts();
   renderQueryAnalysis();
+
+  // Publish the sticky band's real height so anchor offsets and the
+  // scroll-spy threshold follow it instead of hardcoding a guess. Re-measured
+  // on resize because the header's meta column wraps at narrow widths.
+  // Observe rather than measure once: the band's height changes AFTER this
+  // runs (hdr-meta's two lines land below, nav links for optional sections
+  // un-hide, the webfont swaps) and again whenever the viewport resizes and
+  // the header's meta column rewraps. Measuring a single time read 104px for
+  // a band that settles at ~123px, which left anchor jumps tucking each
+  // heading under the nav.
+  const topbar=document.querySelector('.topbar');
+  let topbarH=124;
+  function measureTopbar(){
+    if(!topbar) return;
+    const h=Math.round(topbar.getBoundingClientRect().height);
+    if(h && h!==topbarH){
+      topbarH=h;
+      document.documentElement.style.setProperty('--topbar-h', h+'px');
+    }
+  }
+  measureTopbar();
+  if(window.ResizeObserver){
+    new ResizeObserver(measureTopbar).observe(topbar);
+  } else {
+    window.addEventListener('resize', measureTopbar, {passive:true});
+  }
 
   // nav active highlight on scroll
   const secs=[...document.querySelectorAll('section[id]')];
   const navLinks=[...document.querySelectorAll('nav a')];
   window.addEventListener('scroll',function(){
     let cur='';
-    secs.forEach(s=>{if(s.getBoundingClientRect().top<=130)cur=s.id;});
+    // A section counts as current once its top reaches the underside of the
+    // band, so the highlight matches what the reader can actually see.
+    const line=topbarH+8;
+    secs.forEach(s=>{if(s.getBoundingClientRect().top<=line)cur=s.id;});
     navLinks.forEach(a=>{
       a.classList.toggle('active',a.getAttribute('href')==='#'+cur);
     });
@@ -1873,35 +2680,112 @@ document.addEventListener('DOMContentLoaded',function(){
 
   // header
   document.getElementById('hdr-badge').innerHTML=
-    '<span class="badge badge-'+DATA.mode+'">'+DATA.mode+'</span>';
+    '<span class="badge badge-'+esc(DATA.mode)+'">'+esc(DATA.mode)+'</span>';
   document.getElementById('hdr-meta').innerHTML=
-    'Generated: '+DATA.generated_at+'<br>Version: '+(DATA.version||'N/A');
+    'Generated: '+esc(DATA.generated_at)+'<br>Version: '+esc(DATA.version||'N/A');
 
   // stats
+  // esc() on both arguments: every caller currently passes a number, a
+  // version string or a joined load average, so nothing renders differently
+  // today — but a stat tile is a general helper and the escape-by-default
+  // contract has to hold at the helper, not at each call site.
+  const tile=(v,l)=>'<div class="stat-card"><div class="val'
+    +(String(v).length>14?' val-sm':String(v).length>8?' val-md':'')
+    +'">'+esc(v)+'</div><div class="lbl">'+esc(l)+'</div></div>';
   const sg=document.getElementById('stats-grid');
   sg.innerHTML=[
-    '<div class="stat-card"><div class="val">'+(DATA.version||'N/A')+'</div><div class="lbl">Server Version</div></div>',
-    '<div class="stat-card"><div class="val">'+(DATA.uptime||'N/A')+'</div><div class="lbl">Uptime</div></div>',
-    '<div class="stat-card"><div class="val">'+fmt(DATA.total_databases)+'</div><div class="lbl">Databases</div></div>',
-    '<div class="stat-card"><div class="val">'+fmt(DATA.total_tables)+'</div><div class="lbl">Tables</div></div>',
-    '<div class="stat-card"><div class="val">'+fmt(DATA.active_parts)+'</div><div class="lbl">Active Parts</div></div>',
-    '<div class="stat-card"><div class="val">'+(DATA.total_size||'N/A')+'</div><div class="lbl">Total Data Size</div></div>',
+    // A stat tile is a hero figure: long strings (uptime, long versions) step
+    // down a size instead of wrapping the headline onto three lines.
+    tile(DATA.version||'N/A','Server Version'),
+    tile(DATA.uptime||'N/A','Uptime'),
+    tile(fmt(DATA.total_databases),'Databases'),
+    tile(fmt(DATA.total_tables),'Tables'),
+    tile(fmt(DATA.active_parts),'Active Parts'),
+    tile(DATA.total_size||'N/A','Total Data Size'),
   ].join('');
+
+  // ── Host facts (from host_info.json; absent when host-info was skipped) ──
+  (function(){
+    const hi=DATA.host_info;
+    if(!hi)return;
+    document.getElementById('host-block').style.display='';
+
+    const os=hi.os||{}, cpu=hi.cpu||{}, mem=hi.memory||{};
+    const gib=b=>b?(Number(b)/1073741824).toFixed(2)+' GiB':'—';
+    const dur=sec=>{
+      sec=Number(sec||0); if(!sec)return '—';
+      const d=Math.floor(sec/86400),h=Math.floor(sec%86400/3600),m=Math.floor(sec%3600/60);
+      return (d?d+'d ':'')+(h?h+'h ':'')+m+'m';
+    };
+
+    // The host's own headline numbers, appended to the existing KPI row so the
+    // reader sees server and machine together.
+    if(cpu.logical_cpus) sg.innerHTML+=tile(String(cpu.logical_cpus),'Logical CPUs');
+    if(mem.total_bytes)  sg.innerHTML+=tile(gib(mem.total_bytes),'Host RAM');
+    if(cpu.load_avg_1_5_15 && cpu.load_avg_1_5_15.length)
+      sg.innerHTML+=tile(cpu.load_avg_1_5_15.join(' / '),'Load 1/5/15m');
+
+    // Machine facts. A definition-style table rather than more tiles: these are
+    // strings to read once, not magnitudes to compare.
+    const osRows=[
+      ['hostname',os.hostname],
+      ['os',[os.distro,os.distro_version].filter(Boolean).join(' ')],
+      ['kernel',os.kernel_version],
+      ['architecture',os.arch],
+      ['host uptime',dur(os.uptime_seconds)],
+      ['cpu model',cpu.model_name],
+      ['vector flags',(cpu.notable_flags||[]).join(', ')],
+      ['memory total',gib(mem.total_bytes)],
+      ['memory available',gib(mem.available_bytes)],
+      ['page cache',gib(mem.cached_bytes)],
+      ['swap total',gib(mem.swap_total_bytes)],
+      ['collected at',hi.collected_at]
+    ].filter(r=>r[1]!==undefined && r[1]!=='' && r[1]!==null)
+     .map(r=>({setting:r[0],value:r[1]}));
+    renderTable('tbl-host-os',osRows,['setting','value']);
+
+    // Tunables carry a status, so they get an icon + word as well as a colour.
+    const ICON={ok:'\u2713 ok',warning:'\u26a0 warning',info:'\u2013',unknown:'? unknown'};
+    const checks=(DATA.host_checks||[]).map(c=>({
+      setting:c.setting,
+      value:c.value,
+      status:ICON[c.status]||c.status,
+      note:c.note||''
+    }));
+    renderTable('tbl-host-tunables',checks,['setting','value','status','note'],
+      r=>String(r.status).indexOf('warning')>=0?'alert-row':'');
+
+
+    const procs=(hi.top_processes_by_rss||[]).slice(0,10).map(pr=>({
+      pid:pr.pid, rss:gib(pr.rss_bytes), threads:pr.threads, state:pr.state, command:pr.command
+    }));
+    renderTable('tbl-host-procs',procs,['pid','rss','threads','state','command']);
+
+    // A section that could not be read is never left looking healthy.
+    const notes=hi.notes||[];
+    if(notes.length){
+      // Notes are free text built from OS errors and paths — the one source
+      // of the three that is not a fixed enum, so escape each before joining.
+      document.getElementById('host-notes').innerHTML=
+        '<div class="alert-skipped">\u2139 host facts partially unavailable: '+notes.map(esc).join('; ')+'</div>';
+    }
+  })();
 
   // ── Storage: size by database (horizontal bar) ───────────────────────────
   (function(){
     const rows=DATA.storage_by_db||[];
     if(!rows.length)return;
-    new Chart(document.getElementById('chart-storage-db'),{
+    mkChart(document.getElementById('chart-storage-db'),{
       type:'bar',
       data:{
         labels:rows.map(r=>r.database),
         datasets:[{
           label:'Compressed (bytes)',
           data:rows.map(r=>r.bytes_total),
-          backgroundColor:rows.map((_,i)=>alpha(C[i%C.length],.8)),
-          borderColor:rows.map((_,i)=>C[i%C.length]),
-          borderWidth:1
+          // Nominal categories: one series, one colour. A hue per bar would
+          // re-encode bar length in colour and spend the identity channel on
+          // nothing.
+          backgroundColor:C[0],borderColor:C[0],borderWidth:1,borderRadius:4
         }]
       },
       options:{
@@ -1919,10 +2803,17 @@ document.addEventListener('DOMContentLoaded',function(){
   (function(){
     const rows=DATA.engines_dist||[];
     if(!rows.length)return;
-    new Chart(document.getElementById('chart-engines'),{
-      type:'doughnut',
-      data:{labels:rows.map(r=>r.engine),datasets:[{data:rows.map(r=>r.count),backgroundColor:C.slice(0,rows.length),borderWidth:2}]},
-      options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{position:'right'}}}
+    // A bar, not a doughnut: the reader's job here is comparing counts, and a
+    // ring makes close values indistinguishable. It also sidesteps the
+    // all-pairs colour cap a doughnut would impose.
+    mkChart(document.getElementById('chart-engines'),{
+      type:'bar',
+      data:{labels:rows.map(r=>r.engine),
+        datasets:[{label:'Tables',data:rows.map(r=>r.count),
+          backgroundColor:C[0],borderColor:C[0],borderWidth:1,borderRadius:4}]},
+      options:{indexAxis:'y',responsive:true,maintainAspectRatio:false,
+        plugins:{legend:{display:false}},
+        scales:{x:{beginAtZero:true,ticks:{precision:0}}}}
     });
   })();
 
@@ -1939,7 +2830,7 @@ document.addEventListener('DOMContentLoaded',function(){
     if(!rows.length)return;
     const d=pivot(rows,'time','query_kind','count');
     d.datasets.forEach(ds=>{ds.fill=false;ds.tension=0.3;ds.pointRadius=2;});
-    new Chart(document.getElementById('chart-query-time'),{
+    mkChart(document.getElementById('chart-query-time'),{
       type:'line',data:d,
       options:{responsive:true,maintainAspectRatio:false,
         interaction:{mode:'index',intersect:false},
@@ -1952,109 +2843,122 @@ document.addEventListener('DOMContentLoaded',function(){
   (function(){
     const rows=DATA.query_by_kind||[];
     if(!rows.length)return;
-    new Chart(document.getElementById('chart-query-kind'),{
+    mkChart(document.getElementById('chart-query-kind'),{
       type:'bar',
       data:{labels:rows.map(r=>r.query_kind||'unknown'),
         datasets:[{label:'Count',data:rows.map(r=>r.count),
-          backgroundColor:rows.map((_,i)=>alpha(C[i%C.length],.8)),
-          borderColor:rows.map((_,i)=>C[i%C.length]),borderWidth:1}]},
+          backgroundColor:C[0],borderColor:C[0],borderWidth:1,borderRadius:4}]},
       options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{y:{beginAtZero:true}}}
     });
   })();
 
-  // ── Query: avg duration + memory by kind (dual-axis bar) ─────────────────
+  // ── Query: avg duration and avg memory by kind — TWO single-axis charts ──
+  //
+  // These were one chart with a second y-axis (ms on the left, MB on the
+  // right). Two scales on one plot align arbitrarily, so the picture invents a
+  // correlation the data does not contain. Same measures, one axis each.
   (function(){
     const rows=DATA.query_by_kind||[];
     if(!rows.length)return;
-    new Chart(document.getElementById('chart-query-duration'),{
+    const labels=rows.map(r=>r.query_kind||'unknown');
+    const one=(canvas,label,vals,axis)=>mkChart(document.getElementById(canvas),{
       type:'bar',
-      data:{
-        labels:rows.map(r=>r.query_kind||'unknown'),
-        datasets:[
-          {label:'Avg Duration (ms)',data:rows.map(r=>r.avg_duration_ms),backgroundColor:alpha('#FC4F05',.75),borderColor:'#FC4F05',borderWidth:1},
-          {label:'Avg Memory (MB)',data:rows.map(r=>r.avg_memory_mb),backgroundColor:alpha('#2196F3',.75),borderColor:'#2196F3',borderWidth:1,yAxisID:'y2'}
-        ]
-      },
-      options:{
-        responsive:true,maintainAspectRatio:false,plugins:{legend:{position:'top'}},
-        scales:{
-          y:{beginAtZero:true,title:{display:true,text:'ms'}},
-          y2:{beginAtZero:true,position:'right',title:{display:true,text:'MB'},grid:{drawOnChartArea:false}}
-        }
-      }
+      data:{labels:labels,datasets:[{label:label,data:vals,
+        backgroundColor:C[0],borderColor:C[0],borderWidth:1,borderRadius:4}]},
+      options:{responsive:true,maintainAspectRatio:false,
+        plugins:{legend:{display:false}},
+        scales:{y:{beginAtZero:true,title:{display:true,text:axis}}}}
     });
+    one('chart-query-duration','Avg duration',rows.map(r=>r.avg_duration_ms),'ms');
+    one('chart-query-memory','Avg memory',rows.map(r=>r.avg_memory_mb),'MB');
   })();
 
   // ── Deep dive: slowest queries (horizontal bar) ───────────────────────────
   (function(){
     const rows=DATA.query_slow||[];
     if(!rows.length)return;
-    const labels=rows.map(r=>r.query_kind+' | '+shortHash(r.hash)+' ('+r.user+')');
-    new Chart(document.getElementById('chart-slow-queries'),{
+    const labels=rows.map(r=>queryLabel(r,34));
+    const ch=mkChart(document.getElementById('chart-slow-queries'),{
       type:'bar',
       data:{
         labels:labels,
         datasets:[
-          {label:'Avg Duration (ms)',data:rows.map(r=>r.avg_duration_ms),backgroundColor:alpha('#FC4F05',.8),borderColor:'#FC4F05',borderWidth:1},
-          {label:'Max Duration (ms)',data:rows.map(r=>r.max_duration_ms),backgroundColor:alpha('#FFB627',.6),borderColor:'#FFB627',borderWidth:1}
+          {label:'Avg Duration (ms)',data:rows.map(r=>r.avg_duration_ms),backgroundColor:C[0],borderColor:C[0],borderWidth:1,borderRadius:4},
+          {label:'Max Duration (ms)',data:rows.map(r=>r.max_duration_ms),backgroundColor:C[1],borderColor:C[1],borderWidth:1,borderRadius:4}
         ]
       },
       options:{
         indexAxis:'y',responsive:true,maintainAspectRatio:false,
         interaction:{mode:'index',intersect:false},
         plugins:{legend:{position:'top'},tooltip:{callbacks:{
+          title:ctx=>{
+            const r=rows[ctx[0].dataIndex];
+            return r.query_kind+' · '+r.user;
+          },
           afterLabel:ctx=>{
             const r=rows[ctx.dataIndex];
-            return['Executions: '+r.executions,'Errors: '+r.errors,'Avg Read: '+r.avg_read_mb+' MB','Avg Mem: '+r.avg_memory_mb+' MB'];
+            return['Executions: '+r.executions,'Errors: '+r.errors,
+                   'Avg Read: '+r.avg_read_mb+' MB','Avg Mem: '+r.avg_memory_mb+' MB',
+                   'hash: '+fullHash(r.hash)];
           }
         }}},
         scales:{x:{beginAtZero:true,title:{display:true,text:'milliseconds'}}}
       }
     });
+    bindQueryPeek(ch,rows,'peek-slow-queries');
   })();
 
   // ── Deep dive: heaviest reads (horizontal bar) ────────────────────────────
   (function(){
     const rows=DATA.query_heavy||[];
     if(!rows.length)return;
-    const labels=rows.map(r=>r.query_kind+' | '+shortHash(r.hash)+' ('+r.user+')');
-    new Chart(document.getElementById('chart-heavy-reads'),{
+    const labels=rows.map(r=>queryLabel(r,34));
+    const ch=mkChart(document.getElementById('chart-heavy-reads'),{
       type:'bar',
       data:{
         labels:labels,
         datasets:[{
           label:'Avg Read (MB)',
           data:rows.map(r=>r.avg_read_mb),
-          backgroundColor:rows.map((_,i)=>alpha(C[i%C.length],.8)),
-          borderColor:rows.map((_,i)=>C[i%C.length]),
-          borderWidth:1
+          // Nominal categories: one series, one colour. A hue per bar would
+          // re-encode bar length in colour and spend the identity channel on
+          // nothing.
+          backgroundColor:C[0],borderColor:C[0],borderWidth:1,borderRadius:4
         }]
       },
       options:{
         indexAxis:'y',responsive:true,maintainAspectRatio:false,
         plugins:{legend:{display:false},tooltip:{callbacks:{
+          title:ctx=>{
+            const r=rows[ctx[0].dataIndex];
+            return r.query_kind+' · '+r.user;
+          },
           label:ctx=>' Avg Read: '+ctx.raw+' MB',
           afterLabel:ctx=>{
             const r=rows[ctx.dataIndex];
-            return['Executions: '+r.executions,'Total Read: '+r.total_read,'Avg Duration: '+r.avg_duration_ms+' ms'];
+            return['Executions: '+r.executions,'Total Read: '+r.total_read,
+                   'Avg Duration: '+r.avg_duration_ms+' ms',
+                   'hash: '+fullHash(r.hash)];
           }
         }}},
         scales:{x:{beginAtZero:true,title:{display:true,text:'MB per query (avg)'}}}
       }
     });
+    bindQueryPeek(ch,rows,'peek-heavy-reads');
   })();
 
   // ── Deep dive: user activity (grouped bar) ────────────────────────────────
   (function(){
     const rows=DATA.query_by_user||[];
     if(!rows.length)return;
-    new Chart(document.getElementById('chart-user-activity'),{
+    mkChart(document.getElementById('chart-user-activity'),{
       type:'bar',
       data:{
         labels:rows.map(r=>r.user),
         datasets:[
-          {label:'Executions',data:rows.map(r=>r.executions),backgroundColor:alpha('#2196F3',.8),borderColor:'#2196F3',borderWidth:1},
-          {label:'Errors',data:rows.map(r=>r.error_count),backgroundColor:alpha('#f44336',.8),borderColor:'#f44336',borderWidth:1}
+          {label:'Executions',data:rows.map(r=>r.executions),backgroundColor:C[0],borderColor:C[0],borderWidth:1,borderRadius:4},
+          // Errors is a state, so it keeps the reserved critical token.
+          {label:'Errors',data:rows.map(r=>r.error_count),backgroundColor:STATUS.critical,borderColor:STATUS.critical,borderWidth:1,borderRadius:4}
         ]
       },
       options:{
@@ -2074,7 +2978,7 @@ document.addEventListener('DOMContentLoaded',function(){
 
   // slow query table
   renderTable('tbl-slow-queries',DATA.query_slow||[],
-    ['query_kind','user','executions','avg_duration_ms','max_duration_ms','avg_read_mb','avg_memory_mb','errors','hash'],
+    ['query_kind','user','executions','avg_duration_ms','max_duration_ms','avg_read_mb','avg_memory_mb','errors','hash','sample_query'],
     r=>r.errors>0?'alert-row':'');
 
   // user summary table
@@ -2089,12 +2993,12 @@ document.addEventListener('DOMContentLoaded',function(){
       document.getElementById('chart-exceptions').parentElement.innerHTML='<p class="no-data">No exceptions in the last 7 days</p>';
       return;
     }
-    new Chart(document.getElementById('chart-exceptions'),{
+    mkChart(document.getElementById('chart-exceptions'),{
       type:'bar',
       data:{
         labels:rows.map(r=>'Code '+r.exception_code),
         datasets:[{label:'Count',data:rows.map(r=>r.count),
-          backgroundColor:alpha('#E91E63',.75),borderColor:'#E91E63',borderWidth:1}]
+          backgroundColor:C[0],borderColor:C[0],borderWidth:1,borderRadius:4}]
       },
       options:{
         indexAxis:'y',responsive:true,maintainAspectRatio:false,
@@ -2110,8 +3014,8 @@ document.addEventListener('DOMContentLoaded',function(){
     const rows=DATA.part_log_by_time||[];
     if(!rows.length)return;
     const d=pivot(rows,'time','event_type','count');
-    d.datasets.forEach(ds=>{ds.stack='s';});
-    new Chart(document.getElementById('chart-partlog-time'),{
+    stackWithGaps(d);
+    mkChart(document.getElementById('chart-partlog-time'),{
       type:'bar',data:d,
       options:{responsive:true,maintainAspectRatio:false,
         interaction:{mode:'index',intersect:false},
@@ -2120,17 +3024,27 @@ document.addEventListener('DOMContentLoaded',function(){
     });
   })();
 
-  // ── Part log: by type (doughnut) ─────────────────────────────────────────
+  // ── Part log: by type (horizontal bar) ───────────────────────────────────
+  //
+  // Was a doughnut over up to ~8 event types. Part events span orders of
+  // magnitude (NewPart dwarfs everything), which a ring renders as one slice
+  // and a sliver; bars keep the comparison readable and lift the three-slot
+  // all-pairs colour cap that a ring imposes.
   (function(){
-    const rows=DATA.part_log_by_type||[];
+    const rows=[...(DATA.part_log_by_type||[])].sort((a,b)=>Number(b.count||0)-Number(a.count||0));
     if(!rows.length)return;
-    new Chart(document.getElementById('chart-partlog-type'),{
-      type:'doughnut',
+    mkChart(document.getElementById('chart-partlog-type'),{
+      type:'bar',
       data:{
-        labels:rows.map(r=>r.event_type+' ('+r.total_size+')'),
-        datasets:[{data:rows.map(r=>r.count),backgroundColor:C.slice(0,rows.length),borderWidth:2}]
+        labels:rows.map(r=>r.event_type),
+        datasets:[{label:'Events',data:rows.map(r=>r.count),
+          backgroundColor:C[0],borderColor:C[0],borderWidth:1,borderRadius:4}]
       },
-      options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{position:'right'}}}
+      options:{indexAxis:'y',responsive:true,maintainAspectRatio:false,
+        plugins:{legend:{display:false},tooltip:{callbacks:{label:ctx=>
+          [' Events: '+fmt(Number(rows[ctx.dataIndex].count||0)),
+           ' Size: '+(rows[ctx.dataIndex].total_size||'—')]}}},
+        scales:{x:{beginAtZero:true}}}
     });
   })();
 
@@ -2173,29 +3087,37 @@ document.addEventListener('DOMContentLoaded',function(){
     const statusMap={};
     rows.forEach(r=>{statusMap[r.status]=(statusMap[r.status]||0)+1;});
     const statLabels=Object.keys(statusMap);
-    new Chart(document.getElementById('chart-dict-status'),{
-      type:'pie',
+    // A bar, not a pie: with two or three states a ring is decoration, and the
+    // count is what the operator reads. Fill stays on the reserved status ramp
+    // and the state is spelled out on the axis, so nothing rides on hue alone.
+    statLabels.sort((a,b)=>statusMap[b]-statusMap[a]);
+    mkChart(document.getElementById('chart-dict-status'),{
+      type:'bar',
       data:{
-        labels:statLabels.map(s=>s+' ('+statusMap[s]+' pod-slots)'),
-        datasets:[{data:statLabels.map(s=>statusMap[s]),
-          backgroundColor:statLabels.map(s=>DICT_STATUS_COLOR[s]||'#607D8B'),borderWidth:2}]
+        labels:statLabels,
+        datasets:[{label:'pod-slots',data:statLabels.map(s=>statusMap[s]),
+          backgroundColor:statLabels.map(s=>DICT_STATUS_COLOR[s]||STATUS.neutral),
+          borderColor:statLabels.map(s=>DICT_STATUS_COLOR[s]||STATUS.neutral),
+          borderWidth:1,borderRadius:4}]
       },
-      options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{position:'right'}}}
+      options:{indexAxis:'y',responsive:true,maintainAspectRatio:false,
+        plugins:{legend:{display:false},tooltip:{callbacks:{
+          label:ctx=>' '+ctx.parsed.x+' pod-slots'}}},
+        scales:{x:{beginAtZero:true,ticks:{precision:0}}}}
     });
 
     // Bytes allocated — max across pods per dict (same dict has very
     // similar bytes on every pod that loaded it; using max avoids
     // visually shrinking a dict that's NOT_LOADED on one replica).
     const topDicts=[...dicts].sort((a,b)=>b.bytes_max-a.bytes_max).slice(0,15);
-    new Chart(document.getElementById('chart-dict-bytes'),{
+    mkChart(document.getElementById('chart-dict-bytes'),{
       type:'bar',
       data:{
         labels:topDicts.map(d=>d.key),
         datasets:[{
           label:'max bytes_allocated across pods',
           data:topDicts.map(d=>d.bytes_max),
-          backgroundColor:topDicts.map((_,i)=>alpha(C[i%C.length],.8)),
-          borderColor:topDicts.map((_,i)=>C[i%C.length]),borderWidth:1
+          backgroundColor:C[0],borderColor:C[0],borderWidth:1,borderRadius:4
         }]
       },
       options:{
@@ -2212,13 +3134,13 @@ document.addEventListener('DOMContentLoaded',function(){
     // deduped per-dict view.
     const lifeRows=dicts.filter(d=>d.lifetime_max>0||d.lifetime_min>0).slice(0,20);
     if(lifeRows.length){
-      new Chart(document.getElementById('chart-dict-lifetime'),{
+      mkChart(document.getElementById('chart-dict-lifetime'),{
         type:'bar',
         data:{
           labels:lifeRows.map(d=>d.name),
           datasets:[
-            {label:'Lifetime Min (s)',data:lifeRows.map(d=>d.lifetime_min),backgroundColor:alpha('#2196F3',.75),borderColor:'#2196F3',borderWidth:1},
-            {label:'Lifetime Max (s)',data:lifeRows.map(d=>d.lifetime_max),backgroundColor:alpha('#FF9800',.75),borderColor:'#FF9800',borderWidth:1}
+            {label:'Lifetime Min (s)',data:lifeRows.map(d=>d.lifetime_min),backgroundColor:C[0],borderColor:C[0],borderWidth:1,borderRadius:4},
+            {label:'Lifetime Max (s)',data:lifeRows.map(d=>d.lifetime_max),backgroundColor:C[1],borderColor:C[1],borderWidth:1,borderRadius:4}
           ]
         },
         options:{
@@ -2245,13 +3167,14 @@ document.addEventListener('DOMContentLoaded',function(){
                 'lifetime_min','lifetime_max',
                 'loading_start_time','last_update','loading_duration_s',
                 'last_exception','origin','comment','uuid'];
-    let h='<table class="dt"><thead><tr>'+cols.map(k=>'<th>'+k+'</th>').join('')+'</tr></thead><tbody>';
+    let h='<table class="dt"><thead><tr>'+cols.map(k=>'<th>'+esc(k)+'</th>').join('')+'</tr></thead><tbody>';
     rows.forEach(r=>{
       const isFailed=r.status==='FAILED'||String(r.last_exception||'').length>1;
       h+='<tr'+(isFailed?' class="error-row"':r.status==='LOADING'?' class="alert-row"':'')+'>';
       cols.forEach(k=>{
+        // name / last_exception / origin / comment / source are customer data.
         if(k==='status') h+='<td>'+dictStatusBadge(r[k])+'</td>';
-        else h+='<td title="'+(r[k]??'')+'">'+(r[k]??'')+'</td>';
+        else h+='<td title="'+esc(r[k])+'">'+esc(r[k])+'</td>';
       });
       h+='</tr>';
     });
@@ -2308,11 +3231,14 @@ document.addEventListener('DOMContentLoaded',function(){
     });
     const bLabels=Object.keys(delayBuckets);
     const bData=bLabels.map(k=>delayBuckets[k]);
-    const bColors=['#4CAF50','#8BC34A','#FFB627','#FF5722','#f44336'];
-    new Chart(document.getElementById('chart-replica-delay'),{
+    // Delay bands are ORDERED, so they take a one-hue ordinal ramp. The old
+    // green→yellow→red rainbow spent five hues re-encoding an order the axis
+    // already spells out, and read as a status scale it is not.
+    const bColors=(ORDINAL[currentTheme()]||ORDINAL.light).slice(0,bLabels.length);
+    mkChart(document.getElementById('chart-replica-delay'),{
       type:'bar',
       data:{labels:bLabels,datasets:[{label:'Replicas',data:bData,
-        backgroundColor:bColors,borderColor:bColors,borderWidth:1}]},
+        backgroundColor:bColors,borderColor:bColors,borderWidth:1,borderRadius:4,_ordinal:true}]},
       options:{responsive:true,maintainAspectRatio:false,
         plugins:{legend:{display:false}},scales:{y:{beginAtZero:true,ticks:{stepSize:1}}}}
     });
@@ -2320,14 +3246,14 @@ document.addEventListener('DOMContentLoaded',function(){
     // queue size horizontal bar (top 15)
     const topQ=[...rows].sort((a,b)=>Number(b.queue_size||0)-Number(a.queue_size||0)).slice(0,15);
     if(topQ.some(r=>Number(r.queue_size||0)>0)){
-      new Chart(document.getElementById('chart-replica-queue'),{
+      mkChart(document.getElementById('chart-replica-queue'),{
         type:'bar',
         data:{
           labels:topQ.map(r=>r.database+'.'+r.table),
           datasets:[
-            {label:'Queue Size',data:topQ.map(r=>r.queue_size||0),backgroundColor:alpha('#FC4F05',.75),borderColor:'#FC4F05',borderWidth:1},
-            {label:'Inserts In Queue',data:topQ.map(r=>r.inserts_in_queue||0),backgroundColor:alpha('#2196F3',.75),borderColor:'#2196F3',borderWidth:1},
-            {label:'Merges In Queue',data:topQ.map(r=>r.merges_in_queue||0),backgroundColor:alpha('#4CAF50',.75),borderColor:'#4CAF50',borderWidth:1}
+            {label:'Queue Size',data:topQ.map(r=>r.queue_size||0),backgroundColor:C[0],borderColor:C[0],borderWidth:1,borderRadius:4},
+            {label:'Inserts In Queue',data:topQ.map(r=>r.inserts_in_queue||0),backgroundColor:C[1],borderColor:C[1],borderWidth:1,borderRadius:4},
+            {label:'Merges In Queue',data:topQ.map(r=>r.merges_in_queue||0),backgroundColor:C[2],borderColor:C[2],borderWidth:1,borderRadius:4}
           ]
         },
         options:{indexAxis:'y',responsive:true,maintainAspectRatio:false,
@@ -2350,7 +3276,7 @@ document.addEventListener('DOMContentLoaded',function(){
     const rows=DATA.disks||[];
     const WARN_PCT=15, CRIT_PCT=5;
     if(rows.length){
-      new Chart(document.getElementById('chart-disk-usage'),{
+      mkChart(document.getElementById('chart-disk-usage'),{
         type:'bar',
         data:{
           // In cloud mode system.disks fans out, so the same disk appears
@@ -2361,11 +3287,12 @@ document.addEventListener('DOMContentLoaded',function(){
           labels:rows.map(r=>r.hostname?r.name+' @ '+String(r.hostname).split('.')[0]:r.name),
           datasets:[
             {label:'Used',data:rows.map(r=>Number(r.total_space||0)-Number(r.free_space||0)),
-              backgroundColor:rows.map(r=>Number(r.free_pct||100)<CRIT_PCT?alpha('#f44336',.8):Number(r.free_pct||100)<WARN_PCT?alpha('#FF9800',.8):alpha('#2196F3',.75)),
-              borderColor:rows.map(r=>Number(r.free_pct||100)<CRIT_PCT?'#f44336':Number(r.free_pct||100)<WARN_PCT?'#FF9800':'#2196F3'),
-              borderWidth:1},
+              backgroundColor:rows.map(r=>Number(r.free_pct||100)<CRIT_PCT?STATUS.critical:Number(r.free_pct||100)<WARN_PCT?STATUS.warning:C[0]),
+              borderColor:rows.map(r=>Number(r.free_pct||100)<CRIT_PCT?STATUS.critical:Number(r.free_pct||100)<WARN_PCT?STATUS.warning:C[0]),
+              borderWidth:1,borderRadius:4},
             {label:'Free',data:rows.map(r=>Number(r.free_space||0)),
-              backgroundColor:alpha('#4CAF50',.6),borderColor:'#4CAF50',borderWidth:1}
+              // Free space is the remainder, not a "good" state — recessive gray.
+              backgroundColor:OTHER,borderColor:OTHER,borderWidth:1,borderRadius:4}
           ]
         },
         options:{
@@ -2393,14 +3320,13 @@ document.addEventListener('DOMContentLoaded',function(){
   (function(){
     const rows=(DATA.server_errors||[]).slice(0,20);
     if(rows.length){
-      new Chart(document.getElementById('chart-server-errors'),{
+      mkChart(document.getElementById('chart-server-errors'),{
         type:'bar',
         data:{
           labels:rows.map(r=>r.name||'code '+r.code),
           datasets:[{label:'Total count (since restart)',
             data:rows.map(r=>r.value),
-            backgroundColor:rows.map((_,i)=>alpha(C[i%C.length],.8)),
-            borderColor:rows.map((_,i)=>C[i%C.length]),borderWidth:1}]
+            backgroundColor:C[0],borderColor:C[0],borderWidth:1,borderRadius:4}]
         },
         options:{indexAxis:'y',responsive:true,maintainAspectRatio:false,
           plugins:{legend:{display:false},tooltip:{callbacks:{
@@ -2423,6 +3349,126 @@ document.addEventListener('DOMContentLoaded',function(){
       ['day','event_type','merge_reason','events','total_size']);
   })();
 
+  // ── Logs ──────────────────────────────────────────────────────────────────
+  //
+  // Bounded structured rows searchable in-page; the complete raw files are
+  // linked under Collected Files. Paginated because the row cap bounds the
+  // payload, not the DOM — 1000 rows of <tr> is what makes a page crawl.
+  (function(){
+    const rows=DATA.text_log||[];
+    if(!rows.length) return;
+    document.getElementById('sec-logs').style.display='';
+    document.getElementById('nav-logs').style.display='';
+
+    const cap=DATA.text_log_row_cap||rows.length;
+    document.getElementById('logs-scope').textContent=
+      'Warning and worse (Warning, Error, Critical, Fatal) from system.text_log, last 24 h, newest first'
+      +(rows.length>=cap?' — capped at the most recent '+cap+' rows; the complete raw files are under Collected Files.':'.');
+
+    const sel=document.getElementById('log-level-filter');
+    [...new Set(rows.map(r=>r.level))].sort().forEach(l=>{
+      sel.innerHTML+='<option value="'+esc(l)+'">'+esc(l)+'</option>';
+    });
+
+    const PAGE=100;
+    let filtered=rows.slice(), page=0;
+    const BADGE={Fatal:'err-badge',Critical:'err-badge',Error:'err-badge',Warning:'warn-badge'};
+    // Level is a state: status ramp plus the word itself, never colour alone.
+    const cell=r=>({
+      event_time:r.event_time,
+      level:'<span class="'+(BADGE[r.level]||'warn-badge')+'">'+esc(r.level)+'</span>',
+      logger_name:r.logger_name,
+      message:r.message
+    });
+
+    function render(){
+      const cnt=document.getElementById('log-count');
+      const pg=document.getElementById('log-pagination');
+      cnt.textContent=filtered.length+' / '+rows.length+' entries';
+      if(!filtered.length){
+        document.getElementById('tbl-logs').innerHTML='<p class="no-data">No entries match</p>';
+        pg.innerHTML=''; return;
+      }
+      const start=page*PAGE;
+      renderTable('tbl-logs',filtered.slice(start,start+PAGE).map(cell),
+        ['event_time','level','logger_name','message'],null,['level']);
+      const total=Math.ceil(filtered.length/PAGE);
+      if(total<=1){pg.innerHTML='';return;}
+      let h='';
+      if(page>0) h+='<button onclick="window._logPg('+(page-1)+')">&#9664;</button>';
+      h+='<span class="cur">'+(page+1)+' / '+total+'</span>';
+      if(page<total-1) h+='<button onclick="window._logPg('+(page+1)+')">&#9654;</button>';
+      pg.innerHTML=h;
+    }
+    window._logPg=function(pp){page=pp;render();};
+    window.logsFilter=function(){
+      const q=(document.getElementById('log-search').value||'').toLowerCase();
+      const lvl=document.getElementById('log-level-filter').value;
+      filtered=rows.filter(r=>{
+        if(lvl && r.level!==lvl) return false;
+        if(q) return String(r.message||'').toLowerCase().includes(q)
+                 || String(r.logger_name||'').toLowerCase().includes(q);
+        return true;
+      });
+      page=0; render();
+    };
+    render();
+  })();
+
+  // ── Collected files ───────────────────────────────────────────────────────
+  //
+  // An index of the rest of the bundle, not a copy of it. Every artifact the
+  // run wrote gets a row and a relative link; the browser opens the file.
+  (function(){
+    const files=DATA.bundle_files||[];
+    if(!files.length) return;
+    document.getElementById('sec-files').style.display='';
+    document.getElementById('nav-files').style.display='';
+
+    const total=files.reduce((a,f)=>a+Number(f.bytes||0),0);
+    const human=b=>{
+      const u=['B','KiB','MiB','GiB','TiB']; let i=0; b=Number(b)||0;
+      while(b>=1024 && i<u.length-1){b/=1024;i++;}
+      return (i?b.toFixed(1):b)+' '+u[i];
+    };
+    document.getElementById('files-scope').textContent=
+      files.length+' files collected, '+human(total)+' in total.';
+
+    const sel=document.getElementById('file-group-filter');
+    // '' is the 'All folders' sentinel, so the root group gets '/' as its
+    // option value or selecting '(bundle root)' would filter nothing.
+    [...new Set(files.map(f=>f.group))].sort().forEach(g=>{
+      sel.innerHTML+='<option value="'+esc(g||'/')+'">'+esc(g||'(bundle root)')+'</option>';
+    });
+
+    let filtered=files.slice();
+    // The link is markup this file builds; the filename inside it is escaped,
+    // and each path segment is percent-encoded so a space, '#' or '?' in a
+    // name cannot break the href (encodeURI leaves '#'/'?' alone — they would
+    // become a bogus fragment/query and 404 against the extracted bundle).
+    const row=f=>({
+      file:'<a href="'+f.href.split('/').map(encodeURIComponent).join('/')+'" target="_blank" rel="noopener">'+esc(f.file)+'</a>',
+      kind:f.kind||'\u2014',
+      size:f.size
+    });
+
+    function render(){
+      document.getElementById('file-count').textContent=
+        filtered.length+' / '+files.length+' files';
+      renderTable('tbl-files',filtered.map(row),['file','kind','size'],null,['file']);
+    }
+    window.filesFilter=function(){
+      const q=(document.getElementById('file-search').value||'').toLowerCase();
+      const g=document.getElementById('file-group-filter').value;
+      filtered=files.filter(f=>{
+        if(g!=='' && f.group!==(g==='/'?'':g)) return false;
+        return !q || String(f.file).toLowerCase().includes(q);
+      });
+      render();
+    };
+    render();
+  })();
+
   // ── Async inserts (non-gov only) ──────────────────────────────────────────
   (function(){
     const rows=DATA.async_inserts||[];
@@ -2430,8 +3476,8 @@ document.addEventListener('DOMContentLoaded',function(){
     document.getElementById('sec-async-inserts').style.display='';
     document.getElementById('nav-async-inserts').style.display='';
     const d=pivot(rows,'hour','status','flushes');
-    d.datasets.forEach(ds=>{ds.stack='s';});
-    new Chart(document.getElementById('chart-async-inserts'),{
+    stackWithGaps(d);
+    mkChart(document.getElementById('chart-async-inserts'),{
       type:'bar',data:d,
       options:{responsive:true,maintainAspectRatio:false,
         interaction:{mode:'index',intersect:false},
