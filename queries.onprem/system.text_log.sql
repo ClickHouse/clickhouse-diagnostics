@@ -12,6 +12,8 @@ FROM system.text_log
 -- --from/--to out to whole days.
 WHERE event_date >= toDate({from:1d}, timezone()) AND event_date <= toDate({to:now}, timezone())
   AND event_time > {from:1d} AND event_time <= {to:now}
-  AND level IN ('Warning', 'Error', 'Fatal')
+  -- Critical sits between Fatal and Error in the level Enum8; "Warning and
+  -- worse" is not complete without it.
+  AND level IN ('Warning', 'Error', 'Critical', 'Fatal')
 ORDER BY event_time DESC
 LIMIT 2000

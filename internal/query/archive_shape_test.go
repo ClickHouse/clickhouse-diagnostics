@@ -144,3 +144,35 @@ func TestArchiveQueries_TruncateFreeTextWithLeftUTF8(t *testing.T) {
 		t.Fatal("no non-exempt .sql files found — test is not guarding anything")
 	}
 }
+
+// The archived text_log collectors describe themselves as "Warning and worse".
+// In the level Enum8, Critical sits between Fatal and Error, so a filter of
+// ('Warning','Error','Fatal') silently drops exactly the rows a support
+// engineer opens the bundle for. The dashboard's own text_log query already
+// includes Critical; the archive must match or the two disagree about what
+// happened on the server.
+func TestTextLog_IncludesCritical(t *testing.T) {
+	levelFilter := regexp.MustCompile(`(?i)level\s+IN\s*\(([^)]*)\)`)
+
+	var seen int
+	for _, path := range realRepoSQLFiles(t) {
+		if !strings.HasPrefix(filepath.Base(path), "system.text_log") {
+			continue
+		}
+		seen++
+		body := readFileForTest(t, path)
+		m := levelFilter.FindStringSubmatch(body)
+		if m == nil {
+			t.Errorf("%s: no level IN (...) filter found", path)
+			continue
+		}
+		for _, lvl := range []string{"Warning", "Error", "Critical", "Fatal"} {
+			if !strings.Contains(m[1], "'"+lvl+"'") {
+				t.Errorf("%s: level filter %q omits %s", path, strings.TrimSpace(m[0]), lvl)
+			}
+		}
+	}
+	if seen == 0 {
+		t.Fatal("no system.text_log*.sql files found — test is not guarding anything")
+	}
+}
