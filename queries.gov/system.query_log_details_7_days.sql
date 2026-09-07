@@ -44,8 +44,16 @@ SELECT
             max(event_time) as maxDate,
             exception_code
         FROM system.query_log
-        ARRAY JOIN tables
+        LEFT ARRAY JOIN tables
         WHERE (event_time > {from:7d} AND event_time <= {to:now})
+        -- LEFT ARRAY JOIN, not ARRAY JOIN: a query that never resolved a table has
+        -- an empty `tables` array and a plain ARRAY JOIN drops it — exactly the
+        -- failure class worth archiving (UNKNOWN_TABLE, parse errors). LEFT keeps
+        -- them; tables/database/table then hash the empty string, which is fine.
+        --
+        -- Either way, a query touching N tables emits N rows with every sum repeated
+        -- in full. Filter to one table before reading sums; never re-sum across rows.
+        -- No raw query text here by design: this is the redacted (gov) variant.
         -- Explicit key list instead of GROUP BY ALL: that syntax needs
         -- 22.12+ and this root file must run on every supported server
         -- (22.8+). Keys are the inner non-aggregate projections.

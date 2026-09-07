@@ -16,7 +16,7 @@ A Go-based diagnostic tool for ClickHouse that collects system information, runs
 
 ### Required grants
 
-The tool is read-only and never touches customer data — every query reads a `system` table. Two grants are enough for `onprem` and `gov` mode:
+The tool is read-only and never reads customer tables — every query reads a `system` table. That bounds what it *queries*, not what reaches the bundle: some `system` tables describe customer data in free text (query text, exception messages, log lines), so see [Gov mode and hashed names](#gov-mode-and-hashed-names) for what is withheld or hashed when that matters. Two grants are enough for `onprem` and `gov` mode:
 
 ```sql
 CREATE USER sys_read_only IDENTIFIED WITH sha256_password BY '<password>';
@@ -416,6 +416,7 @@ Several outputs are deliberately withheld in gov mode, because each is part of t
 |---|---|
 | `dashboard.html` | Its panels are built in Go and select raw identifiers — database/table names for up to 2000 tables, disk paths, users — plus server-generated text (`last_exception`, `last_error_message`). Hashing every panel is the follow-up that would restore it. |
 | Query analysis (`--query-id` / `--normalized-query-hash`) | The bundle embeds raw query text, exception messages and full DDL. Freeform SQL text can't be hashed without destroying its diagnostic value, so the flags are rejected outright. |
+| **Query text in `system.query_log_details_7_days`** | The onprem/cloud collectors archive the first 500 characters of one sampled query per `normalized_query_hash`, so a hash in that file can still be mapped back to SQL once the server is gone. Query text embeds customer literals, so the gov variant omits the column entirely — it is the only mode where that mapping is unavailable. |
 | **Configuration files** (`configuration/`) | The XML embeds raw hostnames — `<macros>` shard/replica names, `<remote_servers>`, `<zookeeper>` hosts. Sanitisation strips credentials, not identifiers, and an XML tree can't be hashed while remaining mergeable. |
 | **Host facts** (`host_info.json`) | Hostname, mount paths and process command lines are exactly the identifiers gov hashing protects — and a command line can't be hashed while staying useful. |
 | **Server log files** (`logs/`) | Log lines carry raw queries, table names and paths as free text. Hashing a log destroys the reason to collect it. |
