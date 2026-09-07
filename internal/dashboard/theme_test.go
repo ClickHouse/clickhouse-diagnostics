@@ -206,6 +206,9 @@ func TestTemplate_InterpolatesThroughEsc(t *testing.T) {
 		`+'">'+esc(v)+'</div><div class="lbl">'+esc(l)+'</div></div>'`,
 		// host facts notes — free text, escaped per element before joining
 		`notes.map(esc).join('; ')`,
+		// query-analysis window tag — Go-formatted RFC3339 today, but the
+		// contract holds at the sink, not at whoever happens to fill DATA
+		`>window '+esc(DATA.qa_from||'')+' → '+esc(DATA.qa_to||'')+'</span></span>'`,
 	} {
 		if !strings.Contains(htmlTemplate, want) {
 			t.Errorf("innerHTML site no longer escapes its interpolation: missing %q", want)
@@ -217,6 +220,7 @@ func TestTemplate_InterpolatesThroughEsc(t *testing.T) {
 		"+DATA.mode+",
 		"+'\">'+v+'</div>",
 		"notes.join('; ')",
+		"+(DATA.qa_from||'')+",
 	} {
 		if strings.Contains(htmlTemplate, forbidden) {
 			t.Errorf("unescaped interpolation is back: %q", forbidden)

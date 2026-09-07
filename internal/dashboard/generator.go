@@ -2473,7 +2473,7 @@ function renderQueryAnalysis(){
   let h='<div class="alert-header">';
   h+='<span class="alert-title">Focus query_id: '+esc(DATA.qa_query_id||'(none)')+'</span>';
   h+='<span class="alert-tags"><span class="alert-tag">hash '+esc(DATA.qa_hash||'')+'</span>';
-  h+='<span class="alert-tag">window '+(DATA.qa_from||'')+' → '+(DATA.qa_to||'')+'</span></span>';
+  h+='<span class="alert-tag">window '+esc(DATA.qa_from||'')+' → '+esc(DATA.qa_to||'')+'</span></span>';
   h+='</div>';
   if(det.query_kind){
     h+='<div class="alert-desc">';
