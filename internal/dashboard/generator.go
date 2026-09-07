@@ -2711,7 +2711,10 @@ document.addEventListener('DOMContentLoaded',function(){
     document.getElementById('host-block').style.display='';
 
     const os=hi.os||{}, cpu=hi.cpu||{}, mem=hi.memory||{};
-    const gib=b=>b?(Number(b)/1073741824).toFixed(2)+' GiB':'—';
+    // Null/empty means the collector could not read the field; 0 is a real
+    // reading (swap_total_bytes is 0 on hosts with swap disabled) and must
+    // render as 0.00 GiB, not as missing.
+    const gib=b=>(b==null||b==='')?'—':(Number(b)/1073741824).toFixed(2)+' GiB';
     const dur=sec=>{
       sec=Number(sec||0); if(!sec)return '—';
       const d=Math.floor(sec/86400),h=Math.floor(sec%86400/3600),m=Math.floor(sec%3600/60);

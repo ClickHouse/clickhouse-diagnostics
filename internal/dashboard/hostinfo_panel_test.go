@@ -113,3 +113,18 @@ func TestTemplate_HostPanelIsConditional(t *testing.T) {
 		}
 	}
 }
+
+// gib() must distinguish "the collector could not read this" (null/empty)
+// from a genuine zero. swap_total_bytes is 0 on every host with swap
+// disabled, and rendering that as "—" tells the reader the value is
+// unknown when it is in fact the single most useful thing to know about
+// swap. A truthiness check (b ? ... : '—') conflates the two.
+func TestTemplate_GibRendersZeroAsZero(t *testing.T) {
+	want := `const gib=b=>(b==null||b==='')?'—':(Number(b)/1073741824).toFixed(2)+' GiB';`
+	if !strings.Contains(htmlTemplate, want) {
+		t.Errorf("gib helper missing or changed; want %q", want)
+	}
+	if strings.Contains(htmlTemplate, `const gib=b=>b?`) {
+		t.Error("gib uses a truthiness check, so a real 0-byte reading renders as missing")
+	}
+}
