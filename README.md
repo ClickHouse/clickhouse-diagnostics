@@ -14,12 +14,12 @@ Under the hood: per-environment query sets (`cloud` / `onprem` / `gov`) selected
 |---|---|---|
 | `system.version` | Which build is this? | Every default, limit and bug fix is version-specific. |
 | `system.parts` (active, largest 50 000) | How many parts, how big, how fragmented, on which disk? | Part count per partition is the earliest signal of insert/merge trouble (`TOO_MANY_PARTS`). |
-| `system.part_log` (7 days, hourly) | Are merges keeping up with inserts; did any merge or mutation fail? | Shows insert size, merge throughput and failing background operations with their error codes. |
+| `system.part_log_7_days` (hourly aggregation of `system.part_log`) | Are merges keeping up with inserts; did any merge or mutation fail? | Shows insert size, merge throughput and failing background operations with their error codes. |
 | `system.merges`, `system.mutations` | What is merging or mutating right now; what is stuck? | A stuck merge or a mutation backlog is the usual reason parts pile up while the pool looks idle. |
 | `system.replicas`, `system.replication_queue` | Is every replica writable and caught up; if not, why? | Read-only state, Keeper session loss and the shape of the queue locate replication problems. |
-| `system.query_log` (7 days, hourly) | What ran, how slow, how much memory, what failed, by whom? | Most incidents start with the workload; this is the aggregated view, with a 500-character sample per query pattern and no customer rows. |
+| `system.query_log_details_7_days` (hourly aggregation of `system.query_log`) | What ran, how slow, how much memory, what failed, by whom? | Most incidents start with the workload; this is the aggregated view, with a 500-character sample per query pattern and no customer rows. |
 | `system.errors`, `system.text_log` (24 h) | Which errors, how often, with what message? | Fast triage by error code; the log slice gives the server's own words. |
-| `system.metric_log` (7 days, hourly) | Memory and background-pool load over time | Tells "the server was overloaded" apart from "one query misbehaved". |
+| `system.metric_log_7_days` (hourly aggregation of `system.metric_log`) | Memory and background-pool load over time | Tells "the server was overloaded" apart from "one query misbehaved". |
 | `system.disks`, `system.detached_parts` | Is disk running out; has data been set aside as broken? | A full disk explains many other symptoms; detached parts record corruption or replication leftovers. |
 | `system.tables`, `system.columns`, `system.dictionaries`, `system.clusters` | Schema, keys, materialized views, dictionaries, topology | Findings in parts and queries are *explained* by the schema and the cluster definition. |
 | `system.settings`, `system.server_settings` (≥ 23.4) | Which query/profile and server settings deviate from their defaults | Answers "what was tuned" without a config copy — cloud bundles have no `configuration/`; identifying server values are `REMOVED` in gov. |
@@ -717,7 +717,7 @@ The repo ships with 11 alert rules in `alerts/`. They are intended as a starting
 | `keeper_exception_spike` | warning | More than 20 KEEPER_EXCEPTION (code 999) errors in the last hour |
 | `high_exception_rate` | warning | More than 50 query exceptions for a single exception code in the last hour |
 | `too_many_simultaneous_queries` | warning | More than 10 code-202 (`TOO_MANY_SIMULTANEOUS_QUERIES`) errors in the last hour (`max_concurrent_queries` hit) |
-| `too_many_parts` | warning | A partition has more than 300 active parts (CH throttles at 1000) |
+| `too_many_parts` | warning | A partition has more than 300 active parts (inserts are delayed from `parts_to_delay_insert` = 1000 and rejected with code 252 `TOO_MANY_PARTS` at `parts_to_throw_insert` = 3000) |
 | `large_parts` | warning | A single active part is larger than 150 GB |
 | `mutation_running_too_long` | warning | A mutation has been running for more than 3 hours |
 | `detached_parts_exist` | info | Parts exist in the `detached/` folder (failed merges, manual detach, replication conflicts) |

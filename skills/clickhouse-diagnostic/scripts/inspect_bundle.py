@@ -113,6 +113,8 @@ def safe_extract(archive: str, dest: str) -> None:
             name = m.name
             if name.startswith("/") or ".." in name.split("/") or m.issym() or m.islnk():
                 die(f"refusing unsafe archive member: {name}")
+            if not (m.isfile() or m.isdir()):  # devices, FIFOs, anything non-regular
+                die(f"refusing non-regular archive member: {name} (type {m.type!r})")
         try:
             tar.extractall(dest, filter="data")  # Python ≥ 3.12
         except TypeError:
