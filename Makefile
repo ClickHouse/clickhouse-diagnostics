@@ -11,7 +11,7 @@ DIST_DIR=./dist
 PLATFORMS=linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64
 # Runtime data the tool reads from the working directory. These must ship
 # alongside the binary, so each release archive bundles them.
-DATA_DIRS=queries.cloud queries.onprem queries.gov queries.query_analysis alerts
+DATA_DIRS=queries.cloud queries.onprem queries.gov queries.query_analysis alerts skills
 
 # Default target
 .PHONY: all
@@ -82,7 +82,7 @@ release: clean
 		mkdir -p $$stage; \
 		GOOS=$$os GOARCH=$$arch go build -o $$stage/$$bin $(CMD_DIR) || exit 1; \
 		cp -R $(DATA_DIRS) $$stage/; \
-		cp README.md $$stage/ 2>/dev/null || true; \
+		cp README.md AGENTS.md $$stage/ 2>/dev/null || true; \
 		if [ "$$os" = "windows" ]; then \
 			(cd $(DIST_DIR) && zip -qr $$pkg.zip $$pkg); \
 		else \

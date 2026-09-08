@@ -37,10 +37,10 @@ dist/
 
 # Built binaries (do not commit — produced by `make build` / `go build`)
 /bin/
-clickhouse-diagnostic
-clickhouse-diagnostics
-clickhouse_diagnostic
-clickhouse-diagnostic-*
+/clickhouse-diagnostic
+/clickhouse-diagnostics
+/clickhouse_diagnostic
+/clickhouse-diagnostic-*
 
 # Local scripts (connect to private repos — not for public commit)
 local/
@@ -65,3 +65,6 @@ configuration/
 /*.json
 /*HomeDash*.json
 /S2HomeDash*.json
+
+# Python bytecode from the skill helper script
+__pycache__/
