@@ -3,7 +3,7 @@ title: "Table partition approaching too-many-parts limit"
 severity: warning
 description: |
   A table partition has more than 300 active parts. ClickHouse starts
-  throttling inserts at 1000 parts per partition (code 497) and may
+  throttling inserts at 1000 parts per partition (code 252, TOO_MANY_PARTS) and may
   fully block writes before that threshold. High part counts indicate
   that background merges are not keeping up with insert throughput —
   common causes include excessive insert frequency, an unfavourable
@@ -32,4 +32,4 @@ query: |
   HAVING parts_count > 300
   ORDER BY parts_count DESC
 
-message: "{database}.{table} partition '{partition_id}' has {parts_count} active parts — inserts may be throttled (code 497 at 1000 parts)"
+message: "{database}.{table} partition '{partition_id}' has {parts_count} active parts — inserts may be throttled (code 252 at 1000 parts)"

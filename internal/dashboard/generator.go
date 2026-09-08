@@ -1877,7 +1877,7 @@ footer{text-align:center;color:var(--ink-muted);font-size:var(--click-font-size-
       <div class="chart-wrap h300"><canvas id="chart-server-errors"></canvas></div>
     </div>
   </div>
-  <div class="sub-title">High Part-Count Partitions (&gt;100 parts — potential code 497 risk)</div>
+  <div class="sub-title">High Part-Count Partitions (&gt;100 parts — potential code 252 TOO_MANY_PARTS risk)</div>
   <div class="tbl-wrap"><div id="tbl-high-parts"></div></div>
   <div class="sub-title" style="margin-top:18px">TTL Activity (last 7 days)</div>
   <div class="tbl-wrap"><div id="tbl-ttl-activity"></div></div>
