@@ -96,15 +96,29 @@ def human(n) -> str:
     return str(n)
 
 
+_DT_RE = re.compile(
+    r"^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})(?:\.\d{1,9})?(?:Z|[+-]\d{2}:?\d{2})?$"
+)
+
+
 def parse_dt(s):
+    """Parse the timestamp shapes a bundle can contain into a naive datetime.
+
+    Accepts ClickHouse DateTime / DateTime64 text (``2026-08-25 12:00:38``,
+    ``2026-08-25 12:00:38.123456``) and RFC 3339 (``2026-08-25T12:00:38Z``,
+    ``2026-08-25T12:00:38.5+02:00``). Fractional seconds and the zone suffix are
+    dropped: the script only ever compares values from the same file, which
+    share one zone, so spans and windows stay correct.
+    """
     if not s or not isinstance(s, str):
         return None
-    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%M:%S"):
-        try:
-            return datetime.strptime(s[:19], fmt)
-        except ValueError:
-            continue
-    return None
+    m = _DT_RE.match(s.strip())
+    if not m:
+        return None
+    try:
+        return datetime.strptime(f"{m.group(1)} {m.group(2)}", "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
 
 
 def safe_extract(archive: str, dest: str) -> None:
