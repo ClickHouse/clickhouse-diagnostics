@@ -24,7 +24,6 @@ query: |
   FROM {sys.query_log}
   WHERE event_time > now() - INTERVAL 1 HOUR
     AND exception_code = 202
-    AND type = 'ExceptionWhileProcessing'
   HAVING error_count > 10
 
 message: "Too many simultaneous queries (code 202) occurred {error_count} times in the last hour — example: {example_message}"

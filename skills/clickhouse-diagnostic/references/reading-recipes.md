@@ -169,7 +169,7 @@ WITH dedup AS (
   WHERE type != 'QueryStart'
   LIMIT 1 BY time, query_kind, type, user, interface, normalized_query_hash, exception_code)
 SELECT normalized_query_hash, any(user) AS user, sum(toUInt64(count)) AS runs,
-       formatReadableSize(max(toUInt64(memory_usage)) / max(toUInt64(count))) AS mem_per_query_est,
+       formatReadableSize(max(toUInt64(memory_usage)) / argMax(toUInt64(`count`),toUInt64(memory_usage))) AS mem_per_query_est,
        leftUTF8(any(query), 150) AS sample
 FROM dedup WHERE type = 'QueryFinish'
 GROUP BY 1 ORDER BY max(toUInt64(memory_usage)) DESC LIMIT 10

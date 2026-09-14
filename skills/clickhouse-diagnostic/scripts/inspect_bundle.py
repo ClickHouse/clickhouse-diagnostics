@@ -9,8 +9,11 @@ talks to the network. Prints a coverage statement, an inventory and the health
 checks that can be computed without SQL (see references/health-checks.md for
 the full rule set the assistant applies on top of this).
 
+Requires a bundle collected with the default `-output-format jsonl`; a `.native`
+or `.tsv` bundle is refused rather than misread (see require_jsonl).
+
 Exit code 0 even when findings are present; exit 2 only when the input cannot
-be read (bad path, not a bundle, unsafe archive member).
+be read (bad path, not a bundle, unsafe archive member, wrong output format).
 """
 from __future__ import annotations
 
@@ -165,6 +168,26 @@ def find_run_dir(path: str) -> str:
     return path
 
 
+def require_jsonl(base: str) -> None:
+    """Refuse a bundle collected with -output-format native or tsv.
+
+    Every reader below globs ``*.jsonl``. On another format they all come back
+    empty and the report renders as "version: unknown, active parts: 0,
+    Findings (0)" — a false all-clear that looks exactly like a healthy server.
+    Failing loudly is the only safe answer until the other formats are parsed.
+    """
+    if glob.glob(os.path.join(base, "system.version_*.jsonl")):
+        return
+    exts = {os.path.splitext(p)[1] for p in glob.glob(os.path.join(base, "system.*.*"))}
+    exts.discard(".jsonl")
+    if not exts:
+        return
+    found = " / ".join(sorted(e.lstrip(".") for e in exts))
+    die(f"bundle was collected with -output-format {found}; this script reads .jsonl only, and on "
+        f"{found} every check would silently report zero. Re-collect with -output-format jsonl "
+        f"(the collector default) and re-run.")
+
+
 def first(pattern: str, base: str):
     hits = sorted(glob.glob(os.path.join(base, pattern)))
     return hits[0] if hits else None
@@ -276,8 +299,9 @@ def analyse(base: str):
     if ql:
         times = [parse_dt(r.get("time")) for r in ql]
         times = [t for t in times if t]
-        out["query_log_window"] = {"from": min(times).isoformat(sep=" "), "to": max(times).isoformat(sep=" "),
-                                   "hour_buckets": len(set(times))}
+        if times:
+            out["query_log_window"] = {"from": min(times).isoformat(sep=" "), "to": max(times).isoformat(sep=" "),
+                                       "hour_buckets": len(set(times))}
     tl = read_jsonl(first("system.text_log_2*.jsonl", base))  # not the histogram / keeper-marker files
     if tl:
         ts = [parse_dt(r.get("event_time")) for r in tl]
@@ -344,10 +368,14 @@ def analyse(base: str):
         pct = num(d.get("free_pct"))
         if pct is None:
             continue
+        # Same severity as alerts/disk_space_low.yaml and HC-4.1: below 15 % is
+        # critical (merges need headroom, inserts fail with 243 and replicas go
+        # read-only before the disk is actually full); below 5 % the dashboard
+        # also paints the disk red, so say it in the message.
         if pct < 5:
-            add("critical", "disk", f"disk `{d.get('name')}` only {pct}% free", f"free {d.get('free_space')} of {d.get('total_space')}", "HC-4.1")
+            add("critical", "disk", f"disk `{d.get('name')}` only {pct}% free — critically low, inserts can already fail", f"free {d.get('free_space')} of {d.get('total_space')}", "HC-4.1")
         elif pct < 15:
-            add("warning", "disk", f"disk `{d.get('name')}` {pct}% free (< 15%)", f"free {d.get('free_space')} of {d.get('total_space')}", "HC-4.1")
+            add("critical", "disk", f"disk `{d.get('name')}` {pct}% free (< 15%, alert disk_space_low)", f"free {d.get('free_space')} of {d.get('total_space')}", "HC-4.1")
 
     # ---- parts
     parts = read_jsonl(first("system.parts_*.jsonl", base))
@@ -410,11 +438,16 @@ def analyse(base: str):
                 f"num_parts={mg.get('num_parts')} memory={human(mg.get('memory_usage'))} is_mutation={mg.get('is_mutation')}", "HC-2.5")
     muts = read_jsonl(first("system.mutations_*.jsonl", base))
     if muts:
-        per_table = Counter((r.get("database"), r.get("table")) for r in muts)
+        # `finished_mutations_to_keep` (default 100) means the file also holds
+        # completed mutations, so a plain row count crosses the >100 threshold on
+        # retention alone. Count only rows with work left, the same way HC-8.1
+        # below does — `number_of_mutations_to_throw` counts unfinished ones too.
+        pending = [r for r in muts if (num(r.get("parts_to_do")) or 0) > 0]
+        per_table = Counter((r.get("database"), r.get("table")) for r in pending)
         for (db, tb), c in per_table.most_common(5):
             if c > 100:
                 add("critical" if c >= 900 else "warning", "mutations", f"{db}.{tb} has {c} pending mutations (throws at number_of_mutations_to_throw, default 1000)",
-                    "system.mutations", "HC-8.2")
+                    f"{len(muts) - len(pending)} finished mutations in the file excluded", "HC-8.2")
         if run_ts:
             for r in muts:
                 ct = parse_dt(r.get("create_time"))
@@ -1032,6 +1065,7 @@ def main() -> None:
         base = find_run_dir(path)
         extracted_to = None
 
+    require_jsonl(base)
     result = analyse(base)
     result["path"] = base
     if extracted_to:
