@@ -351,10 +351,14 @@ def analyse(base: str):
         pct = num(d.get("free_pct"))
         if pct is None:
             continue
+        # Same severity as alerts/disk_space_low.yaml and HC-4.1: below 15 % is
+        # critical (merges need headroom, inserts fail with 243 and replicas go
+        # read-only before the disk is actually full); below 5 % the dashboard
+        # also paints the disk red, so say it in the message.
         if pct < 5:
-            add("critical", "disk", f"disk `{d.get('name')}` only {pct}% free", f"free {d.get('free_space')} of {d.get('total_space')}", "HC-4.1")
+            add("critical", "disk", f"disk `{d.get('name')}` only {pct}% free — critically low, inserts can already fail", f"free {d.get('free_space')} of {d.get('total_space')}", "HC-4.1")
         elif pct < 15:
-            add("warning", "disk", f"disk `{d.get('name')}` {pct}% free (< 15%)", f"free {d.get('free_space')} of {d.get('total_space')}", "HC-4.1")
+            add("critical", "disk", f"disk `{d.get('name')}` {pct}% free (< 15%, alert disk_space_low)", f"free {d.get('free_space')} of {d.get('total_space')}", "HC-4.1")
 
     # ---- parts
     parts = read_jsonl(first("system.parts_*.jsonl", base))
