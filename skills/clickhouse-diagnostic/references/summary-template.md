@@ -33,7 +33,7 @@ Produce the summary inline (markdown) unless the user asks for a file. Keep it s
 **What:** <one or two sentences in plain language>
 **Evidence:**
 - `system.parts_*.jsonl` → active parts in <db>.<table>/<partition_id>: 812 (level 0: 540)
-- `system.part_log_7_days_*.jsonl` → NewPart 3 900/h vs MergeParts 41/h on 2026-08-25 10:00–14:00
+- `system.part_log_3_days_*.jsonl` → NewPart 3 900/h vs MergeParts 41/h on 2026-08-25 10:00–14:00
 - `system.metric_log_7_days_*.jsonl` → max_merge_pool_tasks = 16 (pool size) for 6 consecutive hours
 **Why it matters:** <consequence, with the threshold that will bite next: "inserts are delayed from 1000 parts and rejected at 3000 (`parts_to_throw_insert`)">
 **Recommended action:** <ordered, concrete, with settings + defaults; distinguish immediate mitigation from durable fix>

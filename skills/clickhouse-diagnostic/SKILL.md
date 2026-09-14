@@ -97,7 +97,7 @@ Point them to `references/running-the-tool.md`: grants (`SHOW DATABASES, SHOW TA
 - Do **not** trust `host_info.json` when the tool ran on a different machine than the server.
 - Do **not** read an `onprem` bundle from a SharedMergeTree / `cloud_mode = 1` cluster as the cluster: it is one replica of N (parts, errors, part_log, query_log, text_log are per replica). Say which node, and propose `-mode cloud`.
 - Do **not** conclude "Keeper was fine" from `query_log`: background merges, fetches and part commits never appear there. Read `metric_log_coordination_3_days` (`ZooKeeperHardwareExceptions` per hour) and `part_log` errors first.
-- Do **not** treat an absent `zookeeper_log_1_day` / `blob_storage_log_7_days` as evidence of anything — both tables exist only when configured.
+- Do **not** treat an absent `zookeeper_log_errors_1_day` / `blob_storage_log_7_days` as evidence of anything — both tables exist only when configured.
 - Do **not** call anything a known issue, name a fix version you have not verified, or cite an issue you have not opened.
 - Do **not** promote a measurement to an attribution in customer-facing text.
 - Do **not** modify, re-pack, or upload the bundle; do not paste `configuration/`, `logs/`, `host_info.json` or DDL verbatim outside the machine.

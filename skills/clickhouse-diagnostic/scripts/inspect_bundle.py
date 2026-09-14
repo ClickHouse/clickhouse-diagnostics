@@ -225,7 +225,7 @@ def detect_mode(base: str, files) -> str:
     clusters = read_jsonl(first("system.clusters_*.jsonl", base))
     if any("clickhouse.cloud" in str(r.get("host_name", "")) for r in clusters):
         return "cloud"
-    pl = read_jsonl(first("system.part_log_7_days_*.jsonl", base))
+    pl = read_jsonl(first("system.part_log_3_days_*.jsonl", base))
     hosts = {r.get("hostname") for r in pl if r.get("hostname")}
     if len(hosts) > 1:
         return "cloud"
@@ -486,7 +486,7 @@ def analyse(base: str):
                 "distributed_ddl_queue, query_log Create rows with empty user", "P-57")
 
     # ---- part_log: merges stalled / failing background operations per hour
-    pl_rows = read_jsonl(first("system.part_log_7_days_*.jsonl", base))
+    pl_rows = read_jsonl(first("system.part_log_3_days_*.jsonl", base))
     if pl_rows:
         for r in pl_rows:
             h = hour_key(r.get("time"))
@@ -676,22 +676,21 @@ def analyse(base: str):
         if failed:
             ex = next((r.get("example_error") for r in bsl if num(r.get("failed")) and r.get("example_error")), "")
             add("warning", "storage", f"{failed} failed object-storage operation(s) in blob_storage_log", str(ex)[:200], "HC-4.9/P-58")
-    zl = read_jsonl(first("system.zookeeper_log_1_day_*.jsonl", base))
+    zl = read_jsonl(first("system.zookeeper_log_errors_1_day_*.jsonl", base))
     if zl:
         errs = Counter()
-        sess = Counter()
+        loss_hours = set()
         for r in zl:
             e = r.get("error")
-            if e and e != "ZOK":
-                errs[e] += num(r.get("requests")) or 0
+            n_failed = num(r.get("failed_requests")) or 0
+            errs[e] += n_failed
             h = hour_key(r.get("time"))
-            if h:
-                sess[h] = max(sess[h], num(r.get("sessions")) or 0)
-        churn = sorted(h for h, n in sess.items() if n > 2)
+            if h and e in ("ZSESSIONEXPIRED", "ZCONNECTIONLOSS", "ZOPERATIONTIMEOUT"):
+                loss_hours.add(h)
         bad = {e: n for e, n in errs.items() if e in ("ZSESSIONEXPIRED", "ZCONNECTIONLOSS", "ZOPERATIONTIMEOUT")}
-        if bad or churn:
-            add("warning", "keeper", "zookeeper_log: " + (", ".join(f"{e}={n}" for e, n in bad.items()) or "no loss errors") +
-                (f"; session churn (> 2 sessions/h) in {len(churn)} hour(s)" if churn else ""), "hours: " + ", ".join(churn[:6]), "HC-3.10")
+        if bad:
+            add("warning", "keeper", "zookeeper_log: failed Keeper requests with loss errors — " + ", ".join(f"{e}={n}" for e, n in bad.items()),
+                "hours: " + ", ".join(sorted(loss_hours)[:8]), "HC-3.10")
     th = read_jsonl(first("system.text_log_histogram_1_day_*.jsonl", base))
     if th:
         per_hour = Counter()

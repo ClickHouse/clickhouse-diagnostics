@@ -14,7 +14,7 @@ Under the hood: per-environment query sets (`cloud` / `onprem` / `gov`) selected
 |---|---|---|
 | `system.version` | Which build is this? | Every default, limit and bug fix is version-specific. |
 | `system.parts` (active, largest 50 000) | How many parts, how big, how fragmented, on which disk? | Part count per partition is the earliest signal of insert/merge trouble (`TOO_MANY_PARTS`). |
-| `system.part_log_7_days` (hourly aggregation of `system.part_log`) | Are merges keeping up with inserts; did any merge or mutation fail? | Shows insert size, merge throughput and failing background operations with their error codes. |
+| `system.part_log_3_days` (3 days, hourly aggregation of `system.part_log`) | Are merges keeping up with inserts; did any merge or mutation fail? | Shows insert size, merge throughput and failing background operations with their error codes. |
 | `system.merges`, `system.mutations` | What is merging or mutating right now; what is stuck? | A stuck merge or a mutation backlog is the usual reason parts pile up while the pool looks idle. |
 | `system.replicas`, `system.replication_queue` | Is every replica writable and caught up; if not, why? | Read-only state, Keeper session loss and the shape of the queue locate replication problems. |
 | `system.query_log_details_7_days` (hourly aggregation of `system.query_log`) | What ran, how slow, how much memory, what failed, by whom? | Most incidents start with the workload; this is the aggregated view, with a 500-character sample per query pattern and no customer rows. |
@@ -32,7 +32,7 @@ Under the hood: per-environment query sets (`cloud` / `onprem` / `gov`) selected
 | `system.metric_log_coordination_3_days` (3 days, hourly, columns selected by regex) | Keeper, object-storage, filesystem-cache and replication counters hour by hour | A Keeper outage or an S3 error burst at 03:00 is visible here even when no query failed. |
 | `system.zookeeper_connection` (≥ 23.8), `system.databases`, `system.storage_policies` | Which Keeper node, how old the session; how many `Replicated` databases; which disks back which policy | The coordination and storage topology behind replication and "file doesn't exist" findings. |
 | `system.distributed_ddl_queue` (7 days), `system.replicated_fetches` | Stuck or failed `ON CLUSTER` / Replicated-database DDL with per-host status; part fetches in flight | DDL replay storms (`TABLE_ALREADY_EXISTS` on `.tmp.inner_id` tables, code 571) and wedged fetches are visible only here. |
-| `system.zookeeper_log_1_day`, `system.blob_storage_log_7_days` (only when the tables are enabled) | Keeper requests, errors and sessions per hour; object-storage uploads, deletes and failures per hour | Direct evidence for "Keeper stopped answering" and "the blob was deleted / never written". |
+| `system.zookeeper_log_errors_1_day`, `system.blob_storage_log_7_days` (only when the tables are enabled) | Failed Keeper requests per hour, operation and error code (errors only — the table is far too large to aggregate whole); object-storage uploads, deletes and failures per hour | Direct evidence for "Keeper stopped answering" and "the blob was deleted / never written". |
 | `host_info.json` (onprem) | OS, CPU, RAM, disks, THP, overcommit, limits, cgroups | A large share of self-managed incidents are host settings ClickHouse itself warns about at startup. |
 | `logs/` (onprem) | Restarts, startup warnings, fatal stacks, the first error of an incident | System tables lose this on restart; the log files keep it. |
 | `configuration/` | Which settings deviate from defaults | Memory limits, pools, Keeper, storage policies, log-table TTLs — with credentials removed. |
@@ -295,7 +295,7 @@ Most collection queries look back over a fixed period. Each declares its **own**
 | Query | Default look-back |
 |---|---|
 | `system.query_log_details_7_days` | 7 days |
-| `system.part_log_7_days` | 7 days |
+| `system.part_log_3_days` | 3 days |
 | `system.metric_log_7_days` | 7 days |
 | `system.asynchronous_insert_log_7_days` | 7 days |
 | `system.metric_log_coordination_3_days` | 3 days |
@@ -305,7 +305,7 @@ Most collection queries look back over a fixed period. Each declares its **own**
 | `system.text_log` | 1 day |
 | `system.text_log_histogram_1_day` | 1 day |
 | `system.text_log_keeper_1_day` | 1 day |
-| `system.zookeeper_log_1_day` | 1 day |
+| `system.zookeeper_log_errors_1_day` | 1 day |
 
 > `system.text_log` and `system.zookeeper_log` stop at 1 day: they are by far the highest-volume tables here (a busy cluster writes millions of Keeper log rows an hour), and a 7-day slice is too large to be useful in a support bundle. Use `-from` when you need more.
 

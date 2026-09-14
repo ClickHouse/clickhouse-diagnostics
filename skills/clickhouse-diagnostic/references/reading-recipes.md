@@ -18,7 +18,7 @@ mkdir -p /tmp/chdiag && tar -xzf clickhouse_backup_*.tar.gz -C /tmp/chdiag
 B=$(ls -d /tmp/chdiag/clickhouse_backup_*)
 ls -la "$B"; wc -l "$B"/*.jsonl                          # 0-line files are meaningful (see bundle-layout §1)
 cat "$B"/system.version_*.jsonl
-head -c 400 "$B"/system.part_log_7_days_*.jsonl          # confirm column names on this bundle
+head -c 400 "$B"/system.part_log_3_days_*.jsonl          # confirm column names on this bundle
 grep -l '^### support-diagnostic: TRUNCATED' "$B"/logs/* 2>/dev/null
 ```
 
@@ -68,7 +68,7 @@ Merge activity and failures from `part_log` (bucketed sums — divide by `count`
 SELECT event_type, merge_reason, sum(toUInt64(count)) AS events,
        round(sum(toUInt64(duration_ms)) / sum(toUInt64(count))) AS avg_ms,
        formatReadableSize(sum(toUInt64(size_in_bytes))) AS bytes
-FROM file('$B/system.part_log_7_days_*.jsonl', JSONEachRow)
+FROM file('$B/system.part_log_3_days_*.jsonl', JSONEachRow)
 GROUP BY 1,2 ORDER BY events DESC
 ```
 Failed part operations: `WHERE error != 0` → `error, exception (sample), distinct_exceptions, sum(count)` grouped by `table_name, event_type`.
@@ -106,7 +106,7 @@ SELECT toStartOfHour(event_time) AS h,
        anyIf(leftUTF8(message, 160), message LIKE '%Connected to ZooKeeper%') AS example
 FROM file('$B/system.text_log_*.jsonl', JSONEachRow) GROUP BY h HAVING expired + finalized + connected + reconnecting > 0 ORDER BY h
 ```
-(`system.text_log_keeper_1_day_*.jsonl` has the same counts precomputed for the whole day.) Then 999/319/571 per hour from `query_log_details` (§6) and `MergeParts` with `error = 999` per hour from `part_log` (§2) — the hours must line up. Cumulative 999/242 in `system.errors` only says "since restart"; `system.error_log_7_days` (≥ 24.8, when present) gives them per hour, background threads included.
+(`system.text_log_keeper_1_day_*.jsonl` has the same counts precomputed for the whole day.) Mean Keeper latency per hour — the "saturated first" signal — from the coordination file: `"sum(ProfileEvent_ZooKeeperWaitMicroseconds)" / "sum(ProfileEvent_ZooKeeperTransactions)"`; failed operations by error from `system.zookeeper_log_errors_1_day_*.jsonl` (`op_num, error, failed_requests, sessions_affected`). Then 999/319/571 per hour from `query_log_details` (§6) and `MergeParts` with `error = 999` per hour from `part_log` (§2) — the hours must line up. Cumulative 999/242 in `system.errors` only says "since restart"; `system.error_log_7_days` (≥ 24.8, when present) gives them per hour, background threads included.
 
 ## 4. Disk and storage
 

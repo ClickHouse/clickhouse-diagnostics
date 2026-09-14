@@ -2,7 +2,7 @@
 
 Names were taken from `src/Common/ErrorCodes.cpp` on the ClickHouse master branch (2026-09). Codes never change meaning across versions, but a few names were added recently — if a code is missing here, resolve it with `SELECT errorCodeToName(N)` on any ClickHouse ≥ 21.x, or read `ErrorCodes.cpp` at the customer's tag (see `clickhouse-source.md`).
 
-Where codes appear in the bundle: `system.errors` (`code`, cumulative `value` since restart), `system.query_log_details_7_days` (`exception_code` per hour bucket), `system.part_log_7_days` (`error` for failed merges/fetches/mutations), `system.text_log` / `logs/*.log` (`Code: NNN` in message text), `query_analysis/failed_*` (`error_type` as `NAME (code)`), `dashboard.html` (`exceptions`, `server_errors`).
+Where codes appear in the bundle: `system.errors` (`code`, cumulative `value` since restart), `system.query_log_details_7_days` (`exception_code` per hour bucket), `system.part_log_3_days` (`error` for failed merges/fetches/mutations), `system.text_log` / `logs/*.log` (`Code: NNN` in message text), `query_analysis/failed_*` (`error_type` as `NAME (code)`), `dashboard.html` (`exceptions`, `server_errors`).
 
 `P-nn` refers to entries in `known-patterns.md`; `HC-n` to checks in `health-checks.md`.
 
