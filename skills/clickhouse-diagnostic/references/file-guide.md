@@ -259,7 +259,7 @@ Windows: `*_7_days` files cover the last 7 days (or `-from/-to`); `system.text_l
 **Read first:** Error and Fatal `count` per hour; the `logger_class` values that appear only in the incident hours; their `example`.
 **Healthy looks like:** a flat, low Warning baseline from a few loggers, Error counts near zero, no Fatal.
 **Red flags:** an hour where Error `count` is 10× the quiet hours (HC-11.5); classes typical of an incident: `ZooKeeperClient`, `DDLWorker`, `DatabaseReplicated`, `InterserverIOHTTPHandler`, `MergeTreeBackgroundExecutor`, `*::MetaInKeeper`/`DiskS3`, `executeQuery` with `Code: 107`; `BackgroundSchedulePool` "Temporarily pause scheduling" in the thousands (merges/fetches being throttled).
-**Traps:** `logger_class` is a normalisation (table-specific loggers collapse to their component; plain loggers stay as they are); `example` is *one* line per cell, not the worst; gov hashes both.
+**Traps:** `logger_class` is a normalisation (table-specific loggers collapse to their component; plain loggers stay as they are); `example` is *one* line per cell, not the worst; gov keeps the class readable, masks a `<disk>::` prefix and hashes only unrecognised `db.table` fallbacks and the example.
 **Pairs with:** `system.text_log` (the exact newest lines), `logs/*.err.log` (grep the hour), `query_log_details` (same hours).
 
 ### system.error_log_7_days (≥ 24.8)
