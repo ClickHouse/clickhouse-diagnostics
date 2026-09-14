@@ -259,8 +259,9 @@ def analyse(base: str):
     if ql:
         times = [parse_dt(r.get("time")) for r in ql]
         times = [t for t in times if t]
-        out["query_log_window"] = {"from": min(times).isoformat(sep=" "), "to": max(times).isoformat(sep=" "),
-                                   "hour_buckets": len(set(times))}
+        if times:
+            out["query_log_window"] = {"from": min(times).isoformat(sep=" "), "to": max(times).isoformat(sep=" "),
+                                       "hour_buckets": len(set(times))}
     tl = read_jsonl(first("system.text_log_*.jsonl", base))
     if tl:
         ts = [parse_dt(r.get("event_time")) for r in tl]
