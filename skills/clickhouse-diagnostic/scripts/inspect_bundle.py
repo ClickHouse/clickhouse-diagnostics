@@ -709,6 +709,43 @@ def analyse(base: str):
                 add("warning", "logs", f"Error-level log volume peaked at {peak_n} lines in hour {peak_h} (median hour {quiet})",
                     "top classes: " + ", ".join(f"{c}={n}" for c, n in cls.most_common(4)), "HC-11.5")
 
+    # ---- execution_log.txt: which collectors ran, failed, and what they cost
+    xl_path = os.path.join(base, "execution_log.txt")
+    if os.path.exists(xl_path):
+        rows = []
+        with open(xl_path, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if not line.startswith("| ") or line.startswith("| # |") or line.startswith("|---"):
+                    continue
+                cells = [c.strip() for c in line.strip().strip("|").split("|")]
+                if len(cells) < 10:
+                    continue
+                rows.append({"stage": cells[1], "name": cells[2], "source": cells[3], "status": cells[4],
+                             "ms": num(cells[5]) or 0, "bytes": num(cells[6]) or 0, "rows": cells[7], "note": cells[8], "error": cells[9]})
+        coll = [r for r in rows if r["stage"] == "collector"]
+        if coll:
+            ok = [r for r in coll if r["status"] == "ok"]
+            failed = [r for r in coll if r["status"] == "failed"]
+            slow = sorted(coll, key=lambda r: -r["ms"])[:3]
+            out["execution_log"] = {"collectors": len(coll), "ok": len(ok), "failed": [f"{r['name']} ({r['source']}): {r['error'][:90]}" for r in failed],
+                                    "slowest": [f"{r['name']} {r['ms'] / 1000:.1f} s" for r in slow], "total_s": round(sum(r["ms"] for r in coll) / 1000, 1)}
+            timeouts = [r for r in failed if "Code: 159" in r["error"] or "TIMEOUT_EXCEEDED" in r["error"]]
+            if timeouts:
+                add("warning", "coverage", f"{len(timeouts)} collector(s) hit the tool's own -query-timeout (code 159) — the server was too slow for these system tables; their files are missing",
+                    ", ".join(r["name"] for r in timeouts), "HC-0")
+            grants = [r for r in failed if "Code: 497" in r["error"] or "ACCESS_DENIED" in r["error"]]
+            if grants:
+                add("warning", "coverage", f"{len(grants)} collector(s) failed on grants (497) — the bundle is narrowed to what the collector's user may read",
+                    ", ".join(r["name"] for r in grants), "HC-0")
+            other = [r for r in failed if r not in timeouts and r not in grants]
+            if other:
+                add("info", "coverage", f"{len(other)} collector(s) did not run (table or config not present on this server) — their files are absent, not empty",
+                    "; ".join(f"{r['name']}: {r['error'][:70]}" for r in other[:6]), "HC-0")
+            heavy = [r for r in coll if r["ms"] >= 60000]
+            if heavy:
+                add("info", "coverage", f"{len(heavy)} collector(s) took over a minute — candidates for a shorter window on this server",
+                    ", ".join(f"{r['name']} {r['ms'] / 1000:.0f} s" for r in heavy), "HC-0")
+
     # ---- one node of a SharedMergeTree cluster?
     st_rows = read_jsonl(first("system.settings_*.jsonl", base))
     cloud_mode = any(r.get("name") == "cloud_mode" and str(r.get("value")) in ("1", "true") for r in st_rows)
@@ -891,6 +928,10 @@ def render_md(o) -> str:
         q = o["query_log"]
         codes = ", ".join(f"{c['name']}({c['code']})={c['count']}" for c in q["top_exception_codes"]) or "none"
         L.append(f"- query_log: {q['queries']} finished/failed queries in window · {q['exceptions']} exceptions · top codes: {codes}")
+    if o.get("execution_log"):
+        x = o["execution_log"]
+        L.append(f"- collectors: {x['ok']}/{x['collectors']} ok in {x['total_s']} s of query time · slowest: {', '.join(x['slowest'])}"
+                 + (f" · failed: {'; '.join(x['failed'])}" if x['failed'] else ""))
     if o.get("uptime_seconds") is not None or o.get("databases"):
         bits = []
         if o.get("uptime_seconds") is not None:

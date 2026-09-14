@@ -955,6 +955,7 @@ clickhouse_results/
 │   │   └── users.d/…
 │   ├── query_analysis/                                      #   only with --query-id / --hash
 │   ├── dashboard.html                                       #   unless -skip-dashboard or gov
+│   ├── execution_log.txt                                    #   every collector: outcome, wall time, size; alerts; phases
 │   └── alerts_summary.json                                  #   when alerts ran but dashboard.html is absent
 └── clickhouse_backup_YYYYMMDD_HHMMSS_gov_name_mapping.csv   # → LOCAL only (gov mode)
 clickhouse_backup_YYYYMMDD_HHMMSS.tar.gz                     # unless -skip-archive
@@ -962,6 +963,7 @@ clickhouse_backup_YYYYMMDD_HHMMSS.tar.gz                     # unless -skip-arch
 
 - **Query results**: one file per query, in the format chosen by [`-output-format`](#output-format) (default `jsonl`)
 - **Dashboard**: standalone `dashboard.html`, loads Chart.js from CDN
+- **Execution log**: `execution_log.txt` — one line per collector query with its version directory, outcome (`ok` / `failed` / `empty`), wall time, result bytes and rows, plus every alert rule with its outcome and duration and the wall time of each phase (collectors, host facts, logs, config, alerts, dashboard). The *Most expensive collectors* list is what to read before adapting a window in `queries.<mode>/`; the *Failed collectors* list is what separates "the table was empty" from "the query never ran". Contains file names, timings and ClickHouse error text only — no result data.
 - **Archive**: `tar.gz` containing the per-run results directory — `configuration/` now lives *inside* it, tree intact, so a bundle can only ever contain this run's configs. (Before v0.3.0 it was a flat, process-wide `./configuration` beside the run directory; anything parsing bundles by that path needs updating.)
 - **Gov-mode mapping CSV** (gov mode only): sits next to the backup folder, **not inside it** — never goes into the archive. See [Gov mode and hashed names](#gov-mode-and-hashed-names).
 

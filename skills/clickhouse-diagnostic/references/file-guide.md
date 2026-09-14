@@ -368,6 +368,15 @@ Windows: `*_7_days` files cover the last 7 days (or `-from/-to`); `system.text_l
 **Traps:** the HTML loads Chart.js from a CDN — irrelevant for reading `DATA`; alert `rows` contain identifiers; withheld in gov.
 **Pairs with:** `alerts/*.yaml` in the repo (thresholds and SQL of each rule).
 
+### execution_log.txt (every mode)
+**Why we run it:** the result files cannot say which collectors did not run, why, or what each cost; a missing file looks exactly like an empty table.
+**Question:** did every collector run; which failed (grant, missing table, timeout); which were expensive on this server; how long did each phase take?
+**Read first:** the *Summary* line; *Failed collectors* (error text — `Code: 60` unknown table = not enabled on this version/config, `Code: 497` = grant missing, `Code: 159` = the tool's own `-query-timeout` fired, `Code: 139` = no Keeper/DDL config); *Most expensive collectors*.
+**Healthy looks like:** every collector `ok`, the slowest a few seconds, failures only for tables the server does not have.
+**Red flags:** a collector with 159 (the server was too slow for the tool — itself a finding, HC-0); 497 on `system.*` (the bundle is grant-narrowed); `part_log`, `query_log` or `zookeeper_log` collectors taking minutes (huge log tables — propose a shorter `-from/-to` next time); a phase (dashboard, logs) dominating the run.
+**Traps:** durations are wall time from the tool's host, including network; `rows` is `-1` for Native format; older bundles have no such file.
+**Pairs with:** `HC-0` coverage, `system.errors` code 159/497 near collection time, `running-the-tool.md` §8 (re-collection).
+
 ### alerts_summary.json (gov, `-skip-dashboard`, or dashboard failure)
 **Why we run it:** when no dashboard is produced it is the only proof the alert rules ran, and which fired, errored or did not apply.
 **Question:** which alert rules ran, fired, errored or were not applicable — without any matched rows.

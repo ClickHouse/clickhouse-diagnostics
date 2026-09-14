@@ -13,6 +13,7 @@ clickhouse_backup_YYYYMMDD_HHMMSS/            # single top-level entry of the .t
 ├── host_info.json                             # onprem by default (never in gov)
 ├── logs/*.log                                 # onprem by default (never in gov)
 ├── dashboard.html                             # unless -skip-dashboard or gov
+├── execution_log.txt                          # every collector: outcome, wall time, bytes, rows; alerts; phases (read first)
 └── alerts_summary.json                        # only when alerts ran but dashboard.html is absent
 clickhouse_backup_<ts>_gov_name_mapping.csv    # NEXT TO the folder, never inside the archive (gov only)
 ```
@@ -149,6 +150,10 @@ Mirror of the config directory (`config.d/…`, `users.d/…`, sometimes `config
 ## 8. `dashboard.html`
 
 Self-contained; all panel data is embedded as one JSON literal on a line starting `const DATA = {`. Keys: `alerts` (full rule results **including matched rows**), `keeper_metric_hourly` (per hour: `transactions, hw_exceptions, user_exceptions, wait_us, sessions_min, sessions_max` — the Keeper health test inputs, 7 days), `keeper_errors_hourly` (`time, code_name, count` for 999/242/319/571/252; `keeper_errors_source` says whether it came from `error_log` or `query_log`), `keeper_connection` (live `zookeeper_connection` rows), `version, uptime, total_databases, total_tables, active_parts, total_size`, `host_info`, `host_checks`, `storage_by_db`, `engines_dist`, `tables_list`, `query_by_time`, `query_by_kind`, `query_slow`, `query_heavy`, `query_by_user`, `exceptions`, `part_log_by_time`, `part_log_by_type`, `dictionaries`, `crash_log`, `mutations`, `detached`, `replication_queue`, `clusters`, `replicas`, `disks`, `text_log`, `bundle_files`, `server_errors`, `high_part_count`, `ttl_activity`, `async_inserts`, and `qa_*` when query analysis ran. Extraction recipe in `reading-recipes.md`.
+
+## 8a. `execution_log.txt`
+
+Plain text, written just before the archive. Header (`started`, `finished`, `mode`, `server`, `target`, `window`, `timeout`, `format`), a **Summary** (`collectors: N ok, M failed, K empty — T of query time`, alert counts, phase wall times), **Most expensive collectors** (top 10 by wall time with bytes and rows), **Failed collectors** with the ClickHouse error text (capped at 300 chars), then **All entries** as a pipe table — `| # | stage | name | source | status | duration_ms | bytes | rows | note | error |` — where `stage` ∈ collector / alert / text_log / analysis, `source` is the version directory (`root` = the base file) and `note` carries the output file name or the alert instance count. Read it **first**: a result file that is missing was a `failed` collector (its error is here), not an empty table; a collector with code 159 hit the tool's own `-query-timeout`; a collector taking tens of seconds on a small server is a window worth shortening. Bundles from tool builds before this file exist without it.
 
 ## 9. `alerts_summary.json`
 

@@ -114,6 +114,7 @@ Query analysis writes 12 files to `<backup>/query_analysis/` and adds a dashboar
 
 ```
 clickhouse_results/clickhouse_backup_YYYYMMDD_HHMMSS/   # the folder that is archived
+clickhouse_results/clickhouse_backup_YYYYMMDD_HHMMSS/execution_log.txt   # what ran, what failed, what it cost
 clickhouse_backup_YYYYMMDD_HHMMSS.tar.gz                # in the CWD — send this
 clickhouse_results/clickhouse_backup_<ts>_gov_name_mapping.csv   # gov only — never send
 ```

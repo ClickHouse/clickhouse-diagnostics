@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"clickhouse-diagnostic/internal"
+	"clickhouse-diagnostic/internal/runlog"
 	"clickhouse-diagnostic/pkg"
 )
 
@@ -16,6 +17,7 @@ type Manager struct {
 	from     time.Time
 	to       time.Time
 	mode     string
+	rec      *runlog.Recorder
 }
 
 // WithMode sets the topology mode used for {sys.<table>} expansion.
@@ -31,6 +33,12 @@ func (m *Manager) WithWindow(from, to time.Time) *Manager {
 }
 
 // WithOutputFormat sets the serialisation format for query results.
+// WithRecorder attaches the execution-log recorder passed on to the executor.
+func (m *Manager) WithRecorder(r *runlog.Recorder) *Manager {
+	m.rec = r
+	return m
+}
+
 func (m *Manager) WithOutputFormat(f OutputFormat) *Manager {
 	m.format = f
 	return m
@@ -72,7 +80,7 @@ func (m *Manager) ExecuteQueries(client *pkg.ClickHouseClient, queriesDir string
 
 	// Execute the selected queries and get the specific output directory
 	executor := NewExecutor(client).WithSalt(salt).WithOutputFormat(m.format).
-		WithWindow(m.from, m.to).WithMode(m.mode)
+		WithWindow(m.from, m.to).WithMode(m.mode).WithRecorder(m.rec)
 	finalOutputDir, err := executor.ExecuteQueries(selectedQueries, outputDir)
 	if err != nil {
 		return "", fmt.Errorf("error executing queries: %w", err)
