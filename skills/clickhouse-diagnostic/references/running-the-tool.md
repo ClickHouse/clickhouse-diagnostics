@@ -78,7 +78,7 @@ export CH_HOST=… CH_USER=… CH_PASS=…
 ./clickhouse-diagnostic -mode onprem -host ch-01 -dry-run
 ```
 
-Useful flags: `-query-timeout` (default 240 s — the server enforces it as `max_execution_time`, so a collector query that overruns shows up as a clean `Code: 159` in the customer's `query_log`; `0` disables), `-output-dir` (default `./clickhouse_results`), `-output-format jsonl|native|tsv`, `-skip-alerts`, `-skip-dashboard`, `-skip-archive`, `-alerts-dir`, `-config-dir`, `-logs-dir`, `-logs-max-mb` (default 50), `-logs-include-archives`, `-host-info on|off|auto`, `-logs on|off|auto`.
+Useful flags: `-query-timeout` (default 240 s — the server enforces it as `max_execution_time`, so a collector query that overruns shows up as a clean `Code: 159` in the customer's `query_log`; `0` disables), `-output-dir` (default `./clickhouse_results`), `-output-format jsonl|native|tsv` (**leave at `jsonl`** — this skill and `inspect_bundle.py` can only read `.jsonl`, and a `native`/`tsv` bundle is refused; see bundle-layout §1), `-skip-alerts`, `-skip-dashboard`, `-skip-archive`, `-alerts-dir`, `-config-dir`, `-logs-dir`, `-logs-max-mb` (default 50), `-logs-include-archives`, `-host-info on|off|auto`, `-logs on|off|auto`.
 
 ## 5. Time windows
 

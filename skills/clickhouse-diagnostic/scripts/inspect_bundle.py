@@ -9,8 +9,11 @@ talks to the network. Prints a coverage statement, an inventory and the health
 checks that can be computed without SQL (see references/health-checks.md for
 the full rule set the assistant applies on top of this).
 
+Requires a bundle collected with the default `-output-format jsonl`; a `.native`
+or `.tsv` bundle is refused rather than misread (see require_jsonl).
+
 Exit code 0 even when findings are present; exit 2 only when the input cannot
-be read (bad path, not a bundle, unsafe archive member).
+be read (bad path, not a bundle, unsafe archive member, wrong output format).
 """
 from __future__ import annotations
 
@@ -146,6 +149,26 @@ def find_run_dir(path: str) -> str:
         return kids[-1]
     die(f"{path} does not look like a clickhouse-diagnostic bundle (no system.version_* file)")
     return path
+
+
+def require_jsonl(base: str) -> None:
+    """Refuse a bundle collected with -output-format native or tsv.
+
+    Every reader below globs ``*.jsonl``. On another format they all come back
+    empty and the report renders as "version: unknown, active parts: 0,
+    Findings (0)" — a false all-clear that looks exactly like a healthy server.
+    Failing loudly is the only safe answer until the other formats are parsed.
+    """
+    if glob.glob(os.path.join(base, "system.version_*.jsonl")):
+        return
+    exts = {os.path.splitext(p)[1] for p in glob.glob(os.path.join(base, "system.*.*"))}
+    exts.discard(".jsonl")
+    if not exts:
+        return
+    found = " / ".join(sorted(e.lstrip(".") for e in exts))
+    die(f"bundle was collected with -output-format {found}; this script reads .jsonl only, and on "
+        f"{found} every check would silently report zero. Re-collect with -output-format jsonl "
+        f"(the collector default) and re-run.")
 
 
 def first(pattern: str, base: str):
@@ -697,6 +720,7 @@ def main() -> None:
         base = find_run_dir(path)
         extracted_to = None
 
+    require_jsonl(base)
     result = analyse(base)
     result["path"] = base
     if extracted_to:

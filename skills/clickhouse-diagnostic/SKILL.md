@@ -54,6 +54,8 @@ Every finding cites `file → column → value`. Never modify the bundle. Never 
    python3 <skill-dir>/scripts/inspect_bundle.py <bundle> --json > /tmp/inspect.json
    ```
    `<skill-dir>` is the directory holding this SKILL.md. Reuse the printed extraction directory (`B=…`) for every later recipe.
+
+   If it exits 2 with `bundle was collected with -output-format native|tsv`, **stop**: the whole skill reads `.jsonl` only, so nothing downstream can be trusted on that bundle. Say the bundle is unreadable and ask for a re-collection with the default `-output-format jsonl` (bundle-layout §1). Never substitute your own reading of the `.native`/`.tsv` files, and never report zeros from them.
 3. State the **coverage** in ≤ 6 lines: ClickHouse version; mode (cloud/onprem/gov — detection rules in bundle-layout §3); collection timestamp; query_log window actually covered; text_log rows and span; files empty/absent and why (healthy-empty vs not collected); `TRUNCATED` log headers; whether `host_info.json` describes the server or another machine; signs the collector lacked grants (only `system` tables visible, 497 in `system.errors`).
 4. If the user's incident is outside the covered window, say so now and propose the `-from/-to` re-run (running-the-tool §8). Continue with what the bundle *does* cover.
 

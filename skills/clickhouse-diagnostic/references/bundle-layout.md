@@ -19,6 +19,7 @@ clickhouse_backup_<ts>_gov_name_mapping.csv    # NEXT TO the folder, never insid
 
 - `<ts>` in the folder name is the run start in the **collector host's local time**; `text_log_<ts>` and `query_analysis/*_<ts>` are stamped in **UTC** at write time.
 - Extension follows `-output-format`: `.jsonl` (default, `JSONEachRow`), `.native`, or `.tsv` (`TSVWithNamesAndTypes`: names on line 1, **types on line 2**).
+- **Only `.jsonl` can be analysed.** Every recipe in this skill and every reader in `scripts/inspect_bundle.py` globs `*.jsonl`; on a `.native` or `.tsv` bundle they find nothing and would report "0 parts, no findings" — a false all-clear indistinguishable from a healthy server. `inspect_bundle.py` therefore refuses such a bundle outright (exit 2) instead of misreading it. Ask for a re-collection with the default `-output-format jsonl`; do **not** hand-wave the counts as zero.
 - Empty files are normal and meaningful: a 0-byte `system.crash_log_*.jsonl` means no crash; 0-byte `system.merges_*.jsonl` means nothing was merging at collection time.
 
 ## 2. Value encoding rules (JSONL)
