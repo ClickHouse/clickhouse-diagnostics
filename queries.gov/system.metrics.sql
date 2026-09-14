@@ -3,7 +3,7 @@
 -- ReadonlyReplica, ReplicatedFetch/ReplicatedSend, S3Requests,
 -- FilesystemCacheSize, MetadataFromKeeperCacheObjects (object storage with
 -- metadata in Keeper), Background*PoolTask, DelayedInserts, MemoryTracking.
--- A snapshot: pair with metric_log_coordination_7_days for history.
+-- A snapshot: pair with metric_log_coordination_3_days for history.
 SELECT
     metric,
     value,

@@ -516,7 +516,7 @@ def analyse(base: str):
                 "; ".join(f"{et} code {err} {ERROR_NAMES.get(err, '')} × {v}" for (et, err), v in top_bg), "HC-2.5")
 
     # ---- metric_log_coordination: Keeper hardware exceptions per hour, read-only replicas, S3 errors
-    mlc = read_jsonl(first("system.metric_log_coordination_7_days_*.jsonl", base))
+    mlc = read_jsonl(first("system.metric_log_coordination_3_days_*.jsonl", base))
     if mlc:
         cols = set(mlc[0].keys())
         for r in mlc:

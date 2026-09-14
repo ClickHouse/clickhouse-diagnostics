@@ -96,7 +96,7 @@ SELECT time, toUInt64(zk_hw_exceptions) AS hw, toUInt64(zk_transactions) AS tx, 
 FROM file('$B/system.metric_log_7_days_*.jsonl', JSONEachRow)
 WHERE verdict != 'ok' ORDER BY time
 ```
-The same over the richer file (column names carry the aggregate): replace `zk_hw_exceptions` with `"sum(ProfileEvent_ZooKeeperHardwareExceptions)"` and `zk_transactions` with `"sum(ProfileEvent_ZooKeeperTransactions)"` in `system.metric_log_coordination_7_days_*.jsonl`; add `"max(CurrentMetric_ZooKeeperSession)"` (0 = no session that hour).
+The same over the richer file (column names carry the aggregate): replace `zk_hw_exceptions` with `"sum(ProfileEvent_ZooKeeperHardwareExceptions)"` and `zk_transactions` with `"sum(ProfileEvent_ZooKeeperTransactions)"` in `system.metric_log_coordination_3_days_*.jsonl`; add `"max(CurrentMetric_ZooKeeperSession)"` (0 = no session that hour).
 
 Session markers by hour (which minute, which Keeper host the server moved to):
 ```sql

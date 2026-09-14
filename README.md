@@ -29,7 +29,7 @@ Under the hood: per-environment query sets (`cloud` / `onprem` / `gov`) selected
 | `system.asynchronous_insert_log` (7 days) | Are async-insert flushes succeeding and how slow are they? | A lost flush is silent when `wait_for_async_insert = 0`. |
 | `system.crash_log`, `system.stack_trace` | Did the server crash; what were its threads doing? | Crash evidence needs the trace and the query that triggered it. |
 | `system.metrics`, `system.events`, `system.asynchronous_metrics` | Live gauges and cumulative counters: Keeper session and watches, read-only replicas, fetches in flight, object-storage requests, cache size, `Uptime` | The "right now" state the hourly aggregates cannot give; `Uptime` turns `system.errors` and `system.events` counts into rates. |
-| `system.metric_log_coordination_7_days` (hourly, columns selected by regex) | Keeper, object-storage, filesystem-cache and replication counters hour by hour | A Keeper outage or an S3 error burst at 03:00 is visible here even when no query failed. |
+| `system.metric_log_coordination_3_days` (3 days, hourly, columns selected by regex) | Keeper, object-storage, filesystem-cache and replication counters hour by hour | A Keeper outage or an S3 error burst at 03:00 is visible here even when no query failed. |
 | `system.zookeeper_connection` (≥ 23.8), `system.databases`, `system.storage_policies` | Which Keeper node, how old the session; how many `Replicated` databases; which disks back which policy | The coordination and storage topology behind replication and "file doesn't exist" findings. |
 | `system.distributed_ddl_queue` (7 days), `system.replicated_fetches` | Stuck or failed `ON CLUSTER` / Replicated-database DDL with per-host status; part fetches in flight | DDL replay storms (`TABLE_ALREADY_EXISTS` on `.tmp.inner_id` tables, code 571) and wedged fetches are visible only here. |
 | `system.zookeeper_log_1_day`, `system.blob_storage_log_7_days` (only when the tables are enabled) | Keeper requests, errors and sessions per hour; object-storage uploads, deletes and failures per hour | Direct evidence for "Keeper stopped answering" and "the blob was deleted / never written". |
@@ -298,7 +298,7 @@ Most collection queries look back over a fixed period. Each declares its **own**
 | `system.part_log_7_days` | 7 days |
 | `system.metric_log_7_days` | 7 days |
 | `system.asynchronous_insert_log_7_days` | 7 days |
-| `system.metric_log_coordination_7_days` | 7 days |
+| `system.metric_log_coordination_3_days` | 3 days |
 | `system.blob_storage_log_7_days` | 7 days |
 | `system.error_log_7_days` | 7 days |
 | `system.distributed_ddl_queue` | 7 days |

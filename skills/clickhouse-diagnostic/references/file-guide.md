@@ -168,7 +168,7 @@ Windows: `*_7_days` files cover the last 7 days (or `-from/-to`); `system.text_l
 **Healthy looks like:** `ZooKeeperSession ≥ 1`, `ReadonlyReplica = 0`, exception and error counters tiny relative to `Uptime`, `MetadataFromKeeperCacheObjects` similar across replicas.
 **Red flags:** `ZooKeeperSession = 0` (HC-3.12); `ReadonlyReplica > 0` (HC-1.4); a replica whose `MetadataFromKeeperCacheObjects` is ≈ 1 while peers hold 10⁵ (P-58); `ZooKeeperHardwareExceptions` in the millions (P-57); `S3*RequestsErrors` growing (HC-4.10); `Uptime` of minutes = the server restarted (HC-1.2).
 **Traps:** `events` and `system.errors` are cumulative since start — divide by `Uptime`, never treat as rates; `asynchronous_metrics` refresh every minute, so `Uptime` is ≤ 60 s stale; per-core rows are dropped on purpose; gov drops per-object gauges.
-**Pairs with:** `system.errors` (same counters, with messages), `metric_log_coordination_7_days` (the same counters over time), `zookeeper_connection`.
+**Pairs with:** `system.errors` (same counters, with messages), `metric_log_coordination_3_days` (the same counters over time), `zookeeper_connection`.
 
 ### system.databases and system.storage_policies
 **Why we run it:** `system.tables` cannot tell `Atomic` from `Replicated` databases, and it names a `storage_policy` without saying what backs it.
@@ -244,7 +244,7 @@ Windows: `*_7_days` files cover the last 7 days (or `-from/-to`); `system.text_l
 **Traps:** absent on < 22.10 or when async inserts are unused (not a problem); `total_rows` only ≥ 23.4; hashed names in gov.
 **Pairs with:** `query_log_details` `Insert` rows, `system.tables` (MVs on the target), `part_log` NewPart on the target.
 
-### system.metric_log_coordination_7_days
+### system.metric_log_coordination_3_days
 **Why we run it:** `metric_log_7_days` keeps a fixed, version-stable handful of columns; this file takes every Keeper, object-storage, filesystem-cache and replication counter the version exports, hour by hour, so an outage of a *dependency* is visible even when no query failed.
 **Question:** in which hours did Keeper stop answering, did S3 start returning errors, did the cache thrash, did fetches fail — and how do those hours line up with the workload?
 **Read first:** `sum(ProfileEvent_ZooKeeperHardwareExceptions)` and `sum(ProfileEvent_ZooKeeperTransactions)` per hour (an outage = the first explodes while the second collapses); `max(CurrentMetric_ZooKeeperSession)` (0 in an hour = no session at all); `sum(ProfileEvent_S3ReadRequestsErrors)`, `…ReadBufferFromS3RequestsErrors`, `…S3WriteRequestsErrors`; `sum(ProfileEvent_ReplicatedPartFailedFetches)`; `max(CurrentMetric_ReadonlyReplica)`; `sum(ProfileEvent_FailedInsertQuery)`; `sum(ProfileEvent_RejectedInserts)` / `DelayedInserts`.
@@ -435,7 +435,7 @@ Reading: step 1 tells you *which side* is behind, step 2 whether capacity is exh
 
 ### Keeper outage on a cluster whose tables live on object storage
 
-1. `system.metric_log_coordination_7_days` → the hours where `sum(ProfileEvent_ZooKeeperHardwareExceptions)` explodes and `…ZooKeeperTransactions` collapses (HC-3.8). Those hours are the incident; everything else is before or after.
+1. `system.metric_log_coordination_3_days` → the hours where `sum(ProfileEvent_ZooKeeperHardwareExceptions)` explodes and `…ZooKeeperTransactions` collapses (HC-3.8). Those hours are the incident; everything else is before or after.
 2. `system.part_log_7_days` → `MergeParts` with `error = 999` in those hours, then hours with `NewPart > 0` and `MergeParts = 0` (HC-2.11): merges stopped. `system.query_log_details_7_days` → 999/319 on inserts, 571 and 57 (`.tmp.inner_id` UUID collisions) on DDL, then 252 on the busiest insert target (P-57).
 3. `system.zookeeper_connection` → session age since recovery; `system.zookeeper_log_1_day` (if present) → sessions per hour and `ZSESSIONEXPIRED`; `configuration/zookeeper.xml` → ensemble size; `system.databases` → `Replicated` count (load multiplier).
 4. `system.distributed_ddl_queue` → entries not `Finished`, the replayed `CREATE OR REPLACE` statements (HC-3.11). `system.errors` → 221/86 counts vs `Uptime` (recovery noise or persisting).
