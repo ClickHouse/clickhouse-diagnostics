@@ -104,9 +104,44 @@ SELECT toStartOfHour(event_time) AS h,
        countIf(message LIKE '%Session expired%') AS expired, countIf(message LIKE '%Finalizing session%') AS finalized,
        countIf(message LIKE '%Connected to ZooKeeper%') AS connected, countIf(message LIKE '%Trying to establish a new connection%') AS reconnecting,
        anyIf(leftUTF8(message, 160), message LIKE '%Connected to ZooKeeper%') AS example
-FROM file('$B/system.text_log_*.jsonl', JSONEachRow) GROUP BY h HAVING expired + finalized + connected + reconnecting > 0 ORDER BY h
+FROM file('$B/system.text_log_2*.jsonl', JSONEachRow) GROUP BY h HAVING expired + finalized + connected + reconnecting > 0 ORDER BY h
 ```
 (`system.text_log_keeper_1_day_*.jsonl` has the same counts precomputed for the whole day.) Mean Keeper latency per hour — the "saturated first" signal — from the coordination file: `"sum(ProfileEvent_ZooKeeperWaitMicroseconds)" / "sum(ProfileEvent_ZooKeeperTransactions)"`; failed operations by error from `system.zookeeper_log_errors_1_day_*.jsonl` (`op_num, error, failed_requests, sessions_affected`). Then 999/319/571 per hour from `query_log_details` (§6) and `MergeParts` with `error = 999` per hour from `part_log` (§2) — the hours must line up. Cumulative 999/242 in `system.errors` only says "since restart"; `system.error_log_7_days` (≥ 24.8, when present) gives them per hour, background threads included.
+
+## 3a. Keeper and object-storage files (added for Keeper incidents)
+
+Failed Keeper operations by hour and error (only present when `zookeeper_log` is enabled; the file holds failed responses only):
+```sql
+SELECT time, error, sum(toUInt64(failed_requests)) AS failed, max(toUInt64(sessions_affected)) AS sessions, groupArray(op_num) AS ops
+FROM file('$B/system.zookeeper_log_errors_1_day_*.jsonl', JSONEachRow)
+WHERE error IN ('ZSESSIONEXPIRED', 'ZCONNECTIONLOSS', 'ZOPERATIONTIMEOUT') GROUP BY time, error ORDER BY time
+```
+Every error code per hour, background threads included (`error_log`, ≥ 24.8):
+```sql
+SELECT time, error, sum(toUInt64(errors)) AS n FROM file('$B/system.error_log_7_days_*.jsonl', JSONEachRow)
+WHERE code IN (999, 242, 252, 107, 319, 571) GROUP BY time, error ORDER BY time, n DESC
+```
+DDL that never finished, and replayed DDL (same statement under many entries):
+```sql
+SELECT status, count(), min(query_create_time) AS oldest, groupUniqArray(5)(host) AS hosts
+FROM file('$B/system.distributed_ddl_queue_*.jsonl', JSONEachRow) WHERE status != 'Finished' GROUP BY status;
+SELECT leftUTF8(query, 120) AS q, uniq(entry) AS entries, countIf(toInt32(exception_code) = 57) AS uuid_collisions
+FROM file('$B/system.distributed_ddl_queue_*.jsonl', JSONEachRow) GROUP BY q HAVING entries > 1 ORDER BY entries DESC LIMIT 10
+```
+Object storage: is user data on it, and did uploads fail / deletes spike before the `FILE_DOESNT_EXIST` hour?
+```sql
+SELECT policy_name, disks FROM file('$B/system.storage_policies_*.jsonl', JSONEachRow);
+SELECT name, type FROM file('$B/system.disks_*.jsonl', JSONEachRow);
+SELECT time, event_type, sum(toUInt64(count)) AS ops, sumIf(toUInt64(count), toUInt8(failed) = 1) AS failed, anyIf(example_error, toUInt8(failed) = 1) AS err
+FROM file('$B/system.blob_storage_log_7_days_*.jsonl', JSONEachRow) GROUP BY time, event_type ORDER BY time
+```
+Per-replica snapshot skew (cloud mode; one row per `hostname`) — the Keeper-held metadata cache and current sessions:
+```sql
+SELECT hostname, anyIf(value, metric = 'MetadataFromKeeperCacheObjects') AS cache_objects, anyIf(value, metric = 'ZooKeeperSession') AS zk_sessions,
+       anyIf(value, metric = 'ReadonlyReplica') AS readonly_tables
+FROM file('$B/system.metrics_*.jsonl', JSONEachRow) GROUP BY hostname ORDER BY cache_objects
+```
+Server uptime and the error rate it implies: `SELECT value FROM file('$B/system.asynchronous_metrics_*.jsonl', JSONEachRow) WHERE metric = 'Uptime'` → divide `system.errors.value` and `system.events.value` by it. Fetches still in flight: `system.replicated_fetches_*.jsonl` sorted by `elapsed`. Warning/Error volume per hour and component: `system.text_log_histogram_1_day_*.jsonl` (`time, level, logger_class, count, example`).
 
 ## 4. Disk and storage
 

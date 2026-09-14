@@ -278,7 +278,7 @@ def analyse(base: str):
         times = [t for t in times if t]
         out["query_log_window"] = {"from": min(times).isoformat(sep=" "), "to": max(times).isoformat(sep=" "),
                                    "hour_buckets": len(set(times))}
-    tl = read_jsonl(first("system.text_log_*.jsonl", base))
+    tl = read_jsonl(first("system.text_log_2*.jsonl", base))  # not the histogram / keeper-marker files
     if tl:
         ts = [parse_dt(r.get("event_time")) for r in tl]
         ts = [t for t in ts if t]
@@ -506,7 +506,7 @@ def analyse(base: str):
         if stalled:
             add("critical" if len(stalled) >= 3 else "warning", "merges",
                 f"{len(stalled)} hour(s) with inserts (NewPart > 100) and zero completed merges — merges were not running",
-                "hours: " + ", ".join(stalled[:8]) + (" …" if len(stalled) > 8 else ""), "HC-2.11/P-57")
+                "hours: " + ", ".join(stalled[:8]) + (" …" if len(stalled) > 8 else ""), "HC-2.12/P-57")
         bg = Counter()
         for t in timeline.values():
             bg.update(t["failed_bg"])

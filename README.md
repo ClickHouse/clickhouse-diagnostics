@@ -885,6 +885,7 @@ When `-skip-dashboard` is not set, the tool generates a single self-contained `d
 | 12 | 🔄 **Replication Queue** | Current entries in `system.replication_queue` with type, table, and last exception |
 | 13 | 🌐 **Cluster Nodes** (cloud mode only) | Hosts in the `default` cluster with shard / replica / active status |
 | 14 | 🔁 **Replicas Health** | Replication-delay distribution, queue-size by table, per-replica details (only shown when replicated tables exist) |
+| 14a | 🔑 **Keeper Health** (last 7 days) | Shown when `system.metric_log` has rows. Per hour: Keeper transactions (line) against hardware exceptions (bars coloured by verdict), mean request latency (`ZooKeeperWaitMicroseconds / ZooKeeperTransactions`), Keeper-dependent error codes (999 / 242 / 319 / 571 / 252 from `system.error_log` on 24.8+, else `query_log`), and the live `system.zookeeper_connection` rows. A verdict table applies the same rule as the `keeper_health` alert: > 1000 exceptions with traffic below 50 % of the 7-day median = unavailable; with traffic holding = blip. |
 | 15 | 💾 **Disk Usage** | Free vs used space per disk plus a disk-details table |
 | 16 | 🛑 **Server Error Counters** | Top 20 cumulative error codes from `system.errors`, high-part-count partitions (>100 parts → potential code-252 `TOO_MANY_PARTS` risk), and TTL activity from `part_log` |
 | 17 | ⚡ **Async Insert Activity** (last 24 h) | Flush count per hour by status — section is hidden when `system.asynchronous_insert_log` is empty or in gov mode |
