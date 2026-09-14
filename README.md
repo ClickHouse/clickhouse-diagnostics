@@ -99,9 +99,34 @@ You will be prompted for any value not supplied on the command line:
 | ClickHouse port | `8123` (http) / `8443` (https) |
 | Username | _empty_ |
 | Password (hidden) | _empty_ |
-| Mode (cloud/onprem/gov) | `onprem` |
+| Mode (cloud/onprem/gov) | `onprem` — only when `-mode` is absent entirely; see below |
 | Config directory | `/etc/clickhouse-server/config.d/` |
 | Gov-mode salt (hidden, `gov` mode only) | _empty_ |
+
+#### How `-mode` is resolved
+
+`onprem` is the least protective of the three modes, so the tool never *guesses* it. A `-mode` value it cannot parse is a hard error with a non-zero exit — it is not rounded down to `onprem`, because a mistyped `-mode gov` would then collect unhashed database and table names from a run that asked for hashing, and in a scripted collection nobody reads the warning:
+
+```
+$ clickhouse-diagnostic -mode govv ...
+Error: invalid mode "govv" — choose cloud, onprem, gov; did you mean "gov"?
+$ echo $?
+1
+```
+
+The `onprem` default applies only when `-mode` is absent altogether. On a terminal you are prompted and Enter accepts it; with stdin closed the default is used and announced:
+
+```
+No -mode given and stdin is not a terminal; using onprem.
+```
+
+Values are trimmed and lower-cased, and these spellings are accepted:
+
+| Mode | Also accepted |
+|---|---|
+| `cloud` | `ch-cloud`, `clickhouse-cloud` |
+| `onprem` | `on-prem`, `on_prem`, `on-premise(s)`, `onpremise(s)`, `self-hosted`, `selfhosted`, `self_hosted` |
+| `gov` | *nothing* — the protective mode takes no alias, so a near-miss is rejected rather than resolved by guesswork |
 
 ### Command-line flags
 
