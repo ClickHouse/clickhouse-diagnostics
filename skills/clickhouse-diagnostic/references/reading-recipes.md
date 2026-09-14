@@ -88,7 +88,25 @@ Queue shape (any single `type` > 60 entries is a replica falling behind):
 SELECT type, count(), countIf(last_exception != '') AS with_error, min(create_time) AS oldest
 FROM file('$B/system.replication_queue_*.jsonl', JSONEachRow) GROUP BY type ORDER BY 2 DESC
 ```
-Keeper pressure over time: `zk_transactions`, `zk_hw_exceptions` per hour in `system.metric_log_7_days` (any non-zero `zk_hw_exceptions` bucket = connection loss/timeouts); `KEEPER_EXCEPTION` (999) and `TABLE_IS_READ_ONLY` (242) in `system.errors` and `exception_code` in `query_log_details`.
+Keeper health test (HC-3.8) — the two counters per hour against the 7-day median, with a verdict per hour:
+```sql
+WITH (SELECT quantile(0.5)(toUInt64(zk_transactions)) FROM file('$B/system.metric_log_7_days_*.jsonl', JSONEachRow)) AS med
+SELECT time, toUInt64(zk_hw_exceptions) AS hw, toUInt64(zk_transactions) AS tx, round(100 * tx / greatest(med, 1)) AS pct_of_median,
+       multiIf(hw > 1000 AND tx < 0.5 * med, 'UNAVAILABLE', hw > 1000, 'blip', tx < 0.1 * med, 'idle/disconnected', 'ok') AS verdict
+FROM file('$B/system.metric_log_7_days_*.jsonl', JSONEachRow)
+WHERE verdict != 'ok' ORDER BY time
+```
+The same over the richer file (column names carry the aggregate): replace `zk_hw_exceptions` with `"sum(ProfileEvent_ZooKeeperHardwareExceptions)"` and `zk_transactions` with `"sum(ProfileEvent_ZooKeeperTransactions)"` in `system.metric_log_coordination_7_days_*.jsonl`; add `"max(CurrentMetric_ZooKeeperSession)"` (0 = no session that hour).
+
+Session markers by hour (which minute, which Keeper host the server moved to):
+```sql
+SELECT toStartOfHour(event_time) AS h,
+       countIf(message LIKE '%Session expired%') AS expired, countIf(message LIKE '%Finalizing session%') AS finalized,
+       countIf(message LIKE '%Connected to ZooKeeper%') AS connected, countIf(message LIKE '%Trying to establish a new connection%') AS reconnecting,
+       anyIf(leftUTF8(message, 160), message LIKE '%Connected to ZooKeeper%') AS example
+FROM file('$B/system.text_log_*.jsonl', JSONEachRow) GROUP BY h HAVING expired + finalized + connected + reconnecting > 0 ORDER BY h
+```
+(`system.text_log_keeper_1_day_*.jsonl` has the same counts precomputed for the whole day.) Then 999/319/571 per hour from `query_log_details` (§6) and `MergeParts` with `error = 999` per hour from `part_log` (§2) — the hours must line up. Cumulative 999/242 in `system.errors` only says "since restart"; `system.error_log_7_days` (≥ 24.8, when present) gives them per hour, background threads included.
 
 ## 4. Disk and storage
 

@@ -57,6 +57,8 @@ Rules for the assistant: never write the password into a file inside the reposit
 | `cloud` | `clusterAllReplicas(default, system.*)` for per-replica tables | host facts/logs off by default (they would describe your laptop); use `-skip-config` |
 | `gov` | `system.*` with database/table/user/host names hashed (`SHA256(name || salt)`) | requires `-salt` (8–64 alphanumerics, keep it private); no dashboard, no query text, no config/host/logs/query-analysis; writes `alerts_summary.json` and a **local-only** mapping CSV |
 
+**Self-hosted SharedMergeTree clusters** (`cloud_mode = 1` in `system.settings`, `Shared*MergeTree` engines, an `s3_with_keeper` disk): every replica keeps its own `system.*` tables, so `-mode onprem` collects **one node of N** (its parts, errors, part_log, query_log, text_log). The tool prints a warning when it sees `cloud_mode = 1`. Ask for `-mode cloud` for the cluster-wide view (fans out over the `default` cluster; needs `REMOTE` + `CREATE TEMPORARY TABLE`) **plus** one `onprem` run on a node for host facts, configuration and log files.
+
 ## 4. Common invocations
 
 ```bash
@@ -77,6 +79,8 @@ export CH_HOST=… CH_USER=… CH_PASS=…
 # security review: print every query it would run + EXPLAIN ESTIMATE, collect nothing
 ./clickhouse-diagnostic -mode onprem -host ch-01 -dry-run
 ```
+
+Collectors that read Keeper (`system.distributed_ddl_queue`, `system.zookeeper_connection`) or a very large log table (`system.zookeeper_log`) are bounded by `LIMIT` and by the timeout below; on an unhealthy Keeper they may be the ones that time out (code 159), which is itself evidence.
 
 Useful flags: `-query-timeout` (default 240 s — the server enforces it as `max_execution_time`, so a collector query that overruns shows up as a clean `Code: 159` in the customer's `query_log`; `0` disables), `-output-dir` (default `./clickhouse_results`), `-output-format jsonl|native|tsv`, `-skip-alerts`, `-skip-dashboard`, `-skip-archive`, `-alerts-dir`, `-config-dir`, `-logs-dir`, `-logs-max-mb` (default 50), `-logs-include-archives`, `-host-info on|off|auto`, `-logs on|off|auto`.
 
@@ -129,7 +133,9 @@ Before sharing: open `configuration/` and confirm nothing sensitive remains (san
 | Cloud: some tables errored with 497 | grant `REMOTE` + `CREATE TEMPORARY TABLE`, re-run |
 | Gov bundle lacks what the analysis needs | if policy allows, collect an `onprem` bundle and share only the summary; otherwise use the mapping CSV locally |
 | Track a trend (parts growth, error rates) | collect a second bundle hours/days later and diff `system.parts` counts and `system.errors` values |
+| Keeper incident on a multi-replica / SharedMergeTree cluster | `-mode cloud` for all replicas' `metric_log_coordination`, `zookeeper_connection`, `metrics` (`MetadataFromKeeperCacheObjects` per replica), `part_log`; plus the Keeper logs and `echo mntr \| nc <keeper> <port>` from every Keeper member (not collected by the tool) |
+| `zookeeper_log_1_day` / `blob_storage_log_7_days` missing | the tables are not enabled: `<zookeeper_log>` / `<blob_storage_log>` in the server config (both have a TTL knob); enable, wait for the next incident, or ask for `system.remote_data_paths` for one key |
 
 ## 9. What the bundle deliberately does not contain
 
-Customer rows (never queried); `system.zookeeper`, `system.trace_log`, `system.processors_profile_log` (except in query analysis), `system.merge_tree_settings`, `system.metrics`/`asynchronous_metrics` snapshots, `system.users/grants`, `system.backups`, `system.query_views_log`, `system.row_policies`, Keeper logs/`mntr` output. When a finding needs one of these, list the exact `SELECT` the user should run (single isolating query, `LIMIT`ed) rather than asking for a dump.
+Customer rows (never queried); `system.zookeeper` (the tree itself), `system.remote_data_paths` (one row per blob — too large), `system.filesystem_cache` (one row per segment), `system.trace_log`, `system.processors_profile_log` (except in query analysis), `system.merge_tree_settings`, `system.users/grants`, `system.backups`, `system.query_views_log`, `system.row_policies`, Keeper logs/`mntr` output, and `system.zookeeper_log` / `system.blob_storage_log` when the server does not have them enabled. When a finding needs one of these, list the exact `SELECT` the user should run (single isolating query, `LIMIT`ed) rather than asking for a dump.

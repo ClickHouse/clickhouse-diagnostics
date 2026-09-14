@@ -63,6 +63,23 @@ TRUNC_HEADER = "### support-diagnostic: TRUNCATED"
 
 # ----------------------------------------------------------------------------- helpers
 
+for _code, _name in {
+    57: "TABLE_ALREADY_EXISTS", 84: "DIRECTORY_ALREADY_EXISTS", 86: "RECEIVED_ERROR_FROM_REMOTE_IO_SERVER",
+    107: "FILE_DOESNT_EXIST", 159: "TIMEOUT_EXCEEDED", 221: "NO_SUCH_INTERSERVER_IO_ENDPOINT",
+    319: "UNKNOWN_STATUS_OF_INSERT", 499: "S3_ERROR", 504: "FILE_ALREADY_EXISTS",
+    571: "DATABASE_REPLICATION_FAILED", 735: "QUERY_WAS_CANCELLED_BY_CLIENT",
+}.items():
+    ERROR_NAMES.setdefault(_code, _name)
+
+ZK_HW_COL = "sum(ProfileEvent_ZooKeeperHardwareExceptions)"
+ZK_TX_COL = "sum(ProfileEvent_ZooKeeperTransactions)"
+
+
+def hour_key(v):
+    d = parse_dt(v)
+    return d.strftime("%Y-%m-%d %H:00") if d else None
+
+
 def die(msg: str) -> None:
     print(f"error: {msg}", file=sys.stderr)
     sys.exit(2)
@@ -418,7 +435,13 @@ def analyse(base: str):
                 f"{r.get('name')} ({code}) counted {r.get('value')} times since server start",
                 f"last at {r.get('last_error_time')}", "HC-1.5/HC-5.3")
 
-    # ---- query_log exceptions (dedupe the LEFT ARRAY JOIN duplication)
+    # ---- query_log exceptions (dedupe the LEFT ARRAY JOIN duplication) + hourly timeline
+    timeline = {}  # hour -> signals
+
+    def tl(h):
+        return timeline.setdefault(h, {"queries": 0, "exceptions": 0, "codes": Counter(), "new_parts": 0,
+                                       "merges": 0, "failed_bg": Counter(), "zk_hw": 0, "zk_tx": None})
+
     if ql:
         seen = set()
         exc = Counter()
@@ -434,6 +457,13 @@ def analyse(base: str):
                 continue
             total += c
             code = num(r.get("exception_code")) or 0
+            h = hour_key(r.get("time"))
+            if h:
+                t = tl(h)
+                t["queries"] += c
+                if code:
+                    t["exceptions"] += c
+                    t["codes"][code] += c
             if code:
                 exc[code] += c
         out["query_log"] = {"queries": total, "exceptions": sum(exc.values()),
@@ -445,6 +475,252 @@ def analyse(base: str):
             add("warning", "queries", f"TOO_MANY_SIMULTANEOUS_QUERIES (202) × {exc[202]}", "query_log_details", "HC-6.2")
         if exc.get(252, 0):
             add("warning", "inserts", f"TOO_MANY_PARTS (252) × {exc[252]} — inserts rejected", "query_log_details", "HC-2.1")
+        if exc.get(999, 0) or exc.get(319, 0) or exc.get(571, 0):
+            add("warning", "keeper", f"Keeper-dependent failures in query_log: 999 × {exc.get(999, 0)}, 319 UNKNOWN_STATUS_OF_INSERT × {exc.get(319, 0)}, 571 DATABASE_REPLICATION_FAILED × {exc.get(571, 0)}",
+                "see the incident timeline for the hours", "HC-3.8/P-57")
+        if exc.get(107, 0) > 10:
+            add("warning", "storage", f"FILE_DOESNT_EXIST (107) × {exc[107]} — parts whose files/blobs cannot be read (stale metadata on object storage after an incident, or missing files)",
+                "query_log_details by table; check system.disks.type and blob_storage_log", "P-58")
+        if exc.get(57, 0) > 50:
+            add("info", "ddl", f"TABLE_ALREADY_EXISTS (57) × {exc[57]} — if the messages say 'UUID collision' on .tmp.inner_id tables this is Replicated-database DDL replay after a Keeper session loss",
+                "distributed_ddl_queue, query_log Create rows with empty user", "P-57")
+
+    # ---- part_log: merges stalled / failing background operations per hour
+    pl_rows = read_jsonl(first("system.part_log_7_days_*.jsonl", base))
+    if pl_rows:
+        for r in pl_rows:
+            h = hour_key(r.get("time"))
+            if not h:
+                continue
+            t = tl(h)
+            c = num(r.get("count")) or 0
+            et = r.get("event_type")
+            err = num(r.get("error")) or 0
+            if et == "NewPart":
+                t["new_parts"] += c
+            elif et == "MergeParts" and not err:
+                t["merges"] += c
+            if err:
+                t["failed_bg"][(et, err)] += c
+        stalled = sorted(h for h, t in timeline.items() if t["new_parts"] > 100 and t["merges"] == 0)
+        if stalled:
+            add("critical" if len(stalled) >= 3 else "warning", "merges",
+                f"{len(stalled)} hour(s) with inserts (NewPart > 100) and zero completed merges — merges were not running",
+                "hours: " + ", ".join(stalled[:8]) + (" …" if len(stalled) > 8 else ""), "HC-2.11/P-57")
+        bg = Counter()
+        for t in timeline.values():
+            bg.update(t["failed_bg"])
+        top_bg = [(k, v) for k, v in bg.most_common(5) if v > 50]
+        if top_bg:
+            add("warning", "merges", "background operations failing repeatedly (part_log)",
+                "; ".join(f"{et} code {err} {ERROR_NAMES.get(err, '')} × {v}" for (et, err), v in top_bg), "HC-2.5")
+
+    # ---- metric_log_coordination: Keeper hardware exceptions per hour, read-only replicas, S3 errors
+    mlc = read_jsonl(first("system.metric_log_coordination_7_days_*.jsonl", base))
+    if mlc:
+        cols = set(mlc[0].keys())
+        for r in mlc:
+            h = hour_key(r.get("time"))
+            if not h:
+                continue
+            t = tl(h)
+            t["zk_hw"] = num(r.get(ZK_HW_COL)) or 0
+            t["zk_tx"] = num(r.get(ZK_TX_COL))
+        ro_col = "max(CurrentMetric_ReadonlyReplica)"
+        if ro_col in cols:
+            ro_hours = sorted(hour_key(r.get("time")) for r in mlc if (num(r.get(ro_col)) or 0) > 0)
+            if ro_hours:
+                add("warning", "replication", f"read-only replicas present in {len(ro_hours)} hour(s) (metric_log ReadonlyReplica max > 0)",
+                    f"first {ro_hours[0]}, last {ro_hours[-1]}", "HC-1.4")
+        s3_cols = [c for c in cols if c.startswith("sum(ProfileEvent_") and ("S3" in c or "ObjectStorage" in c or "AzureBlobStorage" in c) and c.endswith("Errors)")]
+        s3_err = {c: sum(num(r.get(c)) or 0 for r in mlc) for c in s3_cols}
+        s3_err = {c: v for c, v in s3_err.items() if v}
+        if s3_err:
+            add("warning", "storage", "object-storage request errors in metric_log",
+                ", ".join(f"{c[len('sum(ProfileEvent_'):-1]}={v}" for c, v in sorted(s3_err.items(), key=lambda kv: -kv[1])[:5]), "HC-4.10")
+
+    if not mlc:
+        # older bundles: fall back to the fixed-column metric_log aggregate for the Keeper signal
+        for r in read_jsonl(first("system.metric_log_7_days_*.jsonl", base)):
+            h = hour_key(r.get("time"))
+            if h:
+                tl(h)["zk_hw"] = num(r.get("zk_hw_exceptions")) or 0
+                tl(h)["zk_tx"] = num(r.get("zk_transactions"))
+
+    # ---- Keeper health test (HC-3.8): hardware exceptions AND transactions vs the 7-day median, per hour
+    tx_vals = sorted(t["zk_tx"] for t in timeline.values() if t["zk_tx"] is not None)
+    tx_med = tx_vals[len(tx_vals) // 2] if tx_vals else 0
+    tx_hours = [h for h, t in timeline.items() if t["zk_tx"] is not None]
+    edge_hours = {min(tx_hours), max(tx_hours)} if tx_hours else set()  # partial buckets at both ends of the window
+    for h, t in timeline.items():
+        t["tx_pct"] = round(100 * t["zk_tx"] / tx_med) if (t["zk_tx"] is not None and tx_med) else None
+        if t["zk_hw"] > 1000 and t["tx_pct"] is not None and t["tx_pct"] < 50:
+            t["keeper"] = "UNAVAILABLE"
+        elif t["zk_hw"] > 1000:
+            t["keeper"] = "blip"
+        elif t["tx_pct"] is not None and t["tx_pct"] < 10 and h not in edge_hours:
+            t["keeper"] = "idle/disconnected"
+        else:
+            t["keeper"] = ""
+    unavailable = sorted(h for h, t in timeline.items() if t["keeper"] == "UNAVAILABLE")
+    blips = sorted(h for h, t in timeline.items() if t["keeper"] == "blip")
+    if unavailable:
+        peak = max(unavailable, key=lambda h: timeline[h]["zk_hw"])
+        add("critical", "keeper", f"Keeper effectively unavailable in {len(unavailable)} hour(s): > 1000 hardware exceptions/h while Keeper transactions fell below 50 % of the 7-day median ({tx_med}/h); peak {timeline[peak]['zk_hw']} exceptions at {peak} with traffic at {timeline[peak]['tx_pct']} %",
+            "hours: " + ", ".join(unavailable[:8]) + (" …" if len(unavailable) > 8 else "") + " — every 999/319/571/252 finding in these hours is downstream (alert keeper_health)", "HC-3.8/P-57")
+    if blips:
+        add("warning", "keeper", f"Keeper session lost and re-established in {len(blips)} hour(s) while traffic stayed normal (> 1000 hardware exceptions/h)",
+            "hours: " + ", ".join(blips[:8]) + (" …" if len(blips) > 8 else "") + " — read text_log_keeper markers for the minute and the Keeper host (alert keeper_connection_blips)", "HC-3.8")
+    tk = read_jsonl(first("system.text_log_keeper_1_day_*.jsonl", base))
+    if tk:
+        mk = Counter()
+        for r in tk:
+            mk[r.get("marker")] += num(r.get("count")) or 0
+        conn = [r for r in tk if r.get("marker") == "connected"]
+        ex = conn[-1].get("example") if conn else ""
+        if mk.get("session_expired") or mk.get("reconnecting"):
+            add("warning", "keeper", "Keeper session markers in text_log (last day): " + ", ".join(f"{k}={v}" for k, v in mk.most_common()),
+                (f"last reconnect: {str(ex)[:160]}" if ex else ""), "HC-3.8")
+    el = read_jsonl(first("system.error_log_7_days_*.jsonl", base))
+    if el:
+        by_code = Counter()
+        for r in el:
+            by_code[num(r.get("code"))] += num(r.get("errors")) or 0
+            h = hour_key(r.get("time"))
+            if h and num(r.get("code")) in (999, 242, 319, 571):
+                tl(h)["codes"][num(r.get("code"))] += 0  # make the hour visible in the timeline
+        top = by_code.most_common(6)
+        out["error_log_top"] = [{"code": c, "name": ERROR_NAMES.get(c, "?"), "count": n} for c, n in top]
+
+    # ---- incident hours: elevated exceptions, stalled merges, Keeper loss, failing background ops
+    exc_hours = [t["exceptions"] for t in timeline.values() if t["exceptions"]]
+    med = sorted(exc_hours)[len(exc_hours) // 2] if exc_hours else 0
+    incident = []
+    for h in sorted(timeline):
+        t = timeline[h]
+        flags = []
+        if t["exceptions"] >= 50 and (t["exceptions"] >= 0.2 * max(t["queries"], 1) or t["exceptions"] >= 5 * max(med, 1)):
+            flags.append("exceptions")
+        if t["new_parts"] > 100 and t["merges"] == 0:
+            flags.append("no merges")
+        if t.get("keeper"):
+            flags.append(f"keeper {t['keeper']}")
+        if sum(t["failed_bg"].values()) > 50:
+            flags.append("bg failures")
+        if flags:
+            incident.append({"hour": h, "queries": t["queries"], "exceptions": t["exceptions"],
+                             "top_codes": ", ".join(f"{ERROR_NAMES.get(c, c)}={n}" for c, n in t["codes"].most_common(3)),
+                             "new_parts": t["new_parts"], "merges": t["merges"], "failed_bg": sum(t["failed_bg"].values()),
+                             "zk_hw": t["zk_hw"], "tx_pct": t.get("tx_pct"), "flags": ", ".join(flags)})
+    out["incident_hours"] = incident[:48]
+    if incident:
+        out["notes"].append(f"incident hours detected: {incident[0]['hour']} → {incident[-1]['hour']} ({len(incident)} hour(s)) — see the timeline table")
+
+    # ---- snapshots added for Keeper / object-storage incidents
+    am = read_jsonl(first("system.asynchronous_metrics_*.jsonl", base))
+    uptime = None
+    if am:
+        ups = [num(r.get("value")) for r in am if r.get("metric") == "Uptime"]
+        ups = [u for u in ups if u is not None]
+        if ups:
+            uptime = min(ups)
+            out["uptime_seconds"] = uptime
+    mt = read_jsonl(first("system.metrics_*.jsonl", base))
+    if mt:
+        by_host = {}
+        for r in mt:
+            by_host.setdefault(r.get("hostname", ""), {})[r.get("metric")] = num(r.get("value"))
+        for host, mm in by_host.items():
+            who = f" on {host}" if host else ""
+            if mm.get("ZooKeeperSession") == 0:
+                add("critical", "keeper", f"no Keeper session right now (ZooKeeperSession = 0){who}", "system.metrics", "HC-3.12")
+            if (mm.get("ReadonlyReplica") or 0) > 0:
+                add("critical", "replication", f"{mm['ReadonlyReplica']} read-only replica table(s) right now{who}", "system.metrics", "HC-1.4")
+        cache = {h: mm.get("MetadataFromKeeperCacheObjects") for h, mm in by_host.items() if mm.get("MetadataFromKeeperCacheObjects") is not None}
+        if len(cache) > 2:
+            vals = sorted(cache.values())
+            median = vals[len(vals) // 2]
+            low = [h for h, v in cache.items() if median > 1000 and v < median / 100]
+            if low:
+                add("warning", "storage", f"{len(low)} replica(s) with an almost empty Keeper metadata cache (MetadataFromKeeperCacheObjects ≪ peers, median {int(median)})",
+                    ", ".join(low[:6]), "HC-3.12/P-58")
+    zc = read_jsonl(first("system.zookeeper_connection_*.jsonl", base))
+    for r in zc:
+        who = f" on {r['hostname']}" if r.get("hostname") else ""
+        if num(r.get("is_expired")):
+            add("critical", "keeper", f"Keeper session expired right now{who}", f"host {r.get('host')}", "HC-3.9")
+        age = num(r.get("session_uptime_elapsed_seconds"))
+        if age is not None and uptime and age < uptime / 10 and uptime > 3600:
+            add("warning", "keeper", f"Keeper session is {int(age // 60)} min old on a server up {int(uptime // 3600)} h{who} — the session was re-established at {r.get('connected_time')}",
+                f"host {r.get('host')}", "HC-3.9/P-57")
+    dbs = read_jsonl(first("system.databases_*.jsonl", base))
+    if dbs:
+        eng = Counter(r.get("engine") for r in dbs)
+        out["databases"] = dict(eng)
+        if eng.get("Replicated", 0) >= 50:
+            add("info", "keeper", f"{eng['Replicated']} Replicated databases (of {len(dbs)}) — one DDLWorker and Keeper watch set each, per replica",
+                "system.databases", "HC-3.13")
+    ddl = read_jsonl(first("system.distributed_ddl_queue_*.jsonl", base))
+    if ddl:
+        ref = run_ts or datetime.now()
+        stuck = [r for r in ddl if r.get("status") not in ("Finished", None) and parse_dt(r.get("query_create_time")) and (ref - parse_dt(r.get("query_create_time"))).total_seconds() > 600]
+        if stuck:
+            hosts = Counter(r.get("host") for r in stuck)
+            add("warning", "ddl", f"{len(stuck)} DDL queue row(s) not Finished after 10 min", "hosts: " + ", ".join(f"{h}×{n}" for h, n in hosts.most_common(4)), "HC-3.11")
+        codes = Counter(num(r.get("exception_code")) for r in ddl if num(r.get("exception_code")))
+        if codes:
+            add("info", "ddl", "DDL queue exceptions", ", ".join(f"{ERROR_NAMES.get(c, c)}={n}" for c, n in codes.most_common(5)), "HC-3.11")
+    bsl = read_jsonl(first("system.blob_storage_log_7_days_*.jsonl", base))
+    if bsl:
+        failed = sum(num(r.get("count")) or 0 for r in bsl if num(r.get("failed")))
+        if failed:
+            ex = next((r.get("example_error") for r in bsl if num(r.get("failed")) and r.get("example_error")), "")
+            add("warning", "storage", f"{failed} failed object-storage operation(s) in blob_storage_log", str(ex)[:200], "HC-4.9/P-58")
+    zl = read_jsonl(first("system.zookeeper_log_1_day_*.jsonl", base))
+    if zl:
+        errs = Counter()
+        sess = Counter()
+        for r in zl:
+            e = r.get("error")
+            if e and e != "ZOK":
+                errs[e] += num(r.get("requests")) or 0
+            h = hour_key(r.get("time"))
+            if h:
+                sess[h] = max(sess[h], num(r.get("sessions")) or 0)
+        churn = sorted(h for h, n in sess.items() if n > 2)
+        bad = {e: n for e, n in errs.items() if e in ("ZSESSIONEXPIRED", "ZCONNECTIONLOSS", "ZOPERATIONTIMEOUT")}
+        if bad or churn:
+            add("warning", "keeper", "zookeeper_log: " + (", ".join(f"{e}={n}" for e, n in bad.items()) or "no loss errors") +
+                (f"; session churn (> 2 sessions/h) in {len(churn)} hour(s)" if churn else ""), "hours: " + ", ".join(churn[:6]), "HC-3.10")
+    th = read_jsonl(first("system.text_log_histogram_1_day_*.jsonl", base))
+    if th:
+        per_hour = Counter()
+        cls = Counter()
+        for r in th:
+            if r.get("level") in ("Error", "Fatal", "Critical"):
+                h = hour_key(r.get("time"))
+                per_hour[h] += num(r.get("count")) or 0
+                cls[r.get("logger_class")] += num(r.get("count")) or 0
+        if per_hour:
+            peak_h, peak_n = per_hour.most_common(1)[0]
+            quiet = sorted(per_hour.values())[len(per_hour) // 2]
+            out["text_log_histogram"] = {"error_hours": len(per_hour), "peak_hour": peak_h, "peak_errors": peak_n, "median_errors": quiet,
+                                         "top_classes": [f"{c}={n}" for c, n in cls.most_common(6)]}
+            if quiet and peak_n >= 10 * quiet:
+                add("warning", "logs", f"Error-level log volume peaked at {peak_n} lines in hour {peak_h} (median hour {quiet})",
+                    "top classes: " + ", ".join(f"{c}={n}" for c, n in cls.most_common(4)), "HC-11.5")
+
+    # ---- one node of a SharedMergeTree cluster?
+    st_rows = read_jsonl(first("system.settings_*.jsonl", base))
+    cloud_mode = any(r.get("name") == "cloud_mode" and str(r.get("value")) in ("1", "true") for r in st_rows)
+    shared = False
+    tb = read_jsonl(first("system.tables_*.jsonl", base))
+    if tb:
+        shared = any(str(r.get("engine", "")).startswith("Shared") for r in tb)
+    if (cloud_mode or shared) and out["mode"] == "onprem":
+        cl = read_jsonl(first("system.clusters_*.jsonl", base))
+        n = len({(r.get("host_name"), r.get("port")) for r in cl if r.get("cluster") == "default"}) or "N"
+        out["notes"].append(f"SharedMergeTree cluster collected in onprem mode: this bundle describes ONE replica of {n} (parts, errors, part_log, query_log, text_log are per replica) — propose -mode cloud for the cluster view")
 
     # ---- dictionaries
     dicts = read_jsonl(first("system.dictionaries_*.jsonl", base))
@@ -461,7 +737,7 @@ def analyse(base: str):
         zk = sum(num(r.get("zk_hw_exceptions")) or 0 for r in ml)
         out["metric_log"] = {"hours": len(ml), "max_avg_memory_tracking": human(max(mem)), "max_merge_pool_tasks": max(pool),
                              "hours_pool_at_max": sum(1 for p in pool if p == max(pool)) if max(pool) else 0, "zk_hw_exceptions_total": zk}
-        if zk:
+        if zk and not any(f["check"].startswith("HC-3.8") for f in findings):
             add("warning", "keeper", f"{zk} ZooKeeper/Keeper hardware exceptions over {len(ml)} hours", "metric_log.zk_hw_exceptions", "HC-3.5")
 
     # ---- host info
@@ -616,6 +892,18 @@ def render_md(o) -> str:
         q = o["query_log"]
         codes = ", ".join(f"{c['name']}({c['code']})={c['count']}" for c in q["top_exception_codes"]) or "none"
         L.append(f"- query_log: {q['queries']} finished/failed queries in window · {q['exceptions']} exceptions · top codes: {codes}")
+    if o.get("uptime_seconds") is not None or o.get("databases"):
+        bits = []
+        if o.get("uptime_seconds") is not None:
+            bits.append(f"server uptime {round(o['uptime_seconds'] / 3600, 1)} h (denominator for system.errors / system.events)")
+        if o.get("databases"):
+            bits.append("databases by engine: " + ", ".join(f"{k}={v}" for k, v in sorted(o["databases"].items(), key=lambda kv: -kv[1])))
+        L.append("- " + " · ".join(bits))
+    if o.get("error_log_top"):
+        L.append("- error_log (7 days, all threads incl. background): " + ", ".join(f"{e['name']}({e['code']})={e['count']}" for e in o["error_log_top"]))
+    if o.get("text_log_histogram"):
+        t = o["text_log_histogram"]
+        L.append(f"- text_log histogram: Error-level lines in {t['error_hours']} hour(s) · peak {t['peak_errors']} at {t['peak_hour']} (median hour {t['median_errors']}) · top classes: {', '.join(t['top_classes'])}")
     if o.get("empty_files"):
         L.append(f"- empty files: {', '.join(o['empty_files'])}")
     for key, label in (("settings_changed", "query/profile settings changed"), ("server_settings_changed", "server settings changed")):
@@ -654,6 +942,14 @@ def render_md(o) -> str:
         chk = f" [{f['check']}]" if f["check"] else ""
         L.append(f"- **{f['severity']}** ({f['area']}) {f['message']}{ev}{chk}")
     L.append("")
+    if o.get("incident_hours"):
+        L.append("## Incident timeline — hours with elevated failures, stalled merges or Keeper loss")
+        L.append("| hour | queries | exceptions | top codes | new parts | merges | failed bg ops | zk hw exc | zk tx % of median | flags |")
+        L.append("|---|---|---|---|---|---|---|---|---|---|")
+        for t in o["incident_hours"]:
+            pct = "" if t.get("tx_pct") is None else f"{t['tx_pct']}%"
+            L.append(f"| {t['hour']} | {t['queries']} | {t['exceptions']} | {t['top_codes']} | {t['new_parts']} | {t['merges']} | {t['failed_bg']} | {t['zk_hw']} | {pct} | {t['flags']} |")
+        L.append("")
     if o.get("top_partitions"):
         L.append("## Top partitions by active parts")
         L.append("| database | table | partition | parts | level-0 | avg rows/part |")

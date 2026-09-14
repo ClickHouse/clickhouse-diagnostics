@@ -18,7 +18,7 @@ Produce the summary inline (markdown) unless the user asks for a file. Keep it s
 |---|---|---|
 | Availability & crashes | ok / warning / critical / n/a | `system.crash_log`: 0 rows |
 | Parts & merges | … | `system.parts`: <db>.<table> partition <id> 812 active parts (alert threshold 300) |
-| Replication & Keeper | … | `system.replicas`: max absolute_delay 4 s; `metric_log.zk_hw_exceptions` 0 |
+| Replication & Keeper | … | `system.replicas`: max absolute_delay 4 s; Keeper health: 0 hardware exceptions in every hour, transactions ≈ median (or: UNAVAILABLE 13:00–17:00 — 25 M exceptions/h, traffic 9 % of median) |
 | Disk & storage | … | `system.disks`: default 71 % free; `system` db 38 GiB (3rd largest) |
 | Memory & CPU | … | `metric_log.avg_memory_tracking_bytes` peak 11.2 GiB of 16 GiB RAM; load 0.3/8 CPUs |
 | Query workload | … | 241 = 3.1 % of queries (1 240/40 000), one hash accounts for 92 % |

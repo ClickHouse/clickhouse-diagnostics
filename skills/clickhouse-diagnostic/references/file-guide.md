@@ -161,6 +161,51 @@ Windows: `*_7_days` files cover the last 7 days (or `-from/-to`); `system.text_l
 **Traps:** not collected in gov; large, symbol-heavy, identifies the build; only meaningful if the bundle was taken **during** the hang.
 **Pairs with:** `system.processes`, `system.merges`.
 
+### system.metrics, system.events, system.asynchronous_metrics
+**Why we run it:** the hourly aggregates cannot say what is true *now*, and `system.errors` has no denominator; these three are the live gauges, the cumulative counters and the server `Uptime`.
+**Question:** does this server hold a Keeper session right now; are replicas read-only; how many fetches/merges are running; how many object-storage and Keeper errors has it seen since start, per hour of uptime?
+**Read first:** `metrics`: `ZooKeeperSession`, `ZooKeeperWatch`, `ReadonlyReplica`, `ReplicatedFetch`, `Background*PoolTask`, `S3Requests`, `FilesystemCacheSize`, `MetadataFromKeeperCacheObjects` (cloud: per `hostname`); `asynchronous_metrics`: `Uptime`, `ReplicasMaxAbsoluteDelay`, `ReplicasSumQueueSize`, `MaxPartCountForPartition`, `NumberOfTables`, `NumberOfDatabases`; `events`: `ZooKeeperHardwareExceptions`, `ZooKeeperUserExceptions`, `S3ReadRequestsErrors`, `ReadBufferFromS3RequestsErrors`, `ReplicatedPartFailedFetches`, `RejectedInserts`, `DelayedInserts`, `FailedQuery`.
+**Healthy looks like:** `ZooKeeperSession ≥ 1`, `ReadonlyReplica = 0`, exception and error counters tiny relative to `Uptime`, `MetadataFromKeeperCacheObjects` similar across replicas.
+**Red flags:** `ZooKeeperSession = 0` (HC-3.12); `ReadonlyReplica > 0` (HC-1.4); a replica whose `MetadataFromKeeperCacheObjects` is ≈ 1 while peers hold 10⁵ (P-58); `ZooKeeperHardwareExceptions` in the millions (P-57); `S3*RequestsErrors` growing (HC-4.10); `Uptime` of minutes = the server restarted (HC-1.2).
+**Traps:** `events` and `system.errors` are cumulative since start — divide by `Uptime`, never treat as rates; `asynchronous_metrics` refresh every minute, so `Uptime` is ≤ 60 s stale; per-core rows are dropped on purpose; gov drops per-object gauges.
+**Pairs with:** `system.errors` (same counters, with messages), `metric_log_coordination_7_days` (the same counters over time), `zookeeper_connection`.
+
+### system.databases and system.storage_policies
+**Why we run it:** `system.tables` cannot tell `Atomic` from `Replicated` databases, and it names a `storage_policy` without saying what backs it.
+**Question:** how many `Replicated` databases exist (a Keeper-load multiplier); do user tables live on object storage?
+**Read first:** `databases`: count by `engine`; `storage_policies`: `disks` of the policies that `system.tables.storage_policy` uses, joined with `system.disks.type`.
+**Healthy looks like:** a handful of `Replicated` databases; policies whose disks you can name.
+**Red flags:** hundreds of `Replicated` databases × tens of replicas when Keeper is the finding (HC-3.13, P-57); `ObjectStorage` disks behind user tables when 107/`NoSuchKey` errors appear (HC-4.0, P-58).
+**Traps:** `Replicated` here is the *database* engine, unrelated to `ReplicatedMergeTree` tables; gov hashes names with the same salt as `system.tables`/`system.disks`, so the joins still work.
+**Pairs with:** `system.tables` (`storage_policy`, engines), `system.disks`, `configuration/` `<storage_configuration>`.
+
+### system.zookeeper_connection (≥ 23.8)
+**Why we run it:** the only place that says which Keeper node this server talks to and **how old the session is**.
+**Question:** is there a Keeper session right now, when was it (re)established, is the server pinned to one Keeper host?
+**Read first:** `is_expired`, `connected_time`, `session_uptime_elapsed_seconds` vs `Uptime` (`asynchronous_metrics`), `host`/`index`; cloud: the same per `hostname`.
+**Healthy looks like:** one row per configured connection, `is_expired = 0`, session age ≈ server uptime.
+**Red flags:** `is_expired = 1` (critical, HC-3.9); session age of minutes/hours on a long-running server = the last expiry happened at `connected_time` (P-40/P-57); all replicas on the same `host` (leader-only traffic) or one replica on a different host than its peers.
+**Traps:** absent on < 23.8 (not collected, not evidence); `session_uptime_elapsed_seconds` resets on every reconnect, so it dates the *last* expiry only.
+**Pairs with:** `metric_log_coordination` (the hours), `zookeeper_log_1_day`, `configuration/zookeeper.xml`.
+
+### system.replicated_fetches
+**Why we run it:** fetches in flight are invisible in `part_log` until they finish or fail.
+**Question:** is this replica pulling parts right now, from whom, how big, stuck?
+**Read first:** `elapsed`, `progress`, `total_size_bytes_compressed`, `source_replica_hostname`.
+**Healthy looks like:** empty, or a few fetches with moving `progress`.
+**Red flags:** dozens of long `elapsed` fetches after an incident (catching up — expected, but it explains `absolute_delay`); a fetch whose `progress` is identical in two bundles (wedged interserver connection, HC-3.1/P-41); `to_detached = 1` (fetching into `detached/` for a check).
+**Traps:** a snapshot; empty proves nothing about the last hour — use `part_log` `DownloadPart` for history.
+**Pairs with:** `system.replicas` (`queue_size`, `inserts_in_queue`), `part_log` `DownloadPart` errors (499, 210, 209).
+
+### system.distributed_ddl_queue (7 days)
+**Why we run it:** `ON CLUSTER` and Replicated-database DDL execute through Keeper, not through `query_log` on the initiator; their per-host status and failures live only here.
+**Question:** which DDL is stuck or failed, on which host, why; was DDL replayed after a Keeper incident?
+**Read first:** `status != 'Finished'` rows and their age; `exception_code` histogram (57, 571, 999, 60, 253); the same `query` text under many `entry` values.
+**Healthy looks like:** every entry `Finished` on every host within seconds, `exception_code = 0`.
+**Red flags:** `Active`/`Inactive` entries older than minutes (HC-3.11 — a host that never picked up the task, often one that is down or has lost its session); bursts of 57 `Mapping for table with UUID … already exists` on `CREATE OR REPLACE TABLE … .tmp.inner_id.*` (P-57: Replicated databases replaying materialized-view DDL); 571 (session died mid-replay).
+**Traps:** read from Keeper — when Keeper is unhealthy this collector is slow or times out (code 159 in `query_log` for the collector user, HC-0); at most 5000 newest rows; one row per (entry, host), so a 29-replica cluster has 29 rows per statement; cloud reads it once (it is the same from every replica).
+**Pairs with:** `system.databases` (Replicated engines), `query_log_details` `Create` rows with empty `user`, `text_log_histogram` `DDLWorker`.
+
 ## Windowed aggregates
 
 ### system.query_log_details_7_days
@@ -199,7 +244,61 @@ Windows: `*_7_days` files cover the last 7 days (or `-from/-to`); `system.text_l
 **Traps:** absent on < 22.10 or when async inserts are unused (not a problem); `total_rows` only ≥ 23.4; hashed names in gov.
 **Pairs with:** `query_log_details` `Insert` rows, `system.tables` (MVs on the target), `part_log` NewPart on the target.
 
-### system.text_log (24 h slice, ≤ 2000 rows, Warning/Error/Fatal)
+### system.metric_log_coordination_7_days
+**Why we run it:** `metric_log_7_days` keeps a fixed, version-stable handful of columns; this file takes every Keeper, object-storage, filesystem-cache and replication counter the version exports, hour by hour, so an outage of a *dependency* is visible even when no query failed.
+**Question:** in which hours did Keeper stop answering, did S3 start returning errors, did the cache thrash, did fetches fail — and how do those hours line up with the workload?
+**Read first:** `sum(ProfileEvent_ZooKeeperHardwareExceptions)` and `sum(ProfileEvent_ZooKeeperTransactions)` per hour (an outage = the first explodes while the second collapses); `max(CurrentMetric_ZooKeeperSession)` (0 in an hour = no session at all); `sum(ProfileEvent_S3ReadRequestsErrors)`, `…ReadBufferFromS3RequestsErrors`, `…S3WriteRequestsErrors`; `sum(ProfileEvent_ReplicatedPartFailedFetches)`; `max(CurrentMetric_ReadonlyReplica)`; `sum(ProfileEvent_FailedInsertQuery)`; `sum(ProfileEvent_RejectedInserts)` / `DelayedInserts`.
+**Healthy looks like:** hardware exceptions 0 in every hour, transactions on a steady diurnal curve, S3 error columns 0 or tiny, `ReadonlyReplica` 0.
+**Red flags:** any hour with hardware exceptions in the thousands or more (HC-3.8 Keeper health test — alerts `keeper_health` / `keeper_connection_blips`, P-57); `ReadonlyReplica` max > 0 (HC-1.4); S3 error columns rising in the hours before 107/`NoSuchKey` findings (HC-4.10, P-58); `ReplicatedPartFailedFetches` bursts (P-41).
+**Traps:** column names carry the aggregate — `"sum(ProfileEvent_ZooKeeperTransactions)"` — and the set is **version-dependent** (a missing column means the version has no such counter, not that it was 0); values are per hour and, in cloud mode, summed/maxed over all replicas; a `CurrentMetric_*` hourly **max** hides sub-hour dips.
+**Pairs with:** `metric_log_7_days` (memory and pools), `part_log_7_days` (merges stopped?), `query_log_details` (which codes in those hours), `zookeeper_connection`.
+
+### system.text_log_histogram_1_day
+**Why we run it:** the 2000-row `text_log` slice is the newest lines only; on a chatty server that is a few minutes. The histogram covers the whole day at hour × level × component granularity.
+**Question:** when did Warning/Error volume change, in which component, and what did a typical line say?
+**Read first:** Error and Fatal `count` per hour; the `logger_class` values that appear only in the incident hours; their `example`.
+**Healthy looks like:** a flat, low Warning baseline from a few loggers, Error counts near zero, no Fatal.
+**Red flags:** an hour where Error `count` is 10× the quiet hours (HC-11.5); classes typical of an incident: `ZooKeeperClient`, `DDLWorker`, `DatabaseReplicated`, `InterserverIOHTTPHandler`, `MergeTreeBackgroundExecutor`, `*::MetaInKeeper`/`DiskS3`, `executeQuery` with `Code: 107`; `BackgroundSchedulePool` "Temporarily pause scheduling" in the thousands (merges/fetches being throttled).
+**Traps:** `logger_class` is a normalisation (table-specific loggers collapse to their component; plain loggers stay as they are); `example` is *one* line per cell, not the worst; gov hashes both.
+**Pairs with:** `system.text_log` (the exact newest lines), `logs/*.err.log` (grep the hour), `query_log_details` (same hours).
+
+### system.error_log_7_days (≥ 24.8)
+**Why we run it:** `system.errors` is a cumulative counter since restart; `error_log` is its history — every code raised anywhere in the server, including background threads that never touch `query_log`, per hour.
+**Question:** when did each error code start and stop; did 999/242/252/107 happen at night with no query to show for it?
+**Read first:** `errors` per hour for 999, 242, 252, 107, 499, 241; `remote = 1` rows (errors received from other servers — interserver/distributed); the first hour a code appears.
+**Healthy looks like:** a flat, low baseline of expected codes (60 UNKNOWN_TABLE from probes, 516 auth noise), no bursts.
+**Red flags:** bursts that line up with the Keeper health test hours (HC-3.8); a code present in every hour at a steady rate (a retry loop — P-41/P-47); `remote = 1` bursts (peers failing, 86/221).
+**Traps:** absent below 24.8 or when `<error_log>` is disabled; counts are events, not distinct incidents; the error *name* is the ClickHouse constant, not a message — pair with `system.errors.last_error_message` and `text_log`.
+**Pairs with:** `system.errors` (message + trace), `query_log_details` (which queries), `part_log` (which merges), `metric_log_coordination`.
+
+### system.text_log_keeper_1_day
+**Why we run it:** the session-lifecycle lines (`Session expired`, `Finalizing session`, `Connected to ZooKeeper at <host>`, `Trying to establish a new connection`) are Information/Debug level, so the Warning-and-worse `text_log` slice never has them; they give the *minute* of a session loss and the Keeper host the server moved to.
+**Question:** when exactly did this server lose and regain its Keeper session, how often, to which host?
+**Read first:** `marker` counts per hour (`session_expired`, `session_finalized`, `reconnecting`, `connected`), `first_seen`/`last_seen`, the `connected` `example` (host:port).
+**Healthy looks like:** no rows, or a single `connected` at server start.
+**Red flags:** `session_expired`/`reconnecting` in the hours the Keeper health test (HC-3.8) flagged; repeated reconnects to *different* hosts (leader flapping); `connection_loss`/`operation_timeout` bursts.
+**Traps:** one day only (`text_log` volume); a server with `text_log` level above Information will show nothing — say so; gov hashes the example.
+**Pairs with:** `metric_log_7_days` / `metric_log_coordination` (the hours), `zookeeper_connection` (current session), `configuration/zookeeper.xml` (which hosts exist).
+
+### system.zookeeper_log_1_day (only when enabled)
+**Why we run it:** the client-side record of every Keeper request — the only per-hour view of Keeper latency, errors and session churn a ClickHouse server has.
+**Question:** when did requests start failing or slowing, which operations, how many sessions did this server go through?
+**Read first:** Response rows with `error != 'ZOK'` per hour (`ZSESSIONEXPIRED`, `ZCONNECTIONLOSS`, `ZOPERATIONTIMEOUT`, `ZBADVERSION`); `sessions` per hour; `p99_duration_ms` trend; `requests` per hour vs baseline.
+**Healthy looks like:** `sessions` 1 (or the number of configured connections), errors limited to `ZNONODE`/`ZNODEEXISTS` (normal control flow), p99 in the low milliseconds.
+**Red flags:** `sessions > 2` in an hour (HC-3.10, session churn = expirations); expiry/loss errors; p99 ×10 in the hour *before* the failures (Keeper was saturated first — check its memory/disk); `requests` collapsing to near zero (no session at all).
+**Traps:** absent file = `<zookeeper_log>` not configured, not health; one day only and very large tables — `-from/-to` re-collection is expensive; `error` is NULL on Request rows; durations are reported in ms on every version (converted from microseconds on ≥ 24.3).
+**Pairs with:** `metric_log_coordination` (same hours from ProfileEvents), `zookeeper_connection`, `configuration/zookeeper.xml`.
+
+### system.blob_storage_log_7_days (≥ 23.11, only when enabled)
+**Why we run it:** object-storage operations leave no trace in `part_log`; this is where a deleted or never-uploaded blob can be seen.
+**Question:** did uploads fail; when were blobs deleted; does a delete precede the reads that now fail?
+**Read first:** `failed = 1` rows and their `example_error`; `Delete` counts per hour vs baseline; `Upload`/`MultiPartUpload*` bytes per hour (write throughput).
+**Healthy looks like:** `failed = 0` everywhere, deletes a steady fraction of uploads (merges replacing parts).
+**Red flags:** failed uploads (HC-4.9 — the part's data never reached the bucket; a later read fails with 107/`NoSuchKey`); a delete burst followed by 107 errors on the same tables (P-58); errors mentioning 403/credentials (a policy or key rotation problem, not data loss).
+**Traps:** absent = table not configured; `bytes` excludes `Delete` rows (their `data_size` is a sentinel); the log names blobs by key, not by table — the owner maps a key to a part with `system.remote_data_paths`, which the bundle does not ship (too large).
+**Pairs with:** `system.disks`/`storage_policies` (which disk), `query_log_details` 107 by table, `system.metrics` cache-object counts per replica.
+
+### system.text_log (24 h slice, ≤ 2000 rows, severity first, ≤ 200 rows per logger)
 **Why we run it:** the server's recent warnings and errors with full text — Keeper session loss, merge failures, retry loops and 'Too many parts' appear here with the object they concern.
 **Question:** what did the server itself complain about most recently?
 **Read first:** `min(event_time)` — if it is minutes before `max(event_time)`, the cap was hit and the slice is a snapshot, not a day (HC-11.4); then `logger_name` histogram; then the newest 20 Error/Fatal rows; then `Code: NNN` histogram from `message`.
@@ -333,3 +432,12 @@ Reading: step 1 tells you *which side* is behind, step 2 whether capacity is exh
 2. `logs/clickhouse-server.log` → `Starting ClickHouse`/`Received termination signal` timeline; `<Fatal>` blocks; the startup warning block.
 3. `host_info.json` → `memory.available_bytes`, cgroup limit, THP, overcommit.
 4. `system.query_log_details_7_days` → the hash of `crash_log.query_id`'s pattern; `system.errors` 49/1001 counts.
+
+### Keeper outage on a cluster whose tables live on object storage
+
+1. `system.metric_log_coordination_7_days` → the hours where `sum(ProfileEvent_ZooKeeperHardwareExceptions)` explodes and `…ZooKeeperTransactions` collapses (HC-3.8). Those hours are the incident; everything else is before or after.
+2. `system.part_log_7_days` → `MergeParts` with `error = 999` in those hours, then hours with `NewPart > 0` and `MergeParts = 0` (HC-2.11): merges stopped. `system.query_log_details_7_days` → 999/319 on inserts, 571 and 57 (`.tmp.inner_id` UUID collisions) on DDL, then 252 on the busiest insert target (P-57).
+3. `system.zookeeper_connection` → session age since recovery; `system.zookeeper_log_1_day` (if present) → sessions per hour and `ZSESSIONEXPIRED`; `configuration/zookeeper.xml` → ensemble size; `system.databases` → `Replicated` count (load multiplier).
+4. `system.distributed_ddl_queue` → entries not `Finished`, the replayed `CREATE OR REPLACE` statements (HC-3.11). `system.errors` → 221/86 counts vs `Uptime` (recovery noise or persisting).
+5. **After recovery:** `query_log_details` → 107 `FILE_DOESNT_EXIST` / `The specified key does not exist` on `Active` parts by table; `system.disks.type = ObjectStorage` + `storage_policies` confirm object storage; `system.metrics` per replica → `MetadataFromKeeperCacheObjects` skew; `blob_storage_log_7_days` → deletes/failed uploads for the hour (P-58). Recommend metadata refresh (`SYSTEM RESTART REPLICA`, `SYSTEM DROP DISK METADATA CACHE`, rolling restart) before anything that touches data.
+6. **Coverage caveat:** on a SharedMergeTree cluster an `onprem` bundle is one replica of N (HC-0) — say which, and propose `-mode cloud` for the cluster view. Keeper's own logs and `mntr` output are not in the bundle; ask for them.

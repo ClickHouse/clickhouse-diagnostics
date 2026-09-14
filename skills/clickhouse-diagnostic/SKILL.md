@@ -58,10 +58,10 @@ Every finding cites `file → column → value`. Never modify the bundle. Never 
 4. If the user's incident is outside the covered window, say so now and propose the `-from/-to` re-run (running-the-tool §8). Continue with what the bundle *does* cover.
 
 ### 1 — Triage the headline
-From the pre-pass and `dashboard.html` `DATA.alerts` / `alerts_summary.json`: fired alerts (never count "could not run" as findings), `crash_log` rows, read-only replicas, disks < 15 %, top `system.errors` codes relative to uptime, `replication_queue.last_exception`. Write the 1–3 headline bullets; everything else is detail.
+From the pre-pass and `dashboard.html` `DATA.alerts` / `alerts_summary.json`: fired alerts (never count "could not run" as findings), `crash_log` rows, read-only replicas, disks < 15 %, top `system.errors` codes relative to uptime (`asynchronous_metrics.Uptime`), `replication_queue.last_exception`, the **incident hours** — hours where `metric_log_coordination` shows Keeper hardware exceptions, `part_log` shows inserts without merges, or `query_log` exceptions spike (the pre-pass prints an hourly timeline). Write the 1–3 headline bullets; everything else is detail.
 
 ### 2 — Area health pass
-Walk `health-checks.md` HC-1 → HC-11 in order, opening the `file-guide.md` entry for each file you touch and using the recipes in `reading-recipes.md` (`clickhouse local` if available, else Python; `jq` only for non-numeric filtering). Record one status per area with its single most specific evidence line. Respect the two data traps: `query_log_details` rows are duplicated per table (`LEFT ARRAY JOIN tables`) — fix one `tables` value before summing; `system.errors.value` is cumulative since restart — compare with uptime, never treat as a rate. Read `system.parts` with `active = 1` only.
+Walk `health-checks.md` HC-1 → HC-11 in order — and run the **Keeper health test** (HC-3.8: hardware exceptions *and* transactions per hour against the 7-day median) whenever any 999/319/571, read-only replica or stalled-merge hour appears — opening the `file-guide.md` entry for each file you touch and using the recipes in `reading-recipes.md` (`clickhouse local` if available, else Python; `jq` only for non-numeric filtering). Record one status per area with its single most specific evidence line. Respect the two data traps: `query_log_details` rows are duplicated per table (`LEFT ARRAY JOIN tables`) — fix one `tables` value before summing; `system.errors.value` is cumulative since restart — compare with uptime, never treat as a rate. Read `system.parts` with `active = 1` only.
 
 ### 3 — Query analysis (only if `query_analysis/` exists)
 Read `file-guide.md` → *query_analysis/* first. Order matters:
@@ -95,6 +95,9 @@ Point them to `references/running-the-tool.md`: grants (`SHOW DATABASES, SHOW TA
 - Do **not** parse quoted 64-bit integers as JavaScript/`jq` numbers.
 - Do **not** conclude "no errors" from `system.text_log` (24 h, 2000-row cap) — check its actual span.
 - Do **not** trust `host_info.json` when the tool ran on a different machine than the server.
+- Do **not** read an `onprem` bundle from a SharedMergeTree / `cloud_mode = 1` cluster as the cluster: it is one replica of N (parts, errors, part_log, query_log, text_log are per replica). Say which node, and propose `-mode cloud`.
+- Do **not** conclude "Keeper was fine" from `query_log`: background merges, fetches and part commits never appear there. Read `metric_log_coordination_7_days` (`ZooKeeperHardwareExceptions` per hour) and `part_log` errors first.
+- Do **not** treat an absent `zookeeper_log_1_day` / `blob_storage_log_7_days` as evidence of anything — both tables exist only when configured.
 - Do **not** call anything a known issue, name a fix version you have not verified, or cite an issue you have not opened.
 - Do **not** promote a measurement to an attribution in customer-facing text.
 - Do **not** modify, re-pack, or upload the bundle; do not paste `configuration/`, `logs/`, `host_info.json` or DDL verbatim outside the machine.
