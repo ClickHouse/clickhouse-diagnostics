@@ -1,14 +1,88 @@
 # ClickHouse Diagnostic Tool
 
-A Go-based diagnostic tool for ClickHouse that collects system information, runs a curated set of diagnostic queries, evaluates alert rules, and produces an HTML dashboard plus a shareable archive.
+## What this is for
 
-- **Per-environment query sets** — separate query directories for Cloud, on-prem, and government (hashed-PII) deployments, selected via `-mode`
-- **Version-aware query execution** — automatically picks the highest-compatible query variant for the connected server
-- **YAML-driven alerts** — drop a `.yaml` file in `alerts/` and the tool will run it, validate the SQL is read-only, and surface fired alerts in the dashboard
-- **Query analysis mode** — focus the collection on one `query_id` (or `normalized_query_hash`) and get a `query_analysis/` slice covering query_log, text_log, processors_profile_log, and a fast-vs-slow comparison
-- **HTML dashboard** — single-file `dashboard.html` rendered into the output directory with key charts, alert results, and (when scoped) the query-analysis breakdown
-- **Safe config collection** — passwords, tokens, and secrets are stripped from collected XML config files before they leave the host
-- **Archive packaging** — bundles results, sanitised configs, alerts, and the dashboard into a single `tar.gz`
+When a ClickHouse server misbehaves — inserts rejected, queries running out of memory, a replica read-only, a disk filling up — the answers are already in its `system` tables, its logs and the host it runs on. Getting them out by hand means a dozen queries, a config copy, a log tail, and a round-trip with support for each thing you forgot.
+
+`clickhouse-diagnostic` collects that evidence **once, read-only, in one command**, and packs it into a single `clickhouse_backup_<timestamp>.tar.gz` you can keep, share with support, open in the bundled `dashboard.html`, or hand to an AI assistant that knows how to read it (see [Reading the bundle](#reading-the-bundle)). It never reads customer rows, strips credentials from configuration files, and can hash identifiers (`gov` mode) when the bundle must cross a trust boundary.
+
+Under the hood: per-environment query sets (`cloud` / `onprem` / `gov`) selected with `-mode`, version-aware query variants picked for the connected server, YAML-driven read-only alert rules, an optional query-analysis slice for one `query_id`/`normalized_query_hash`, a self-contained HTML dashboard, and a `tar.gz` archive of everything.
+
+## What it collects and why
+
+| Collected | Question it answers | Why it is in the bundle |
+|---|---|---|
+| `system.version` | Which build is this? | Every default, limit and bug fix is version-specific. |
+| `system.parts` (active, largest 50 000) | How many parts, how big, how fragmented, on which disk? | Part count per partition is the earliest signal of insert/merge trouble (`TOO_MANY_PARTS`). |
+| `system.part_log_7_days` (hourly aggregation of `system.part_log`) | Are merges keeping up with inserts; did any merge or mutation fail? | Shows insert size, merge throughput and failing background operations with their error codes. |
+| `system.merges`, `system.mutations` | What is merging or mutating right now; what is stuck? | A stuck merge or a mutation backlog is the usual reason parts pile up while the pool looks idle. |
+| `system.replicas`, `system.replication_queue` | Is every replica writable and caught up; if not, why? | Read-only state, Keeper session loss and the shape of the queue locate replication problems. |
+| `system.query_log_details_7_days` (hourly aggregation of `system.query_log`) | What ran, how slow, how much memory, what failed, by whom? | Most incidents start with the workload; this is the aggregated view, with a 500-character sample per query pattern and no customer rows. |
+| `system.errors`, `system.text_log` (24 h) | Which errors, how often, with what message? | Fast triage by error code; the log slice gives the server's own words. |
+| `system.metric_log_7_days` (hourly aggregation of `system.metric_log`) | Memory and background-pool load over time | Tells "the server was overloaded" apart from "one query misbehaved". |
+| `system.disks`, `system.detached_parts` | Is disk running out; has data been set aside as broken? | A full disk explains many other symptoms; detached parts record corruption or replication leftovers. |
+| `system.tables`, `system.columns`, `system.dictionaries`, `system.clusters` | Schema, keys, materialized views, dictionaries, topology | Findings in parts and queries are *explained* by the schema and the cluster definition. |
+| `system.settings`, `system.server_settings` (≥ 23.4) | Which query/profile and server settings deviate from their defaults | Answers "what was tuned" without a config copy — cloud bundles have no `configuration/`; identifying server values are `REMOVED` in gov. |
+| `system.asynchronous_insert_log` (7 days) | Are async-insert flushes succeeding and how slow are they? | A lost flush is silent when `wait_for_async_insert = 0`. |
+| `system.crash_log`, `system.stack_trace` | Did the server crash; what were its threads doing? | Crash evidence needs the trace and the query that triggered it. |
+| `host_info.json` (onprem) | OS, CPU, RAM, disks, THP, overcommit, limits, cgroups | A large share of self-managed incidents are host settings ClickHouse itself warns about at startup. |
+| `logs/` (onprem) | Restarts, startup warnings, fatal stacks, the first error of an incident | System tables lose this on restart; the log files keep it. |
+| `configuration/` | Which settings deviate from defaults | Memory limits, pools, Keeper, storage policies, log-table TTLs — with credentials removed. |
+| Alert results + `dashboard.html` | What is already over a threshold | Eleven read-only rules give the headline before anyone reads a file. |
+
+Details per file (columns, windows, gov differences) are in [Modes and Query Layout](#modes-and-query-layout) and, for readers of the bundle, in `skills/clickhouse-diagnostic/references/file-guide.md`.
+
+## Quick start
+
+```bash
+make build                                   # → ./bin/clickhouse-diagnostic  (or download a release binary)
+cd <directory containing queries.onprem/ queries.cloud/ queries.gov/ alerts/>   # query folders are resolved from the CWD
+
+# self-managed node (host facts + logs are collected because the tool runs on the server)
+./bin/clickhouse-diagnostic -mode onprem -host localhost -user sys_read_only
+
+# ClickHouse Cloud service
+./bin/clickhouse-diagnostic -mode cloud -host <svc>.<region>.aws.clickhouse.cloud -port 8443 -protocol https \
+  -user sys_read_only -skip-config
+
+# hashed identifiers, for bundles that must leave your organisation
+./bin/clickhouse-diagnostic -mode gov -host ch-01 -user sys_read_only -salt <YourPrivateSalt>
+```
+
+> **Passing the password non-interactively.** `-password` is the only non-interactive option (there is no environment variable; the prompt needs a TTY). Export the variable in one statement and use it in the next — `export CH_PASS='…'` then `-password "$CH_PASS"`. The one-liner `CH_PASS='…' ./clickhouse-diagnostic … -password "$CH_PASS"` sends an **empty** password (the shell expands `$CH_PASS` before the assignment) and fails with `401 … Code: 194 (REQUIRED_PASSWORD)` after printing `Enter Password:`. Flags are visible in `ps` and shell history, so rotate the password after a scripted run.
+
+Each run leaves `clickhouse_backup_<ts>.tar.gz` in the current directory and the unpacked results under `clickhouse_results/clickhouse_backup_<ts>/` (open `dashboard.html` there). Before the first run create the read-only user — see [Required grants](#required-grants). Useful next steps:
+
+```bash
+./bin/clickhouse-diagnostic -mode onprem -host ch-01 -from 2026-08-14T09:00:00Z -to 2026-08-14T13:00:00Z   # just the incident window
+./bin/clickhouse-diagnostic -mode onprem -host ch-01 --normalized-query-hash <hash>                         # deep-dive one query pattern
+./bin/clickhouse-diagnostic -mode onprem -host ch-01 -dry-run                                               # list every query it would run, collect nothing
+```
+
+## Reading the bundle
+
+Three options, in increasing depth:
+
+1. **`dashboard.html`** — open it from the results folder; alerts, storage, query activity, replication, disks, host tunables and (when requested) query analysis, all in one self-contained page. See [Dashboard](#dashboard).
+2. **`inspect_bundle.py`** — a standard-library Python pre-pass that prints coverage, inventory and the deterministic health checks in the terminal, from the archive or the folder:
+   ```bash
+   python3 skills/clickhouse-diagnostic/scripts/inspect_bundle.py clickhouse_backup_<ts>.tar.gz
+   ```
+3. **The AI skill** — `skills/clickhouse-diagnostic/` teaches Claude Code, Codex CLI or any assistant that reads `SKILL.md`/`AGENTS.md` how to read a bundle and how to run the tool: what each file answers, thresholds aligned with the alert rules, an anonymised catalogue of recurring ClickHouse failure patterns, a summary template with evidence (`file → column → value`), recommended actions and follow-up prompts, and the exact re-collection command when the bundle does not cover the question. In Claude Code the skill is auto-discovered when you open this repository (`.claude/skills/clickhouse-diagnostic`, a symlink) — run `/clickhouse-diagnostic <bundle>` or ask "analyse this bundle"; Codex is pointed at it by the root `AGENTS.md` (`.agents/skills/clickhouse-diagnostic`). To use it from another directory, copy or symlink `skills/clickhouse-diagnostic` into your assistant's skills folder. The skill never modifies or uploads the bundle; see `skills/clickhouse-diagnostic/references/privacy.md`.
+
+## What leaves your machine
+
+Before sending an archive to anyone:
+
+- The tool **never selects customer rows** — every query reads a `system` table. Free-text columns can still carry customer values (query text, exception messages, log lines); see [Gov mode and hashed names](#gov-mode-and-hashed-names) for what is withheld or hashed when that matters.
+- `configuration/` is **credential-stripped** (passwords, keys, tokens, PEM blocks) but keeps hostnames, IPs, cluster topology and table names — review it before sharing. See [Configuration Collection](#configuration-collection).
+- `-dry-run` prints every SELECT the tool would run, with `EXPLAIN ESTIMATE`, and collects nothing — use it for a security review first. See [Dry-run mode](#dry-run-mode).
+- `gov` mode hashes database/table/user/host names with your private salt and withholds the dashboard, query text, configs, host facts and logs. **The salt and the local `*_gov_name_mapping.csv` never leave your machine.**
+- `alerts_summary.json` (when written) contains rule names and counts only, never matched rows.
+
+---
+
+*The sections below are the full reference.*
 
 ## Usage
 
@@ -667,8 +741,8 @@ The repo ships with 11 alert rules in `alerts/`. They are intended as a starting
 | `disk_space_low` | critical | Any disk has less than 15% free space — **on any replica** in cloud mode, with the reporting host named in the message |
 | `keeper_exception_spike` | warning | More than 20 KEEPER_EXCEPTION (code 999) errors in the last hour |
 | `high_exception_rate` | warning | More than 50 query exceptions for a single exception code in the last hour |
-| `too_many_simultaneous_queries` | warning | More than 10 code-252 errors in the last hour (`max_concurrent_queries` hit) |
-| `too_many_parts` | warning | A partition has more than 300 active parts (CH throttles at 1000) |
+| `too_many_simultaneous_queries` | warning | More than 10 code-202 (`TOO_MANY_SIMULTANEOUS_QUERIES`) errors in the last hour (`max_concurrent_queries` hit) |
+| `too_many_parts` | warning | A partition has more than 300 active parts (inserts are delayed from `parts_to_delay_insert` = 1000 and rejected with code 252 `TOO_MANY_PARTS` at `parts_to_throw_insert` = 3000) |
 | `large_parts` | warning | A single active part is larger than 150 GB |
 | `mutation_running_too_long` | warning | A mutation has been running for more than 3 hours |
 | `detached_parts_exist` | info | Parts exist in the `detached/` folder (failed merges, manual detach, replication conflicts) |
@@ -810,7 +884,7 @@ When `-skip-dashboard` is not set, the tool generates a single self-contained `d
 | 13 | 🌐 **Cluster Nodes** (cloud mode only) | Hosts in the `default` cluster with shard / replica / active status |
 | 14 | 🔁 **Replicas Health** | Replication-delay distribution, queue-size by table, per-replica details (only shown when replicated tables exist) |
 | 15 | 💾 **Disk Usage** | Free vs used space per disk plus a disk-details table |
-| 16 | 🛑 **Server Error Counters** | Top 20 cumulative error codes from `system.errors`, high-part-count partitions (>100 parts → potential code-497 risk), and TTL activity from `part_log` |
+| 16 | 🛑 **Server Error Counters** | Top 20 cumulative error codes from `system.errors`, high-part-count partitions (>100 parts → potential code-252 `TOO_MANY_PARTS` risk), and TTL activity from `part_log` |
 | 17 | ⚡ **Async Insert Activity** (last 24 h) | Flush count per hour by status — section is hidden when `system.asynchronous_insert_log` is empty or in gov mode |
 
 In addition, when `--query-id` or `--normalized-query-hash` is set, a **🔍 Query Analysis** section appears near the top of the nav. See [Query analysis mode](#query-analysis-mode) for what it contains.
