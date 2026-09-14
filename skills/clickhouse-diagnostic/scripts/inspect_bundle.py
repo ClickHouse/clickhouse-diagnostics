@@ -225,7 +225,7 @@ def detect_mode(base: str, files) -> str:
     clusters = read_jsonl(first("system.clusters_*.jsonl", base))
     if any("clickhouse.cloud" in str(r.get("host_name", "")) for r in clusters):
         return "cloud"
-    pl = read_jsonl(first("system.part_log_3_days_*.jsonl", base))
+    pl = read_jsonl(first("system.part_log_*_days_*.jsonl", base))
     hosts = {r.get("hostname") for r in pl if r.get("hostname")}
     if len(hosts) > 1:
         return "cloud"
@@ -486,7 +486,7 @@ def analyse(base: str):
                 "distributed_ddl_queue, query_log Create rows with empty user", "P-57")
 
     # ---- part_log: merges stalled / failing background operations per hour
-    pl_rows = read_jsonl(first("system.part_log_3_days_*.jsonl", base))
+    pl_rows = read_jsonl(first("system.part_log_*_days_*.jsonl", base))
     if pl_rows:
         for r in pl_rows:
             h = hour_key(r.get("time"))

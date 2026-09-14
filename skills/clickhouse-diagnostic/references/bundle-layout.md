@@ -6,7 +6,7 @@ Read this before opening any file in a bundle. It describes the archive produced
 
 ```
 clickhouse_backup_YYYYMMDD_HHMMSS/            # single top-level entry of the .tar.gz
-├── system.<table>[_7_days|_1_day]_<ts>.jsonl  # one file per collection query (JSONEachRow)
+├── system.<table>[_7_days|_3_days|_1_day]_<ts>.jsonl  # one file per collection query (JSONEachRow); the suffix is the window — bundles from older tool builds name part_log `_7_days`
 ├── text_log_<ts>.jsonl                        # only with --collect-text-log (UTC stamp, may differ by 1 s)
 ├── query_analysis/<name>_<ts>.jsonl           # only with --query-id / --normalized-query-hash (12 files)
 ├── configuration/…                            # sanitised XML/YAML, source tree preserved (never in gov)
