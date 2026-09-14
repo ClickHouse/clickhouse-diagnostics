@@ -417,11 +417,16 @@ def analyse(base: str):
                 f"num_parts={mg.get('num_parts')} memory={human(mg.get('memory_usage'))} is_mutation={mg.get('is_mutation')}", "HC-2.5")
     muts = read_jsonl(first("system.mutations_*.jsonl", base))
     if muts:
-        per_table = Counter((r.get("database"), r.get("table")) for r in muts)
+        # `finished_mutations_to_keep` (default 100) means the file also holds
+        # completed mutations, so a plain row count crosses the >100 threshold on
+        # retention alone. Count only rows with work left, the same way HC-8.1
+        # below does — `number_of_mutations_to_throw` counts unfinished ones too.
+        pending = [r for r in muts if (num(r.get("parts_to_do")) or 0) > 0]
+        per_table = Counter((r.get("database"), r.get("table")) for r in pending)
         for (db, tb), c in per_table.most_common(5):
             if c > 100:
                 add("critical" if c >= 900 else "warning", "mutations", f"{db}.{tb} has {c} pending mutations (throws at number_of_mutations_to_throw, default 1000)",
-                    "system.mutations", "HC-8.2")
+                    f"{len(muts) - len(pending)} finished mutations in the file excluded", "HC-8.2")
         if run_ts:
             for r in muts:
                 ct = parse_dt(r.get("create_time"))
