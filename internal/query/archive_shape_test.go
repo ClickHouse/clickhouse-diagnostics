@@ -159,6 +159,14 @@ func TestTextLog_IncludesCritical(t *testing.T) {
 		if !strings.HasPrefix(filepath.Base(path), "system.text_log") {
 			continue
 		}
+		// text_log_keeper_1_day deliberately reads EVERY level: the Keeper
+		// session markers it counts ("Connected to ZooKeeper", "Finalizing
+		// session") are Information/Debug lines, so a Warning-and-worse
+		// filter would return nothing. It is a marker histogram, not a
+		// severity slice, and the Critical guarantee does not apply.
+		if strings.HasPrefix(filepath.Base(path), "system.text_log_keeper") {
+			continue
+		}
 		seen++
 		body := readFileForTest(t, path)
 		m := levelFilter.FindStringSubmatch(body)
