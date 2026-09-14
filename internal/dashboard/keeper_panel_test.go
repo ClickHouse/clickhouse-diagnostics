@@ -94,3 +94,22 @@ func TestTemplate_KeeperPanel(t *testing.T) {
 		}
 	}
 }
+
+// Replica Details is one row per replicated table (25 000 on a large shared
+// cluster). The charts may use every row; the table must page so the DOM
+// does not, and the first page must be the replicas that need attention.
+func TestTemplate_ReplicasTableIsPaginated(t *testing.T) {
+	for _, want := range []string{
+		`id="replicas-pagination"`, `id="replicas-scope"`,
+		"const REPLICA_PAGE=50;",
+		"rows.slice(start,start+REPLICA_PAGE)",
+		"window._replicaPg",
+	} {
+		if !strings.Contains(htmlTemplate, want) {
+			t.Errorf("replicas table pagination missing %q", want)
+		}
+	}
+	if strings.Contains(htmlTemplate, "renderTable('tbl-replicas',rows,") {
+		t.Error("replicas table renders every row again — page it")
+	}
+}

@@ -1927,7 +1927,9 @@ footer{text-align:center;color:var(--ink-muted);font-size:var(--click-font-size-
     </div>
   </div>
   <div class="sub-title">Replica Details</div>
+  <p class="host-note" id="replicas-scope"></p>
   <div class="tbl-wrap"><div id="tbl-replicas"></div></div>
+  <div class="pagination" id="replicas-pagination"></div>
 </section>
 
 <!-- ── KEEPER HEALTH ── -->
@@ -3397,11 +3399,35 @@ document.addEventListener('DOMContentLoaded',function(){
       document.getElementById('chart-replica-queue').parentElement.innerHTML='<p class="no-data">No queue entries</p>';
     }
 
-    renderTable('tbl-replicas',rows,
-      ['database','table','is_readonly','is_session_expired','is_leader',
+    // Replica Details is one row per replicated table — 25 000 rows on a
+    // large SharedMergeTree cluster. The charts above use every row; the
+    // table shows 50 at a time. Rows arrive ordered by absolute_delay DESC,
+    // is_readonly DESC, so page 1 is the replicas that need attention.
+    const REPLICA_PAGE=50;
+    let rpage=0;
+    const rcols=['database','table','is_readonly','is_session_expired','is_leader',
        'queue_size','inserts_in_queue','merges_in_queue','future_parts',
-       'parts_to_check','absolute_delay','active_replicas','total_replicas'],
-      r=>r.is_readonly?'error-row':(Number(r.absolute_delay||0)>60?'alert-row':''));
+       'parts_to_check','absolute_delay','active_replicas','total_replicas'];
+    const rclass=r=>r.is_readonly?'error-row':(Number(r.absolute_delay||0)>60?'alert-row':'');
+    const attention=rows.filter(r=>rclass(r)).length;
+    document.getElementById('replicas-scope').textContent=
+      rows.length+' replicated table'+(rows.length===1?'':'s')+' on this server'
+      +(attention?' — '+attention+' read-only or more than 60 s behind, listed first':' — none read-only or behind')
+      +(rows.length>REPLICA_PAGE?'; '+REPLICA_PAGE+' per page, sorted by delay.':'.');
+    function renderReplicas(){
+      const start=rpage*REPLICA_PAGE;
+      renderTable('tbl-replicas',rows.slice(start,start+REPLICA_PAGE),rcols,rclass);
+      const pg=document.getElementById('replicas-pagination');
+      const total=Math.ceil(rows.length/REPLICA_PAGE);
+      if(total<=1){pg.innerHTML='';return;}
+      let h='';
+      if(rpage>0) h+='<button onclick="window._replicaPg('+(rpage-1)+')">&#9664;</button>';
+      h+='<span class="cur">'+(rpage+1)+' / '+total+'</span>';
+      if(rpage<total-1) h+='<button onclick="window._replicaPg('+(rpage+1)+')">&#9654;</button>';
+      pg.innerHTML=h;
+    }
+    window._replicaPg=function(pp){rpage=pp;renderReplicas();};
+    renderReplicas();
   })();
 
   // ── Keeper health ─────────────────────────────────────────────────────────
