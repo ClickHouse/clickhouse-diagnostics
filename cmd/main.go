@@ -239,6 +239,18 @@ func main() {
 	fmt.Printf("ClickHouse server version: %d.%d.%d.%d\n",
 		serverVersion.Major, serverVersion.Minor, serverVersion.Patch, serverVersion.Build)
 
+	// SharedMergeTree clusters keep per-replica system tables; tell the
+	// operator when -mode onprem is about to collect one node of N. Best
+	// effort: a failed probe (no grant on system.settings, old server)
+	// simply produces no hint.
+	if mode == "onprem" {
+		if cloudMode, err := client.ExecuteQuery("SELECT value FROM system.settings WHERE name = 'cloud_mode'"); err == nil {
+			if hint := sharedMergeTreeHint(mode, cloudMode); hint != "" {
+				fmt.Println(hint)
+			}
+		}
+	}
+
 	// Query analysis is not available in gov mode: its results embed raw
 	// query text, exception messages, identifiers and full DDL
 	// (query_details, failed_queries, tables_for_query, text_log slices),
