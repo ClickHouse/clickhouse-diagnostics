@@ -1,0 +1,48 @@
+name: keeper_connection_blips
+title: "Keeper connection losses in an hour while traffic stayed normal"
+severity: warning
+description: |
+  More than 1000 ZooKeeperHardwareExceptions in one hour of the last 7 days
+  while this server still completed at least half of its usual Keeper
+  transactions (median hourly ZooKeeperTransactions over the same 7 days).
+  A session was lost and re-established — a Keeper leader change, a
+  restart of one Keeper node, a network hiccup — without Keeper becoming
+  unavailable. Hours where traffic also collapsed are reported by
+  keeper_health instead.
+
+  Repeated blips deserve attention: they abort merges and inserts in
+  flight (999 / 319) and force replicas to re-check their state.
+
+  Check: text_log 'Finalizing session' / 'Connected to ZooKeeper' in the
+  hour (which Keeper host did the server move to), Keeper logs for a
+  leader election at that time, part_log errors in the hour.
+tags:
+  - keeper
+  - reliability
+
+query: |
+  WITH
+    (
+      SELECT quantile(0.5)(tx)
+      FROM
+      (
+        SELECT toStartOfHour(event_time) AS h, sum(ProfileEvent_ZooKeeperTransactions) AS tx
+        FROM {sys.metric_log}
+        WHERE event_time > now() - INTERVAL 7 DAY
+        GROUP BY h
+      )
+    ) AS baseline
+  SELECT
+    toStartOfHour(event_time)                                   AS hour,
+    sum(ProfileEvent_ZooKeeperHardwareExceptions)               AS hw_exceptions,
+    sum(ProfileEvent_ZooKeeperTransactions)                     AS transactions,
+    round(100 * sum(ProfileEvent_ZooKeeperTransactions) / greatest(baseline, 1)) AS pct_of_usual
+  FROM {sys.metric_log}
+  WHERE event_time > now() - INTERVAL 7 DAY
+  GROUP BY hour
+  HAVING hw_exceptions > 1000
+     AND transactions >= 0.5 * baseline
+  ORDER BY hw_exceptions DESC
+  LIMIT 24
+
+message: "hour starting {hour}: {hw_exceptions} Keeper hardware exceptions while traffic stayed at {pct_of_usual}% of usual ({transactions} transactions) — session lost and re-established"

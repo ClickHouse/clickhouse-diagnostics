@@ -249,7 +249,7 @@ func TestPlaceholderInCommentIgnored(t *testing.T) {
 func TestShippedQueryDefaultWindows(t *testing.T) {
 	want := map[string]string{
 		"system.query_log_details_7_days.sql":       "7d",
-		"system.part_log_7_days.sql":                "7d",
+		"system.part_log_3_days.sql":                "3d",
 		"system.metric_log_7_days.sql":              "7d",
 		"system.asynchronous_insert_log_7_days.sql": "7d",
 		"system.text_log.sql":                       "1d",

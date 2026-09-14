@@ -118,3 +118,12 @@ help:
 	@echo "  release   - Create release builds for multiple platforms"
 	@echo "  install   - Install binary to GOPATH/bin"
 	@echo "  help      - Show this help message"
+
+# Render the dashboard from an anonymised, incident-shaped fixture (a Keeper
+# outage on a shared-storage cluster) so the Keeper Health panel and the
+# Keeper alerts can be reviewed without a live server. Writes
+# bin/keeper_incident_preview.html (Chart.js from CDN).
+.PHONY: dashboard-preview
+dashboard-preview:
+	mkdir -p bin
+	DASHBOARD_PREVIEW_DIR=$(CURDIR)/bin go test ./internal/dashboard -run TestBuildHTML_KeeperIncidentPreview -count=1 >/dev/null && echo "bin/keeper_incident_preview.html"

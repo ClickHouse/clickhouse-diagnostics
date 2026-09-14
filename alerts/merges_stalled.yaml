@@ -1,0 +1,36 @@
+name: merges_stalled
+title: "Parts were inserted but no merge completed for a whole hour"
+severity: warning
+description: |
+  In one or more hours of the last 24, system.part_log recorded more than
+  100 NewPart events and zero successful MergeParts events on this server.
+  Inserts kept creating parts while nothing merged them — the state that
+  ends in TOO_MANY_PARTS (code 252) once parts_to_delay_insert /
+  parts_to_throw_insert are reached.
+
+  Usual causes: Keeper unavailable (merges on replicated / shared tables
+  are assigned through Keeper), the merge pool saturated or paused
+  (SYSTEM STOP MERGES), or every merge failing (see failed_merges and
+  the background_operation_failures alert).
+
+  Check: metric_log for the same hours (ZooKeeperHardwareExceptions,
+  BackgroundMergesAndMutationsPoolTask), system.merges, system.parts
+  per partition, text_log 'Temporarily pause scheduling'.
+tags:
+  - parts
+  - merges
+  - keeper
+
+query: |
+  SELECT
+    toStartOfHour(event_time)                                     AS hour,
+    countIf(event_type = 'NewPart')                               AS new_parts,
+    countIf(event_type = 'MergeParts' AND error = 0)              AS merges,
+    countIf(event_type = 'MergeParts' AND error != 0)             AS failed_merges
+  FROM {sys.part_log}
+  WHERE event_time > now() - INTERVAL 24 HOUR
+  GROUP BY hour
+  HAVING new_parts > 100 AND merges = 0
+  ORDER BY hour
+
+message: "hour starting {hour}: {new_parts} parts inserted, 0 merges completed ({failed_merges} merges failed) — merges were not running"

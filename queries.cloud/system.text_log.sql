@@ -15,5 +15,10 @@ WHERE event_date >= toDate({from:1d}, timezone()) AND event_date <= toDate({to:n
   -- Critical sits between Fatal and Error in the level Enum8; "Warning and
   -- worse" is not complete without it.
   AND level IN ('Warning', 'Error', 'Critical', 'Fatal')
-ORDER BY event_time DESC
+-- Severity first (the level Enum orders Fatal < Critical < Error < Warning),
+-- then newest; at most 200 rows per (level, logger) so one chatty logger —
+-- e.g. thousands of identical Warning lines a minute — cannot fill the cap
+-- and hide the few Error lines that matter. LIMIT BY runs before LIMIT.
+ORDER BY level ASC, event_time DESC
+LIMIT 200 BY level, logger_name
 LIMIT 2000

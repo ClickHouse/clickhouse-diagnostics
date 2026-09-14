@@ -194,6 +194,17 @@ func TestFindVersionedFiles_RealRepoDirs(t *testing.T) {
 		// and must keep failing this check if that file ever goes missing.
 		"queries.onprem/system.server_settings.sql": true,
 		"queries.gov/system.server_settings.sql":    true,
+		// system.zookeeper_connection was added in 23.8 and
+		// system.blob_storage_log in 23.11; onprem/gov (floor 22.8) have no
+		// root variant. Cloud carries both at root (its floor is 23.5 on
+		// paper, but it has never run a build without these tables).
+		"queries.onprem/system.zookeeper_connection.sql":    true,
+		"queries.gov/system.zookeeper_connection.sql":       true,
+		"queries.onprem/system.blob_storage_log_7_days.sql": true,
+		"queries.gov/system.blob_storage_log_7_days.sql":    true,
+		// system.error_log was added in 24.8; same reasoning.
+		"queries.onprem/system.error_log_7_days.sql": true,
+		"queries.gov/system.error_log_7_days.sql":    true,
 	}
 	dirs := map[string]string{
 		"../../queries.onprem":         ".sql",
