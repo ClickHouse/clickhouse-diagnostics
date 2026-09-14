@@ -894,6 +894,10 @@ In addition, when `--query-id` or `--normalized-query-hash` is set, a **🔍 Que
 
 A sticky top nav at the page header lets you jump straight to any section. Sections that depend on cluster-specific or version-specific data (Crash Log, Cluster Nodes, Replicas Health, Async Inserts, Query Analysis) are hidden when there is nothing to show.
 
+### Previewing the Keeper Health panel without an outage
+
+`make dashboard-preview` renders `bin/keeper_incident_preview.html` from an anonymised fixture shaped like a real Keeper outage on a shared-storage cluster: 48 hours of Keeper counters (a blip on day one, quorum lost for eight hours on day two), the `keeper_health`, `keeper_connection_blips`, `merges_stalled`, `background_operation_failures`, `high_exception_rate` and `too_many_parts` alerts as they would fire, the error codes per hour and a re-established Keeper session. Use it to see what the panel and the alerts look like before an incident, or to review a theme or wording change.
+
 ### What's interactive vs static
 
 - **Interactive**: Tables Explorer (full text search, database/engine filters, pagination); all charts (hover tooltips, legend toggling).
