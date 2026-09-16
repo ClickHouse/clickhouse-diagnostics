@@ -16,6 +16,10 @@ SELECT
     log_pointer,
     absolute_delay,
     total_replicas,
-    active_replicas
+    active_replicas,
+    -- is_readonly = 1 says the replica stopped accepting writes; these two say
+    -- why. See queries.onprem/system.replicas.sql for the cost note.
+    last_queue_update_exception,
+    zookeeper_exception
 FROM clusterAllReplicas(default, system.replicas)
 ORDER BY absolute_delay DESC, database, table

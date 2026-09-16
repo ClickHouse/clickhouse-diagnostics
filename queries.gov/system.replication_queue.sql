@@ -1,5 +1,8 @@
 SELECT
   create_time,
+  -- database is hashed exactly as in system.replicas, so a queue entry can
+  -- still be joined to its replica row inside the bundle.
+  hex(SHA256(concat(database, '%salt%'))) AS database,
   hex(SHA256(concat(table, '%salt%'))) AS table,
   type,
   -- replica_name is conventionally the {replica} macro, i.e. a hostname —
@@ -7,6 +10,8 @@ SELECT
   hex(SHA256(concat(replica_name, '%salt%'))) AS replica_name,
   is_currently_executing,
   position,
+  -- num_tries is a plain counter with no identifier in it.
+  num_tries,
   -- postpone_reason and last_exception are server-generated text that
   -- routinely names parts, tables and paths, so both are hashed (as
   -- system.errors does with last_error_message).
