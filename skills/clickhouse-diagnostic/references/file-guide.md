@@ -110,19 +110,19 @@ Windows: `*_7_days` files cover the last 7 days (or `-from/-to`); `system.text_l
 ### system.replicas
 **Why we run it:** a replicated cluster under load degrades replica by replica: read-only state, expired Keeper sessions and `absolute_delay` show which replica is falling behind and whether writes are still accepted.
 **Question:** is replication healthy on every `Replicated*` table — connected to Keeper, writable, caught up?
-**Read first:** `is_readonly`, `is_session_expired`, `absolute_delay`, `queue_size` split into `inserts_in_queue`/`merges_in_queue`/`part_mutations_in_queue`, `parts_to_check`, `active_replicas`/`total_replicas`, `queue_oldest_time`.
+**Read first:** `is_readonly`, `is_session_expired`, `absolute_delay`, `queue_size` split into `inserts_in_queue`/`merges_in_queue`/`part_mutations_in_queue`, `parts_to_check`, `active_replicas`/`total_replicas`, `queue_oldest_time`, then `zookeeper_exception`/`last_queue_update_exception` for the reason behind a read-only or stalled replica.
 **Healthy looks like:** `is_readonly = 0`, `absolute_delay` a few seconds, `queue_size` small and draining, `active_replicas = total_replicas`.
-**Red flags:** `is_readonly = 1` (critical, HC-1.4, P-40), `absolute_delay > 60` (HC-3.1, P-41), `active_replicas < total_replicas` (HC-3.3 — a dead replica or a ghost in Keeper, P-43), `parts_to_check > 0` (suspicious parts), `queue_oldest_time` hours old.
-**Traps:** empty file = no replicated tables (normal on a single node); one row per table per replica; the file is sorted by `absolute_delay DESC`, so the first row is the worst.
+**Red flags:** `is_readonly = 1` (critical, HC-1.4, P-40), `absolute_delay > 60` (HC-3.1, P-41), `active_replicas < total_replicas` (HC-3.3 — a dead replica or a ghost in Keeper, P-43), `parts_to_check > 0` (suspicious parts), `queue_oldest_time` hours old, non-empty `zookeeper_exception` (Keeper-side failure — pairs with `system.errors` 999/242) or `last_queue_update_exception` (the replica cannot refresh its own queue).
+**Traps:** empty file = no replicated tables (normal on a single node); one row per table per replica; the file is sorted by `absolute_delay DESC`, so the first row is the worst; `zookeeper_exception` and `last_queue_update_exception` are hashed in gov (empty stays empty, so "is this replica erroring at all?" is still visible).
 **Pairs with:** `system.replication_queue` (why), `metric_log.zk_*` (Keeper health), `system.errors` 999/242.
 
 ### system.replication_queue
 **Why we run it:** when a replica falls behind, the queue says *why* — fetch-bound (`GET_PART`) vs merge-bound (`MERGE_PARTS`), the postpone reason and the last exception; any type above ~60 entries means a replica is becoming unavailable *(guideline)*.
 **Question:** what is the replica waiting to do, and why is it not doing it?
-**Read first:** `count()` by `type` (GET_PART = fetch-bound, MERGE_PARTS = merge-bound, MUTATE_PART, ALTER_METADATA); `postpone_reason` values; `last_exception` non-empty rows; oldest `create_time`; `is_currently_executing` count.
+**Read first:** `count()` by `type` (GET_PART = fetch-bound, MERGE_PARTS = merge-bound, MUTATE_PART, ALTER_METADATA); `postpone_reason` values; `last_exception` non-empty rows; `num_tries` on those rows; oldest `create_time`; `is_currently_executing` count.
 **Healthy looks like:** empty, or a few entries with recent `create_time` and empty `last_exception`.
-**Red flags:** any `type` > 60 entries *(guideline)* (HC-3.4), `last_exception` with 232/234 (part missing on source → P-41/P-43), 210/209 (fetch network failures → P-44), 40/226 (corrupt source → P-31); `postpone_reason` "N fetches already executing, max N" (fetch pool too small, P-41), "because part … is not ready" chains.
-**Traps:** `replica_name`, `postpone_reason` and `last_exception` are hashed in gov (empty stays empty, so "has an exception" is still visible).
+**Red flags:** any `type` > 60 entries *(guideline)* (HC-3.4), `last_exception` with 232/234 (part missing on source → P-41/P-43), 210/209 (fetch network failures → P-44), 40/226 (corrupt source → P-31); `postpone_reason` "N fetches already executing, max N" (fetch pool too small, P-41), "because part … is not ready" chains; a high `num_tries` on an entry that is still queued (retried and failing, not merely waiting its turn).
+**Traps:** `database`, `table`, `replica_name`, `postpone_reason` and `last_exception` are hashed in gov (empty stays empty, so "has an exception" is still visible); `num_tries` is not hashed.
 **Pairs with:** `system.replicas`, `configuration/` (`background_fetches_pool_size`, `<interserver_http_host>`), `system.clusters.errors_count`.
 
 ### system.processes
