@@ -86,7 +86,7 @@ func TestTemplate_KeeperPanel(t *testing.T) {
 		"if(!rows.length)return;",
 		"chart-keeper-traffic", "chart-keeper-exceptions", "chart-keeper-latency", "chart-keeper-errors",
 		"tbl-keeper-verdict", "tbl-keeper-connection",
-		"hw[i]>1000&&pct<50)return 'UNAVAILABLE'", // UNAVAILABLE: exceptions AND traffic collapse
+		"hw[i]>1000&&pct<50)return 'UNAVAILABLE'",                                 // UNAVAILABLE: exceptions AND traffic collapse
 		"if(pct===null)return hw[i]>1000?'exceptions, no traffic baseline':'ok';", // no baseline → never a blip
 		"DATA.keeper_errors_source",
 	} {
