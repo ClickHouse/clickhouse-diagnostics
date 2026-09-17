@@ -79,18 +79,21 @@ TTL work: `merge_reason IN ('TTLDeleteMerge','TTLRecompressMerge')` or `event_ty
 
 ```sql
 SELECT database, table, is_readonly, is_session_expired, absolute_delay, queue_size, inserts_in_queue,
-       merges_in_queue, parts_to_check, active_replicas, total_replicas
+       merges_in_queue, parts_to_check, active_replicas, total_replicas,
+       zookeeper_exception, last_queue_update_exception
 FROM file('$B/system.replicas_*.jsonl', JSONEachRow)
 ORDER BY is_readonly DESC, absolute_delay DESC LIMIT 10
 ```
 Queue shape (any single `type` > 60 entries is a replica falling behind):
 ```sql
-SELECT type, count(), countIf(last_exception != '') AS with_error, min(create_time) AS oldest
+SELECT type, count(), countIf(last_exception != '') AS with_error, max(num_tries) AS max_tries, min(create_time) AS oldest
 FROM file('$B/system.replication_queue_*.jsonl', JSONEachRow) GROUP BY type ORDER BY 2 DESC
 ```
+A non-empty `zookeeper_exception` names the Keeper-side failure behind a read-only replica, and `last_queue_update_exception` the local queue-update failure; a high `max_tries` on a type that is still queued means the entry is retrying and failing rather than waiting its turn. Both sets are hashed in gov (empty stays empty, so "is it erroring at all?" survives).
+
 Keeper health test (HC-3.8) — the two counters per hour against the 7-day median, with a verdict per hour:
 ```sql
-WITH (SELECT quantile(0.5)(toUInt64(zk_transactions)) FROM file('$B/system.metric_log_7_days_*.jsonl', JSONEachRow)) AS med
+WITH (SELECT quantileExactHigh(0.5)(toUInt64(zk_transactions)) FROM file('$B/system.metric_log_7_days_*.jsonl', JSONEachRow)) AS med
 SELECT time, toUInt64(zk_hw_exceptions) AS hw, toUInt64(zk_transactions) AS tx, round(100 * tx / greatest(med, 1)) AS pct_of_median,
        multiIf(hw > 1000 AND tx < 0.5 * med, 'UNAVAILABLE', hw > 1000, 'blip', tx < 0.1 * med, 'idle/disconnected', 'ok') AS verdict
 FROM file('$B/system.metric_log_7_days_*.jsonl', JSONEachRow)
