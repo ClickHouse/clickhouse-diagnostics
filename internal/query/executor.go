@@ -132,6 +132,7 @@ func (e *Executor) executeQuery(query internal.QueryFile, outputDir, timestamp s
 	// Read query from file
 	queryContent, err := os.ReadFile(query.FullPath)
 	if err != nil {
+		e.rec.Record(runlog.Entry{Stage: "collector", Name: query.Name, Source: query.DirName, Status: "failed", Rows: -1, Error: "error reading query file: " + err.Error()})
 		return fmt.Errorf("error reading query file: %w", err)
 	}
 
@@ -204,6 +205,8 @@ func (e *Executor) executeQuery(query internal.QueryFile, outputDir, timestamp s
 
 	// Save the result to a file
 	if err := os.WriteFile(outputPath, []byte(result), 0600); err != nil {
+		e.rec.Record(runlog.Entry{Stage: "collector", Name: query.Name, Source: query.DirName, Status: "failed",
+			Duration: elapsed, Bytes: int64(len(result)), Rows: -1, Error: "error saving result: " + err.Error()})
 		return fmt.Errorf("error saving result: %w", err)
 	}
 

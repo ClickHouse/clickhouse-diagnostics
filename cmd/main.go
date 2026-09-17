@@ -244,10 +244,16 @@ func main() {
 	// alert rule, every phase — written into the bundle as execution_log.txt
 	// so a reader can tell a failed collector from an empty table and see
 	// which queries are expensive on this server.
-	rec := runlog.New()
+	rec := runlog.New().WithGov(mode == "gov")
 	rec.SetMeta("mode", mode)
 	rec.SetMeta("server", fmt.Sprintf("%d.%d.%d.%d", serverVersion.Major, serverVersion.Minor, serverVersion.Patch, serverVersion.Build))
-	rec.SetMeta("target", fmt.Sprintf("%s:%s (%s)", host, port, protocol))
+	if mode == "gov" {
+		// The host is customer infrastructure; gov hashes host names in every
+		// result file, so the log must not carry it in clear either.
+		rec.SetMeta("target", fmt.Sprintf("(host redacted in gov mode) via %s", protocol))
+	} else {
+		rec.SetMeta("target", fmt.Sprintf("%s:%s (%s)", host, port, protocol))
+	}
 	if collectFrom.IsZero() && collectTo.IsZero() {
 		rec.SetMeta("window", "each query's own default look-back (7 days for most log tables, 3 days for part_log and metric_log_coordination, 1 day for text_log and zookeeper_log)")
 	} else {

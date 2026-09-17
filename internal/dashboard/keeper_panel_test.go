@@ -104,6 +104,7 @@ func TestTemplate_ReplicasTableIsPaginated(t *testing.T) {
 		"const REPLICA_PAGE=50;",
 		"rows.slice(start,start+REPLICA_PAGE)",
 		"window._replicaPg",
+		"const rows=[...allRows].sort((a,b)=>rank(b)-rank(a));", // attention rows first, before paging
 	} {
 		if !strings.Contains(htmlTemplate, want) {
 			t.Errorf("replicas table pagination missing %q", want)

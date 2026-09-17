@@ -520,6 +520,13 @@ def analyse(base: str):
 
     # ---- part_log: merges stalled / failing background operations per hour
     pl_rows = read_jsonl(first("system.part_log_*_days_*.jsonl", base))
+    # Servers below 23.11 get the root part_log collector, which aggregates in
+    # 12-hour buckets; the stalled-merge rule (NewPart > 100 with zero merges in
+    # an HOUR) is meaningless on those rows, so detect the width first.
+    pl_hours = {parse_dt(r.get("time")).hour for r in pl_rows if parse_dt(r.get("time"))}
+    pl_12h = bool(pl_rows) and pl_hours <= {0, 12} and len({parse_dt(r.get("time")) for r in pl_rows if parse_dt(r.get("time"))}) > 1
+    if pl_12h:
+        out["notes"].append("part_log is aggregated in 12-hour buckets (server < 23.11): the hourly stalled-merge check is skipped; merges/new-parts columns in the timeline are 12-hour totals")
     if pl_rows:
         for r in pl_rows:
             h = hour_key(r.get("time"))
@@ -535,7 +542,7 @@ def analyse(base: str):
                 t["merges"] += c
             if err:
                 t["failed_bg"][(et, err)] += c
-        stalled = sorted(h for h, t in timeline.items() if t["new_parts"] > 100 and t["merges"] == 0)
+        stalled = [] if pl_12h else sorted(h for h, t in timeline.items() if t["new_parts"] > 100 and t["merges"] == 0)
         if stalled:
             add("critical" if len(stalled) >= 3 else "warning", "merges",
                 f"{len(stalled)} hour(s) with inserts (NewPart > 100) and zero completed merges — merges were not running",
@@ -581,7 +588,13 @@ def analyse(base: str):
                 tl(h)["zk_tx"] = num(r.get("zk_transactions"))
 
     # ---- Keeper health test (HC-3.8): hardware exceptions AND transactions vs the 7-day median, per hour
-    tx_vals = sorted(t["zk_tx"] for t in timeline.values() if t["zk_tx"] is not None)
+    # The median is taken from metric_log_7_days whenever it exists — the same
+    # 7-day baseline alerts/keeper_health.yaml and the dashboard use — so the
+    # three surfaces agree; the 3-day coordination file only supplies the
+    # per-hour signals. Without the 7-day file, fall back to whatever hours are known.
+    ml7 = read_jsonl(first("system.metric_log_7_days_*.jsonl", base))
+    tx_vals = sorted(num(r.get("zk_transactions")) or 0 for r in ml7) if ml7 else \
+        sorted(t["zk_tx"] for t in timeline.values() if t["zk_tx"] is not None)
     tx_med = tx_vals[len(tx_vals) // 2] if tx_vals else 0
     tx_hours = [h for h, t in timeline.items() if t["zk_tx"] is not None]
     edge_hours = {min(tx_hours), max(tx_hours)} if tx_hours else set()  # partial buckets at both ends of the window
@@ -634,7 +647,7 @@ def analyse(base: str):
         flags = []
         if t["exceptions"] >= 50 and (t["exceptions"] >= 0.2 * max(t["queries"], 1) or t["exceptions"] >= 5 * max(med, 1)):
             flags.append("exceptions")
-        if t["new_parts"] > 100 and t["merges"] == 0:
+        if not pl_12h and t["new_parts"] > 100 and t["merges"] == 0:
             flags.append("no merges")
         if t.get("keeper"):
             flags.append(f"keeper {t['keeper']}")

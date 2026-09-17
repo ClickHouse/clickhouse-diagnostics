@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -53,6 +54,43 @@ type Recorder struct {
 	meta    []kv
 	entries []Entry
 	phases  []Phase
+	// gov strips free text before it is stored: server error messages name
+	// databases, tables, parts, paths and hosts, and the log lands in the
+	// same archive that hashes those identifiers everywhere else. Only the
+	// ClickHouse error code and its constant name survive.
+	gov bool
+}
+
+// WithGov enables gov-mode redaction of every free-text field.
+func (r *Recorder) WithGov(on bool) *Recorder {
+	if r != nil {
+		r.gov = on
+	}
+	return r
+}
+
+var (
+	reErrCode = regexp.MustCompile(`Code: (\d+)`)
+	reErrName = regexp.MustCompile(`\(([A-Z][A-Z0-9_]{2,})\)`)
+)
+
+// redactError keeps only what cannot identify a customer: the ClickHouse
+// error code and its constant name, e.g. "Code: 60 (UNKNOWN_TABLE)". A
+// message without either becomes a fixed marker.
+func redactError(msg string) string {
+	if msg == "" {
+		return ""
+	}
+	code := reErrCode.FindStringSubmatch(msg)
+	name := reErrName.FindStringSubmatch(msg)
+	switch {
+	case code != nil && name != nil:
+		return fmt.Sprintf("Code: %s (%s) — message redacted in gov mode", code[1], name[1])
+	case code != nil:
+		return fmt.Sprintf("Code: %s — message redacted in gov mode", code[1])
+	default:
+		return "error text redacted in gov mode"
+	}
 }
 
 type kv struct{ k, v string }
@@ -79,6 +117,11 @@ func (r *Recorder) Record(e Entry) {
 	if r == nil {
 		return
 	}
+	if r.gov {
+		e.Error = redactError(e.Error)
+		// Extra carries output file names (safe) or alert instance counts
+		// (safe); phase-style free text never reaches Extra. Nothing else to do.
+	}
 	if len(e.Error) > errorCap {
 		e.Error = e.Error[:errorCap] + "…"
 	}
@@ -92,6 +135,9 @@ func (r *Recorder) Record(e Entry) {
 func (r *Recorder) Phase(name string, d time.Duration, note string) {
 	if r == nil {
 		return
+	}
+	if r.gov && note != "" {
+		note = redactError(note)
 	}
 	r.mu.Lock()
 	r.phases = append(r.phases, Phase{name, d, note})

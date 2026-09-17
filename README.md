@@ -563,15 +563,15 @@ The tool targets **ClickHouse 22.8 and newer** for on-prem servers. Root-level q
 | `system.settings.default` | 23.4 | `queries.{onprem,gov}/23.4.1.0/` (`default` is the only column their roots omit; the cloud root has it) |
 | `system.clusters` replicated-db columns (`database_shard_name`, `database_replica_name`, `is_active`, `name`) | 23.5 | `queries.*/23.5.1.0/` |
 | `system.query_log.query_cache_usage` | 23.8 | `queries.query_analysis/23.8.1.0/` |
-| `system.zookeeper_connection` table | 23.8 | `queries.{onprem,gov}/23.8.1.0/` (no root file — skipped below 23.8; cloud carries it at root) |
+| `system.zookeeper_connection` table | 23.8 | `queries.*/23.8.1.0/` (no root file — skipped below 23.8 in every mode) |
 | `system.query_log.peak_threads_usage` | 23.9 | `queries.query_analysis/23.9.1.0/` |
 | `hostname` column in system log tables | 23.11 | `queries.*/23.11.1.0/` (roots use `hostName()`) |
-| `system.blob_storage_log` table (needs `<blob_storage_log>` config) | 23.11 | `queries.{onprem,gov}/23.11.1.0/` (no root file; cloud root) |
+| `system.blob_storage_log` table (needs `<blob_storage_log>` config) | 23.11 | `queries.*/23.11.1.0/` (no root file — skipped below 23.11 in every mode) |
 | `system.tables.total_bytes_uncompressed` | 23.12 | `queries.query_analysis/23.12.1.0/` |
 | `system.mutations.is_killed` | 24.1 | `alerts/24.1.1.0/` (root omits the filter) |
 | `system.tables.metadata_version` | 24.2 | `queries.*/24.2.1.0/` |
-| `system.error_log` table | 24.8 | `queries.{onprem,gov}/24.8.1.0/` (no root file; cloud root) |
-| `system.zookeeper_log.duration_microseconds` (replaces `duration_ms`) | 24.3 | `queries.{onprem,gov}/24.3.1.0/` (roots use `duration_ms`; output stays in ms on every rung; cloud root uses microseconds) |
+| `system.error_log` table | 24.8 | `queries.*/24.8.1.0/` (no root file — skipped below 24.8 in every mode) |
+| `system.zookeeper_log.duration_microseconds` (replaces `duration_ms`) | 24.3 | `queries.*/24.3.1.0/` (roots use `duration_ms`; output stays in ms on every rung) |
 | `system.tables.parameterized_view_parameters` | 25.4 | `queries.{onprem,cloud}/25.4.1.0/` (gov: not collected) |
 
 The dashboard (`internal/dashboard/generator.go`) builds its SQL dynamically, so instead of version directories it probes the live schema at runtime (`hasColumn`/`hasTable`) and adapts each panel — covering the same columns (`error_count`, `is_killed`, `bytes_on_disk`, the async table/`rows`, `crash_log`) plus optional tables that may be disabled by config.
@@ -737,7 +737,7 @@ The repo ships with 15 alert rules in `alerts/`. They are intended as a starting
 | `replica_readonly` | critical | A replicated table is in read-only mode (lost Keeper session, disk full, network partition) |
 | `replication_queue_errors` | critical | Replication queue entries have a non-empty `last_exception` |
 | `disk_space_low` | critical | Any disk has less than 15% free space — **on any replica** in cloud mode, with the reporting host named in the message |
-| `keeper_health` | critical | The two-signal Keeper health test per hour over 7 days: more than 1000 `ZooKeeperHardwareExceptions` **and** `ZooKeeperTransactions` below 50 % of the 7-day median (or traffic below 10 % regardless) — Keeper effectively unavailable; catches outages that never reached `query_log` |
+| `keeper_health` | critical | The two-signal Keeper health test per hour over 7 days: more than 1000 `ZooKeeperHardwareExceptions` **and** `ZooKeeperTransactions` below 50 % of the 7-day median — Keeper effectively unavailable (low traffic alone never fires: an idle hour is not an outage); catches outages that never reached `query_log` |
 | `keeper_connection_blips` | warning | More than 1000 `ZooKeeperHardwareExceptions` in an hour while Keeper traffic stayed at or above 50 % of usual — a session lost and re-established |
 | `keeper_exception_spike` | warning | More than 20 KEEPER_EXCEPTION (code 999) errors in one hour of the last 24 hours (one instance per hour) |
 | `high_exception_rate` | warning | More than 50 query exceptions for a single exception code in one hour of the last 24 hours (one instance per hour and code, worst 24) |

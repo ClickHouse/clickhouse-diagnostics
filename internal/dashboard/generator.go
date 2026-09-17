@@ -3349,10 +3349,17 @@ document.addEventListener('DOMContentLoaded',function(){
 
   // ── Replicas health ───────────────────────────────────────────────────────
   (function(){
-    const rows=DATA.replicas||[];
-    if(!rows.length)return;
+    const allRows=DATA.replicas||[];
+    if(!allRows.length)return;
     document.getElementById('sec-replicas').style.display='';
     document.getElementById('nav-replicas').style.display='';
+    // Attention first: read-only, then more than 60 s behind, then the rest —
+    // each group in the SQL's delay order (Array.prototype.sort is stable).
+    // Sorting only by delay, as the SQL does, could push a read-only table
+    // with a small delay off page 1 of the details table. The charts are
+    // order-insensitive, so they use the same array.
+    const rank=r=>r.is_readonly?2:(Number(r.absolute_delay||0)>60?1:0);
+    const rows=[...allRows].sort((a,b)=>rank(b)-rank(a));
 
     // delay distribution (bar)
     const delayBuckets={'0s':0,'<10s':0,'<60s':0,'<5m':0,'≥5m':0};

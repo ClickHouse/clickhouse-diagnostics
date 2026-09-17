@@ -73,3 +73,28 @@ func TestWrite_CreatesFileAndNilIsSafe(t *testing.T) {
 		t.Errorf("nil recorder must be a no-op, got %q %v", p, err)
 	}
 }
+
+func TestGovRedaction(t *testing.T) {
+	r := New().WithGov(true)
+	r.Record(Entry{Stage: "collector", Name: "system.parts.sql", Status: "failed", Rows: -1,
+		Error: "error executing query: non-OK status: 404, body: Code: 60. DB::Exception: Unknown table expression identifier 'customer_db.orders' in scope SELECT … (UNKNOWN_TABLE)"})
+	r.Record(Entry{Stage: "collector", Name: "system.tables.sql", Status: "failed", Rows: -1, Error: "dial tcp 10.1.2.3:8123: connection refused"})
+	r.Phase("dashboard", time.Second, "failed: could not read customer_db.orders")
+	out := r.Render(time.Now())
+	for _, leak := range []string{"customer_db", "orders", "10.1.2.3"} {
+		if strings.Contains(out, leak) {
+			t.Errorf("gov log leaks %q:\n%s", leak, out)
+		}
+	}
+	for _, want := range []string{"Code: 60 (UNKNOWN_TABLE) — message redacted in gov mode", "error text redacted in gov mode"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("gov log missing %q", want)
+		}
+	}
+	// Non-gov keeps the text.
+	plain := New()
+	plain.Record(Entry{Stage: "collector", Name: "x.sql", Status: "failed", Rows: -1, Error: "Code: 60. Unknown table customer_db.orders (UNKNOWN_TABLE)"})
+	if !strings.Contains(plain.Render(time.Now()), "customer_db.orders") {
+		t.Error("non-gov recorder must keep the error text")
+	}
+}

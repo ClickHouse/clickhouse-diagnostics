@@ -5,9 +5,12 @@ description: |
   The two-signal Keeper health test over the last 7 days, per hour. An hour
   fires when this server logged more than 1000 ZooKeeperHardwareExceptions
   (connection loss, session expiry, operation timeout) AND completed less
-  than half of its usual Keeper transactions — or when transactions fell
-  below 10 % of usual regardless of exceptions. "Usual" is the median
-  hourly ZooKeeperTransactions over the same 7 days.
+  than half of its usual Keeper transactions. "Usual" is the median hourly
+  ZooKeeperTransactions over the same 7 days. Low traffic on its own never
+  fires: a quiet night looks the same as a disconnected server in this
+  counter, and telling them apart needs ZooKeeperSession (system.metrics)
+  or the dashboard's per-hour verdict, which labels such hours
+  "idle/disconnected" instead.
 
   Both signals together mean Keeper was effectively unavailable to this
   server: sessions were expiring and the work that normally flows through
@@ -51,7 +54,8 @@ query: |
   WHERE event_time > now() - INTERVAL 7 DAY
   GROUP BY hour
   HAVING baseline > 0
-     AND ((hw_exceptions > 1000 AND transactions < 0.5 * baseline) OR transactions < 0.1 * baseline)
+     AND hw_exceptions > 1000
+     AND transactions < 0.5 * baseline
   ORDER BY hour
   LIMIT 48
 

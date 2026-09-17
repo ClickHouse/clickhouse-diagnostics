@@ -7,8 +7,7 @@
 -- (ZooKeeperTransactions, ZooKeeperWaitMicroseconds / ZooKeeperTransactions);
 -- session churn from text_log_keeper_1_day. Table exists only when
 -- <zookeeper_log> is configured.
--- Cloud root (< 24.3): per replica, duration_ms. The 24.3.1.0 variant reads
--- the microseconds column; output names stay in milliseconds on both.
+-- Cloud 24.3+: zookeeper_log.duration_ms became duration_microseconds; output stays in ms.
 SELECT
     toStartOfHour(event_time)            AS time,
     hostName()                           AS hostname,
@@ -16,7 +15,7 @@ SELECT
     error,
     count()                              AS failed_requests,
     uniq(session_id)                     AS sessions_affected,
-    max(duration_ms)                     AS max_duration_ms
+    max(duration_microseconds) / 1000    AS max_duration_ms
 FROM clusterAllReplicas(default, system.zookeeper_log)
 PREWHERE type = 'Response' AND error IS NOT NULL AND error != 'ZOK'
 WHERE event_date >= toDate({from:1d}, timezone()) AND event_date <= toDate({to:now}, timezone())

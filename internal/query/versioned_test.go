@@ -194,17 +194,20 @@ func TestFindVersionedFiles_RealRepoDirs(t *testing.T) {
 		// and must keep failing this check if that file ever goes missing.
 		"queries.onprem/system.server_settings.sql": true,
 		"queries.gov/system.server_settings.sql":    true,
-		// system.zookeeper_connection was added in 23.8 and
-		// system.blob_storage_log in 23.11; onprem/gov (floor 22.8) have no
-		// root variant. Cloud carries both at root (its floor is 23.5 on
-		// paper, but it has never run a build without these tables).
+		// system.zookeeper_connection was added in 23.8, system.blob_storage_log
+		// in 23.11 and system.error_log in 24.8 — all newer than every mode's
+		// floor (22.8 onprem/gov, 23.5 cloud), so no mode has a root variant:
+		// a root file would be selected on a server without the table and
+		// fail with UNKNOWN_TABLE instead of being skipped.
 		"queries.onprem/system.zookeeper_connection.sql":    true,
 		"queries.gov/system.zookeeper_connection.sql":       true,
+		"queries.cloud/system.zookeeper_connection.sql":     true,
 		"queries.onprem/system.blob_storage_log_7_days.sql": true,
 		"queries.gov/system.blob_storage_log_7_days.sql":    true,
-		// system.error_log was added in 24.8; same reasoning.
-		"queries.onprem/system.error_log_7_days.sql": true,
-		"queries.gov/system.error_log_7_days.sql":    true,
+		"queries.cloud/system.blob_storage_log_7_days.sql":  true,
+		"queries.onprem/system.error_log_7_days.sql":        true,
+		"queries.gov/system.error_log_7_days.sql":           true,
+		"queries.cloud/system.error_log_7_days.sql":         true,
 	}
 	dirs := map[string]string{
 		"../../queries.onprem":         ".sql",
