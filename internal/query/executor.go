@@ -210,10 +210,17 @@ func (e *Executor) executeQuery(query internal.QueryFile, outputDir, timestamp s
 		return fmt.Errorf("error saving result: %w", err)
 	}
 
-	// Rows are only countable in line-oriented formats; Native is opaque.
+	// Rows are only countable in line-oriented formats; Native is opaque, and
+	// TSVWithNamesAndTypes carries two header lines that are not data.
 	rows := int64(-1)
-	if ext := e.outputFormat().Ext; ext == ".jsonl" || ext == ".tsv" {
+	switch e.outputFormat().Ext {
+	case ".jsonl":
 		rows = int64(strings.Count(result, "\n"))
+	case ".tsv":
+		rows = int64(strings.Count(result, "\n")) - 2
+		if rows < 0 {
+			rows = 0
+		}
 	}
 	e.rec.Record(runlog.Entry{Stage: "collector", Name: query.Name, Source: query.DirName, Status: "ok",
 		Duration: elapsed, Bytes: int64(len(result)), Rows: rows, Extra: outputFileName})

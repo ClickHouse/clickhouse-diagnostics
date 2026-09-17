@@ -3449,13 +3449,17 @@ document.addEventListener('DOMContentLoaded',function(){
     const N=v=>Number(v||0);
     const labels=rows.map(r=>r.time);
     const tx=rows.map(r=>N(r.transactions)), hw=rows.map(r=>N(r.hw_exceptions));
+    // Median = the upper-middle sample, exactly quantileExactHigh(0.5) in
+    // alerts/keeper_health.yaml and tx_vals[len//2] in inspect_bundle.py, so
+    // an hour near the 50 % line gets the same verdict on all three surfaces.
     const sorted=[...tx].sort((a,b)=>a-b);
     const med=sorted[Math.floor(sorted.length/2)]||0;
     const verdict=rows.map((r,i)=>{
       const pct=med?100*tx[i]/med:null;
-      if(hw[i]>1000&&pct!==null&&pct<50)return 'UNAVAILABLE';
+      if(pct===null)return hw[i]>1000?'exceptions, no traffic baseline':'ok';
+      if(hw[i]>1000&&pct<50)return 'UNAVAILABLE';
       if(hw[i]>1000)return 'blip';
-      if(pct!==null&&pct<10&&i>0&&i<rows.length-1)return 'idle/disconnected';
+      if(pct<10&&i>0&&i<rows.length-1)return 'idle/disconnected';
       return 'ok';
     });
     const summary=['UNAVAILABLE','blip','idle/disconnected'].map(v=>{

@@ -11,7 +11,10 @@ description: |
   keeper_health instead.
 
   Repeated blips deserve attention: they abort merges and inserts in
-  flight (999 / 319) and force replicas to re-check their state.
+  flight (999 / 319) and force replicas to re-check their state. A server
+  with no traffic baseline at all (median 0 — freshly started or genuinely
+  idle for the whole window) does not fire: "normal traffic" is undefined
+  there, and the dashboard labels such hours accordingly.
 
   Check: text_log 'Finalizing session' / 'Connected to ZooKeeper' in the
   hour (which Keeper host did the server move to), Keeper logs for a
@@ -23,7 +26,7 @@ tags:
 query: |
   WITH
     (
-      SELECT quantile(0.5)(tx)
+      SELECT quantileExactHigh(0.5)(tx)
       FROM
       (
         SELECT toStartOfHour(event_time) AS h, sum(ProfileEvent_ZooKeeperTransactions) AS tx
@@ -40,9 +43,10 @@ query: |
   FROM {sys.metric_log}
   WHERE event_time > now() - INTERVAL 7 DAY
   GROUP BY hour
-  HAVING hw_exceptions > 1000
+  HAVING baseline > 0
+     AND hw_exceptions > 1000
      AND transactions >= 0.5 * baseline
-  ORDER BY hw_exceptions DESC
-  LIMIT 24
+  ORDER BY hour
+  LIMIT 168
 
 message: "hour starting {hour}: {hw_exceptions} Keeper hardware exceptions while traffic stayed at {pct_of_usual}% of usual ({transactions} transactions) — session lost and re-established"

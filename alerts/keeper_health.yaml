@@ -20,7 +20,10 @@ description: |
   normal traffic are reported separately by keeper_connection_blips.
 
   This rule reads metric_log because background operations never reach
-  query_log: an outage at night shows up here and nowhere else.
+  query_log: an outage at night shows up here and nowhere else. The median
+  is quantileExactHigh — the upper-middle hourly sample — the same value the
+  dashboard and the skill's pre-pass compute. LIMIT 168 covers every hour of
+  the 7-day window, so a multi-day outage is never truncated.
 
   Check next: system.zookeeper_connection (session age), part_log errors
   in the same hours, text_log 'Session expired' / 'Finalizing session' /
@@ -35,7 +38,7 @@ tags:
 query: |
   WITH
     (
-      SELECT quantile(0.5)(tx)
+      SELECT quantileExactHigh(0.5)(tx)
       FROM
       (
         SELECT toStartOfHour(event_time) AS h, sum(ProfileEvent_ZooKeeperTransactions) AS tx
@@ -57,6 +60,6 @@ query: |
      AND hw_exceptions > 1000
      AND transactions < 0.5 * baseline
   ORDER BY hour
-  LIMIT 48
+  LIMIT 168
 
 message: "hour starting {hour}: {hw_exceptions} Keeper hardware exceptions, {transactions} Keeper transactions = {pct_of_usual}% of usual ({usual_transactions}/h median) — Keeper effectively unavailable to this server"

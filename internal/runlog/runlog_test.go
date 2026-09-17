@@ -81,12 +81,13 @@ func TestGovRedaction(t *testing.T) {
 	r.Record(Entry{Stage: "collector", Name: "system.tables.sql", Status: "failed", Rows: -1, Error: "dial tcp 10.1.2.3:8123: connection refused"})
 	r.Phase("dashboard", time.Second, "failed: could not read customer_db.orders")
 	out := r.Render(time.Now())
-	for _, leak := range []string{"customer_db", "orders", "10.1.2.3"} {
+	r.Record(Entry{Stage: "collector", Name: "system.x.sql", Status: "failed", Rows: -1, Error: "Code: 60. DB::Exception: something about (CUSTOMER_TABLE) (UNKNOWN_TABLE)"})
+	for _, leak := range []string{"customer_db", "orders", "10.1.2.3", "CUSTOMER_TABLE", "UNKNOWN_TABLE"} {
 		if strings.Contains(out, leak) {
 			t.Errorf("gov log leaks %q:\n%s", leak, out)
 		}
 	}
-	for _, want := range []string{"Code: 60 (UNKNOWN_TABLE) — message redacted in gov mode", "error text redacted in gov mode"} {
+	for _, want := range []string{"Code: 60 — message redacted in gov mode", "error text redacted in gov mode"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("gov log missing %q", want)
 		}

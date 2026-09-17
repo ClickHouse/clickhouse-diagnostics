@@ -69,28 +69,22 @@ func (r *Recorder) WithGov(on bool) *Recorder {
 	return r
 }
 
-var (
-	reErrCode = regexp.MustCompile(`Code: (\d+)`)
-	reErrName = regexp.MustCompile(`\(([A-Z][A-Z0-9_]{2,})\)`)
-)
+var reErrCode = regexp.MustCompile(`Code: (\d+)`)
 
-// redactError keeps only what cannot identify a customer: the ClickHouse
-// error code and its constant name, e.g. "Code: 60 (UNKNOWN_TABLE)". A
-// message without either becomes a fixed marker.
+// redactError keeps only the numeric ClickHouse error code, e.g. "Code: 60".
+// The constant name is deliberately NOT extracted: a parenthesised all-caps
+// token in a server message cannot be told from customer text such as
+// "(CUSTOMER_TABLE)" without a list of ClickHouse constants, and the reader
+// can resolve a code with errorCodeToName() or the skill's error-codes.md.
+// A message without a code becomes a fixed marker.
 func redactError(msg string) string {
 	if msg == "" {
 		return ""
 	}
-	code := reErrCode.FindStringSubmatch(msg)
-	name := reErrName.FindStringSubmatch(msg)
-	switch {
-	case code != nil && name != nil:
-		return fmt.Sprintf("Code: %s (%s) — message redacted in gov mode", code[1], name[1])
-	case code != nil:
+	if code := reErrCode.FindStringSubmatch(msg); code != nil {
 		return fmt.Sprintf("Code: %s — message redacted in gov mode", code[1])
-	default:
-		return "error text redacted in gov mode"
 	}
+	return "error text redacted in gov mode"
 }
 
 type kv struct{ k, v string }
@@ -308,7 +302,9 @@ func (r *Recorder) Write(dir string) (string, error) {
 		return "", nil
 	}
 	dst := filepath.Join(dir, FileName)
-	if err := os.WriteFile(dst, []byte(r.Render(time.Now())), 0640); err != nil {
+	// 0600 like every other data file in the bundle: outside gov the file
+	// carries the target host and raw server error text.
+	if err := os.WriteFile(dst, []byte(r.Render(time.Now())), 0600); err != nil {
 		return "", fmt.Errorf("write %s: %w", FileName, err)
 	}
 	return dst, nil

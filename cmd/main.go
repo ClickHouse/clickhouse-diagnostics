@@ -269,7 +269,9 @@ func main() {
 	// operator when -mode onprem is about to collect one node of N. Best
 	// effort: a failed probe (no grant on system.settings, old server)
 	// simply produces no hint.
-	if mode == "onprem" {
+	// Skipped in dry-run: that contract allows only the version / preflight /
+	// EXPLAIN metadata queries to reach the server, and this hint is neither.
+	if mode == "onprem" && !dryRun {
 		if cloudMode, err := client.ExecuteQuery("SELECT value FROM system.settings WHERE name = 'cloud_mode'"); err == nil {
 			if hint := sharedMergeTreeHint(mode, cloudMode); hint != "" {
 				fmt.Println(hint)
@@ -591,6 +593,12 @@ func main() {
 			WithServerVersion(serverVersion).
 			WithAnalysis(analysisOpts, analysisDir).
 			WithHostInfo(hostReport)
+		// Write the execution log once now so the dashboard's Collected Files
+		// panel indexes it; the final write below refreshes it with the
+		// dashboard phase itself.
+		if _, err := rec.Write(finalOutputDir); err != nil {
+			fmt.Printf("Warning: execution log could not be written: %v\n", err)
+		}
 		phaseStart = time.Now()
 		if err := gen.Generate(finalOutputDir, alertResults); err != nil {
 			fmt.Printf("Warning: dashboard generation failed: %v\n", err)

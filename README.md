@@ -738,7 +738,7 @@ The repo ships with 15 alert rules in `alerts/`. They are intended as a starting
 | `replication_queue_errors` | critical | Replication queue entries have a non-empty `last_exception` |
 | `disk_space_low` | critical | Any disk has less than 15% free space — **on any replica** in cloud mode, with the reporting host named in the message |
 | `keeper_health` | critical | The two-signal Keeper health test per hour over 7 days: more than 1000 `ZooKeeperHardwareExceptions` **and** `ZooKeeperTransactions` below 50 % of the 7-day median — Keeper effectively unavailable (low traffic alone never fires: an idle hour is not an outage); catches outages that never reached `query_log` |
-| `keeper_connection_blips` | warning | More than 1000 `ZooKeeperHardwareExceptions` in an hour while Keeper traffic stayed at or above 50 % of usual — a session lost and re-established |
+| `keeper_connection_blips` | warning | More than 1000 `ZooKeeperHardwareExceptions` in an hour while Keeper traffic stayed at or above 50 % of usual (a positive 7-day median) — a session lost and re-established |
 | `keeper_exception_spike` | warning | More than 20 KEEPER_EXCEPTION (code 999) errors in one hour of the last 24 hours (one instance per hour) |
 | `high_exception_rate` | warning | More than 50 query exceptions for a single exception code in one hour of the last 24 hours (one instance per hour and code, worst 24) |
 | `background_operation_failures` | warning | More than 50 failed merges / fetches / mutations with the same code in one hour of the last 24 (`part_log`) |

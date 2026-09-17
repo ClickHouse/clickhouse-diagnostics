@@ -524,7 +524,9 @@ def analyse(base: str):
     # 12-hour buckets; the stalled-merge rule (NewPart > 100 with zero merges in
     # an HOUR) is meaningless on those rows, so detect the width first.
     pl_hours = {parse_dt(r.get("time")).hour for r in pl_rows if parse_dt(r.get("time"))}
-    pl_12h = bool(pl_rows) and pl_hours <= {0, 12} and len({parse_dt(r.get("time")) for r in pl_rows if parse_dt(r.get("time"))}) > 1
+    ver = tuple(int(x) for x in re.findall(r"\d+", out.get("version") or "")[:2]) if out.get("version") else ()
+    old_server = bool(ver) and ver < (23, 11)  # the root part_log collector (12-hour buckets) is selected below 23.11
+    pl_12h = bool(pl_rows) and (old_server or (pl_hours <= {0, 12} and len({parse_dt(r.get("time")) for r in pl_rows if parse_dt(r.get("time"))}) > 1))
     if pl_12h:
         out["notes"].append("part_log is aggregated in 12-hour buckets (server < 23.11): the hourly stalled-merge check is skipped; merges/new-parts columns in the timeline are 12-hour totals")
     if pl_rows:
@@ -544,24 +546,37 @@ def analyse(base: str):
                 t["failed_bg"][(et, err)] += c
         stalled = [] if pl_12h else sorted(h for h, t in timeline.items() if t["new_parts"] > 100 and t["merges"] == 0)
         if stalled:
-            add("critical" if len(stalled) >= 3 else "warning", "merges",
+            # HC-2.12: critical from three CONSECUTIVE hours, not three isolated ones
+            run = best = 1
+            for a, b in zip(stalled, stalled[1:]):
+                da, db = datetime.strptime(a, "%Y-%m-%d %H:%M"), datetime.strptime(b, "%Y-%m-%d %H:%M")
+                run = run + 1 if (db - da).total_seconds() == 3600 else 1
+                best = max(best, run)
+            add("critical" if best >= 3 else "warning", "merges",
                 f"{len(stalled)} hour(s) with inserts (NewPart > 100) and zero completed merges — merges were not running",
                 "hours: " + ", ".join(stalled[:8]) + (" …" if len(stalled) > 8 else ""), "HC-2.12/P-57")
-        bg = Counter()
-        for t in timeline.values():
-            bg.update(t["failed_bg"])
-        top_bg = [(k, v) for k, v in bg.most_common(5) if v > 50]
-        if top_bg:
-            add("warning", "merges", "background operations failing repeatedly (part_log)",
-                "; ".join(f"{et} code {err} {ERROR_NAMES.get(err, '')} × {v}" for (et, err), v in top_bg), "HC-2.5")
+        # same rule as alerts/background_operation_failures.yaml: > 50 failures of one
+        # (event_type, code) within ONE hour — never summed across hours
+        bg_hours = []
+        for h in sorted(timeline):
+            for (et, err), v in timeline[h]["failed_bg"].items():
+                if v > 50:
+                    bg_hours.append((h, et, err, v))
+        if bg_hours:
+            worst = sorted(bg_hours, key=lambda x: -x[3])[:5]
+            add("warning", "merges", f"background operations failing repeatedly in {len({x[0] for x in bg_hours})} hour(s) (part_log, > 50 of one kind in an hour)",
+                "; ".join(f"{h} {et} code {err} {ERROR_NAMES.get(err, '')} × {v}" for h, et, err, v in worst), "HC-2.5")
 
     # ---- metric_log_coordination: Keeper hardware exceptions per hour, read-only replicas, S3 errors
     mlc = read_jsonl(first("system.metric_log_coordination_3_days_*.jsonl", base))
+    mlc_has_zk = bool(mlc) and ZK_HW_COL in mlc[0] and ZK_TX_COL in mlc[0]
+    if mlc and not mlc_has_zk:
+        out["notes"].append("metric_log_coordination has no ZooKeeper counter columns on this version — Keeper signals taken from metric_log_7_days")
     if mlc:
         cols = set(mlc[0].keys())
         for r in mlc:
             h = hour_key(r.get("time"))
-            if not h:
+            if not h or not mlc_has_zk:
                 continue
             t = tl(h)
             t["zk_hw"] = num(r.get(ZK_HW_COL)) or 0
@@ -579,8 +594,8 @@ def analyse(base: str):
             add("warning", "storage", "object-storage request errors in metric_log",
                 ", ".join(f"{c[len('sum(ProfileEvent_'):-1]}={v}" for c, v in sorted(s3_err.items(), key=lambda kv: -kv[1])[:5]), "HC-4.10")
 
-    if not mlc:
-        # older bundles: fall back to the fixed-column metric_log aggregate for the Keeper signal
+    if not mlc_has_zk:
+        # older bundles, or a coordination file without the Keeper columns: fall back to the fixed-column aggregate
         for r in read_jsonl(first("system.metric_log_7_days_*.jsonl", base)):
             h = hour_key(r.get("time"))
             if h:
@@ -599,12 +614,15 @@ def analyse(base: str):
     tx_hours = [h for h, t in timeline.items() if t["zk_tx"] is not None]
     edge_hours = {min(tx_hours), max(tx_hours)} if tx_hours else set()  # partial buckets at both ends of the window
     for h, t in timeline.items():
-        t["tx_pct"] = round(100 * t["zk_tx"] / tx_med) if (t["zk_tx"] is not None and tx_med) else None
-        if t["zk_hw"] > 1000 and t["tx_pct"] is not None and t["tx_pct"] < 50:
+        pct = (100 * t["zk_tx"] / tx_med) if (t["zk_tx"] is not None and tx_med) else None  # unrounded for the test
+        t["tx_pct"] = round(pct) if pct is not None else None  # rounded only for display
+        if pct is None:
+            t["keeper"] = "exceptions, no traffic baseline" if t["zk_hw"] > 1000 else ""
+        elif t["zk_hw"] > 1000 and pct < 50:
             t["keeper"] = "UNAVAILABLE"
         elif t["zk_hw"] > 1000:
             t["keeper"] = "blip"
-        elif t["tx_pct"] is not None and t["tx_pct"] < 10 and h not in edge_hours:
+        elif pct < 10 and h not in edge_hours:
             t["keeper"] = "idle/disconnected"
         else:
             t["keeper"] = ""
@@ -683,7 +701,7 @@ def analyse(base: str):
             if (mm.get("ReadonlyReplica") or 0) > 0:
                 add("critical", "replication", f"{mm['ReadonlyReplica']} read-only replica table(s) right now{who}", "system.metrics", "HC-1.4")
         cache = {h: mm.get("MetadataFromKeeperCacheObjects") for h, mm in by_host.items() if mm.get("MetadataFromKeeperCacheObjects") is not None}
-        if len(cache) > 2:
+        if len(cache) >= 2:
             vals = sorted(cache.values())
             median = vals[len(vals) // 2]
             low = [h for h, v in cache.items() if median > 1000 and v < median / 100]
@@ -783,10 +801,15 @@ def analyse(base: str):
             if grants:
                 add("warning", "coverage", f"{len(grants)} collector(s) failed on grants (497) — the bundle is narrowed to what the collector's user may read",
                     ", ".join(r["name"] for r in grants), "HC-0")
-            other = [r for r in failed if r not in timeouts and r not in grants]
+            absent = [r for r in failed if r not in timeouts and r not in grants
+                      and ("Code: 60" in r["error"] or "UNKNOWN_TABLE" in r["error"] or "Code: 139" in r["error"] or "NO_ELEMENTS_IN_CONFIG" in r["error"] or "Code: 81" in r["error"])]
+            if absent:
+                add("info", "coverage", f"{len(absent)} collector(s) did not run because the table or config is not present on this server — their files are absent, not empty",
+                    "; ".join(f"{r['name']}: {r['error'][:70]}" for r in absent[:6]), "HC-0")
+            other = [r for r in failed if r not in timeouts and r not in grants and r not in absent]
             if other:
-                add("info", "coverage", f"{len(other)} collector(s) did not run (table or config not present on this server) — their files are absent, not empty",
-                    "; ".join(f"{r['name']}: {r['error'][:70]}" for r in other[:6]), "HC-0")
+                add("warning", "coverage", f"{len(other)} collector(s) failed for another reason (syntax, unknown column, network, write error) — evidence is missing, not absent",
+                    "; ".join(f"{r['name']}: {r['error'][:90]}" for r in other[:6]), "HC-0")
             heavy = [r for r in coll if r["ms"] >= 60000]
             if heavy:
                 add("info", "coverage", f"{len(heavy)} collector(s) took over a minute — candidates for a shorter window on this server",
