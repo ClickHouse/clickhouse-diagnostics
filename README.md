@@ -14,17 +14,25 @@ Under the hood: per-environment query sets (`cloud` / `onprem` / `gov`) selected
 |---|---|---|
 | `system.version` | Which build is this? | Every default, limit and bug fix is version-specific. |
 | `system.parts` (active, largest 50 000) | How many parts, how big, how fragmented, on which disk? | Part count per partition is the earliest signal of insert/merge trouble (`TOO_MANY_PARTS`). |
-| `system.part_log_7_days` (hourly aggregation of `system.part_log`) | Are merges keeping up with inserts; did any merge or mutation fail? | Shows insert size, merge throughput and failing background operations with their error codes. |
+| `system.part_log_3_days` (3 days, hourly aggregation of `system.part_log`) | Are merges keeping up with inserts; did any merge or mutation fail? | Shows insert size, merge throughput and failing background operations with their error codes. |
 | `system.merges`, `system.mutations` | What is merging or mutating right now; what is stuck? | A stuck merge or a mutation backlog is the usual reason parts pile up while the pool looks idle. |
 | `system.replicas`, `system.replication_queue` | Is every replica writable and caught up; if not, why? | Read-only state, Keeper session loss and the shape of the queue locate replication problems. |
 | `system.query_log_details_7_days` (hourly aggregation of `system.query_log`) | What ran, how slow, how much memory, what failed, by whom? | Most incidents start with the workload; this is the aggregated view, with a 500-character sample per query pattern and no customer rows. |
-| `system.errors`, `system.text_log` (24 h) | Which errors, how often, with what message? | Fast triage by error code; the log slice gives the server's own words. |
+| `system.errors`, `system.text_log` (24 h, severity first, ≤ 200 rows per logger) | Which errors, how often, with what message? | Fast triage by error code; the log slice gives the server's own words. |
+| `system.text_log_histogram_1_day` | Warning-and-worse log lines per hour, level and component, with one example each | Says *when* errors started and *which* component, independent of the 2000-row `text_log` cap. |
+| `system.error_log_7_days` (≥ 24.8) | Every error code raised anywhere in the server, per hour, background threads included | The history behind `system.errors`: puts 999 / 242 / 252 / 107 on a timeline even when no query failed. |
+| `system.text_log_keeper_1_day` | Keeper session markers per hour (expired, finalized, reconnecting, connected to which host) | The minute a Keeper session was lost and where the server reconnected — lines that are below Warning level and never reach `text_log`. |
 | `system.metric_log_7_days` (hourly aggregation of `system.metric_log`) | Memory and background-pool load over time | Tells "the server was overloaded" apart from "one query misbehaved". |
 | `system.disks`, `system.detached_parts` | Is disk running out; has data been set aside as broken? | A full disk explains many other symptoms; detached parts record corruption or replication leftovers. |
 | `system.tables`, `system.columns`, `system.dictionaries`, `system.clusters` | Schema, keys, materialized views, dictionaries, topology | Findings in parts and queries are *explained* by the schema and the cluster definition. |
 | `system.settings`, `system.server_settings` (≥ 23.4) | Which query/profile and server settings deviate from their defaults | Answers "what was tuned" without a config copy — cloud bundles have no `configuration/`; identifying server values are `REMOVED` in gov. |
 | `system.asynchronous_insert_log` (7 days) | Are async-insert flushes succeeding and how slow are they? | A lost flush is silent when `wait_for_async_insert = 0`. |
 | `system.crash_log`, `system.stack_trace` | Did the server crash; what were its threads doing? | Crash evidence needs the trace and the query that triggered it. |
+| `system.metrics`, `system.events`, `system.asynchronous_metrics` | Live gauges and cumulative counters: Keeper session and watches, read-only replicas, fetches in flight, object-storage requests, cache size, `Uptime` | The "right now" state the hourly aggregates cannot give; `Uptime` turns `system.errors` and `system.events` counts into rates. |
+| `system.metric_log_coordination_3_days` (3 days, hourly, columns selected by regex) | Keeper, object-storage, filesystem-cache and replication counters hour by hour | A Keeper outage or an S3 error burst at 03:00 is visible here even when no query failed. |
+| `system.zookeeper_connection` (≥ 23.8), `system.databases`, `system.storage_policies` | Which Keeper node, how old the session; how many `Replicated` databases; which disks back which policy | The coordination and storage topology behind replication and "file doesn't exist" findings. |
+| `system.distributed_ddl_queue` (7 days), `system.replicated_fetches` | Stuck or failed `ON CLUSTER` / Replicated-database DDL with per-host status; part fetches in flight | DDL replay storms (`TABLE_ALREADY_EXISTS` on `.tmp.inner_id` tables, code 571) and wedged fetches are visible only here. |
+| `system.zookeeper_log_errors_1_day`, `system.blob_storage_log_7_days` (only when the tables are enabled) | Failed Keeper requests per hour, operation and error code (errors only — the table is far too large to aggregate whole); object-storage uploads, deletes and failures per hour | Direct evidence for "Keeper stopped answering" and "the blob was deleted / never written". |
 | `host_info.json` (onprem) | OS, CPU, RAM, disks, THP, overcommit, limits, cgroups | A large share of self-managed incidents are host settings ClickHouse itself warns about at startup. |
 | `logs/` (onprem) | Restarts, startup warnings, fatal stacks, the first error of an incident | System tables lose this on restart; the log files keep it. |
 | `configuration/` | Which settings deviate from defaults | Memory limits, pools, Keeper, storage policies, log-table TTLs — with credentials removed. |
@@ -312,12 +320,19 @@ Most collection queries look back over a fixed period. Each declares its **own**
 | Query | Default look-back |
 |---|---|
 | `system.query_log_details_7_days` | 7 days |
-| `system.part_log_7_days` | 7 days |
+| `system.part_log_3_days` | 3 days |
 | `system.metric_log_7_days` | 7 days |
 | `system.asynchronous_insert_log_7_days` | 7 days |
+| `system.metric_log_coordination_3_days` | 3 days |
+| `system.blob_storage_log_7_days` | 7 days |
+| `system.error_log_7_days` | 7 days |
+| `system.distributed_ddl_queue` | 7 days |
 | `system.text_log` | 1 day |
+| `system.text_log_histogram_1_day` | 1 day |
+| `system.text_log_keeper_1_day` | 1 day |
+| `system.zookeeper_log_errors_1_day` | 1 day |
 
-> `system.text_log` is the one exception at 1 day: it is by far the highest-volume table here, and a 7-day slice of it is usually too large to be useful in a support bundle. Use `-from` when you need more.
+> `system.text_log` and `system.zookeeper_log` stop at 1 day: they are by far the highest-volume tables here (a busy cluster writes millions of Keeper log rows an hour), and a 7-day slice is too large to be useful in a support bundle. Use `-from` when you need more.
 
 `-from` and `-to` override **every** window at once:
 
@@ -473,6 +488,8 @@ Sample block of the output:
 
 Alert queries use the same mode — see [Alerts](#alerts).
 
+> **Self-hosted SharedMergeTree clusters** (`cloud_mode = 1` in `system.settings`, table engines `Shared*MergeTree`, an `s3_with_keeper` disk): every replica keeps its own `system.*` tables, so `-mode onprem` describes **one node of N** — its parts, errors, part_log, query_log and text_log only. The tool prints a warning when it detects `cloud_mode = 1`. Run `-mode cloud` for the cluster-wide view (fans out over the `default` cluster with `clusterAllReplicas`; needs `GRANT REMOTE` and `CREATE TEMPORARY TABLE`) and keep an `onprem` run from one node for host facts, configuration and log files.
+
 ### Gov mode and hashed names
 
 In `gov` mode, every database and table name written to the support-bound output is replaced with `hex(SHA256(name + salt))`. The salt is supplied by **you** at runtime (via `-salt` or the interactive prompt) — the tool does **not** ship with a default. This is what makes the hashes meaningful: without a per-customer salt, anyone with the source could pre-compute hashes for common names like `users`, `events`, or `orders` and reverse the obfuscation.
@@ -571,11 +588,15 @@ The tool targets **ClickHouse 22.8 and newer** for on-prem servers. Root-level q
 | `system.settings.default` | 23.4 | `queries.{onprem,gov}/23.4.1.0/` (`default` is the only column their roots omit; the cloud root has it) |
 | `system.clusters` replicated-db columns (`database_shard_name`, `database_replica_name`, `is_active`, `name`) | 23.5 | `queries.*/23.5.1.0/` |
 | `system.query_log.query_cache_usage` | 23.8 | `queries.query_analysis/23.8.1.0/` |
+| `system.zookeeper_connection` table | 23.8 | `queries.*/23.8.1.0/` (no root file — skipped below 23.8 in every mode) |
 | `system.query_log.peak_threads_usage` | 23.9 | `queries.query_analysis/23.9.1.0/` |
 | `hostname` column in system log tables | 23.11 | `queries.*/23.11.1.0/` (roots use `hostName()`) |
+| `system.blob_storage_log` table (needs `<blob_storage_log>` config) | 23.11 | `queries.*/23.11.1.0/` (no root file — skipped below 23.11 in every mode) |
 | `system.tables.total_bytes_uncompressed` | 23.12 | `queries.query_analysis/23.12.1.0/` |
 | `system.mutations.is_killed` | 24.1 | `alerts/24.1.1.0/` (root omits the filter) |
 | `system.tables.metadata_version` | 24.2 | `queries.*/24.2.1.0/` |
+| `system.error_log` table | 24.8 | `queries.*/24.8.1.0/` (no root file — skipped below 24.8 in every mode) |
+| `system.zookeeper_log.duration_microseconds` (replaces `duration_ms`) | 24.3 | `queries.*/24.3.1.0/` (roots use `duration_ms`; output stays in ms on every rung) |
 | `system.tables.parameterized_view_parameters` | 25.4 | `queries.{onprem,cloud}/25.4.1.0/` (gov: not collected) |
 
 The dashboard (`internal/dashboard/generator.go`) builds its SQL dynamically, so instead of version directories it probes the live schema at runtime (`hasColumn`/`hasTable`) and adapts each panel — covering the same columns (`error_count`, `is_killed`, `bytes_on_disk`, the async table/`rows`, `crash_log`) plus optional tables that may be disabled by config.
@@ -629,6 +650,8 @@ The directory is resolved in this order:
 3. `/var/log/clickhouse-server`
 
 Both 2 and 3 are collected when they differ. `*.log` is copied by default; `-logs-include-archives` adds rotated `*.gz`/`*.zst`. Files above `-logs-max-mb` (default 50) are **tail**-truncated — the recent end is kept, with a header recording what was dropped so the first surviving line isn't mistaken for the start of the log.
+
+> At `<level>debug</level>` a busy server writes 50 MB in **seconds**, so the tail of `clickhouse-server.log` rarely reaches back to an incident that ended hours earlier (the `.err.log` tail usually covers a few hours). For the incident timeline rely on `system.text_log_histogram_1_day` and the hourly aggregates, and raise `-logs-max-mb` (or ship the rotated file with `-logs-include-archives`) only when a specific log passage is needed.
 
 ### `--collect-text-log` — a bounded slice of `system.text_log`
 
@@ -731,7 +754,7 @@ In `message:`, `{column_name}` is replaced with the value from each result row. 
 
 ### Bundled alert rules
 
-The repo ships with 11 alert rules in `alerts/`. They are intended as a starting point — adjust thresholds to match your workload.
+The repo ships with 15 alert rules in `alerts/`. They are intended as a starting point — adjust thresholds to match your workload.
 
 | Rule | Severity | Fires when |
 |---|---|---|
@@ -739,15 +762,19 @@ The repo ships with 11 alert rules in `alerts/`. They are intended as a starting
 | `replica_readonly` | critical | A replicated table is in read-only mode (lost Keeper session, disk full, network partition) |
 | `replication_queue_errors` | critical | Replication queue entries have a non-empty `last_exception` |
 | `disk_space_low` | critical | Any disk has less than 15% free space — **on any replica** in cloud mode, with the reporting host named in the message |
-| `keeper_exception_spike` | warning | More than 20 KEEPER_EXCEPTION (code 999) errors in the last hour |
-| `high_exception_rate` | warning | More than 50 query exceptions for a single exception code in the last hour |
+| `keeper_health` | critical | The two-signal Keeper health test per hour over 7 days: more than 1000 `ZooKeeperHardwareExceptions` **and** `ZooKeeperTransactions` below 50 % of the 7-day median — Keeper effectively unavailable (low traffic alone never fires: an idle hour is not an outage); catches outages that never reached `query_log` |
+| `keeper_connection_blips` | warning | More than 1000 `ZooKeeperHardwareExceptions` in an hour while Keeper traffic stayed at or above 50 % of usual (a positive 7-day median) — a session lost and re-established |
+| `keeper_exception_spike` | warning | More than 20 KEEPER_EXCEPTION (code 999) errors in one hour of the last 24 hours (one instance per hour) |
+| `high_exception_rate` | warning | More than 50 query exceptions for a single exception code in one hour of the last 24 hours (one instance per hour and code, worst 24) |
+| `background_operation_failures` | warning | More than 50 failed merges / fetches / mutations with the same code in one hour of the last 24 (`part_log`) |
+| `merges_stalled` | warning | An hour in the last 24 with more than 100 `NewPart` events and zero completed merges (`part_log`) — Keeper down, pool paused or every merge failing |
 | `too_many_simultaneous_queries` | warning | More than 10 code-202 (`TOO_MANY_SIMULTANEOUS_QUERIES`) errors in the last hour (`max_concurrent_queries` hit) |
 | `too_many_parts` | warning | A partition has more than 300 active parts (inserts are delayed from `parts_to_delay_insert` = 1000 and rejected with code 252 `TOO_MANY_PARTS` at `parts_to_throw_insert` = 3000) |
 | `large_parts` | warning | A single active part is larger than 150 GB |
 | `mutation_running_too_long` | warning | A mutation has been running for more than 3 hours |
 | `detached_parts_exist` | info | Parts exist in the `detached/` folder (failed merges, manual detach, replication conflicts) |
 
-Every rule is a single `SELECT` against system tables; rows returned become alert instances in the dashboard. Open the YAML files directly to see the exact thresholds and tweak them.
+Every rule is a single `SELECT` against system tables; rows returned become alert instances in the dashboard. Rules that read a log table look back **24 hours or 7 days, per hour**, not just the last hour — bundles are usually collected after recovery, and an hour-only rule is blind to the incident it exists to surface. Open the YAML files directly to see the exact thresholds and tweak them.
 
 ## Query analysis mode
 
@@ -883,6 +910,7 @@ When `-skip-dashboard` is not set, the tool generates a single self-contained `d
 | 12 | 🔄 **Replication Queue** | Current entries in `system.replication_queue` with type, table, and last exception |
 | 13 | 🌐 **Cluster Nodes** (cloud mode only) | Hosts in the `default` cluster with shard / replica / active status |
 | 14 | 🔁 **Replicas Health** | Replication-delay distribution, queue-size by table, per-replica details (only shown when replicated tables exist) |
+| 14a | 🔑 **Keeper Health** (last 7 days) | Shown when `system.metric_log` has rows. Per hour: Keeper transactions (line) against hardware exceptions (bars coloured by verdict), mean request latency (`ZooKeeperWaitMicroseconds / ZooKeeperTransactions`), Keeper-dependent error codes (999 / 242 / 319 / 571 / 252 from `system.error_log` on 24.8+, else `query_log`), and the live `system.zookeeper_connection` rows. A verdict table applies the same rule as the `keeper_health` alert: > 1000 exceptions with traffic below 50 % of the 7-day median = unavailable; with traffic holding = blip. |
 | 15 | 💾 **Disk Usage** | Free vs used space per disk plus a disk-details table |
 | 16 | 🛑 **Server Error Counters** | Top 20 cumulative error codes from `system.errors`, high-part-count partitions (>100 parts → potential code-252 `TOO_MANY_PARTS` risk), and TTL activity from `part_log` |
 | 17 | ⚡ **Async Insert Activity** (last 24 h) | Flush count per hour by status — section is hidden when `system.asynchronous_insert_log` is empty or in gov mode |
@@ -890,6 +918,10 @@ When `-skip-dashboard` is not set, the tool generates a single self-contained `d
 In addition, when `--query-id` or `--normalized-query-hash` is set, a **🔍 Query Analysis** section appears near the top of the nav. See [Query analysis mode](#query-analysis-mode) for what it contains.
 
 A sticky top nav at the page header lets you jump straight to any section. Sections that depend on cluster-specific or version-specific data (Crash Log, Cluster Nodes, Replicas Health, Async Inserts, Query Analysis) are hidden when there is nothing to show.
+
+### Previewing the Keeper Health panel without an outage
+
+`make dashboard-preview` renders `bin/keeper_incident_preview.html` from an anonymised fixture shaped like a real Keeper outage on a shared-storage cluster: 48 hours of Keeper counters (a blip on day one, quorum lost for eight hours on day two), the `keeper_health`, `keeper_connection_blips`, `merges_stalled`, `background_operation_failures`, `high_exception_rate` and `too_many_parts` alerts as they would fire, the error codes per hour and a re-established Keeper session. Use it to see what the panel and the alerts look like before an incident, or to review a theme or wording change.
 
 ### What's interactive vs static
 
@@ -948,6 +980,7 @@ clickhouse_results/
 │   │   └── users.d/…
 │   ├── query_analysis/                                      #   only with --query-id / --hash
 │   ├── dashboard.html                                       #   unless -skip-dashboard or gov
+│   ├── execution_log.txt                                    #   every collector: outcome, wall time, size; alerts; phases
 │   └── alerts_summary.json                                  #   when alerts ran but dashboard.html is absent
 └── clickhouse_backup_YYYYMMDD_HHMMSS_gov_name_mapping.csv   # → LOCAL only (gov mode)
 clickhouse_backup_YYYYMMDD_HHMMSS.tar.gz                     # unless -skip-archive
@@ -955,6 +988,7 @@ clickhouse_backup_YYYYMMDD_HHMMSS.tar.gz                     # unless -skip-arch
 
 - **Query results**: one file per query, in the format chosen by [`-output-format`](#output-format) (default `jsonl`)
 - **Dashboard**: standalone `dashboard.html`, loads Chart.js from CDN
+- **Execution log**: `execution_log.txt` — one line per collector query with its version directory, outcome (`ok` / `failed` / `empty`), wall time, result bytes and rows, plus every alert rule with its outcome and duration and the wall time of each phase (collectors, host facts, logs, config, alerts, dashboard). The *Most expensive collectors* list is what to read before adapting a window in `queries.<mode>/`; the *Failed collectors* list is what separates "the table was empty" from "the query never ran". Contains file names, timings and ClickHouse error text only — no result data.
 - **Archive**: `tar.gz` containing the per-run results directory — `configuration/` now lives *inside* it, tree intact, so a bundle can only ever contain this run's configs. (Before v0.3.0 it was a flat, process-wide `./configuration` beside the run directory; anything parsing bundles by that path needs updating.)
 - **Gov-mode mapping CSV** (gov mode only): sits next to the backup folder, **not inside it** — never goes into the archive. See [Gov mode and hashed names](#gov-mode-and-hashed-names).
 

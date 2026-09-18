@@ -1,0 +1,42 @@
+name: background_operation_failures
+title: "Background merges / fetches / mutations failing repeatedly"
+severity: warning
+description: |
+  More than 50 failed background operations of one kind and error code in
+  a single hour of the last 24 (one instance per hour, event type and
+  code). system.part_log records every merge, mutation, fetch (DownloadPart)
+  and part removal with its error code; repeated failures are the
+  background counterpart of query exceptions and never appear in
+  query_log.
+
+  Typical codes: 999 KEEPER_EXCEPTION (merges cannot commit — Keeper
+  session lost), 236 ABORTED (merges cancelled at shutdown or by a
+  vanished part), 241 MEMORY_LIMIT_EXCEEDED (merge too large for the
+  pool), 499 S3_ERROR / 107 FILE_DOESNT_EXIST (object storage or missing
+  files during fetch), 84 / 504 *_ALREADY_EXISTS (retries after a
+  half-committed operation).
+
+  Check: the example message, system.merges / system.mutations for the
+  same tables, system.errors for the same code, metric_log for Keeper
+  and memory in that hour.
+tags:
+  - merges
+  - replication
+  - reliability
+
+query: |
+  SELECT
+    toStartOfHour(event_time)   AS hour,
+    event_type,
+    error,
+    count()                     AS failures,
+    any(exception)              AS example_message
+  FROM {sys.part_log}
+  WHERE event_time > now() - INTERVAL 24 HOUR
+    AND error != 0
+  GROUP BY hour, event_type, error
+  HAVING failures > 50
+  ORDER BY failures DESC
+  LIMIT 24
+
+message: "{failures} {event_type} operations failed with code {error} in the hour starting {hour} — example: {example_message}"

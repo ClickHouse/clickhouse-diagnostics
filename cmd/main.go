@@ -17,6 +17,7 @@ import (
 	"clickhouse-diagnostic/internal/hostinfo"
 	"clickhouse-diagnostic/internal/logfiles"
 	"clickhouse-diagnostic/internal/query"
+	"clickhouse-diagnostic/internal/runlog"
 	"clickhouse-diagnostic/internal/version"
 	"clickhouse-diagnostic/pkg"
 
@@ -257,6 +258,45 @@ func main() {
 	fmt.Printf("ClickHouse server version: %d.%d.%d.%d\n",
 		serverVersion.Major, serverVersion.Minor, serverVersion.Patch, serverVersion.Build)
 
+	// Execution log: every collector with its outcome and wall time, every
+	// alert rule, every phase — written into the bundle as execution_log.txt
+	// so a reader can tell a failed collector from an empty table and see
+	// which queries are expensive on this server.
+	rec := runlog.New().WithGov(mode == "gov")
+	rec.SetMeta("mode", mode)
+	rec.SetMeta("server", fmt.Sprintf("%d.%d.%d.%d", serverVersion.Major, serverVersion.Minor, serverVersion.Patch, serverVersion.Build))
+	if mode == "gov" {
+		// The host is customer infrastructure; gov hashes host names in every
+		// result file, so the log must not carry it in clear either.
+		rec.SetMeta("target", fmt.Sprintf("(host redacted in gov mode) via %s", protocol))
+	} else {
+		rec.SetMeta("target", fmt.Sprintf("%s:%s (%s)", host, port, protocol))
+	}
+	if collectFrom.IsZero() && collectTo.IsZero() {
+		rec.SetMeta("window", "each query's own default look-back (7 days for most log tables, 3 days for part_log and metric_log_coordination, 1 day for text_log and zookeeper_log)")
+	} else {
+		rec.SetMeta("window", describeWindow(collectFrom, collectTo))
+	}
+	rec.SetMeta("timeout", fmt.Sprintf("%v per query (-query-timeout; 0 = unbounded)", *queryTimeoutFlag))
+	rec.SetMeta("format", outputFormat.Name)
+	if dryRun {
+		rec.SetMeta("dry-run", "yes — no query was sent to the server, durations are not meaningful")
+	}
+
+	// SharedMergeTree clusters keep per-replica system tables; tell the
+	// operator when -mode onprem is about to collect one node of N. Best
+	// effort: a failed probe (no grant on system.settings, old server)
+	// simply produces no hint.
+	// Skipped in dry-run: that contract allows only the version / preflight /
+	// EXPLAIN metadata queries to reach the server, and this hint is neither.
+	if mode == "onprem" && !dryRun {
+		if cloudMode, err := client.ExecuteQuery("SELECT value FROM system.settings WHERE name = 'cloud_mode'"); err == nil {
+			if hint := sharedMergeTreeHint(mode, cloudMode); hint != "" {
+				fmt.Println(hint)
+			}
+		}
+	}
+
 	// Query analysis is not available in gov mode: its results embed raw
 	// query text, exception messages, identifiers and full DDL
 	// (query_details, failed_queries, tables_for_query, text_log slices),
@@ -383,8 +423,10 @@ func main() {
 
 	// Find and execute queries - get the specific folder path
 	queryManager := query.NewManager().WithOutputFormat(outputFormat).
-		WithWindow(collectFrom, collectTo).WithMode(mode)
+		WithWindow(collectFrom, collectTo).WithMode(mode).WithRecorder(rec)
+	phaseStart := time.Now()
 	finalOutputDir, err := queryManager.ExecuteQueries(client, queriesDir, serverVersion, outputDir, govSalt)
+	rec.Phase("collectors", time.Since(phaseStart), "")
 	if err != nil {
 		fmt.Printf("Error executing queries: %v\n", err)
 		return
@@ -402,12 +444,17 @@ func main() {
 			RowLimit: textLogLimit,
 		}
 		tlColl := query.NewTextLogCollector(client, mode).WithOutputFormat(outputFormat)
+		phaseStart = time.Now()
 		path, err := tlColl.Collect(tlOpts, finalOutputDir, serverVersion)
+		tlStatus, tlErr := "ok", ""
 		if err != nil {
 			fmt.Printf("Warning: text_log collection failed: %v\n", err)
+			tlStatus, tlErr = "failed", err.Error()
 		} else if path != "" {
 			fmt.Printf("  text_log written to %s\n", path)
 		}
+		rec.Record(runlog.Entry{Stage: "text_log", Name: "--collect-text-log slice", Status: tlStatus, Duration: time.Since(phaseStart), Rows: -1, Extra: filepath.Base(path), Error: tlErr})
+		rec.Phase("text_log slice", time.Since(phaseStart), "")
 	}
 
 	// Query analysis bundle (only when --query-id or
@@ -419,9 +466,16 @@ func main() {
 	// "list every query the tool would execute" would omit the bundle.
 	if analysisOpts.Enabled() {
 		coll := query.NewAnalysisCollector(client, mode).WithOutputFormat(outputFormat)
-		if _, _, err := coll.Collect(analysisOpts, analysisDir, finalOutputDir, serverVersion); err != nil {
+		phaseStart = time.Now()
+		written, skipped, err := coll.Collect(analysisOpts, analysisDir, finalOutputDir, serverVersion)
+		qaStatus, qaErr := "ok", ""
+		if err != nil {
 			fmt.Printf("Warning: query analysis failed: %v\n", err)
+			qaStatus, qaErr = "failed", err.Error()
 		}
+		rec.Record(runlog.Entry{Stage: "analysis", Name: "query_analysis/ (--query-id / --normalized-query-hash)", Status: qaStatus,
+			Duration: time.Since(phaseStart), Rows: -1, Extra: fmt.Sprintf("%d files written, %d skipped", written, skipped), Error: qaErr})
+		rec.Phase("query analysis", time.Since(phaseStart), "")
 	}
 
 	if dryRun {
@@ -451,7 +505,9 @@ func main() {
 	var hostReport *hostinfo.Report
 	if !skipHostInfo {
 		fmt.Println("Collecting host OS and hardware facts...")
+		phaseStart = time.Now()
 		report := hostinfo.Collect()
+		rec.Phase("host facts", time.Since(phaseStart), "")
 		hostReport = report
 		if path, err := hostinfo.WriteJSON(finalOutputDir, report); err != nil {
 			fmt.Printf("Warning: host info could not be written: %v\n", err)
@@ -469,6 +525,7 @@ func main() {
 	// operators relocate logs far more often than anything else.
 	if !skipLogs {
 		fmt.Println("Collecting ClickHouse server log files...")
+		phaseStart = time.Now()
 		res, err := logfiles.Collect(finalOutputDir, logfiles.Options{
 			Dir:             logsDir,
 			ConfigDir:       configDir,
@@ -480,6 +537,7 @@ func main() {
 		} else {
 			fmt.Print(res.Summary())
 		}
+		rec.Phase("log files", time.Since(phaseStart), "")
 	}
 
 	// ClickHouse configuration files from disk. Written under the run
@@ -487,6 +545,7 @@ func main() {
 	// and this run.
 	if !skipConfig {
 		configDest := filepath.Join(finalOutputDir, "configuration")
+		phaseStart = time.Now()
 		if err := config.NewCollector().Collect(configDir, configDest, false); err != nil {
 			// Reading /etc/clickhouse-server/config.d/ usually needs root or
 			// the clickhouse group, so an unprivileged run fails here. Warn
@@ -494,13 +553,33 @@ func main() {
 			// having — but never leave it silent.
 			fmt.Printf("Warning: configuration collection failed: %v\n", err)
 		}
+		rec.Phase("configuration", time.Since(phaseStart), "")
 	}
 
 	// Evaluate alert rules if not skipped
 	var alertResults []alert.Result
 	if !skipAlerts {
 		fmt.Println("Evaluating alert rules...")
+		phaseStart = time.Now()
 		alertResults = alert.NewEvaluator(client, mode).RunAll(alertsDir, serverVersion)
+		rec.Phase("alerts", time.Since(phaseStart), "")
+		for _, r := range alertResults {
+			status := "clean"
+			switch {
+			case r.Skipped:
+				status = "skipped"
+			case r.Error != "":
+				status = "failed"
+			case len(r.Rows) > 0:
+				status = "fired"
+			}
+			ruleName, ruleDir := r.File, ""
+			if i := strings.LastIndex(r.File, "/"); i >= 0 {
+				ruleDir, ruleName = r.File[:i], r.File[i+1:]
+			}
+			rec.Record(runlog.Entry{Stage: "alert", Name: ruleName, Source: ruleDir, Status: status, Duration: time.Duration(r.DurationMs) * time.Millisecond,
+				Rows: -1, Extra: fmt.Sprintf("%d instance(s)%s", len(r.Rows), map[bool]string{true: "; " + r.Reason, false: ""}[r.Reason != ""]), Error: r.Error})
+		}
 		// "checked" counts only rules that produced an answer: both skipped
 		// (table not present here) and errored (query failed) rules are
 		// excluded, because reporting either as checked would imply a
@@ -532,10 +611,19 @@ func main() {
 			WithServerVersion(serverVersion).
 			WithAnalysis(analysisOpts, analysisDir).
 			WithHostInfo(hostReport)
+		// Write the execution log once now so the dashboard's Collected Files
+		// panel indexes it; the final write below refreshes it with the
+		// dashboard phase itself.
+		if _, err := rec.Write(finalOutputDir); err != nil {
+			fmt.Printf("Warning: execution log could not be written: %v\n", err)
+		}
+		phaseStart = time.Now()
 		if err := gen.Generate(finalOutputDir, alertResults); err != nil {
 			fmt.Printf("Warning: dashboard generation failed: %v\n", err)
+			rec.Phase("dashboard", time.Since(phaseStart), "failed: "+err.Error())
 		} else {
 			dashboardWritten = true
+			rec.Phase("dashboard", time.Since(phaseStart), "")
 		}
 	}
 
@@ -553,6 +641,14 @@ func main() {
 			fmt.Println("Wrote alerts_summary.json (rule outcomes and instance counts; " +
 				"matched rows are never included).")
 		}
+	}
+
+	// Execution log — last, so it covers every phase above; the archive
+	// then carries it. Never fatal: the results are worth having without it.
+	if path, err := rec.Write(finalOutputDir); err != nil {
+		fmt.Printf("Warning: execution log could not be written: %v\n", err)
+	} else {
+		fmt.Printf("Execution log written: %s (per-collector outcome and wall time)\n", path)
 	}
 
 	// Create archive if not skipped - use the specific folder that was created

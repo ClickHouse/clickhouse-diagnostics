@@ -1,9 +1,10 @@
+-- Window: 3 days. part_log records every part event (NewPart, MergeParts, DownloadPart,
+-- RemovePart …) and reaches tens of GiB per week on a busy replica; three days keep a baseline around an incident at a fraction of the scan.
 SELECT
-    toStartOfInterval(event_time, toIntervalHour(1)) AS time,
+    toStartOfInterval(event_time, toIntervalHour(12)) AS time,
     event_type,
     merge_reason,
     partition_id,
-    hex(SHA256(concat(hostname, '%salt%'))) AS hostname,
     hex(SHA256(concat(database, '%salt%'))) AS database,
     hex(SHA256(concat(table, '%salt%'))) AS table,
     error,
@@ -24,5 +25,8 @@ FROM system.part_log
 -- It is not a handle you can troubleshoot from. The useful grain is
 -- bucket x table x event_type x merge_reason x partition x error, and
 -- partition_id is the identifier to follow up on.
-WHERE (event_time > {from:7d} AND event_time <= {to:now})
-GROUP BY ALL
+WHERE (event_time > {from:3d} AND event_time <= {to:now})
+-- Explicit key list instead of GROUP BY ALL: that syntax needs 22.12+
+-- and this root file must run on every supported server (22.8+).
+GROUP BY time, event_type, merge_reason, partition_id,
+         database, table, error

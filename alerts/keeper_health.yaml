@@ -1,0 +1,65 @@
+name: keeper_health
+title: "Keeper unavailable: session loss storm while Keeper traffic collapsed"
+severity: critical
+description: |
+  The two-signal Keeper health test over the last 7 days, per hour. An hour
+  fires when this server logged more than 1000 ZooKeeperHardwareExceptions
+  (connection loss, session expiry, operation timeout) AND completed less
+  than half of its usual Keeper transactions. "Usual" is the median hourly
+  ZooKeeperTransactions over the same 7 days. Low traffic on its own never
+  fires: a quiet night looks the same as a disconnected server in this
+  counter, and telling them apart needs ZooKeeperSession (system.metrics)
+  or the dashboard's per-hour verdict, which labels such hours
+  "idle/disconnected" instead.
+
+  Both signals together mean Keeper was effectively unavailable to this
+  server: sessions were expiring and the work that normally flows through
+  Keeper (part commits, merge assignment, DDL, replication log) was not
+  happening. Expect 999 / 319 on inserts, 571 / 57 on DDL, merges stopped
+  and TOO_MANY_PARTS following in the same or next hours. Exceptions with
+  normal traffic are reported separately by keeper_connection_blips.
+
+  This rule reads metric_log because background operations never reach
+  query_log: an outage at night shows up here and nowhere else. The median
+  is quantileExactHigh — the upper-middle hourly sample — the same value the
+  dashboard and the skill's pre-pass compute. LIMIT 168 covers every hour of
+  the 7-day window, so a multi-day outage is never truncated.
+
+  Check next: system.zookeeper_connection (session age), part_log errors
+  in the same hours, text_log 'Session expired' / 'Finalizing session' /
+  'Connected to ZooKeeper' markers, then the Keeper nodes themselves
+  ('echo mntr | nc <keeper> <port>': zk_followers vs zk_synced_followers,
+  zk_avg_latency, zk_outstanding_requests; leader changes in Keeper logs).
+tags:
+  - keeper
+  - replication
+  - reliability
+
+query: |
+  WITH
+    (
+      SELECT quantileExactHigh(0.5)(tx)
+      FROM
+      (
+        SELECT toStartOfHour(event_time) AS h, sum(ProfileEvent_ZooKeeperTransactions) AS tx
+        FROM {sys.metric_log}
+        WHERE event_time > now() - INTERVAL 7 DAY
+        GROUP BY h
+      )
+    ) AS baseline
+  SELECT
+    toStartOfHour(event_time)                                   AS hour,
+    sum(ProfileEvent_ZooKeeperHardwareExceptions)               AS hw_exceptions,
+    sum(ProfileEvent_ZooKeeperTransactions)                     AS transactions,
+    round(baseline)                                             AS usual_transactions,
+    round(100 * sum(ProfileEvent_ZooKeeperTransactions) / greatest(baseline, 1)) AS pct_of_usual
+  FROM {sys.metric_log}
+  WHERE event_time > now() - INTERVAL 7 DAY
+  GROUP BY hour
+  HAVING baseline > 0
+     AND hw_exceptions > 1000
+     AND transactions < 0.5 * baseline
+  ORDER BY hour
+  LIMIT 168
+
+message: "hour starting {hour}: {hw_exceptions} Keeper hardware exceptions, {transactions} Keeper transactions = {pct_of_usual}% of usual ({usual_transactions}/h median) — Keeper effectively unavailable to this server"

@@ -725,6 +725,82 @@ func (g *Generator) dictionariesSQL() string {
 }
 
 // collect gathers all metrics from ClickHouse and returns a JSON-ready map.
+// keeperMetricSQL is the Keeper Health panel's primary series: the two
+// counters the Keeper health test is built on (see alerts/keeper_health.yaml
+// and the skill's HC-3.8), per hour over 7 days, plus the inputs for the
+// latency line and the session range. metric_log is one row per second per
+// server, so reading five narrow columns over a week is a few MiB — cheap
+// enough for a live dashboard query. Columns that a version lacks are
+// replaced by 0 so the panel degrades instead of erroring.
+func (g *Generator) keeperMetricSQL(hasWait, hasSession bool) string {
+	wait := "0 AS wait_us"
+	if hasWait {
+		wait = "sum(ProfileEvent_ZooKeeperWaitMicroseconds) AS wait_us"
+	}
+	sess := "0 AS sessions_min, 0 AS sessions_max"
+	if hasSession {
+		sess = "min(CurrentMetric_ZooKeeperSession) AS sessions_min, max(CurrentMetric_ZooKeeperSession) AS sessions_max"
+	}
+	return fmt.Sprintf(
+		`SELECT toString(toStartOfHour(event_time)) AS time,
+				sum(ProfileEvent_ZooKeeperTransactions)       AS transactions,
+				sum(ProfileEvent_ZooKeeperHardwareExceptions) AS hw_exceptions,
+				sum(ProfileEvent_ZooKeeperUserExceptions)     AS user_exceptions,
+				%s,
+				%s
+		 FROM %s
+		 WHERE event_time > now() - INTERVAL 7 DAY
+		 GROUP BY time ORDER BY time`,
+		wait, sess, g.sysTable("metric_log"))
+}
+
+// keeperErrorsSQL counts the Keeper-dependent error codes per hour: 999
+// KEEPER_EXCEPTION, 242 TABLE_IS_READ_ONLY, 319 UNKNOWN_STATUS_OF_INSERT,
+// 571 DATABASE_REPLICATION_FAILED and 252 TOO_MANY_PARTS (the usual
+// aftermath of merges not being scheduled). system.error_log (24.8+) is
+// preferred because it counts every thread — background merges, fetches and
+// DDL workers never reach query_log; the query_log fallback says so in the
+// panel subtitle.
+func (g *Generator) keeperErrorsSQL(useErrorLog bool) string {
+	if useErrorLog {
+		return fmt.Sprintf(
+			`SELECT toString(toStartOfHour(event_time)) AS time,
+					error AS code_name, sum(value) AS count
+			 FROM %s
+			 WHERE event_time > now() - INTERVAL 7 DAY
+			   AND code IN (999, 242, 319, 571, 252)
+			 GROUP BY time, code_name ORDER BY time`,
+			g.sysTable("error_log"))
+	}
+	return fmt.Sprintf(
+		`SELECT toString(toStartOfHour(event_time)) AS time,
+				errorCodeToName(exception_code) AS code_name, count() AS count
+		 FROM %s
+		 WHERE event_time > now() - INTERVAL 7 DAY
+		   AND type = 'ExceptionWhileProcessing'
+		   AND exception_code IN (999, 242, 319, 571, 252)
+		 GROUP BY time, code_name ORDER BY time`,
+		g.sysTable("query_log"))
+}
+
+// keeperConnectionSQL lists the live Keeper connections (23.8+): which host,
+// how old the session is, whether it is expired. Per replica in cloud mode.
+func (g *Generator) keeperConnectionSQL() string {
+	host := ""
+	if g.mode == "cloud" {
+		host = "hostName() AS replica, "
+	}
+	return fmt.Sprintf(
+		`SELECT %sname, host, toString(port) AS port, toString(index) AS index,
+				toString(connected_time) AS connected_time,
+				toString(session_uptime_elapsed_seconds) AS session_uptime_s,
+				toString(is_expired) AS is_expired,
+				toString(keeper_api_version) AS api_version
+		 FROM %s
+		 ORDER BY name`,
+		host, g.sysTable("zookeeper_connection"))
+}
+
 func (g *Generator) collect() map[string]interface{} {
 	p := map[string]interface{}{
 		"generated_at":    time.Now().UTC().Format("2006-01-02 15:04:05 UTC"),
@@ -973,6 +1049,30 @@ func (g *Generator) collect() map[string]interface{} {
 		 ORDER BY absolute_delay DESC, is_readonly DESC`,
 		g.sysTable("replicas"),
 	))
+
+	// ── Keeper health ─────────────────────────────────────────────────────────
+	//
+	// The panel is hidden when metric_log has no rows (table disabled, or a
+	// server without Keeper never touches these counters anyway).
+	if g.hasTable("metric_log") {
+		p["keeper_metric_hourly"] = g.safeQuery("keeper_metric_hourly", g.keeperMetricSQL(
+			g.hasColumn("metric_log", "ProfileEvent_ZooKeeperWaitMicroseconds"),
+			g.hasColumn("metric_log", "CurrentMetric_ZooKeeperSession")))
+	} else {
+		p["keeper_metric_hourly"] = []map[string]interface{}{}
+	}
+	useErrorLog := g.hasTable("error_log")
+	p["keeper_errors_hourly"] = g.safeQuery("keeper_errors_hourly", g.keeperErrorsSQL(useErrorLog))
+	if useErrorLog {
+		p["keeper_errors_source"] = "system.error_log — every thread, background merges and fetches included"
+	} else {
+		p["keeper_errors_source"] = "system.query_log — queries only; background merges, fetches and DDL workers are not counted (system.error_log needs 24.8+)"
+	}
+	if g.hasTable("zookeeper_connection") {
+		p["keeper_connection"] = g.safeQuery("keeper_connection", g.keeperConnectionSQL())
+	} else {
+		p["keeper_connection"] = []map[string]interface{}{}
+	}
 
 	// ── Disk usage ────────────────────────────────────────────────────────────
 
@@ -1530,6 +1630,7 @@ footer{text-align:center;color:var(--ink-muted);font-size:var(--click-font-size-
   <a href="#sec-pending">Pending Work</a>
   <a href="#sec-replication">Replication</a>
   <a href="#sec-replicas" id="nav-replicas" style="display:none">Replicas</a>
+  <a href="#sec-keeper" id="nav-keeper" style="display:none">Keeper</a>
   <a href="#sec-clusters" id="nav-clusters" style="display:none">Clusters</a>
   <a href="#sec-disks">Disks</a>
   <a href="#sec-logs" id="nav-logs" style="display:none">Logs</a>
@@ -1826,7 +1927,38 @@ footer{text-align:center;color:var(--ink-muted);font-size:var(--click-font-size-
     </div>
   </div>
   <div class="sub-title">Replica Details</div>
+  <p class="host-note" id="replicas-scope"></p>
   <div class="tbl-wrap"><div id="tbl-replicas"></div></div>
+  <div class="pagination" id="replicas-pagination"></div>
+</section>
+
+<!-- ── KEEPER HEALTH ── -->
+<section id="sec-keeper" style="display:none">
+  <h2>🔑 Keeper Health (last 7 days)</h2>
+  <p class="host-note">Two counters per hour decide the verdict: <b>transactions</b> (work Keeper completed for this server) and <b>hardware exceptions</b> (connection loss, session expiry, operation timeout). More than 1000 exceptions while traffic holds is a <b>blip</b> — a session lost and re-established. Exceptions while traffic drops below half of the 7-day median means Keeper was <b>unavailable</b> to this server: inserts fail with 999/319, merges are not scheduled, DDL stalls, and TOO_MANY_PARTS follows.</p>
+  <div class="tbl-wrap"><div id="tbl-keeper-verdict"></div></div>
+  <div class="charts-grid">
+    <div class="chart-card" style="grid-column:1/-1">
+      <h3>Keeper transactions per hour (work completed)</h3>
+      <div class="chart-wrap h260"><canvas id="chart-keeper-traffic"></canvas></div>
+    </div>
+    <div class="chart-card" style="grid-column:1/-1">
+      <h3>Keeper hardware exceptions per hour (connection loss, session expiry, timeouts) — bars coloured by verdict</h3>
+      <div class="chart-wrap h260"><canvas id="chart-keeper-exceptions"></canvas></div>
+    </div>
+    <div class="chart-card">
+      <h3>Mean Keeper request latency per hour (ms)</h3>
+      <p class="host-note">ZooKeeperWaitMicroseconds / ZooKeeperTransactions. Latency rising in the hours <i>before</i> the exceptions means Keeper was saturated first.</p>
+      <div class="chart-wrap h260"><canvas id="chart-keeper-latency"></canvas></div>
+    </div>
+    <div class="chart-card">
+      <h3>Keeper-dependent errors per hour</h3>
+      <p class="host-note" id="keeper-errors-source"></p>
+      <div class="chart-wrap h260"><canvas id="chart-keeper-errors"></canvas></div>
+    </div>
+  </div>
+  <div class="sub-title">Keeper connections (system.zookeeper_connection)</div>
+  <div class="tbl-wrap"><div id="tbl-keeper-connection"></div></div>
 </section>
 
 <!-- ── DISK USAGE ── -->
@@ -3217,10 +3349,17 @@ document.addEventListener('DOMContentLoaded',function(){
 
   // ── Replicas health ───────────────────────────────────────────────────────
   (function(){
-    const rows=DATA.replicas||[];
-    if(!rows.length)return;
+    const allRows=DATA.replicas||[];
+    if(!allRows.length)return;
     document.getElementById('sec-replicas').style.display='';
     document.getElementById('nav-replicas').style.display='';
+    // Attention first: read-only, then more than 60 s behind, then the rest —
+    // each group in the SQL's delay order (Array.prototype.sort is stable).
+    // Sorting only by delay, as the SQL does, could push a read-only table
+    // with a small delay off page 1 of the details table. The charts are
+    // order-insensitive, so they use the same array.
+    const rank=r=>r.is_readonly?2:(Number(r.absolute_delay||0)>60?1:0);
+    const rows=[...allRows].sort((a,b)=>rank(b)-rank(a));
 
     // delay distribution (bar)
     const delayBuckets={'0s':0,'<10s':0,'<60s':0,'<5m':0,'≥5m':0};
@@ -3267,11 +3406,130 @@ document.addEventListener('DOMContentLoaded',function(){
       document.getElementById('chart-replica-queue').parentElement.innerHTML='<p class="no-data">No queue entries</p>';
     }
 
-    renderTable('tbl-replicas',rows,
-      ['database','table','is_readonly','is_session_expired','is_leader',
+    // Replica Details is one row per replicated table — 25 000 rows on a
+    // large SharedMergeTree cluster. The charts above use every row; the
+    // table shows 50 at a time. Rows arrive ordered by absolute_delay DESC,
+    // is_readonly DESC, so page 1 is the replicas that need attention.
+    const REPLICA_PAGE=50;
+    let rpage=0;
+    const rcols=['database','table','is_readonly','is_session_expired','is_leader',
        'queue_size','inserts_in_queue','merges_in_queue','future_parts',
-       'parts_to_check','absolute_delay','active_replicas','total_replicas'],
-      r=>r.is_readonly?'error-row':(Number(r.absolute_delay||0)>60?'alert-row':''));
+       'parts_to_check','absolute_delay','active_replicas','total_replicas'];
+    const rclass=r=>r.is_readonly?'error-row':(Number(r.absolute_delay||0)>60?'alert-row':'');
+    const attention=rows.filter(r=>rclass(r)).length;
+    document.getElementById('replicas-scope').textContent=
+      rows.length+' replicated table'+(rows.length===1?'':'s')+' on this server'
+      +(attention?' — '+attention+' read-only or more than 60 s behind, listed first':' — none read-only or behind')
+      +(rows.length>REPLICA_PAGE?'; '+REPLICA_PAGE+' per page, sorted by delay.':'.');
+    function renderReplicas(){
+      const start=rpage*REPLICA_PAGE;
+      renderTable('tbl-replicas',rows.slice(start,start+REPLICA_PAGE),rcols,rclass);
+      const pg=document.getElementById('replicas-pagination');
+      const total=Math.ceil(rows.length/REPLICA_PAGE);
+      if(total<=1){pg.innerHTML='';return;}
+      let h='';
+      if(rpage>0) h+='<button onclick="window._replicaPg('+(rpage-1)+')">&#9664;</button>';
+      h+='<span class="cur">'+(rpage+1)+' / '+total+'</span>';
+      if(rpage<total-1) h+='<button onclick="window._replicaPg('+(rpage+1)+')">&#9654;</button>';
+      pg.innerHTML=h;
+    }
+    window._replicaPg=function(pp){rpage=pp;renderReplicas();};
+    renderReplicas();
+  })();
+
+  // ── Keeper health ─────────────────────────────────────────────────────────
+  //
+  // Same verdict rule as alerts/keeper_health.yaml and the skill's HC-3.8, so
+  // the dashboard, the alert and the pre-pass never disagree about an hour.
+  (function(){
+    const rows=DATA.keeper_metric_hourly||[];
+    if(!rows.length)return;
+    document.getElementById('sec-keeper').style.display='';
+    document.getElementById('nav-keeper').style.display='';
+    const N=v=>Number(v||0);
+    const labels=rows.map(r=>r.time);
+    const tx=rows.map(r=>N(r.transactions)), hw=rows.map(r=>N(r.hw_exceptions));
+    // Median = the upper-middle sample, exactly quantileExactHigh(0.5) in
+    // alerts/keeper_health.yaml and tx_vals[len//2] in inspect_bundle.py, so
+    // an hour near the 50 % line gets the same verdict on all three surfaces.
+    const sorted=[...tx].sort((a,b)=>a-b);
+    const med=sorted[Math.floor(sorted.length/2)]||0;
+    const verdict=rows.map((r,i)=>{
+      const pct=med?100*tx[i]/med:null;
+      if(pct===null)return hw[i]>1000?'exceptions, no traffic baseline':'ok';
+      if(hw[i]>1000&&pct<50)return 'UNAVAILABLE';
+      if(hw[i]>1000)return 'blip';
+      if(pct<10&&i>0&&i<rows.length-1)return 'idle/disconnected';
+      return 'ok';
+    });
+    const summary=['UNAVAILABLE','blip','idle/disconnected'].map(v=>{
+      const hrs=labels.filter((_,i)=>verdict[i]===v);
+      return {verdict:v,hours:hrs.length,
+        first:hrs[0]||'—',last:hrs[hrs.length-1]||'—',
+        meaning:v==='UNAVAILABLE'?'> 1000 hardware exceptions/h and traffic < 50% of median — sessions expiring, work not completing'
+               :v==='blip'?'> 1000 hardware exceptions/h with traffic ≥ 50% of median — session lost and re-established'
+               :'traffic < 10% of median with no exceptions — server idle, or no Keeper session (check ZooKeeperSession)'};
+    }).filter(x=>x.hours>0);
+    renderTable('tbl-keeper-verdict',
+      summary.length?summary:[{verdict:'ok',hours:rows.length,first:labels[0],last:labels[labels.length-1],
+        meaning:'no hour with > 1000 hardware exceptions; median traffic '+fmt(med)+' transactions/h'}],
+      ['verdict','hours','first','last','meaning'],
+      r=>r.verdict==='UNAVAILABLE'?'error-row':(r.verdict==='blip'?'alert-row':''));
+    // Two single-axis charts that share the x labels (a dual axis would invent
+    // a correlation): traffic as a line with the median drawn as a reference,
+    // exceptions as bars coloured by the hour's verdict.
+    const crit=themeVar('--status-critical')||C[1], warn=themeVar('--status-warning')||C[2];
+    const bars=verdict.map(v=>v==='UNAVAILABLE'?crit:(v==='blip'?warn:OTHER));
+    const verdictTip={callbacks:{afterBody:items=>{
+      const i=items[0].dataIndex;
+      return [' verdict: '+verdict[i]+(med?' ('+Math.round(100*tx[i]/med)+'% of median traffic)':'')];}}};
+    mkChart(document.getElementById('chart-keeper-traffic'),{
+      type:'line',
+      data:{labels,datasets:[
+        {label:'Transactions / h',data:tx,borderColor:C[0],backgroundColor:C[0],tension:0.2,pointRadius:0,borderWidth:2},
+        {label:'7-day median',data:tx.map(()=>med),borderColor:OTHER,borderDash:[6,4],pointRadius:0,borderWidth:1}]},
+      options:{responsive:true,maintainAspectRatio:false,interaction:{mode:'index',intersect:false},
+        plugins:{legend:{position:'top'},tooltip:verdictTip},
+        scales:{x:{ticks:{maxTicksLimit:14,maxRotation:45}},y:{beginAtZero:true}}}
+    });
+    mkChart(document.getElementById('chart-keeper-exceptions'),{
+      type:'bar',
+      data:{labels,datasets:[{label:'Hardware exceptions / h',data:hw,backgroundColor:bars,borderColor:bars,borderWidth:1}]},
+      options:{responsive:true,maintainAspectRatio:false,interaction:{mode:'index',intersect:false},
+        plugins:{legend:{display:false},tooltip:verdictTip},
+        scales:{x:{ticks:{maxTicksLimit:14,maxRotation:45}},y:{beginAtZero:true}}}
+    });
+    if(rows.some(r=>N(r.wait_us)>0)){
+      const lat=rows.map((r,i)=>tx[i]?N(r.wait_us)/tx[i]/1000:0);
+      mkChart(document.getElementById('chart-keeper-latency'),{
+        type:'line',
+        data:{labels,datasets:[{label:'mean ms / request',data:lat,borderColor:C[1],backgroundColor:C[1],tension:0.2,pointRadius:0,borderWidth:2}]},
+        options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},
+          scales:{x:{ticks:{maxTicksLimit:10,maxRotation:45}},y:{beginAtZero:true}}}
+      });
+    }else{
+      document.getElementById('chart-keeper-latency').parentElement.innerHTML='<p class="no-data">ZooKeeperWaitMicroseconds is not exported by this version</p>';
+    }
+    const er=DATA.keeper_errors_hourly||[];
+    document.getElementById('keeper-errors-source').textContent='Source: '+(DATA.keeper_errors_source||'');
+    if(er.length){
+      const d=pivot(er,'time','code_name','count');
+      stackWithGaps(d);
+      mkChart(document.getElementById('chart-keeper-errors'),{
+        type:'bar',data:d,
+        options:{responsive:true,maintainAspectRatio:false,interaction:{mode:'index',intersect:false},
+          plugins:{legend:{position:'top'}},
+          scales:{x:{stacked:true,ticks:{maxTicksLimit:10,maxRotation:45}},y:{stacked:true,beginAtZero:true}}}
+      });
+    }else{
+      document.getElementById('chart-keeper-errors').parentElement.innerHTML='<p class="no-data">No 999 / 242 / 319 / 571 / 252 in the last 7 days</p>';
+    }
+    const cn=DATA.keeper_connection||[];
+    if(cn.length){
+      renderTable('tbl-keeper-connection',cn,null,r=>String(r.is_expired)==='1'?'error-row':'');
+    }else{
+      document.getElementById('tbl-keeper-connection').innerHTML='<p class="no-data">system.zookeeper_connection is not available (ClickHouse &lt; 23.8)</p>';
+    }
   })();
 
   // ── Disk usage ────────────────────────────────────────────────────────────

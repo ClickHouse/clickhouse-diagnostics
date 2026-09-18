@@ -2,9 +2,13 @@ name: keeper_exception_spike
 title: "Keeper/ZooKeeper exceptions spiking (code 999)"
 severity: warning
 description: |
-  More than 20 Keeper exception errors (code 999 — KEEPER_EXCEPTION)
-  occurred in the last hour. These errors mean ClickHouse failed to
-  complete a coordination request with ClickHouse Keeper or ZooKeeper.
+  More than 20 Keeper exception errors (code 999 — KEEPER_EXCEPTION) in a
+  single hour of the last 24 hours (one alert instance per such hour).
+  These errors mean ClickHouse failed to complete a coordination request
+  with ClickHouse Keeper or ZooKeeper. The window is a day, not an hour,
+  because bundles are usually collected after recovery — a rule that
+  only looks at the last hour is blind to the incident it is meant to
+  surface.
 
   Ongoing Keeper exceptions can block DDL operations, stall replication,
   and prevent mutations from completing. Common causes include Keeper
@@ -21,12 +25,15 @@ tags:
 
 query: |
   SELECT
-    count()        AS error_count,
-    any(exception) AS example_message
+    toStartOfHour(event_time) AS hour,
+    count()                   AS error_count,
+    any(exception)            AS example_message
   FROM {sys.query_log}
-  WHERE event_time > now() - INTERVAL 1 HOUR
+  WHERE event_time > now() - INTERVAL 24 HOUR
     AND exception_code = 999
     AND type = 'ExceptionWhileProcessing'
+  GROUP BY hour
   HAVING error_count > 20
+  ORDER BY hour
 
-message: "Keeper exception (code 999) fired {error_count} times in the last hour — example: {example_message}"
+message: "Keeper exception (code 999) fired {error_count} times in the hour starting {hour} — example: {example_message}"

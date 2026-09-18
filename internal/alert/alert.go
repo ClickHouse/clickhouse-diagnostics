@@ -118,6 +118,8 @@ type Result struct {
 	// never ran.
 	Skipped bool   `json:"skipped,omitempty"`
 	Reason  string `json:"skip_reason,omitempty"`
+	// DurationMs is the wall time of the rule's query, for execution_log.txt.
+	DurationMs int64 `json:"duration_ms,omitempty"`
 }
 
 // Notable reports whether this result deserves the reader's attention —
@@ -199,7 +201,9 @@ func (ev *Evaluator) RunAll(dir string, serverVersion internal.Version) []Result
 
 	var results []Result
 	for _, f := range files {
+		started := time.Now()
 		r := ev.evalFile(f.FullPath)
+		r.DurationMs = time.Since(started).Milliseconds()
 		// Preserve the version-override context in the reported filename
 		// (mirrors analysis.go) so support engineers can tell which variant
 		// fired — e.g. "22.11.1.0/detached_parts_exist.yaml".

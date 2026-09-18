@@ -18,7 +18,7 @@ mkdir -p /tmp/chdiag && tar -xzf clickhouse_backup_*.tar.gz -C /tmp/chdiag
 B=$(ls -d /tmp/chdiag/clickhouse_backup_*)
 ls -la "$B"; wc -l "$B"/*.jsonl                          # 0-line files are meaningful (see bundle-layout §1)
 cat "$B"/system.version_*.jsonl
-head -c 400 "$B"/system.part_log_7_days_*.jsonl          # confirm column names on this bundle
+head -c 400 "$B"/system.part_log_3_days_*.jsonl          # confirm column names on this bundle
 grep -l '^### support-diagnostic: TRUNCATED' "$B"/logs/* 2>/dev/null
 ```
 
@@ -68,7 +68,7 @@ Merge activity and failures from `part_log` (bucketed sums — divide by `count`
 SELECT event_type, merge_reason, sum(toUInt64(count)) AS events,
        round(sum(toUInt64(duration_ms)) / sum(toUInt64(count))) AS avg_ms,
        formatReadableSize(sum(toUInt64(size_in_bytes))) AS bytes
-FROM file('$B/system.part_log_7_days_*.jsonl', JSONEachRow)
+FROM file('$B/system.part_log_3_days_*.jsonl', JSONEachRow)
 GROUP BY 1,2 ORDER BY events DESC
 ```
 Failed part operations: `WHERE error != 0` → `error, exception (sample), distinct_exceptions, sum(count)` grouped by `table_name, event_type`.
@@ -91,7 +91,60 @@ FROM file('$B/system.replication_queue_*.jsonl', JSONEachRow) GROUP BY type ORDE
 ```
 A non-empty `zookeeper_exception` names the Keeper-side failure behind a read-only replica, and `last_queue_update_exception` the local queue-update failure; a high `max_tries` on a type that is still queued means the entry is retrying and failing rather than waiting its turn. Both sets are hashed in gov (empty stays empty, so "is it erroring at all?" survives).
 
-Keeper pressure over time: `zk_transactions`, `zk_hw_exceptions` per hour in `system.metric_log_7_days` (any non-zero `zk_hw_exceptions` bucket = connection loss/timeouts); `KEEPER_EXCEPTION` (999) and `TABLE_IS_READ_ONLY` (242) in `system.errors` and `exception_code` in `query_log_details`.
+Keeper health test (HC-3.8) — the two counters per hour against the 7-day median, with a verdict per hour:
+```sql
+WITH (SELECT quantileExactHigh(0.5)(toUInt64(zk_transactions)) FROM file('$B/system.metric_log_7_days_*.jsonl', JSONEachRow)) AS med
+SELECT time, toUInt64(zk_hw_exceptions) AS hw, toUInt64(zk_transactions) AS tx, round(100 * tx / greatest(med, 1)) AS pct_of_median,
+       multiIf(hw > 1000 AND tx < 0.5 * med, 'UNAVAILABLE', hw > 1000, 'blip', tx < 0.1 * med, 'idle/disconnected', 'ok') AS verdict
+FROM file('$B/system.metric_log_7_days_*.jsonl', JSONEachRow)
+WHERE verdict != 'ok' ORDER BY time
+```
+The same over the richer file (column names carry the aggregate): replace `zk_hw_exceptions` with `"sum(ProfileEvent_ZooKeeperHardwareExceptions)"` and `zk_transactions` with `"sum(ProfileEvent_ZooKeeperTransactions)"` in `system.metric_log_coordination_3_days_*.jsonl`; add `"max(CurrentMetric_ZooKeeperSession)"` (0 = no session that hour).
+
+Session markers by hour (which minute, which Keeper host the server moved to):
+```sql
+SELECT toStartOfHour(event_time) AS h,
+       countIf(message LIKE '%Session expired%') AS expired, countIf(message LIKE '%Finalizing session%') AS finalized,
+       countIf(message LIKE '%Connected to ZooKeeper%') AS connected, countIf(message LIKE '%Trying to establish a new connection%') AS reconnecting,
+       anyIf(leftUTF8(message, 160), message LIKE '%Connected to ZooKeeper%') AS example
+FROM file('$B/system.text_log_2*.jsonl', JSONEachRow) GROUP BY h HAVING expired + finalized + connected + reconnecting > 0 ORDER BY h
+```
+(`system.text_log_keeper_1_day_*.jsonl` has the same counts precomputed for the whole day.) Mean Keeper latency per hour — the "saturated first" signal — from the coordination file: `"sum(ProfileEvent_ZooKeeperWaitMicroseconds)" / "sum(ProfileEvent_ZooKeeperTransactions)"`; failed operations by error from `system.zookeeper_log_errors_1_day_*.jsonl` (`op_num, error, failed_requests, sessions_affected`). Then 999/319/571 per hour from `query_log_details` (§6) and `MergeParts` with `error = 999` per hour from `part_log` (§2) — the hours must line up. Cumulative 999/242 in `system.errors` only says "since restart"; `system.error_log_7_days` (≥ 24.8, when present) gives them per hour, background threads included.
+
+## 3a. Keeper and object-storage files (added for Keeper incidents)
+
+Failed Keeper operations by hour and error (only present when `zookeeper_log` is enabled; the file holds failed responses only):
+```sql
+SELECT time, error, sum(toUInt64(failed_requests)) AS failed, max(toUInt64(sessions_affected)) AS sessions, groupArray(op_num) AS ops
+FROM file('$B/system.zookeeper_log_errors_1_day_*.jsonl', JSONEachRow)
+WHERE error IN ('ZSESSIONEXPIRED', 'ZCONNECTIONLOSS', 'ZOPERATIONTIMEOUT') GROUP BY time, error ORDER BY time
+```
+Every error code per hour, background threads included (`error_log`, ≥ 24.8):
+```sql
+SELECT time, error, sum(toUInt64(errors)) AS n FROM file('$B/system.error_log_7_days_*.jsonl', JSONEachRow)
+WHERE code IN (999, 242, 252, 107, 319, 571) GROUP BY time, error ORDER BY time, n DESC
+```
+DDL that never finished, and replayed DDL (same statement under many entries):
+```sql
+SELECT status, count(), min(query_create_time) AS oldest, groupUniqArray(5)(host) AS hosts
+FROM file('$B/system.distributed_ddl_queue_*.jsonl', JSONEachRow) WHERE status != 'Finished' GROUP BY status;
+SELECT leftUTF8(query, 120) AS q, uniq(entry) AS entries, countIf(toInt32(exception_code) = 57) AS uuid_collisions
+FROM file('$B/system.distributed_ddl_queue_*.jsonl', JSONEachRow) GROUP BY q HAVING entries > 1 ORDER BY entries DESC LIMIT 10
+```
+Object storage: is user data on it, and did uploads fail / deletes spike before the `FILE_DOESNT_EXIST` hour?
+```sql
+SELECT policy_name, disks FROM file('$B/system.storage_policies_*.jsonl', JSONEachRow);
+SELECT name, type FROM file('$B/system.disks_*.jsonl', JSONEachRow);
+SELECT time, event_type, sum(toUInt64(count)) AS ops, sumIf(toUInt64(count), toUInt8(failed) = 1) AS failed, anyIf(example_error, toUInt8(failed) = 1) AS err
+FROM file('$B/system.blob_storage_log_7_days_*.jsonl', JSONEachRow) GROUP BY time, event_type ORDER BY time
+```
+Per-replica snapshot skew (cloud mode; one row per `hostname`) — the Keeper-held metadata cache and current sessions:
+```sql
+SELECT hostname, anyIf(value, metric = 'MetadataFromKeeperCacheObjects') AS cache_objects, anyIf(value, metric = 'ZooKeeperSession') AS zk_sessions,
+       anyIf(value, metric = 'ReadonlyReplica') AS readonly_tables
+FROM file('$B/system.metrics_*.jsonl', JSONEachRow) GROUP BY hostname ORDER BY cache_objects
+```
+Server uptime and the error rate it implies: `SELECT value FROM file('$B/system.asynchronous_metrics_*.jsonl', JSONEachRow) WHERE metric = 'Uptime'` → divide `system.errors.value` and `system.events.value` by it. Fetches still in flight: `system.replicated_fetches_*.jsonl` sorted by `elapsed`. Warning/Error volume per hour and component: `system.text_log_histogram_1_day_*.jsonl` (`time, level, logger_class, count, example`).
 
 ## 4. Disk and storage
 

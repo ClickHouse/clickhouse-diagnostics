@@ -18,7 +18,7 @@ Produce the summary inline (markdown) unless the user asks for a file. Keep it s
 |---|---|---|
 | Availability & crashes | ok / warning / critical / n/a | `system.crash_log`: 0 rows |
 | Parts & merges | … | `system.parts`: <db>.<table> partition <id> 812 active parts (alert threshold 300) |
-| Replication & Keeper | … | `system.replicas`: max absolute_delay 4 s; `metric_log.zk_hw_exceptions` 0 |
+| Replication & Keeper | … | `system.replicas`: max absolute_delay 4 s; Keeper health: 0 hardware exceptions in every hour, transactions ≈ median (or: UNAVAILABLE 13:00–17:00 — 25 M exceptions/h, traffic 9 % of median) |
 | Disk & storage | … | `system.disks`: default 71 % free; `system` db 38 GiB (3rd largest) |
 | Memory & CPU | … | `metric_log.avg_memory_tracking_bytes` peak 11.2 GiB of 16 GiB RAM; load 0.3/8 CPUs |
 | Query workload | … | 241 = 3.1 % of queries (1 240/40 000), one hash accounts for 92 % |
@@ -33,7 +33,7 @@ Produce the summary inline (markdown) unless the user asks for a file. Keep it s
 **What:** <one or two sentences in plain language>
 **Evidence:**
 - `system.parts_*.jsonl` → active parts in <db>.<table>/<partition_id>: 812 (level 0: 540)
-- `system.part_log_7_days_*.jsonl` → NewPart 3 900/h vs MergeParts 41/h on 2026-08-25 10:00–14:00
+- `system.part_log_3_days_*.jsonl` → NewPart 3 900/h vs MergeParts 41/h on 2026-08-25 10:00–14:00
 - `system.metric_log_7_days_*.jsonl` → max_merge_pool_tasks = 16 (pool size) for 6 consecutive hours
 **Why it matters:** <consequence, with the threshold that will bite next: "inserts are delayed from 1000 parts and rejected at 3000 (`parts_to_throw_insert`)">
 **Recommended action:** <ordered, concrete, with settings + defaults; distinguish immediate mitigation from durable fix>

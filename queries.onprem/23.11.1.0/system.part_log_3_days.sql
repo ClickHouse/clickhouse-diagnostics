@@ -1,8 +1,11 @@
+-- Window: 3 days. part_log records every part event (NewPart, MergeParts, DownloadPart,
+-- RemovePart …) and reaches tens of GiB per week on a busy replica; three days keep a baseline around an incident at a fraction of the scan.
 SELECT
-    toStartOfInterval(event_time, toIntervalHour(12)) AS time,
+    toStartOfInterval(event_time, toIntervalHour(1)) AS time,
     event_type,
     merge_reason,
     partition_id,
+    hostname,
     concat(database, '.', table) AS table_name,
     error,
     any(pl.exception) AS exception,
@@ -11,7 +14,7 @@ SELECT
     sum(duration_ms) AS duration_ms,
     sum(size_in_bytes) AS size_in_bytes,
     count() as count
-FROM clusterAllReplicas(default, system.part_log) AS pl
+FROM system.part_log AS pl
 -- part_name is deliberately NOT collected at all, in either form.
 --
 -- As a GROUP BY key it is fatal: it is unique per part, so keying on it turns
@@ -45,5 +48,5 @@ FROM clusterAllReplicas(default, system.part_log) AS pl
 -- produced 8 distinct messages (each names its own database), and grouping on
 -- the text turned 13 aggregated events into 13 rows — a row-for-row copy of
 -- the source, the same trap part_name had.
-WHERE (event_time > {from:7d} AND event_time <= {to:now})
+WHERE (event_time > {from:3d} AND event_time <= {to:now})
 GROUP BY ALL
