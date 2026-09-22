@@ -74,6 +74,29 @@ func TestKeeperPanel_WaitUnavailableIsNotConfusedWithNoKeeper(t *testing.T) {
 	}
 }
 
+// Both optional metric_log counters are substituted with a literal 0 when the
+// server does not export them, so every DATA consumer needs to know which it
+// is. The panel reads keeper_wait_available; the skill reads sessions_min /
+// sessions_max straight out of DATA (bundle-layout §6) and needs
+// keeper_session_available for the same reason. They must travel together —
+// publishing one and not the other is what made the wait column ambiguous.
+func TestKeeperPanel_OptionalColumnFlagsTravelTogether(t *testing.T) {
+	html := buildHTML(keeperIncidentFixture())
+	for _, want := range []string{`"keeper_wait_available":true`, `"keeper_session_available":true`} {
+		if !strings.Contains(html, want) {
+			t.Errorf("DATA missing %s — a reader cannot tell a substituted 0 from a real one", want)
+		}
+	}
+	// The substitution the flags describe must still be in the degraded query,
+	// otherwise the flags are meaningless.
+	degraded := (&Generator{mode: "onprem"}).keeperMetricSQL(false, false)
+	for _, want := range []string{"0 AS wait_us", "0 AS sessions_min", "0 AS sessions_max"} {
+		if !strings.Contains(degraded, want) {
+			t.Errorf("degraded query no longer substitutes %q:\n%s", want, degraded)
+		}
+	}
+}
+
 func TestKeeperErrorsSQL_SourceSwitch(t *testing.T) {
 	g := &Generator{mode: "onprem"}
 	withErrLog := g.keeperErrorsSQL(true)

@@ -130,8 +130,13 @@ func keeperIncidentFixture() map[string]interface{} {
 		"uptime": "1 hours 51 minutes", "total_databases": 410, "total_tables": 33882, "active_parts": 50000, "total_size": "28.40 TiB",
 		"alerts":               alerts,
 		"keeper_metric_hourly": metric,
-		"keeper_errors_hourly": errors,
-		"keeper_errors_source": "system.error_log — every thread, background merges and fetches included",
+		// collect() sets these from hasColumn(); the fixture states them
+		// explicitly so the latency panel exercises the "column present"
+		// path rather than relying on the absent-key default.
+		"keeper_wait_available":    true,
+		"keeper_session_available": true,
+		"keeper_errors_hourly":     errors,
+		"keeper_errors_source":     "system.error_log — every thread, background merges and fetches included",
 		"keeper_connection": []map[string]interface{}{
 			{"name": "default", "host": "keeper-3.example.internal", "port": "9281", "index": "2", "connected_time": "2026-09-10 21:04:31", "session_uptime_s": "6866", "is_expired": "0", "api_version": "4"},
 		},

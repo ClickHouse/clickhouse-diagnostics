@@ -1056,18 +1056,21 @@ func (g *Generator) collect() map[string]interface{} {
 	// server without Keeper never touches these counters anyway).
 	if g.hasTable("metric_log") {
 		hasWait := g.hasColumn("metric_log", "ProfileEvent_ZooKeeperWaitMicroseconds")
-		p["keeper_metric_hourly"] = g.safeQuery("keeper_metric_hourly", g.keeperMetricSQL(
-			hasWait,
-			g.hasColumn("metric_log", "CurrentMetric_ZooKeeperSession")))
-		// The degraded query substitutes `0 AS wait_us`, which is also what a
-		// server that never contacts Keeper reports — so an all-zero series
-		// cannot tell "column absent" from "legitimately zero". Record which
-		// it is here, where hasColumn() already knows, instead of letting the
-		// panel JS guess and blame the server version.
+		hasSession := g.hasColumn("metric_log", "CurrentMetric_ZooKeeperSession")
+		p["keeper_metric_hourly"] = g.safeQuery("keeper_metric_hourly", g.keeperMetricSQL(hasWait, hasSession))
+		// The degraded query substitutes `0 AS wait_us` / `0 AS sessions_*`,
+		// which is also what a server that never contacts Keeper reports — so
+		// a zero value cannot tell "column absent" from "legitimately zero".
+		// Record which it is here, where hasColumn() already knows, instead of
+		// letting a reader guess: the panel JS would otherwise blame the server
+		// version, and the skill reads these columns straight out of DATA
+		// (bundle-layout §6) where a 0 looks like a lost Keeper session.
 		p["keeper_wait_available"] = hasWait
+		p["keeper_session_available"] = hasSession
 	} else {
 		p["keeper_metric_hourly"] = []map[string]interface{}{}
 		p["keeper_wait_available"] = false
+		p["keeper_session_available"] = false
 	}
 	useErrorLog := g.hasTable("error_log")
 	p["keeper_errors_hourly"] = g.safeQuery("keeper_errors_hourly", g.keeperErrorsSQL(useErrorLog))
