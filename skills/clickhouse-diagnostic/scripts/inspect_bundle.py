@@ -696,8 +696,19 @@ def analyse(base: str):
             by_host.setdefault(r.get("hostname", ""), {})[r.get("metric")] = num(r.get("value"))
         for host, mm in by_host.items():
             who = f" on {host}" if host else ""
+            # ZooKeeperSession is exported by every build and sits at 0 on any
+            # server with no Keeper configured, so the metric alone cannot tell
+            # "the session was lost" from "there was never a session". Always
+            # report it, but only call it critical when something independent
+            # shows Keeper is in use: a Replicated*/Shared* table (system.replicas
+            # has rows) or Keeper traffic during the window.
             if mm.get("ZooKeeperSession") == 0:
-                add("critical", "keeper", f"no Keeper session right now (ZooKeeperSession = 0){who}", "system.metrics", "HC-3.12")
+                keeper_in_use = bool(reps) or bool(tx_vals and max(tx_vals) > 0)
+                add("critical" if keeper_in_use else "info", "keeper",
+                    f"no Keeper session right now (ZooKeeperSession = 0){who}"
+                    + ("" if keeper_in_use else " — expected on a single-node installation without Keeper;"
+                                                " no replicated tables and no Keeper traffic in the window"),
+                    "system.metrics", "HC-3.12")
             if (mm.get("ReadonlyReplica") or 0) > 0:
                 add("critical", "replication", f"{mm['ReadonlyReplica']} read-only replica table(s) right now{who}", "system.metrics", "HC-1.4")
         cache = {h: mm.get("MetadataFromKeeperCacheObjects") for h, mm in by_host.items() if mm.get("MetadataFromKeeperCacheObjects") is not None}
