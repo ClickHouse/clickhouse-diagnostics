@@ -64,6 +64,18 @@ func TestBuildHTML_SampleData(t *testing.T) {
 			{"exception_code": "241", "count": 15, "msg": "Memory limit exceeded"},
 			{"exception_code": "60", "count": 8, "msg": "Table doesn't exist"},
 		},
+		"keeper_metric_hourly": []map[string]interface{}{
+			{"time": "2026-04-01 10:00:00", "transactions": 28000000, "hw_exceptions": 0, "user_exceptions": 1200, "wait_us": 5600000000, "sessions_min": 1, "sessions_max": 1},
+			{"time": "2026-04-01 11:00:00", "transactions": 2400000, "hw_exceptions": 25000000, "user_exceptions": 900, "wait_us": 9000000000, "sessions_min": 0, "sessions_max": 1},
+		},
+		"keeper_errors_hourly": []map[string]interface{}{
+			{"time": "2026-04-01 11:00:00", "code_name": "KEEPER_EXCEPTION", "count": 732},
+			{"time": "2026-04-01 11:00:00", "code_name": "UNKNOWN_STATUS_OF_INSERT", "count": 47},
+		},
+		"keeper_errors_source": "system.error_log — every thread, background merges and fetches included",
+		"keeper_connection": []map[string]interface{}{
+			{"name": "default", "host": "keeper-1", "port": "9181", "index": "0", "connected_time": "2026-04-01 11:07:12", "session_uptime_s": "612", "is_expired": "0", "api_version": "3"},
+		},
 		"part_log_by_time": []map[string]interface{}{
 			{"time": "2026-04-01 00:00:00", "event_type": "MERGE_PARTS", "count": 120},
 			{"time": "2026-04-01 00:00:00", "event_type": "NEW_PART", "count": 450},

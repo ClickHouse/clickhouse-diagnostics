@@ -1,13 +1,21 @@
 name: high_exception_rate
-title: "High query exception rate in the last hour"
+title: "High query exception rate for one error code in an hour"
 severity: warning
 description: |
-  More than 50 query exceptions occurred within the last hour for a single
-  exception code. A sudden spike in exceptions can indicate application bugs,
-  schema changes, memory pressure (code 241), or resource exhaustion.
-  Investigate the most frequent exception code and the queries producing it.
+  More than 50 query exceptions with the same exception code occurred
+  within a single hour of the last 24 hours (one alert instance per hour
+  and code, worst 24 first). A sustained rate like this usually points to
+  a systematic problem — a misbehaving client, a schema mismatch, missing
+  permissions, resource limits being hit, or an outage of a dependency
+  (Keeper, object storage) — rather than isolated bad queries.
 
-  Adjust the HAVING threshold to suit your workload.
+  The window is a day rather than an hour because bundles are usually
+  collected after recovery; an hour-only rule would miss the incident.
+
+  Investigate: use the example message and exception code to identify the
+  affected queries; check whether one user or one query pattern
+  (normalized_query_hash) dominates; correlate the hour with metric_log,
+  part_log and text_log.
 tags:
   - exceptions
   - reliability
@@ -15,15 +23,17 @@ tags:
 
 query: |
   SELECT
+    toStartOfHour(event_time) AS hour,
     exception_code,
-    count()          AS error_count,
-    any(exception)   AS example_message
+    count()                   AS error_count,
+    any(exception)            AS example_message
   FROM {sys.query_log}
-  WHERE event_time > now() - INTERVAL 1 HOUR
+  WHERE event_time > now() - INTERVAL 24 HOUR
     AND exception_code != 0
     AND type = 'ExceptionWhileProcessing'
-  GROUP BY exception_code
+  GROUP BY hour, exception_code
   HAVING error_count > 50
   ORDER BY error_count DESC
+  LIMIT 24
 
-message: "Exception code {exception_code} fired {error_count} times in the last hour — example: {example_message}"
+message: "Exception code {exception_code} fired {error_count} times in the hour starting {hour} — example: {example_message}"

@@ -1,0 +1,71 @@
+name: keeper_connection_blips
+title: "Keeper connection losses in an hour while traffic stayed normal"
+severity: warning
+description: |
+  More than 1000 ZooKeeperHardwareExceptions in one hour of the last 7 days
+  while that replica still completed at least half of its own usual Keeper
+  transactions (that replica's median hourly ZooKeeperTransactions over the
+  same 7 days). The test is per replica: a cluster-wide sum would cross the
+  threshold on pooled exceptions no single node experienced.
+  A session was lost and re-established — a Keeper leader change, a
+  restart of one Keeper node, a network hiccup — without Keeper becoming
+  unavailable. Hours where traffic also collapsed are reported by
+  keeper_health instead.
+
+  Repeated blips deserve attention: they abort merges and inserts in
+  flight (999 / 319) and force replicas to re-check their state. A server
+  with no traffic baseline at all (median 0 — freshly started or genuinely
+  idle for the whole window) does not fire: "normal traffic" is undefined
+  there, and the dashboard labels such hours accordingly.
+
+  Check: text_log 'Finalizing session' / 'Connected to ZooKeeper' in the
+  hour (which Keeper host did the server move to), Keeper logs for a
+  leader election at that time, part_log errors in the hour.
+tags:
+  - keeper
+  - reliability
+
+# {sys.metric_log} — per-replica, so cloud mode fans out via
+# clusterAllReplicas. Both the per-hour aggregate AND the median baseline must
+# group by hostName(): a single cluster-wide bucket sums every replica's
+# exceptions, making the >1000 threshold N times easier to cross and reporting
+# a "blip" that no individual node experienced. Must stay the exact
+# complement of keeper_health (same two signals, transactions >= 0.5 *
+# baseline instead of <), so the grouping has to match it too.
+#
+# Safe in gov: alert rows never leave the machine there — alerts_summary.json
+# records only counts (internal/alert/alert.go WriteSummaryJSON) and gov never
+# generates the dashboard, the only other consumer of matched rows.
+query: |
+  WITH per_hour AS
+    (
+      SELECT
+        hostName()                                     AS hostname,
+        toStartOfHour(event_time)                      AS hour,
+        sum(ProfileEvent_ZooKeeperHardwareExceptions)  AS hw_exceptions,
+        sum(ProfileEvent_ZooKeeperTransactions)        AS transactions
+      FROM {sys.metric_log}
+      WHERE event_time > now() - INTERVAL 7 DAY
+      GROUP BY hostname, hour
+    ),
+    baseline AS
+    (
+      SELECT hostname, quantileExactHigh(0.5)(transactions) AS usual
+      FROM per_hour
+      GROUP BY hostname
+    )
+  SELECT
+    p.hostname                                         AS hostname,
+    p.hour                                             AS hour,
+    p.hw_exceptions                                    AS hw_exceptions,
+    p.transactions                                     AS transactions,
+    round(100 * p.transactions / greatest(b.usual, 1)) AS pct_of_usual
+  FROM per_hour AS p
+  INNER JOIN baseline AS b ON p.hostname = b.hostname
+  WHERE b.usual > 0
+    AND p.hw_exceptions > 1000
+    AND p.transactions >= 0.5 * b.usual
+  ORDER BY hour, hostname
+  LIMIT 168 BY hostname
+
+message: "hour starting {hour} on {hostname}: {hw_exceptions} Keeper hardware exceptions while traffic stayed at {pct_of_usual}% of usual ({transactions} transactions) — session lost and re-established"

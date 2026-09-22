@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"clickhouse-diagnostic/internal"
+	"clickhouse-diagnostic/internal/runlog"
 	"clickhouse-diagnostic/pkg"
 )
 
@@ -30,6 +31,15 @@ type Executor struct {
 	// in clusterAllReplicas). Empty leaves such placeholders unexpanded,
 	// which the unbound check below then refuses.
 	mode string
+	// rec, when set, receives one entry per query (outcome, wall time,
+	// result size) for execution_log.txt. nil is a no-op.
+	rec *runlog.Recorder
+}
+
+// WithRecorder attaches the execution-log recorder.
+func (e *Executor) WithRecorder(r *runlog.Recorder) *Executor {
+	e.rec = r
+	return e
 }
 
 // WithMode sets the topology mode used for {sys.<table>} expansion.
@@ -122,11 +132,13 @@ func (e *Executor) executeQuery(query internal.QueryFile, outputDir, timestamp s
 	// Read query from file
 	queryContent, err := os.ReadFile(query.FullPath)
 	if err != nil {
+		e.rec.Record(runlog.Entry{Stage: "collector", Name: query.Name, Source: query.DirName, Status: "failed", Rows: -1, Error: "error reading query file: " + err.Error()})
 		return fmt.Errorf("error reading query file: %w", err)
 	}
 
 	if len(queryContent) == 0 {
 		fmt.Printf("Query file '%s' is empty, skipping\n", query.FullPath)
+		e.rec.Record(runlog.Entry{Stage: "collector", Name: query.Name, Source: query.DirName, Status: "empty", Rows: -1, Extra: "query file is empty"})
 		return nil
 	}
 
@@ -146,7 +158,9 @@ func (e *Executor) executeQuery(query internal.QueryFile, outputDir, timestamp s
 	// A placeholder left unbound would reach the server as a literal
 	// brace: either a parse error or, worse, a silently wrong window.
 	if unbound := UnboundPlaceholders(sqlText); len(unbound) > 0 {
-		return fmt.Errorf("query '%s' has unbound placeholder(s) %v", query.Name, unbound)
+		err := fmt.Errorf("query '%s' has unbound placeholder(s) %v", query.Name, unbound)
+		e.rec.Record(runlog.Entry{Stage: "collector", Name: query.Name, Source: query.DirName, Status: "failed", Rows: -1, Error: err.Error()})
+		return err
 	}
 
 	// Serialise in the configured format, replacing any FORMAT the file
@@ -156,7 +170,9 @@ func (e *Executor) executeQuery(query internal.QueryFile, outputDir, timestamp s
 
 	// Security: enforce read-only SELECT before execution.
 	if err := ValidateQueryContent(sqlText); err != nil {
-		return fmt.Errorf("security validation failed for '%s': %w", query.Name, err)
+		err = fmt.Errorf("security validation failed for '%s': %w", query.Name, err)
+		e.rec.Record(runlog.Entry{Stage: "collector", Name: query.Name, Source: query.DirName, Status: "failed", Rows: -1, Error: err.Error()})
+		return err
 	}
 
 	// Show source information. Prefix changes in dry-run to make clear
@@ -171,9 +187,14 @@ func (e *Executor) executeQuery(query internal.QueryFile, outputDir, timestamp s
 		fmt.Printf("%s query '%s' from root directory...\n", verb, query.Name)
 	}
 
-	// Execute the query
+	// Execute the query, timing the round trip: this is the number that
+	// tells which collectors are expensive on a given server.
+	started := time.Now()
 	result, err := e.client.ExecuteQuery(sqlText)
+	elapsed := time.Since(started)
 	if err != nil {
+		e.rec.Record(runlog.Entry{Stage: "collector", Name: query.Name, Source: query.DirName, Status: "failed",
+			Duration: elapsed, Rows: -1, Error: err.Error()})
 		return fmt.Errorf("error executing query: %w", err)
 	}
 
@@ -184,8 +205,25 @@ func (e *Executor) executeQuery(query internal.QueryFile, outputDir, timestamp s
 
 	// Save the result to a file
 	if err := os.WriteFile(outputPath, []byte(result), 0600); err != nil {
+		e.rec.Record(runlog.Entry{Stage: "collector", Name: query.Name, Source: query.DirName, Status: "failed",
+			Duration: elapsed, Bytes: int64(len(result)), Rows: -1, Error: "error saving result: " + err.Error()})
 		return fmt.Errorf("error saving result: %w", err)
 	}
+
+	// Rows are only countable in line-oriented formats; Native is opaque, and
+	// TSVWithNamesAndTypes carries two header lines that are not data.
+	rows := int64(-1)
+	switch e.outputFormat().Ext {
+	case ".jsonl":
+		rows = int64(strings.Count(result, "\n"))
+	case ".tsv":
+		rows = int64(strings.Count(result, "\n")) - 2
+		if rows < 0 {
+			rows = 0
+		}
+	}
+	e.rec.Record(runlog.Entry{Stage: "collector", Name: query.Name, Source: query.DirName, Status: "ok",
+		Duration: elapsed, Bytes: int64(len(result)), Rows: rows, Extra: outputFileName})
 
 	if !e.client.IsDryRun() {
 		fmt.Printf("Query '%s' executed successfully. Result saved to %s\n\n", query.Name, outputPath)
