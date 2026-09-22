@@ -1055,11 +1055,19 @@ func (g *Generator) collect() map[string]interface{} {
 	// The panel is hidden when metric_log has no rows (table disabled, or a
 	// server without Keeper never touches these counters anyway).
 	if g.hasTable("metric_log") {
+		hasWait := g.hasColumn("metric_log", "ProfileEvent_ZooKeeperWaitMicroseconds")
 		p["keeper_metric_hourly"] = g.safeQuery("keeper_metric_hourly", g.keeperMetricSQL(
-			g.hasColumn("metric_log", "ProfileEvent_ZooKeeperWaitMicroseconds"),
+			hasWait,
 			g.hasColumn("metric_log", "CurrentMetric_ZooKeeperSession")))
+		// The degraded query substitutes `0 AS wait_us`, which is also what a
+		// server that never contacts Keeper reports — so an all-zero series
+		// cannot tell "column absent" from "legitimately zero". Record which
+		// it is here, where hasColumn() already knows, instead of letting the
+		// panel JS guess and blame the server version.
+		p["keeper_wait_available"] = hasWait
 	} else {
 		p["keeper_metric_hourly"] = []map[string]interface{}{}
+		p["keeper_wait_available"] = false
 	}
 	useErrorLog := g.hasTable("error_log")
 	p["keeper_errors_hourly"] = g.safeQuery("keeper_errors_hourly", g.keeperErrorsSQL(useErrorLog))
@@ -3449,9 +3457,13 @@ document.addEventListener('DOMContentLoaded',function(){
     const N=v=>Number(v||0);
     const labels=rows.map(r=>r.time);
     const tx=rows.map(r=>N(r.transactions)), hw=rows.map(r=>N(r.hw_exceptions));
-    // Median = the upper-middle sample, exactly quantileExactHigh(0.5) in
-    // alerts/keeper_health.yaml and tx_vals[len//2] in inspect_bundle.py, so
-    // an hour near the 50 % line gets the same verdict on all three surfaces.
+    // Median = the upper-middle sample, the same estimator as
+    // quantileExactHigh(0.5) in alerts/keeper_health.yaml and tx_vals[len//2]
+    // in inspect_bundle.py. In cloud mode the rows here are pooled across
+    // replicas (keeperMetricSQL groups by hour only), while the alert groups
+    // by hostName() — so the verdicts can differ and a single replica's
+    // outage can be averaged away in this panel. Tracked for a per-replica
+    // panel; until then the alert is the authority.
     const sorted=[...tx].sort((a,b)=>a-b);
     const med=sorted[Math.floor(sorted.length/2)]||0;
     const verdict=rows.map((r,i)=>{
@@ -3499,7 +3511,11 @@ document.addEventListener('DOMContentLoaded',function(){
         plugins:{legend:{display:false},tooltip:verdictTip},
         scales:{x:{ticks:{maxTicksLimit:14,maxRotation:45}},y:{beginAtZero:true}}}
     });
-    if(rows.some(r=>N(r.wait_us)>0)){
+    // keeper_wait_available is the Go side's hasColumn() verdict. Absent key
+    // (older bundle) falls back to treating the column as present, so the
+    // message never claims "no Keeper requests" about data that lacks the flag.
+    const waitCol=DATA.keeper_wait_available!==false;
+    if(waitCol&&rows.some(r=>N(r.wait_us)>0)){
       const lat=rows.map((r,i)=>tx[i]?N(r.wait_us)/tx[i]/1000:0);
       mkChart(document.getElementById('chart-keeper-latency'),{
         type:'line',
@@ -3508,7 +3524,9 @@ document.addEventListener('DOMContentLoaded',function(){
           scales:{x:{ticks:{maxTicksLimit:10,maxRotation:45}},y:{beginAtZero:true}}}
       });
     }else{
-      document.getElementById('chart-keeper-latency').parentElement.innerHTML='<p class="no-data">ZooKeeperWaitMicroseconds is not exported by this version</p>';
+      document.getElementById('chart-keeper-latency').parentElement.innerHTML='<p class="no-data">'+(waitCol
+        ?'No Keeper wait time recorded in this window — this server completed no Keeper requests (not a replicated/shared setup, or Keeper was never contacted)'
+        :'ZooKeeperWaitMicroseconds is not exported by this version')+'</p>';
     }
     const er=DATA.keeper_errors_hourly||[];
     document.getElementById('keeper-errors-source').textContent='Source: '+(DATA.keeper_errors_source||'');

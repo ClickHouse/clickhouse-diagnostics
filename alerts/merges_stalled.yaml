@@ -3,7 +3,10 @@ title: "Parts were inserted but no merge completed for a whole hour"
 severity: warning
 description: |
   In one or more hours of the last 24, system.part_log recorded more than
-  100 NewPart events and zero successful MergeParts events on this server.
+  100 NewPart events and zero successful MergeParts events on one replica.
+  The test is per replica: merges are assigned per node, so a cluster-wide
+  count of zero would require every replica to be stalled at once and would
+  miss the common case of one node stuck while its peers merge normally.
   Inserts kept creating parts while nothing merged them — the state that
   ends in TOO_MANY_PARTS (code 252) once parts_to_delay_insert /
   parts_to_throw_insert are reached.
@@ -21,16 +24,27 @@ tags:
   - merges
   - keeper
 
+# {sys.part_log} — part_log is per-replica, so in cloud mode it fans out via
+# clusterAllReplicas. Grouping by hour alone sums every replica into one
+# bucket, and `merges = 0` then demands that NO replica merged anything all
+# hour: the rule could never fire for the usual failure, one stalled node
+# among healthy peers. hostName() splits the test per replica and names the
+# node to act on.
+#
+# Safe in gov: alert rows never leave the machine there — alerts_summary.json
+# records only counts (internal/alert/alert.go WriteSummaryJSON) and gov never
+# generates the dashboard, the only other consumer of matched rows.
 query: |
   SELECT
+    hostName()                                                    AS hostname,
     toStartOfHour(event_time)                                     AS hour,
     countIf(event_type = 'NewPart')                               AS new_parts,
     countIf(event_type = 'MergeParts' AND error = 0)              AS merges,
     countIf(event_type = 'MergeParts' AND error != 0)             AS failed_merges
   FROM {sys.part_log}
   WHERE event_time > now() - INTERVAL 24 HOUR
-  GROUP BY hour
+  GROUP BY hostname, hour
   HAVING new_parts > 100 AND merges = 0
-  ORDER BY hour
+  ORDER BY hour, hostname
 
-message: "hour starting {hour}: {new_parts} parts inserted, 0 merges completed ({failed_merges} merges failed) — merges were not running"
+message: "hour starting {hour} on {hostname}: {new_parts} parts inserted, 0 merges completed ({failed_merges} merges failed) — merges were not running on that replica"

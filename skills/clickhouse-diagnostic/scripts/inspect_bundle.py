@@ -603,10 +603,16 @@ def analyse(base: str):
                 tl(h)["zk_tx"] = num(r.get("zk_transactions"))
 
     # ---- Keeper health test (HC-3.8): hardware exceptions AND transactions vs the 7-day median, per hour
-    # The median is taken from metric_log_7_days whenever it exists — the same
-    # 7-day baseline alerts/keeper_health.yaml and the dashboard use — so the
-    # three surfaces agree; the 3-day coordination file only supplies the
-    # per-hour signals. Without the 7-day file, fall back to whatever hours are known.
+    # The median is taken from metric_log_7_days whenever it exists; the 3-day
+    # coordination file only supplies the per-hour signals. Without the 7-day
+    # file, fall back to whatever hours are known.
+    #
+    # On cloud bundles this baseline is cluster-wide: the collector's
+    # metric_log_7_days query groups by hour alone, so every replica's hours
+    # are pooled. alerts/keeper_health.yaml groups by hostName() and will
+    # report a different percentage for the same hour — and an outage on one
+    # replica can stay invisible here. Do not present this verdict as
+    # per-replica.
     ml7 = read_jsonl(first("system.metric_log_7_days_*.jsonl", base))
     tx_vals = sorted(num(r.get("zk_transactions")) or 0 for r in ml7) if ml7 else \
         sorted(t["zk_tx"] for t in timeline.values() if t["zk_tx"] is not None)

@@ -47,6 +47,33 @@ func TestKeeperMetricSQL_IsBoundedAndDegrades(t *testing.T) {
 // error_log counts every thread; query_log only queries. The fallback must
 // exist (error_log needs 24.8+) and both must stay bounded to the same codes
 // and window so the two shapes are comparable.
+// The latency panel must distinguish "this version does not export
+// ZooKeeperWaitMicroseconds" from "the column exists and the server simply
+// never contacted Keeper". The degraded query substitutes `0 AS wait_us`, so
+// an all-zero series looks identical in both cases and the JS cannot infer
+// which it is — collect() publishes keeper_wait_available for that, and the
+// template must branch on it rather than blame the server version.
+func TestKeeperPanel_WaitUnavailableIsNotConfusedWithNoKeeper(t *testing.T) {
+	html := buildHTML(keeperIncidentFixture())
+	for _, want := range []string{
+		"DATA.keeper_wait_available!==false",
+		"not exported by this version",
+		"No Keeper wait time recorded in this window",
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("keeper latency panel missing %q", want)
+		}
+	}
+	// The version message must not be reachable while the column is present:
+	// it may only appear inside the false branch of the waitCol conditional.
+	i := strings.Index(html, "DATA.keeper_wait_available!==false")
+	j := strings.Index(html, "No Keeper wait time recorded in this window")
+	k := strings.Index(html, "not exported by this version")
+	if !(i < j && j < k) {
+		t.Errorf("expected waitCol test, then the no-requests message, then the version message; got %d, %d, %d", i, j, k)
+	}
+}
+
 func TestKeeperErrorsSQL_SourceSwitch(t *testing.T) {
 	g := &Generator{mode: "onprem"}
 	withErrLog := g.keeperErrorsSQL(true)

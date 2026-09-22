@@ -2,18 +2,20 @@ name: keeper_health
 title: "Keeper unavailable: session loss storm while Keeper traffic collapsed"
 severity: critical
 description: |
-  The two-signal Keeper health test over the last 7 days, per hour. An hour
-  fires when this server logged more than 1000 ZooKeeperHardwareExceptions
-  (connection loss, session expiry, operation timeout) AND completed less
-  than half of its usual Keeper transactions. "Usual" is the median hourly
-  ZooKeeperTransactions over the same 7 days. Low traffic on its own never
+  The two-signal Keeper health test over the last 7 days, per hour and per
+  replica. An hour fires when one replica logged more than 1000
+  ZooKeeperHardwareExceptions (connection loss, session expiry, operation
+  timeout) AND completed less than half of its own usual Keeper transactions.
+  "Usual" is that replica's median hourly ZooKeeperTransactions over the same
+  7 days — a cluster-wide median would hide a single replica's outage behind
+  its healthy peers' traffic. Low traffic on its own never
   fires: a quiet night looks the same as a disconnected server in this
   counter, and telling them apart needs ZooKeeperSession (system.metrics)
   or the dashboard's per-hour verdict, which labels such hours
   "idle/disconnected" instead.
 
-  Both signals together mean Keeper was effectively unavailable to this
-  server: sessions were expiring and the work that normally flows through
+  Both signals together mean Keeper was effectively unavailable to that
+  replica: sessions were expiring and the work that normally flows through
   Keeper (part commits, merge assignment, DDL, replication log) was not
   happening. Expect 999 / 319 on inserts, 571 / 57 on DDL, merges stopped
   and TOO_MANY_PARTS following in the same or next hours. Exceptions with
@@ -21,9 +23,16 @@ description: |
 
   This rule reads metric_log because background operations never reach
   query_log: an outage at night shows up here and nowhere else. The median
-  is quantileExactHigh — the upper-middle hourly sample — the same value the
-  dashboard and the skill's pre-pass compute. LIMIT 168 covers every hour of
-  the 7-day window, so a multi-day outage is never truncated.
+  is quantileExactHigh — the upper-middle hourly sample. LIMIT 168 BY
+  hostname covers every hour of the 7-day window for each replica, so
+  neither a multi-day outage nor a wide cluster is truncated.
+
+  On a multi-replica service this median is per replica. The dashboard's
+  Keeper Health panel and the skill's pre-pass still compute one median
+  over every replica's hours combined, so their percentages for the same
+  hour will not match this rule's, and both can miss an outage confined to
+  one node. This rule is the per-replica verdict until they group by host
+  too.
 
   Check next: system.zookeeper_connection (session age), part_log errors
   in the same hours, text_log 'Session expired' / 'Finalizing session' /
@@ -35,31 +44,49 @@ tags:
   - replication
   - reliability
 
+# {sys.metric_log} — metric_log is per-replica, so in cloud mode it fans out
+# via clusterAllReplicas. Both the per-hour aggregate AND the median baseline
+# must therefore group by hostName(): with a single cluster-wide bucket, one
+# replica's outage is averaged against its healthy peers and this `critical`
+# rule stays silent (its transactions never fall below half of the CLUSTER
+# median), while the exception threshold becomes N times easier to cross.
+# hostName() attributes each row to the replica that reported it.
+#
+# Safe in gov: alert rows never leave the machine there — alerts_summary.json
+# records only counts (internal/alert/alert.go WriteSummaryJSON) and gov never
+# generates the dashboard, the only other consumer of matched rows. Do not add
+# row-level detail to that file without revisiting this.
 query: |
-  WITH
+  WITH per_hour AS
     (
-      SELECT quantileExactHigh(0.5)(tx)
-      FROM
-      (
-        SELECT toStartOfHour(event_time) AS h, sum(ProfileEvent_ZooKeeperTransactions) AS tx
-        FROM {sys.metric_log}
-        WHERE event_time > now() - INTERVAL 7 DAY
-        GROUP BY h
-      )
-    ) AS baseline
+      SELECT
+        hostName()                                     AS hostname,
+        toStartOfHour(event_time)                      AS hour,
+        sum(ProfileEvent_ZooKeeperHardwareExceptions)  AS hw_exceptions,
+        sum(ProfileEvent_ZooKeeperTransactions)        AS transactions
+      FROM {sys.metric_log}
+      WHERE event_time > now() - INTERVAL 7 DAY
+      GROUP BY hostname, hour
+    ),
+    baseline AS
+    (
+      SELECT hostname, quantileExactHigh(0.5)(transactions) AS usual
+      FROM per_hour
+      GROUP BY hostname
+    )
   SELECT
-    toStartOfHour(event_time)                                   AS hour,
-    sum(ProfileEvent_ZooKeeperHardwareExceptions)               AS hw_exceptions,
-    sum(ProfileEvent_ZooKeeperTransactions)                     AS transactions,
-    round(baseline)                                             AS usual_transactions,
-    round(100 * sum(ProfileEvent_ZooKeeperTransactions) / greatest(baseline, 1)) AS pct_of_usual
-  FROM {sys.metric_log}
-  WHERE event_time > now() - INTERVAL 7 DAY
-  GROUP BY hour
-  HAVING baseline > 0
-     AND hw_exceptions > 1000
-     AND transactions < 0.5 * baseline
-  ORDER BY hour
-  LIMIT 168
+    p.hostname                                         AS hostname,
+    p.hour                                             AS hour,
+    p.hw_exceptions                                    AS hw_exceptions,
+    p.transactions                                     AS transactions,
+    round(b.usual)                                     AS usual_transactions,
+    round(100 * p.transactions / greatest(b.usual, 1)) AS pct_of_usual
+  FROM per_hour AS p
+  INNER JOIN baseline AS b ON p.hostname = b.hostname
+  WHERE b.usual > 0
+    AND p.hw_exceptions > 1000
+    AND p.transactions < 0.5 * b.usual
+  ORDER BY hour, hostname
+  LIMIT 168 BY hostname
 
-message: "hour starting {hour}: {hw_exceptions} Keeper hardware exceptions, {transactions} Keeper transactions = {pct_of_usual}% of usual ({usual_transactions}/h median) — Keeper effectively unavailable to this server"
+message: "hour starting {hour} on {hostname}: {hw_exceptions} Keeper hardware exceptions, {transactions} Keeper transactions = {pct_of_usual}% of usual ({usual_transactions}/h median for this replica) — Keeper effectively unavailable to it"
