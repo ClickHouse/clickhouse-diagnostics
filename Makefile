@@ -68,6 +68,13 @@ lint:
 # alerts) so the tool works from the extracted folder — the binary alone
 # reads those files from the working directory and would otherwise fail.
 # Produces .tar.gz for Unix targets and .zip for Windows, under $(DIST_DIR).
+#
+# CGO_ENABLED=0 keeps every artifact statically linked. Go disables cgo on its
+# own when cross-compiling, so five of the six targets were already static —
+# but the target matching the release runner (linux/amd64) is not a
+# cross-compile, kept cgo on, and linked dynamically against the runner's
+# glibc. That binary then refuses to start on an older host with
+# "version `GLIBC_2.34' not found", before any of our code runs.
 .PHONY: release
 release: clean
 	@mkdir -p $(DIST_DIR)
@@ -80,7 +87,7 @@ release: clean
 		if [ "$$os" = "windows" ]; then bin=$(BINARY_NAME).exe; fi; \
 		echo "Packaging $$pkg..."; \
 		mkdir -p $$stage; \
-		GOOS=$$os GOARCH=$$arch go build -o $$stage/$$bin $(CMD_DIR) || exit 1; \
+		CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build -o $$stage/$$bin $(CMD_DIR) || exit 1; \
 		cp -R $(DATA_DIRS) $$stage/; \
 		cp README.md AGENTS.md $$stage/ 2>/dev/null || true; \
 		if [ "$$os" = "windows" ]; then \
