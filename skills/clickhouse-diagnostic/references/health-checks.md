@@ -131,6 +131,7 @@ Distinguish from **client-side** Keeper noise: 999 with `Bad version` / `No node
 | 7.3 | `query_log_details` `Insert` | `distinct_exceptions` small with high count for 252/241/242 | warning | One recurring insert failure; the message names the table. |
 | 7.4 | `system.tables` | ≥ 5 `MaterializedView`s on one source table; MV chains ≥ 2 hops *(guideline)* | info | Every insert block is processed by each MV synchronously; TOO_MANY_PARTS on an MV target means the *source* gets too many small inserts. P-34. |
 | 7.5 | `text_log` / `system.errors` | `INSERT_WAS_DEDUPLICATED` (389) or "Deduplication path already exists" | info→warning | Client retries are being deduplicated (normal) — or every insert is (token misuse) → P-33. |
+| 7.6 | `system.view_refreshes` (≥ 23.12) | `status = 'Disabled'`, or `exception != ''`, or `last_success_time` older than ~3× the view's `REFRESH` interval *(guideline)* | warning | A refreshable MV that stopped refreshing — its readers see stale data with no error anywhere else (`query_views_log` never records these views). The exception names the object it failed on; `Disabled` means a `SYSTEM STOP VIEW` or the server gave up after repeated failures. |
 
 ## HC-8 Mutations and TTL
 
