@@ -2453,15 +2453,21 @@ function alertMessageParts(msg){
   let head=full.replace(ALERT_STACK_RE,'').replace(/\s+/g,' ').trim()
                .replace(ALERT_VERSION_RE,'').replace(/[\s,;]+$/,'');
   if(head.length>ALERT_HEAD_CHARS){
-    const cut=head.slice(0,ALERT_HEAD_CHARS);
+    // ALERT_HEAD_CHARS is inclusive of the ellipsis: slice one short so the
+    // no-space fallback below yields 260 characters, not 261.
+    const cut=head.slice(0,ALERT_HEAD_CHARS-1);
     const sp=cut.lastIndexOf(' ');
     head=(sp>ALERT_HEAD_CHARS*0.6?cut.slice(0,sp):cut)+'\u2026';
   }
   if(!head) head=flat;
-  // truncated drives the toggle: true only when the reader would otherwise
-  // lose content, so a short single-line message gets no useless disclosure.
-  const flatTrimmed=flat.replace(ALERT_VERSION_RE,'').replace(/[\s,;]+$/,'');
-  return {head:head, full:full, truncated:head!==flatTrimmed||flat!==flatTrimmed, hasStack:ALERT_STACK_RE.test(full)};
+  // truncated drives the toggle: offer it only when the inline line is not
+  // already the whole message, so a short single-line message gets no useless
+  // disclosure. Comparing against the flat message rather than a
+  // version-stripped copy also covers the degenerate case where the message
+  // is NOTHING BUT a version suffix: stripping empties head, the fallback
+  // above restores it, and head===flat then correctly reports that there is
+  // nothing to reveal.
+  return {head:head, full:full, truncated:head!==flat, hasStack:ALERT_STACK_RE.test(full)};
 }
 
 // alertDisclosure renders the "show the rest" toggle for one message.

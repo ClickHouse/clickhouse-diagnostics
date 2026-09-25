@@ -25,6 +25,16 @@ func TestTemplate_AlertMessagesCollapseVerboseParts(t *testing.T) {
 		`'<pre class="alert-full">'+esc(parts.full)+`, // full text is kept, and escaped
 		"more instance",                               // the extra-rows toggle
 		"more about this rule",                        // the description's second half
+
+		// Two off-by-one traps found in review. The cap is INCLUSIVE of the
+		// ellipsis, so the slice has to be one short — otherwise the no-space
+		// fallback emits 261 characters. And the toggle compares the inline
+		// head against the whole flat message, not a version-stripped copy:
+		// with the stripped copy, a message that is NOTHING BUT a version
+		// suffix strips to empty, the fallback restores it, and the mismatch
+		// renders a disclosure whose body repeats the line above it.
+		"head.slice(0,ALERT_HEAD_CHARS-1)",
+		"truncated:head!==flat,",
 	} {
 		if !strings.Contains(htmlTemplate, want) {
 			t.Errorf("alert panel lost %q", want)
@@ -35,6 +45,8 @@ func TestTemplate_AlertMessagesCollapseVerboseParts(t *testing.T) {
 	// text goes through esc().
 	for _, banned := range []string{
 		"+parts.head+", "+p.head+", "+ep.head+", "+msg+'</li>", "+a.error+'",
+		// The pre-fix forms of the two traps above.
+		"head.slice(0,ALERT_HEAD_CHARS)+", "truncated:head!==flatTrimmed",
 	} {
 		if strings.Contains(htmlTemplate, banned) {
 			t.Errorf("alert panel interpolates customer text unescaped: %q", banned)
