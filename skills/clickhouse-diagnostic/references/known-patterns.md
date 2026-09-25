@@ -30,6 +30,8 @@ Language rule when you match a pattern: "the evidence is **consistent with** P-n
 | P-32 | Schema drift between MV/source/target, failing type conversions | tables DDL, query_log 53/70/117/349, part_log |
 | P-33 | Inserts "succeed" but rows are missing, duplicated or wrong | query_log Insert, text_log dedup, async_insert_log, tables (MV) |
 | P-34 | MV chains amplify every insert (and can block async flushes) | tables MV count, part_log NewPart per target, async_insert_log |
+| P-35 | An MV runs clean but writes nothing | query_views_log, tables.as_select, text_log |
+| P-36 | MV push throws after the base part committed | query_views_log, query_log Insert, text_log |
 | P-40 | Keeper session loss → replicas read-only, 999 bursts | replicas, errors 999/242, metric_log zk_*, text_log |
 | P-41 | Replication queue stuck / large absolute_delay | replication_queue, replicas, configuration |
 | P-42 | Topology/config mistakes: interserver host, macros, quorum, new node | configuration, clusters, replicas |
@@ -203,18 +205,32 @@ Language rule when you match a pattern: "the evidence is **consistent with** P-n
 **Public references:** docs → "Materialized views" (schema changes), `ALTER TABLE MODIFY QUERY`.
 
 ### P-33 Inserts "succeed" but rows are missing, duplicated or wrong
-**You see:** `query_log_details` `Insert` with `written_rows = 0` but no error; `text_log` "Deduplication path already exists" / 389 `INSERT_WAS_DEDUPLICATED`; `asynchronous_insert_log` with `FlushError` while clients saw OK (`wait_for_async_insert = 0`); MV target empty while source grows (`query_views_log`-style symptom: MV fires, 0 rows read — often a **row policy** on the inserting user); duplicated rows after retries with `insert_quorum`/async; column values shuffled between rows on an old version with `async_insert` + parameterized `INSERT … VALUES ({p:Type})`.
+**You see:** `query_log_details` `Insert` with `written_rows = 0` but no error; `text_log` "Deduplication path already exists" / 389 `INSERT_WAS_DEDUPLICATED`; `asynchronous_insert_log` with `FlushError` while clients saw OK (`wait_for_async_insert = 0`); MV target empty while source grows (`query_views_log_3_days`: `zero_write_executions` ≈ `executions` with `read_rows > 0` — often a **row policy** on the inserting user; see P-35); duplicated rows after retries with `insert_quorum`/async; column values shuffled between rows on an old version with `async_insert` + parameterized `INSERT … VALUES ({p:Type})`.
 **Usually means:** (a) block deduplication: identical blocks (or the same `insert_deduplication_token` reused for different payloads) are silently skipped; (b) fire-and-forget async inserts lose data on flush failure; (c) a `ROW POLICY` restricts what the insert user can *read* from the source, so the MV writes nothing; (d) a version-specific bug in async-insert template handling (fixed upstream; check the customer's version).
 **Verify:** `system.tables` policies are not in the bundle — ask for `system.row_policies`; `Settings` of the inserting user in `configuration/users.d`; `asynchronous_insert_log.status`; version.
 **Fix:** `wait_for_async_insert = 1` when loss matters; unique tokens per payload or drop `insert_deduplication_token`; give the insert user the row-policy exemption; upgrade for the template bug.
 **Public references:** docs → "Asynchronous inserts", `insert_deduplicate`, `insert_deduplication_token`, "Row policies".
 
 ### P-34 MV chains amplify every insert
-**You see:** `system.tables`: 5–80 `MaterializedView`s on one source (count `dependencies_table`), 2-hop chains, MVs with `JOIN`/`ARRAY JOIN`/`GROUP BY` onto plain `MergeTree`; `part_log` `NewPart` per hour on MV targets = N × source inserts; TOO_MANY_PARTS reported "while pushing to view …"; `asynchronous_insert_log.p90_flush_ms` in seconds; 241 "while pushing to view" (P-10).
+**You see:** `system.tables`: 5–80 `MaterializedView`s on one source (count `dependencies_table`), 2-hop chains, MVs with `JOIN`/`ARRAY JOIN`/`GROUP BY` onto plain `MergeTree`; `part_log` `NewPart` per hour on MV targets = N × source inserts; TOO_MANY_PARTS reported "while pushing to view …"; `asynchronous_insert_log.p90_flush_ms` in seconds; 241 "while pushing to view" (P-10); `query_views_log_3_days` showing the per-view cost directly — `max_view_duration_ms` and `median_peak_memory_usage` summed across the views on one source.
 **Usually means:** every insert block is processed synchronously by each MV (and per partition, per projection): `S3 PUTs ≈ 4 × partitions × (1 + projections)` per MV target; async flushes wait for the slowest MV; an MV with `GROUP BY` onto a non-aggregating engine produces duplicate keys; cascaded MVs see the **raw insert block**, not merged state.
 **Verify:** MV count per source; target engines; insert frequency (P-02).
 **Fix:** batch inserts first; cap MVs per source (~10), consolidate with `ARRAY JOIN` multi-granularity MVs; use `AggregatingMergeTree`/`SummingMergeTree` targets for `GROUP BY` MVs; `dictGet` instead of `JOIN` inside MVs; `Null`-engine staging for heavily partitioned targets; `min_insert_block_size_*_for_materialized_views` to bound memory.
 **Public references:** docs → "Materialized views" best practices, "Cascading materialized views".
+
+### P-35 An MV runs clean but writes nothing
+**You see:** `query_views_log_3_days` with `status = 'QueryFinish'`, `exception_code = 0`, `read_rows > 0`, `written_rows = 0` — `zero_write_executions` close to `executions` for one view while its siblings on the same source keep writing; the MV target stops growing while the source grows; in a chain, one hop's `written_rows` per hour diverges from the hop above it.
+**Usually means:** (a) the MV's SELECT legitimately filters everything out — check its WHERE first, this is the common case; (b) a JOIN inside the MV whose right side is empty at the moment the block is processed, typically because the right side reads a table being swapped (`EXCHANGE`/`RENAME`) or an upstream MV's own target, so an INNER JOIN yields nothing; (c) a `ROW POLICY` on the inserting user restricting what the MV can read from the source (P-33c); (d) parallel processing of the insert without squashing, so a subquery does not see the block being inserted.
+**Verify:** the MV's `as_select` in `system.tables`; whether a joined table is rebuilt by a refreshable MV or `EXCHANGE TABLES` (`text_log` around the affected minutes); `system.row_policies` is not in the bundle — ask for it; compare the same view's `zero_write_executions` ratio in buckets before the incident.
+**Fix:** read a swapped or refreshed table through a dictionary rather than a JOIN on the ingest path; avoid an MV whose JOIN right side reads the target it writes to; grant the inserting user the row-policy exemption. `materialized_views_squash_parallel_inserts` changes the behaviour in (d) — treat it as a hypothesis to test on the customer's version, not a prescription.
+**Not to be confused with:** P-33 (the insert itself wrote nothing), P-36 (the MV threw — here it did not).
+
+### P-36 MV push throws after the base part was committed
+**You see:** `query_views_log_3_days` rows with `status = 'ExceptionWhileProcessing'` and a non-zero `exception_code`, while the parent INSERT in `query_log_details` shows no exception; `text_log` "Failed to push to views" close to a "Committing part" line; the source table has the rows and the MV target does not.
+**Usually means:** the base insert and the MV push are not atomic — the part commits, then each view runs. Common codes: 60 `UNKNOWN_TABLE` (a table the MV reads was swapped, renamed or detached mid-insert — a refreshable MV doing `EXCHANGE TABLES`, or DETACH/ATTACH during maintenance), 241 (P-10/P-34), 252 on the MV target (P-01), 341 `UNFINISHED` during a shutdown or node drain.
+**Verify:** the `exception` text names the object it failed on **and the view it was pushing to** — that attribution matters, because a failed INSERT writes an `ExceptionWhileProcessing` row for *every* view in the pipeline with the same message, so counting rows per view overstates the blast radius; `text_log` in the same minutes for EXCHANGE/RENAME/shutdown lines; whether `materialized_views_ignore_errors` is set, which turns these into losses with no error reaching the client; `part_log` NewPart on source vs target for the same hour.
+**Fix:** keep a swapped table off the synchronous ingest path; make client batches idempotent and retryable; schedule refreshes away from ingest peaks; for 241/252 see P-34/P-01.
+**Not to be confused with:** P-35 (no exception at all), P-33 (the base insert itself failed or was deduplicated).
 
 ## Replication, Keeper, network, storage
 
