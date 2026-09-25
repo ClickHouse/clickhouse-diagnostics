@@ -128,9 +128,10 @@ help:
 
 # Render the dashboard from an anonymised, incident-shaped fixture (a Keeper
 # outage on a shared-storage cluster) so the Keeper Health panel and the
-# Keeper alerts can be reviewed without a live server. Writes
-# bin/keeper_incident_preview.html (Chart.js from CDN).
+# Keeper alerts can be reviewed without a live server, plus the schema graph
+# from a small fixture pipeline. Writes bin/keeper_incident_preview.html
+# (Chart.js from CDN) and bin/schema_graph_preview.html (no network at all).
 .PHONY: dashboard-preview
 dashboard-preview:
 	mkdir -p bin
-	DASHBOARD_PREVIEW_DIR=$(CURDIR)/bin go test ./internal/dashboard -run TestBuildHTML_KeeperIncidentPreview -count=1 >/dev/null && echo "bin/keeper_incident_preview.html"
+	DASHBOARD_PREVIEW_DIR=$(CURDIR)/bin go test ./internal/dashboard -run 'TestBuildHTML_KeeperIncidentPreview|TestBuildSchemaGraphHTML_Preview' -count=1 >/dev/null && echo "bin/keeper_incident_preview.html" && echo "bin/schema_graph_preview.html (also reachable from the preview dashboard's Schema tab)"

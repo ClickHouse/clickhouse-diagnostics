@@ -101,6 +101,16 @@ var credentialPatterns = []credentialPattern{
 // Patterns are applied in declaration order; earlier patterns get first
 // pick (e.g. a JWT is consumed before the long-base64 fallback would).
 func RedactCredentialsInText(s string) (string, int) {
+	return redactHeuristicsWith(s, redacted, redacted)
+}
+
+// redactHeuristicsWith is RedactCredentialsInText with a caller-chosen
+// sentinel. quotedToken replaces a value that was itself a quoted literal
+// (so SQL text stays syntactically valid — '[HIDDEN]' rather than [HIDDEN]
+// between the quotes' remains); token replaces everything else. The config
+// sanitizer passes "REMOVED" for both; the SQL redactor passes '[HIDDEN]'
+// and [HIDDEN], the literal ClickHouse itself writes.
+func redactHeuristicsWith(s, quotedToken, token string) (string, int) {
 	count := 0
 	for _, p := range credentialPatterns {
 		switch p.name {
@@ -111,7 +121,7 @@ func RedactCredentialsInText(s string) (string, int) {
 				sub := p.re.FindStringSubmatch(m)
 				if len(sub) == 3 {
 					count++
-					return sub[1] + redacted + sub[2]
+					return sub[1] + token + sub[2]
 				}
 				return m
 			})
@@ -121,15 +131,24 @@ func RedactCredentialsInText(s string) (string, int) {
 			s = p.re.ReplaceAllStringFunc(s, func(m string) string {
 				sub := p.re.FindStringSubmatch(m)
 				if len(sub) == 4 {
+					v := sub[3]
+					// Already redacted (a second pass, or a >= 23.x server that
+					// masked it first): leave it and do not count it.
+					if v == quotedToken || v == token {
+						return m
+					}
 					count++
-					return sub[1] + sub[2] + redacted
+					if len(v) >= 2 && (v[0] == '\'' || v[0] == '"') {
+						return sub[1] + sub[2] + quotedToken
+					}
+					return sub[1] + sub[2] + token
 				}
 				return m
 			})
 		default:
 			s = p.re.ReplaceAllStringFunc(s, func(m string) string {
 				count++
-				return redacted
+				return token
 			})
 		}
 	}

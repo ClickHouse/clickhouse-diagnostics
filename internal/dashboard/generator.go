@@ -366,6 +366,21 @@ func (g *Generator) hasTable(table string) bool {
 func (g *Generator) Generate(outputDir string, alertResults []alert.Result) error {
 	fmt.Println("\nGenerating HTML dashboard...")
 	payload := g.collect()
+	// The schema graph is a second, self-contained page next to dashboard.html,
+	// loaded on demand from the Schema tab (see schema_graph.go for why it is
+	// not inlined). Written first, and the payload points at it only once it
+	// exists: a dashboard.html copied out of the bundle then shows a note where
+	// the tab would be, not a broken frame.
+	version, _ := payload["version"].(string)
+	if sg := g.collectSchemaGraph(version); sg != nil {
+		dst := filepath.Join(outputDir, schemaGraphFile)
+		if err := os.WriteFile(dst, []byte(buildSchemaGraphHTML(sg)), 0640); err != nil {
+			fmt.Printf("  [dashboard] schema graph not written: %v\n", err)
+		} else {
+			payload["schema_graph"] = schemaGraphSummary(sg)
+			fmt.Printf("Schema graph saved: %s\n", dst)
+		}
+	}
 	// Needs outputDir, so it happens here rather than in collect().
 	payload["bundle_files"] = collectBundleFiles(outputDir)
 	if alertResults == nil {
@@ -563,8 +578,9 @@ func collectBundleFiles(outputDir string) []map[string]interface{} {
 			return nil
 		}
 		rel = filepath.ToSlash(rel)
-		// The dashboard does not list itself, and OS turds are not artifacts.
-		if rel == "dashboard.html" || strings.HasPrefix(info.Name(), ".") {
+		// The dashboard does not list itself — nor its schema graph page, which
+		// it opens from its own tab — and OS turds are not artifacts.
+		if rel == "dashboard.html" || rel == schemaGraphFile || strings.HasPrefix(info.Name(), ".") {
 			return nil
 		}
 		dir := path0(rel)
@@ -1365,33 +1381,13 @@ func buildHTML(data map[string]interface{}) string {
 
 // htmlTemplate is the complete self-contained dashboard page.
 // Chart.js is loaded from CDN; all ClickHouse data is embedded inline.
-const htmlTemplate = `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>ClickHouse Diagnostic Dashboard</title>
-<script>/* stamp the saved theme before first paint so the page never flashes */
-try{var _t=localStorage.getItem("chdiag-theme");if(_t)document.documentElement.setAttribute("data-cui-theme",_t);}catch(e){}
-</script>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
-<style>
-/* ─────────────────────────────────────────────────────────────────────────────
-   Click UI token layer.
-
-   Click UI ships as a React library (@clickhouse/click-ui + ClickUIProvider),
-   which this report cannot use: it is one self-contained HTML file opened
-   offline from a tarball, with no build step. The design system's documented
-   escape hatch for exactly that case is its token layer — CSS custom
-   properties, themed via data-cui-theme on <html>. So the values below are
-   vendored verbatim from ClickHouse/click-ui tokens/themes/{primitives,light,
-   dark}.json; every hex is a real token, none is eyeballed.
-
-   Surfaces are chosen so charts sit on #ffffff (light) / #1F1F1C (dark) — the
-   two surfaces the categorical palette in the script below was validated
-   against. Do not repoint --surface-card without re-running that validation.
-   ───────────────────────────────────────────────────────────────────────── */
-:root{
+// themeTokensCSS is the Click UI token layer — palette primitives, the light and
+// dark semantic roles, type, spacing, radii and shadows — declared once and
+// shared by dashboard.html and schema_graph.html so the two pages can never
+// drift apart in theme. Both dark scopes live here: the OS preference (media
+// query, zero specificity via :where()) and the in-page toggle
+// (data-cui-theme). See theme_test.go for what must survive an edit.
+const themeTokensCSS = `:root{
   color-scheme:light;
   /* primitives actually referenced */
   --click-palette-neutral-0:#ffffff;
@@ -1510,7 +1506,42 @@ try{var _t=localStorage.getItem("chdiag-theme");if(_t)document.documentElement.s
   --click-shadow-1:0 4px 6px -1px rgba(0,0,0,.5), 0 2px 4px -1px rgba(0,0,0,.4);
   --click-shadow-5:0 2px 2px 0 rgba(0,0,0,.3);
 }
+`
 
+// htmlTemplate is the complete self-contained dashboard page, assembled from
+// its head, the shared token layer and the body so the tokens are a single
+// source of truth (see themeTokensCSS).
+var htmlTemplate = htmlTemplateHead + themeTokensCSS + htmlTemplateTail
+
+const htmlTemplateHead = `<!DOCTYPE html><!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ClickHouse Diagnostic Dashboard</title>
+<script>/* stamp the saved theme before first paint so the page never flashes */
+try{var _t=localStorage.getItem("chdiag-theme");if(_t)document.documentElement.setAttribute("data-cui-theme",_t);}catch(e){}
+</script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+<style>
+/* ─────────────────────────────────────────────────────────────────────────────
+   Click UI token layer.
+
+   Click UI ships as a React library (@clickhouse/click-ui + ClickUIProvider),
+   which this report cannot use: it is one self-contained HTML file opened
+   offline from a tarball, with no build step. The design system's documented
+   escape hatch for exactly that case is its token layer — CSS custom
+   properties, themed via data-cui-theme on <html>. So the values below are
+   vendored verbatim from ClickHouse/click-ui tokens/themes/{primitives,light,
+   dark}.json; every hex is a real token, none is eyeballed.
+
+   Surfaces are chosen so charts sit on #ffffff (light) / #1F1F1C (dark) — the
+   two surfaces the categorical palette in the script below was validated
+   against. Do not repoint --surface-card without re-running that validation.
+   ───────────────────────────────────────────────────────────────────────── */
+`
+
+const htmlTemplateTail = `
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:var(--click-font-regular);background:var(--surface-page);color:var(--ink);font-size:var(--click-font-size-2);line-height:var(--click-line-height-1)}
 /* Header and nav stick as ONE band. They used to stick separately, with the
@@ -1574,6 +1605,11 @@ table.dt a:hover{text-decoration:underline}
 .pagination button{padding:var(--click-space-1) var(--click-space-3);border:var(--click-border-width-1) solid var(--stroke);border-radius:var(--click-radii-1);background:var(--surface-card);color:var(--ink);cursor:pointer;font:inherit;font-size:var(--click-font-size-1)}
 .pagination button:hover{background:var(--surface-hover)}
 .pagination .cur{font-weight:var(--click-font-weight-3);color:var(--ink)}
+/* schema graph tab */
+.schema-actions button{padding:var(--click-space-2) var(--click-space-4);border:var(--click-border-width-1) solid var(--stroke);border-radius:var(--click-radii-1);background:var(--click-global-color-accent-default);color:var(--surface-card);cursor:pointer;font:inherit;font-size:var(--click-font-size-1);font-weight:var(--click-font-weight-3)}
+.schema-actions button:hover{opacity:.85}
+.schema-actions a{color:var(--link);font-size:var(--click-font-size-1)}
+#schema-frame{width:100%;height:85vh;border:var(--click-border-width-1) solid var(--stroke);border-radius:var(--click-radii-2);background:var(--surface-card);display:block}
 /* subsection title */
 #tbl-host-tunables td:last-child,#tbl-host-os td:last-child{white-space:normal;max-width:38ch}
 #tbl-host-procs td:last-child{white-space:normal;max-width:60ch;font-family:var(--click-font-mono);font-size:var(--click-font-size-0)}
@@ -1632,6 +1668,7 @@ footer{text-align:center;color:var(--ink-muted);font-size:var(--click-font-size-
   <a href="#sec-overview">Overview</a>
   <a href="#sec-storage">Storage</a>
   <a href="#sec-tables">Tables</a>
+  <a href="#sec-schema" id="nav-schema" style="display:none">Schema Graph</a>
   <a href="#sec-queries">Query Activity</a>
   <a href="#sec-deepdive">Query Deep Dive</a>
   <a href="#sec-exceptions">Exceptions</a>
@@ -1790,6 +1827,25 @@ footer{text-align:center;color:var(--ink-muted);font-size:var(--click-font-size-
   </div>
   <div class="tbl-wrap"><div id="tbl-explorer"></div></div>
   <div class="pagination" id="tbl-pagination"></div>
+</section>
+
+<!-- ── SCHEMA GRAPH ── -->
+<!-- The graph lives in schema_graph.html beside this page and is loaded into
+     the frame only when asked for: assigning iframe.src is a navigation, which
+     file:// allows, while fetch()/XHR of a sibling file is blocked. Nothing is
+     paid for the graph until the tab is opened. -->
+<section id="sec-schema" style="display:none">
+  <h2>🕸 Schema Graph</h2>
+  <p class="host-note" id="schema-note"></p>
+  <div class="filter-bar schema-actions">
+    <button type="button" id="schema-load">Load the graph</button>
+    <a id="schema-open" href="schema_graph.html" target="_blank" rel="noopener">Open in a new tab ↗</a>
+    <span class="count-badge" id="schema-count"></span>
+  </div>
+  <div id="schema-frame-wrap" style="display:none">
+    <iframe id="schema-frame" title="Table dependency graph" loading="eager"></iframe>
+  </div>
+  <p class="host-note">Tables, materialized views, dictionaries and Distributed tables, with the edges data flows along. Nodes are coloured by engine; click one for its keys, columns and CREATE statement (credentials in engine arguments read <code>[HIDDEN]</code>). The page is written beside this one — if the frame stays blank, open the full bundle folder rather than a copied-out dashboard.html.</p>
 </section>
 
 <!-- ── QUERY ACTIVITY ── -->
@@ -3695,6 +3751,39 @@ document.addEventListener('DOMContentLoaded',function(){
       page=0; render();
     };
     render();
+  })();
+
+  // ── Schema graph ─────────────────────────────────────────────────────────
+  //
+  // Present only when the generator wrote schema_graph.html. The frame's src
+  // is assigned on the first click (from the nav link or the button), never
+  // at load, so a reader who does not open the tab downloads nothing extra.
+  (function(){
+    const sg=DATA.schema_graph;
+    if(!sg||!sg.file) return;
+    document.getElementById('sec-schema').style.display='';
+    document.getElementById('nav-schema').style.display='';
+    const bits=[sg.tables+' table(s)', sg.databases+' database(s)'];
+    if(sg.mvs) bits.push(sg.mvs+' materialized view(s)');
+    if(sg.refreshable) bits.push(sg.refreshable+' refreshable');
+    if(sg.dictionaries) bits.push(sg.dictionaries+' dictionar'+(sg.dictionaries===1?'y':'ies'));
+    document.getElementById('schema-count').textContent=bits.join(' · ');
+    document.getElementById('schema-note').textContent='Interactive map of how data flows between tables, built from system.tables, system.columns, system.dictionaries and system.view_refreshes at collection time (system databases excluded).';
+    document.getElementById('schema-open').href=sg.file;
+    const frame=document.getElementById('schema-frame');
+    const wrap=document.getElementById('schema-frame-wrap');
+    const btn=document.getElementById('schema-load');
+    let loaded=false;
+    function load(){
+      if(loaded) return;
+      loaded=true;
+      frame.src=sg.file;
+      wrap.style.display='';
+      btn.textContent='Loaded';
+      btn.disabled=true;
+    }
+    btn.addEventListener('click', load);
+    document.getElementById('nav-schema').addEventListener('click', load);
   })();
 
   // ── Collected files ───────────────────────────────────────────────────────

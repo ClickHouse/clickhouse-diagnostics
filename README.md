@@ -18,6 +18,7 @@ Under the hood: per-environment query sets (`cloud` / `onprem` / `gov`) selected
 | `system.merges`, `system.mutations` | What is merging or mutating right now; what is stuck? | A stuck merge or a mutation backlog is the usual reason parts pile up while the pool looks idle. |
 | `system.replicas`, `system.replication_queue` | Is every replica writable and caught up; if not, why? | Read-only state, Keeper session loss and the shape of the queue locate replication problems. |
 | `system.query_log_details_7_days` (hourly aggregation of `system.query_log`) | What ran, how slow, how much memory, what failed, by whom? | Most incidents start with the workload; this is the aggregated view, with a 500-character sample per query pattern and no customer rows. |
+| `system.view_refreshes` (≥ 23.12) | Are the refreshable materialized views actually refreshing? | A `REFRESH EVERY` view never appears in `query_views_log`; this is the only place its schedule, last success and last error live. |
 | `system.errors`, `system.text_log` (24 h, severity first, ≤ 200 rows per logger) | Which errors, how often, with what message? | Fast triage by error code; the log slice gives the server's own words. |
 | `system.text_log_histogram_1_day` | Warning-and-worse log lines per hour, level and component, with one example each | Says *when* errors started and *which* component, independent of the 2000-row `text_log` cap. |
 | `system.error_log_7_days` (≥ 24.8) | Every error code raised anywhere in the server, per hour, background threads included | The history behind `system.errors`: puts 999 / 242 / 252 / 107 on a timeline even when no query failed. |
@@ -593,11 +594,13 @@ The tool targets **ClickHouse 22.8 and newer** for on-prem servers. Root-level q
 | `hostname` column in system log tables | 23.11 | `queries.*/23.11.1.0/` (roots use `hostName()`) |
 | `system.blob_storage_log` table (needs `<blob_storage_log>` config) | 23.11 | `queries.*/23.11.1.0/` (no root file — skipped below 23.11 in every mode) |
 | `system.tables.total_bytes_uncompressed` | 23.12 | `queries.query_analysis/23.12.1.0/` |
+| `system.view_refreshes` table | 23.12 | `queries.*/23.12.1.0/` (no root file — skipped below 23.12 in every mode) |
 | `system.mutations.is_killed` | 24.1 | `alerts/24.1.1.0/` (root omits the filter) |
 | `system.tables.metadata_version` | 24.2 | `queries.*/24.2.1.0/` |
 | `system.error_log` table | 24.8 | `queries.*/24.8.1.0/` (no root file — skipped below 24.8 in every mode) |
 | `system.zookeeper_log.duration_microseconds` (replaces `duration_ms`) | 24.3 | `queries.*/24.3.1.0/` (roots use `duration_ms`; output stays in ms on every rung) |
 | `system.tables.parameterized_view_parameters` | 25.4 | `queries.{onprem,cloud}/25.4.1.0/` (gov: not collected) |
+| `system.tables.target_database`, `target_table` (an MV's write target, including the implicit `.inner_id.*` table) | 26.6 | `queries.*/26.6.1.0/` (gov hashes both) |
 
 The dashboard (`internal/dashboard/generator.go`) builds its SQL dynamically, so instead of version directories it probes the live schema at runtime (`hasColumn`/`hasTable`) and adapts each panel — covering the same columns (`error_count`, `is_killed`, `bytes_on_disk`, the async table/`rows`, `crash_log`) plus optional tables that may be disabled by config.
 
@@ -914,6 +917,7 @@ When `-skip-dashboard` is not set, the tool generates a single self-contained `d
 | 15 | 💾 **Disk Usage** | Free vs used space per disk plus a disk-details table |
 | 16 | 🛑 **Server Error Counters** | Top 20 cumulative error codes from `system.errors`, high-part-count partitions (>100 parts → potential code-252 `TOO_MANY_PARTS` risk), and TTL activity from `part_log` |
 | 17 | ⚡ **Async Insert Activity** (last 24 h) | Flush count per hour by status — section is hidden when `system.asynchronous_insert_log` is empty or in gov mode |
+| 18 | 🕸 **Schema Graph** | The table-dependency graph — tables, materialized views, dictionaries and Distributed tables with the edges data flows along — served from a second page, `schema_graph.html`, that the tab loads into a frame only when clicked. See *Schema graph* below. |
 
 In addition, when `--query-id` or `--normalized-query-hash` is set, a **🔍 Query Analysis** section appears near the top of the nav. See [Query analysis mode](#query-analysis-mode) for what it contains.
 
@@ -921,13 +925,21 @@ A sticky top nav at the page header lets you jump straight to any section. Secti
 
 ### Previewing the Keeper Health panel without an outage
 
-`make dashboard-preview` renders `bin/keeper_incident_preview.html` from an anonymised fixture shaped like a real Keeper outage on a shared-storage cluster: 48 hours of Keeper counters (a blip on day one, quorum lost for eight hours on day two), the `keeper_health`, `keeper_connection_blips`, `merges_stalled`, `background_operation_failures`, `high_exception_rate` and `too_many_parts` alerts as they would fire, the error codes per hour and a re-established Keeper session. Use it to see what the panel and the alerts look like before an incident, or to review a theme or wording change.
+`make dashboard-preview` renders `bin/schema_graph_preview.html` (a small fixture pipeline with every node kind, reachable from the preview dashboard's Schema tab) and `bin/keeper_incident_preview.html` from an anonymised fixture shaped like a real Keeper outage on a shared-storage cluster: 48 hours of Keeper counters (a blip on day one, quorum lost for eight hours on day two), the `keeper_health`, `keeper_connection_blips`, `merges_stalled`, `background_operation_failures`, `high_exception_rate` and `too_many_parts` alerts as they would fire, the error codes per hour and a re-established Keeper session. Use it to see what the panel and the alerts look like before an incident, or to review a theme or wording change.
 
 ### What's interactive vs static
 
 - **Interactive**: Tables Explorer (full text search, database/engine filters, pagination); all charts (hover tooltips, legend toggling).
 - **Static**: every other table — they render in a fixed order, but their underlying JSON is embedded in the page so you can `grep DATA dashboard.html | head` if you want raw values.
 
+
+### Schema graph
+
+`schema_graph.html` is written next to `dashboard.html` and is an adaptation of ClickHouse's own `/schema` page (`programs/server/schema.html`, Apache-2.0), with every live query replaced by JSON embedded at collection time: `system.tables`, `system.columns`, `system.dictionaries` and `system.view_refreshes`, system databases excluded. Nodes are coloured by engine (MergeTree, MV, refreshable MV, dictionary, Distributed, view); edges follow `dependencies_*` / `loading_dependencies_*` and — on 26.6+ — `target_table`, the only source that names the implicit `.inner_id.*` table of an MV declared with an `ENGINE`. Click a node for its keys, columns, neighbours and `CREATE` statement; search matches table and column names; drag, zoom and filter by database.
+
+Why a second file: the graph needs every column of every user table embedded, and that grows with the schema — ~750 KiB on a near-empty server, tens of MB on a service with thousands of tables. Inlining it would slow `dashboard.html` for every reader. Instead the dashboard's **Schema Graph** tab assigns the file as an `<iframe>` source on the first click (a navigation, which `file://` permits, where `fetch()` of a sibling file is blocked), so nobody pays for the graph until they ask for it. The two pages share the theme through `localStorage`; the frame cannot be scripted across the `file://` boundary and does not need to be. If the frame stays blank, the bundle folder was not copied whole.
+
+**Credentials.** `create_table_query`, `engine_full` and `system.dictionaries.source` carry engine arguments — an S3 secret key, a MySQL password, `kafka_sasl_password`. Servers from 23.x mask these as `'[HIDDEN]'` themselves; a 22.x server does not. Both the collected JSONL (`system.tables`, `system.dictionaries`) and the graph payload pass through a redactor (`internal/collection/sqlredact.go`) that masks the credential positions of every known engine and table function (S3-family, MySQL, PostgreSQL, MongoDB, `remote()`, Redis, Azure, …), plus the byte-shape heuristics the config sanitizer uses (URL basic-auth, AWS key ids, JWTs, `keyword = 'value'`), writing the server's own `[HIDDEN]` token so old and new bundles read alike. `execution_log.txt` notes how many values each collector replaced. This is field-level and JSONL-only: a `-output-format native|tsv` bundle carries the DDL unredacted and says so.
 ## Configuration Collection
 
 When `-skip-config` is not set, the tool reads files from `-config-dir` (default `/etc/clickhouse-server/config.d/`) and writes sanitised copies into the run's `configuration/` directory (inside `clickhouse_backup_<timestamp>/`), mirroring the source tree — `config.d/storage.xml` and `users.d/storage.xml` stay distinct, and the directory a file came from (which determines ClickHouse's merge order) is preserved.

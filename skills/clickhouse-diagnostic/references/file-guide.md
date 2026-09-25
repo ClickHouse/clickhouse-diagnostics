@@ -29,11 +29,20 @@ Windows: `*_7_days` files cover the last 7 days (or `-from/-to`); `system.text_l
 ### system.tables
 **Why we run it:** nearly every parts/merge/insert finding is *explained* by the schema — the partition key, the sorting key, the engine, the MVs attached to a source and the per-table `SETTINGS` overrides.
 **Question:** what does the schema look like — engines, keys, partitioning, MVs, per-table settings?
-**Read first:** non-system tables by `engine`; `partition_key` and `sorting_key` of the tables that show up in parts/queries findings; count of `MaterializedView` per source (`dependencies_table`); `engine_full` for `SETTINGS` overrides (`parts_to_throw_insert`, `ttl_only_drop_parts`, `min_age_to_force_merge_seconds`, `storage_policy`).
+**Read first:** non-system tables by `engine`; `partition_key` and `sorting_key` of the tables that show up in parts/queries findings; count of `MaterializedView` per source (`dependencies_table`); `engine_full` for `SETTINGS` overrides (`parts_to_throw_insert`, `ttl_only_drop_parts`, `min_age_to_force_merge_seconds`, `storage_policy`); `total_rows` / `total_bytes` to tell the tables that hold data from the empty ones; on ≥ 26.6 `target_table` for what each MV writes to (the implicit `.inner_id.*` target included). For the shape of the whole pipeline open `schema_graph.html` from the dashboard's Schema tab rather than reading arrays.
 **Healthy looks like:** MergeTree-family tables with a sorting key that starts with low-cardinality filter columns, partition keys at day/month granularity, ≤ ~10 MVs per source, TTL declared on log-like tables.
 **Red flags:** `sorting_key = ''`/`tuple()` on large tables, high-cardinality partition keys (P-03, P-50); dozens of MVs on one source (P-34); `TTL` in DDL but no TTL activity in `part_log` (P-18); `Nullable` key columns; `Join`/`Buffer`/`Kafka` engines involved in a hang (P-21).
-**Traps:** in gov only 8 columns survive (no DDL/keys); `create_table_query` carries comments and defaults — never paste it verbatim outside the machine (`privacy.md`).
+**Traps:** in gov no DDL/keys survive (identifiers and the dependency arrays are hashed); `create_table_query` carries comments and defaults — never paste it verbatim outside the machine (`privacy.md`); engine credentials read `'[HIDDEN]'` (server-masked on ≥ 23.x, collector-redacted otherwise) — a bundle from a tool build before this redactor and a 22.x server may still carry them raw.
 **Pairs with:** `system.parts` (explain counts), `system.columns` (types), `query_log_details` (which tables are hot).
+
+### system.view_refreshes (≥ 23.12)
+**Why we run it:** a refreshable materialized view (`REFRESH EVERY … / AFTER …`) runs on a schedule, not on insert, so `query_views_log` never sees it and `system.tables` cannot tell it from an ordinary MV. This is the only table that says whether it is still refreshing.
+**Question:** are the refreshable views refreshing on time, and what did the last failure say?
+**Read first:** `status` per view; `last_success_time` against the collection time and the view's `REFRESH` interval in `create_table_query`; `exception`.
+**Healthy looks like:** every row `Scheduled` (or `Running`), `last_success_time` within one interval of collection, empty `exception`.
+**Red flags:** `Disabled` (someone ran `SYSTEM STOP VIEW`, or the server disabled it after repeated failures); `last_success_time` older than several intervals; any `exception` — the text names the failing object, typically a table the view's `SELECT` joins that was dropped or renamed (HC-7.6).
+**Traps:** absent below 23.12 (not a finding); in cloud one row per replica — the refresh runs on one, the others report `RunningOnAnotherReplica`; gov has `has_exception` instead of the text.
+**Pairs with:** `system.tables` (the view's DDL and its `REFRESH` clause), `schema_graph.html` (these views are the pink nodes), `text_log` around `last_refresh_time`.
 
 ### system.columns
 **Why we run it:** types drive merge memory, compression and MV compatibility; the failing column named in an error message is looked up here.
@@ -365,7 +374,7 @@ Windows: `*_7_days` files cover the last 7 days (or `-from/-to`); `system.text_l
 **Read first:** extract the `const DATA = {…}` JSON (recipe in `reading-recipes.md` §1); `alerts[]` (`rows` present = fired, `error` = could not run, `skipped` = not applicable); `host_checks`; `version`/`uptime`; `query_slow`/`query_heavy`/`query_by_user` for a pre-aggregated view; `high_part_count`; `ttl_activity`.
 **Healthy looks like:** no fired alerts, host checks all `ok`/`info`.
 **Red flags:** any fired alert (HC-1) — but read the rule's code, not its name (`too_many_simultaneous_queries` filtered 252 in tool versions before September 2026); `uptime` short (restart).
-**Traps:** the HTML loads Chart.js from a CDN — irrelevant for reading `DATA`; alert `rows` contain identifiers; withheld in gov.
+**Traps:** the HTML loads Chart.js from a CDN — irrelevant for reading `DATA`; alert `rows` contain identifiers; withheld in gov. Its **Schema Graph** tab opens `schema_graph.html` (bundle-layout §8b) into a frame on click — a separate file, so a dashboard.html copied out alone shows an empty frame there, not a bug.
 **Pairs with:** `alerts/*.yaml` in the repo (thresholds and SQL of each rule).
 
 ### execution_log.txt (every mode)

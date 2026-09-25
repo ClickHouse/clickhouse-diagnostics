@@ -159,7 +159,13 @@ func keeperIncidentFixture() map[string]interface{} {
 // TestBuildHTML_KeeperIncidentPreview renders the incident fixture and, when
 // DASHBOARD_PREVIEW_DIR is set, writes the page there for a human to open.
 func TestBuildHTML_KeeperIncidentPreview(t *testing.T) {
-	html := buildHTML(keeperIncidentFixture())
+	fx := keeperIncidentFixture()
+	// The preview dashboard's Schema tab opens the preview graph written by
+	// TestBuildSchemaGraphHTML_Preview next to it (make dashboard-preview runs both).
+	sg := schemaGraphSummary(schemaGraphFixture())
+	sg["file"] = "schema_graph_preview.html"
+	fx["schema_graph"] = sg
+	html := buildHTML(fx)
 	for _, want := range []string{
 		`id="sec-keeper"`, `"keeper_metric_hourly"`, `"hw_exceptions":25068351`, `"keeper_health"`,
 		`"keeper_connection_blips"`, `"merges_stalled"`, `keeper-3.example.internal`,
