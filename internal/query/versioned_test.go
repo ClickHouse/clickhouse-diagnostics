@@ -208,6 +208,11 @@ func TestFindVersionedFiles_RealRepoDirs(t *testing.T) {
 		"queries.onprem/system.error_log_7_days.sql":        true,
 		"queries.gov/system.error_log_7_days.sql":           true,
 		"queries.cloud/system.error_log_7_days.sql":         true,
+		// system.view_refreshes arrived with refreshable materialized views in
+		// 23.12 — newer than every floor, so no mode has a root variant.
+		"queries.onprem/system.view_refreshes.sql": true,
+		"queries.gov/system.view_refreshes.sql":    true,
+		"queries.cloud/system.view_refreshes.sql":  true,
 	}
 	dirs := map[string]string{
 		"../../queries.onprem":         ".sql",
