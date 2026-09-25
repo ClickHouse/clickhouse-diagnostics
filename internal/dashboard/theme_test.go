@@ -184,7 +184,11 @@ func TestTemplate_TopbarSticksAsOneBand(t *testing.T) {
 	if !strings.Contains(htmlTemplate, "new ResizeObserver(measureTopbar)") {
 		t.Error("--topbar-h must be re-measured via ResizeObserver, not set once")
 	}
-	if !strings.Contains(htmlTemplate, "const line=topbarH+8;") {
+	// The threshold is the measured height plus a small tolerance: an anchor
+	// jump lands a heading at exactly scroll-margin-top, and a subpixel
+	// rounding there must not flip the comparison. The slack value is free to
+	// change; deriving it from topbarH is not.
+	if !strings.Contains(htmlTemplate, "const line=topbarH+") {
 		t.Error("the scroll-spy threshold must follow the measured band height")
 	}
 }

@@ -133,4 +133,5 @@ help:
 .PHONY: dashboard-preview
 dashboard-preview:
 	mkdir -p bin
-	DASHBOARD_PREVIEW_DIR=$(CURDIR)/bin go test ./internal/dashboard -run TestBuildHTML_KeeperIncidentPreview -count=1 >/dev/null && echo "bin/keeper_incident_preview.html"
+	DASHBOARD_PREVIEW_DIR=$(CURDIR)/bin go test ./internal/dashboard -run 'TestBuildHTML_(KeeperIncidentPreview|AlertsPreview)' -count=1 >/dev/null \
+	  && echo "bin/keeper_incident_preview.html" && echo "bin/alerts_preview.html"
