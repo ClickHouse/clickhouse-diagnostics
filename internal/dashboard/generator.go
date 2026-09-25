@@ -1529,7 +1529,10 @@ header .meta{margin-left:auto;text-align:right;font-size:var(--click-font-size-1
 #theme-toggle:hover{background:rgba(255,255,255,.12)}
 nav{background:var(--surface-card);border-bottom:var(--click-border-width-1) solid var(--stroke);padding:0 var(--click-space-6);display:flex;overflow-x:auto}
 nav a{padding:var(--click-space-3) var(--click-space-4);color:var(--ink-muted);text-decoration:none;font-size:var(--click-font-size-1);font-weight:var(--click-font-weight-2);white-space:nowrap;border-bottom:2px solid transparent;display:block}
-nav a:hover,nav a.active{color:var(--ink);border-bottom-color:var(--ink)}
+nav a:hover{color:var(--ink);border-bottom-color:var(--stroke)}
+/* The section you are in: accent underline + weight, so it reads as state
+   rather than as the link the pointer happens to be over. */
+nav a.active{color:var(--ink);border-bottom-color:var(--status-info);font-weight:var(--click-font-weight-3)}
 .badge{display:inline-block;padding:2px var(--click-space-2);border-radius:var(--click-radii-full);font-size:var(--click-font-size-0);font-weight:var(--click-font-weight-3);text-transform:uppercase;letter-spacing:.5px;margin-top:2px}
 .badge-cloud{background:var(--status-info);color:#fff}
 .badge-onprem{background:var(--status-good);color:#fff}
@@ -1603,6 +1606,19 @@ footer{text-align:center;color:var(--ink-muted);font-size:var(--click-font-size-
 .alert-messages{padding-left:18px;margin:0}
 .alert-messages li{font-size:var(--click-font-size-1);color:var(--ink);margin:3px 0;font-family:var(--click-font-mono);word-break:break-word;white-space:pre-wrap}
 .alert-err-msg{font-size:var(--click-font-size-1);color:var(--ink-muted);margin-top:var(--click-space-1);font-style:italic}
+/* Disclosures inside an alert. A ClickHouse exception carries its stack trace
+   inline — a measured one was 1764 chars over 15 lines, of which 216 were the
+   message — and a rule may return dozens of rows, so the verbose part sits
+   behind a <details> and the alert list stays scannable. */
+.alert-more{margin:2px 0 0}
+.alert-more>summary{cursor:pointer;color:var(--ink-muted);font-size:var(--click-font-size-0);font-family:var(--click-font-regular);font-style:normal;list-style:none;display:inline-flex;align-items:center;gap:4px;user-select:none}
+.alert-more>summary::-webkit-details-marker{display:none}
+.alert-more>summary::before{content:'\25B8';display:inline-block;transition:transform .12s ease}
+.alert-more[open]>summary::before{transform:rotate(90deg)}
+.alert-more>summary:hover{color:var(--ink);text-decoration:underline}
+.alert-more>summary:focus-visible{outline:2px solid var(--status-info);outline-offset:2px;border-radius:var(--click-radii-1)}
+.alert-full{background:var(--surface-sunken);border:var(--click-border-width-1) solid var(--stroke);border-radius:var(--click-radii-1);padding:var(--click-space-2);margin:var(--click-space-1) 0 var(--click-space-2);font-family:var(--click-font-mono);font-size:var(--click-font-size-0);line-height:var(--click-line-height-1);color:var(--ink-muted);white-space:pre-wrap;word-break:break-word;max-height:360px;overflow:auto}
+.alert-desc-rest{margin-top:var(--click-space-1)}
 .alert-tags{display:flex;gap:var(--click-space-1);flex-wrap:wrap;margin-top:var(--click-space-2)}
 .alert-tag{background:var(--surface-sunken);border:var(--click-border-width-1) solid var(--stroke);color:var(--ink-muted);border-radius:var(--click-radii-full);padding:1px var(--click-space-2);font-size:var(--click-font-size-0)}
 .alert-summary-bar{display:flex;gap:var(--click-space-2);flex-wrap:wrap;margin-bottom:var(--click-space-3)}
@@ -2412,6 +2428,61 @@ function dictStatusBadge(status){
 })();
 
 // ── alerts renderer ───────────────────────────────────────────────────────────
+//
+// How much of one alert is shown before the reader has to ask for more. A
+// ClickHouse exception embeds its stack trace in the message text: one
+// measured in a real bundle ran 1764 characters over 15 lines, of which the
+// first 216 were the actual error. replication_queue_errors returns up to 50
+// such rows and keeper_health up to 168, so rendering every message in full
+// buried the rest of the page under stack frames.
+const ALERT_HEAD_CHARS=260;   // inline length of one instance line
+const ALERT_ROWS_SHOWN=5;     // instances listed before the rest collapse
+
+const ALERT_STACK_RE=/\s*Stack trace \(when copying this message[\s\S]*$/;
+// Every ClickHouse exception ends with the build it came from. It is the same
+// string on every row and the dashboard header already states the version, so
+// it is dropped from the inline line and kept in the full text.
+const ALERT_VERSION_RE=/\s*\(version [0-9][^)]*\([^)]*\)\)[\s,.;]*$/;
+
+// alertMessageParts splits a substituted message into the line shown inline
+// and the complete text kept for the disclosure. Returns truncated=false when
+// nothing was actually dropped, so a short message gets no useless toggle.
+function alertMessageParts(msg){
+  const full=String(msg==null?'':msg);
+  const flat=full.replace(/\s+/g,' ').trim();
+  let head=full.replace(ALERT_STACK_RE,'').replace(/\s+/g,' ').trim()
+               .replace(ALERT_VERSION_RE,'').replace(/[\s,;]+$/,'');
+  if(head.length>ALERT_HEAD_CHARS){
+    const cut=head.slice(0,ALERT_HEAD_CHARS);
+    const sp=cut.lastIndexOf(' ');
+    head=(sp>ALERT_HEAD_CHARS*0.6?cut.slice(0,sp):cut)+'\u2026';
+  }
+  if(!head) head=flat;
+  // truncated drives the toggle: true only when the reader would otherwise
+  // lose content, so a short single-line message gets no useless disclosure.
+  const flatTrimmed=flat.replace(ALERT_VERSION_RE,'').replace(/[\s,;]+$/,'');
+  return {head:head, full:full, truncated:head!==flatTrimmed||flat!==flatTrimmed, hasStack:ALERT_STACK_RE.test(full)};
+}
+
+// alertDisclosure renders the "show the rest" toggle for one message.
+function alertDisclosure(parts){
+  if(!parts.truncated) return '';
+  const label=parts.hasStack?'full message and stack trace':'full message';
+  return '<details class="alert-more"><summary>'+label+'</summary>'
+        +'<pre class="alert-full">'+esc(parts.full)+'</pre></details>';
+}
+
+// alertRowLine renders one instance: the rule's message template with this
+// row's values substituted. The template is ours, the values are customer
+// data (table names, partition ids, raw server text), so the whole line is
+// escaped.
+function alertRowLine(a,row){
+  let msg=a.message;
+  Object.entries(row).forEach(([k,v])=>{msg=msg.split('{'+k+'}').join(String(v==null?'':v));});
+  const parts=alertMessageParts(msg);
+  return '<li>\u25B8 '+esc(parts.head)+alertDisclosure(parts)+'</li>';
+}
+
 function renderAlerts(){
   const alerts=DATA.alerts||[];
   const fired=alerts.filter(a=>(a.rows&&a.rows.length>0)||a.error);
@@ -2482,22 +2553,37 @@ function renderAlerts(){
     if((a.tags||[]).length) html+='<span class="alert-tags">'+a.tags.map(t=>'<span class="alert-tag">'+esc(t)+'</span>').join('')+'</span>';
     html+='</div>'; // header
 
-    if(a.description) html+='<div class="alert-desc">'+esc(a.description.trim()).replace(/\n/g,'<br>')+'</div>';
+    if(a.description){
+      // The rule descriptions are deliberately long — an explanation followed
+      // by what to check next. The first paragraph is the explanation; the
+      // rest is guidance the reader wants only once the alert is worth
+      // following, so it collapses.
+      const d=a.description.trim();
+      const brk=d.indexOf('\n\n');
+      const first=(brk>0?d.slice(0,brk):d).trim();
+      html+='<div class="alert-desc">'+esc(first).replace(/\n/g,'<br>');
+      if(brk>0){
+        html+='<details class="alert-more"><summary>more about this rule</summary>'
+             +'<div class="alert-desc-rest">'+esc(d.slice(brk).trim()).replace(/\n/g,'<br>')+'</div></details>';
+      }
+      html+='</div>';
+    }
 
     if(a.error){
-      // a.error is raw server exception text — customer-influenced.
-      html+='<div class="alert-err-msg">⚠ '+esc(a.error)+'</div>';
+      // a.error is raw server exception text — customer-influenced, and it
+      // carries a stack trace as often as a row message does.
+      const ep=alertMessageParts(a.error);
+      html+='<div class="alert-err-msg">⚠ '+esc(ep.head)+alertDisclosure(ep)+'</div>';
     } else if(a.message&&(a.rows||[]).length){
-      html+='<ul class="alert-messages">';
-      (a.rows||[]).forEach(row=>{
-        let msg=a.message;
-        // Row values are customer data (table names, partition ids, raw
-        // messages) substituted into the rule's message template — the
-        // template is ours, the values are not. Escape the whole line.
-        Object.entries(row).forEach(([k,v])=>{msg=msg.split('{'+k+'}').join(String(v??''));});
-        html+='<li>▸ '+esc(msg)+'</li>';
-      });
-      html+='</ul>';
+      // keeper_health can return one row per hour of a 7-day window; only the
+      // first few are listed, the rest stay one click away.
+      const rows=a.rows||[];
+      const shown=rows.slice(0,ALERT_ROWS_SHOWN), hidden=rows.slice(ALERT_ROWS_SHOWN);
+      html+='<ul class="alert-messages">'+shown.map(r=>alertRowLine(a,r)).join('')+'</ul>';
+      if(hidden.length){
+        html+='<details class="alert-more"><summary>'+hidden.length+' more instance'+(hidden.length===1?'':'s')+'</summary>'
+             +'<ul class="alert-messages">'+hidden.map(r=>alertRowLine(a,r)).join('')+'</ul></details>';
+      }
     }
 
     html+='</div>'; // item
@@ -2807,19 +2893,59 @@ document.addEventListener('DOMContentLoaded',function(){
     window.addEventListener('resize', measureTopbar, {passive:true});
   }
 
-  // nav active highlight on scroll
-  const secs=[...document.querySelectorAll('section[id]')];
+  // nav active highlight on scroll — "you are here" in the sticky band.
+  //
+  // Only RENDERED sections may win. Every optional panel starts at
+  // display:none, and a non-rendered element reports
+  // getBoundingClientRect().top = 0, which passes the "its top is above the
+  // line" test on every scroll. The last such section in the document
+  // therefore won every pass — on a typical bundle that is sec-async-inserts,
+  // whose nav link is hidden too, so the band showed no highlight at all.
+  // getClientRects() is empty for anything not rendered, and the list is
+  // rebuilt each pass because panels un-hide after their data renders.
   const navLinks=[...document.querySelectorAll('nav a')];
-  window.addEventListener('scroll',function(){
-    let cur='';
+  const navFor={};
+  navLinks.forEach(a=>{navFor[a.getAttribute('href')]=a;});
+  function spySections(){
+    return [...document.querySelectorAll('section[id]')]
+      .filter(s=>s.getClientRects().length && navFor['#'+s.id]);
+  }
+  function syncNav(){
+    const secs=spySections();
+    if(!secs.length) return;
     // A section counts as current once its top reaches the underside of the
-    // band, so the highlight matches what the reader can actually see.
-    const line=topbarH+8;
+    // band, so the highlight matches what the reader can actually see. The
+    // tolerance clears the subpixel gap an anchor jump leaves, which lands a
+    // heading at exactly scroll-margin-top.
+    const line=topbarH+16;
+    // Default to the first section: at the very top of the page nothing has
+    // crossed the line yet, and a blank band is what this replaced.
+    let cur=secs[0].id;
     secs.forEach(s=>{if(s.getBoundingClientRect().top<=line)cur=s.id;});
+    // At the end of the page a short final section can never reach the line,
+    // so the last one wins once the scroll cannot go further.
+    if(Math.ceil(window.innerHeight+window.scrollY)>=document.documentElement.scrollHeight-2){
+      cur=secs[secs.length-1].id;
+    }
     navLinks.forEach(a=>{
-      a.classList.toggle('active',a.getAttribute('href')==='#'+cur);
+      const on=a.getAttribute('href')==='#'+cur;
+      a.classList.toggle('active',on);
+      if(on) a.setAttribute('aria-current','true'); else a.removeAttribute('aria-current');
     });
-  },{passive:true});
+  }
+  // Called straight from the listener rather than coalesced through
+  // requestAnimationFrame. The pass is ~20 getBoundingClientRect reads with
+  // no writes, the browser already caps scroll events at the frame rate, and
+  // rAF would make the highlight depend on a repaint — which never happens
+  // under a headless --virtual-time-budget, so the behaviour could not be
+  // tested. Reading live also keeps it correct when a disclosure expands and
+  // shifts every section below it; a cached offset table would not.
+  window.addEventListener('scroll',syncNav,{passive:true});
+  window.addEventListener('resize',syncNav,{passive:true});
+  // Once now for the initial highlight, once after load — optional panels
+  // un-hide as their data renders, which changes which sections exist.
+  syncNav();
+  window.addEventListener('load',syncNav);
 
   // header
   document.getElementById('hdr-badge').innerHTML=
