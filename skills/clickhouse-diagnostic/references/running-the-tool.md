@@ -86,7 +86,7 @@ Useful flags: `-query-timeout` (default 240 s — the server enforces it as `max
 
 ## 5. Time windows
 
-Collection windows are per query: 7 days for `query_log`, `metric_log` (fixed columns), `asynchronous_insert_log`, `blob_storage_log`, `error_log`, `distributed_ddl_queue`; **3 days** for `part_log` and `metric_log_coordination` (the two wide or high-volume ones); **1 day** for `system.text_log` (capped at 2000 rows), the text_log histogram and Keeper markers, and `zookeeper_log` errors. `-from`/`-to` (RFC3339 or `YYYY-MM-DD`, UTC) override **every** window at once; alert rules keep their own windows by design.
+Collection windows are per query: 7 days for `query_log`, `metric_log` (fixed columns), `asynchronous_insert_log`, `blob_storage_log`, `error_log`, `distributed_ddl_queue`; **3 days** for `part_log`, `query_views_log` and `metric_log_coordination` (the wide or high-volume ones); **1 day** for `system.text_log` (capped at 2000 rows), the text_log histogram and Keeper markers, and `zookeeper_log` errors. `-from`/`-to` (RFC3339 or `YYYY-MM-DD`, UTC) override **every** window at once; alert rules keep their own windows by design.
 
 ```bash
 # exactly the incident window (cheapest, most focused)
@@ -139,4 +139,4 @@ Before sharing: open `configuration/` and confirm nothing sensitive remains (san
 
 ## 9. What the bundle deliberately does not contain
 
-Customer rows (never queried); `system.zookeeper` (the tree itself), `system.remote_data_paths` (one row per blob — too large), `system.filesystem_cache` (one row per segment), `system.trace_log`, `system.processors_profile_log` (except in query analysis), `system.merge_tree_settings`, `system.users/grants`, `system.backups`, `system.query_views_log`, `system.row_policies`, Keeper logs/`mntr` output, and `system.zookeeper_log` / `system.blob_storage_log` when the server does not have them enabled. When a finding needs one of these, list the exact `SELECT` the user should run (single isolating query, `LIMIT`ed) rather than asking for a dump.
+Customer rows (never queried); `system.zookeeper` (the tree itself), `system.remote_data_paths` (one row per blob — too large), `system.filesystem_cache` (one row per segment), `system.trace_log`, `system.processors_profile_log` (except in query analysis), `system.merge_tree_settings`, `system.users/grants`, `system.backups`, `system.row_policies`, Keeper logs/`mntr` output, and `system.zookeeper_log` / `system.blob_storage_log` when the server does not have them enabled. When a finding needs one of these, list the exact `SELECT` the user should run (single isolating query, `LIMIT`ed) rather than asking for a dump.

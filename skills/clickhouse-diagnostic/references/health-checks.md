@@ -109,6 +109,7 @@ Distinguish from **client-side** Keeper noise: 999 with `Bad version` / `No node
 | 5.6 | `host_info.memory` | `swap_total_bytes - swap_free_bytes > 0` | info→warning | Swapping hurts latency unpredictably; ClickHouse expects no swap. |
 | 5.7 | `host_info.top_processes_by_rss` | any non-ClickHouse process with RSS > 10 % of RAM *(guideline)* | info | Co-located workloads compete for memory/page cache. |
 | 5.8 | `query_log_details` | hourly `count` growing ×3 vs the 7-day baseline while `memory_usage/count` is flat | info | Memory floor rises because of traffic, not a leak — name the traffic vector (user/table/hash) rather than the allocator. P-12. |
+| 5.9 | `query_views_log_3_days` | `median_peak_memory_usage` for one view stepping up ≥ 3× across a day boundary while `written_rows` stays flat *(guideline)* | warning | Per-MV memory regression, typically after an upgrade. `sum` alone will not show it — that tracks insert volume. Check `system.version` and P-54. |
 
 ## HC-6 Query workload
 
@@ -131,6 +132,9 @@ Distinguish from **client-side** Keeper noise: 999 with `Bad version` / `No node
 | 7.3 | `query_log_details` `Insert` | `distinct_exceptions` small with high count for 252/241/242 | warning | One recurring insert failure; the message names the table. |
 | 7.4 | `system.tables` | ≥ 5 `MaterializedView`s on one source table; MV chains ≥ 2 hops *(guideline)* | info | Every insert block is processed by each MV synchronously; TOO_MANY_PARTS on an MV target means the *source* gets too many small inserts. P-34. |
 | 7.5 | `text_log` / `system.errors` | `INSERT_WAS_DEDUPLICATED` (389) or "Deduplication path already exists" | info→warning | Client retries are being deduplicated (normal) — or every insert is (token misuse) → P-33. |
+| 7.6 | `query_views_log_3_days` | any `status = 'ExceptionWhileProcessing'` | warning→critical | The MV threw after the base part was committed: the source has the rows, the target does not. `exception_code` names the class (60 after a swap/rename/detach, 241 memory, 252 parts, 341 during drain). **A failed INSERT marks every view in the pipeline with the same message** — attribute it to the view named in the text. P-36. |
+| 7.7 | `query_views_log_3_days` | `zero_write_executions / executions > 0.9` on a view with `read_rows > 0` *(guideline)* | warning | The MV ran clean and produced nothing. Legitimate for a filtering MV — compare against that view's earlier buckets and its siblings before concluding. P-35. |
+| 7.8 | `query_views_log_3_days` | one view's `written_rows` per hour diverging from a sibling on the same source | warning | One hop of a chain stopped keeping up. Pair with `system.tables` dependencies. P-35. |
 
 ## HC-8 Mutations and TTL
 
