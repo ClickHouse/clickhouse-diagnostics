@@ -690,9 +690,15 @@ def analyse(base: str):
     elif qv:
         views = {}
         for r in qv:
+            # The server writes QueryFinish / ExceptionWhileProcessing for views
+            # (verified 26.7: no QueryStart rows). Skip them anyway, as the
+            # query_log pass does — a start row carries no resource data and
+            # would double-count executions and pull the memory median to 0.
+            if r.get("status") == "QueryStart":
+                continue
             v = views.setdefault(view_label(r), {
                 "executions": 0, "zero_write": 0, "read": 0, "written": 0, "failures": 0,
-                "codes": Counter(), "max_ms": 0, "buckets_wrote": 0, "buckets_zero": 0,
+                "codes": Counter(), "max_ms": 0, "hours": {}, "exc": "",
                 "mem": [], "target": r.get("view_target") or r.get("target_table") or ""})
             ex = num(r.get("executions")) or 0
             zw = num(r.get("zero_write_executions")) or 0
@@ -711,12 +717,18 @@ def analyse(base: str):
                     v["codes"][code] += ex
                 if h:
                     tl(h)["mv_failed"] += ex
+                # The sampled message names the view that actually threw
+                # ("… while pushing to view db.mv"), on EVERY sibling's row.
+                if not v["exc"] and r.get("exception"):
+                    v["exc"] = str(r.get("exception"))
             else:
-                # bucket-level write history, for "stopped writing" vs "never wrote"
-                if wr > 0:
-                    v["buckets_wrote"] += 1
-                elif rd > 0:
-                    v["buckets_zero"] += 1
+                # Per-hour write history, ORDERED, for "stopped writing" vs
+                # "never wrote" vs "started writing" — a bare count of mixed
+                # buckets cannot tell the first from the last.
+                if h:
+                    hb = v["hours"].setdefault(h, {"wrote": False, "read": False})
+                    hb["wrote"] = hb["wrote"] or wr > 0
+                    hb["read"] = hb["read"] or rd > 0
                 mem = num(r.get("median_peak_memory_usage"))
                 if h and mem is not None:
                     v["mem"].append((h, mem, wr))
@@ -739,28 +751,67 @@ def analyse(base: str):
             "max_ms": v["max_ms"],
         } for k, v in sorted(views.items(), key=lambda kv: -kv[1]["executions"])[:10]]
 
-        # ---- HC-7.6 failures, attributed to the view that actually broke
+        # ---- HC-7.6 failures, attributed to the view that actually broke.
+        # A failed INSERT writes an ExceptionWhileProcessing row for EVERY view
+        # in the pipeline, all with the same message, so the row counts tie.
+        # The message itself says which view threw ("while pushing to view X");
+        # that is the attribution. Without text (gov) a strict count lead is
+        # used, and with neither nobody is named.
         failing = sorted(((k, v) for k, v in views.items() if v["failures"]),
                          key=lambda kv: -kv[1]["failures"])
         if failing:
-            culprit, cv = failing[0]
-            codes = ", ".join(f"{ERROR_NAMES.get(c, c)}({c})={n}" for c, n in cv["codes"].most_common(3))
-            blast = (f"; {len(failing) - 1} other view(s) carry the same message — a failed INSERT marks "
-                     "every view in the pipeline") if len(failing) > 1 else ""
-            add("critical" if cv["failures"] >= 100 else "warning", "inserts",
-                f"materialized view `{culprit}` failed {cv['failures']} push(es) — the base part committed "
-                "and the target did not",
-                f"{codes}{blast}", "HC-7.6/P-36")
+            named = Counter()
+            for _, v in failing:
+                m = re.search(r"while pushing to view (\S+)", v["exc"])
+                if m:
+                    named[m.group(1).rstrip(".,;:")] += 1
+            culprit, how = None, ""
+            if named:
+                cand = named.most_common(1)[0][0]
+                culprit = cand if cand in views else None
+                how = "named in the exception text"
+            if culprit is None and (len(failing) == 1 or failing[0][1]["failures"] > failing[1][1]["failures"]):
+                culprit, how = failing[0][0], "the view with the most failed pushes; no exception text names one"
+            total = sum(v["failures"] for _, v in failing)
+            all_codes = Counter()
+            for _, v in failing:
+                all_codes.update(v["codes"])
+            codes = ", ".join(f"{ERROR_NAMES.get(c, c)}({c})={n}" for c, n in all_codes.most_common(3))
+            sev = "critical" if total >= 100 else "warning"
+            if culprit:
+                cv = views[culprit]
+                others = len(failing) - (1 if culprit in dict(failing) else 0)
+                blast = (f"; {others} other view(s) carry the same message — a failed INSERT marks "
+                         "every view in the pipeline") if others else ""
+                add(sev, "inserts",
+                    f"materialized view `{culprit}` failed {cv['failures'] or total} push(es) — the base part "
+                    "committed and the target did not",
+                    f"{codes}; attribution: {how}{blast}", "HC-7.6/P-36")
+            else:
+                add(sev, "inserts",
+                    f"{len(failing)} materialized view(s) failed {total} push(es) between them — the base part "
+                    "committed and the targets did not; attribution unavailable (equal counts, no exception text)",
+                    f"{codes}; views: " + ", ".join(k for k, _ in failing[:5]), "HC-7.6/P-36")
 
-        # ---- HC-7.7 a view that STOPPED writing (mixed history), vs one that never wrote
-        stopped = [(k, v) for k, v in views.items()
-                   if v["buckets_wrote"] >= 2 and v["buckets_zero"] >= 2
-                   and v["buckets_zero"] >= v["buckets_wrote"]]
-        for k, v in sorted(stopped, key=lambda kv: -kv[1]["buckets_zero"])[:3]:
+        # ---- HC-7.7 a view that STOPPED writing, vs one that never wrote.
+        # Ordered: the last hour that wrote, then the run of hours after it that
+        # read rows and wrote none. A view that started writing (zeros first,
+        # writes later) has an empty trailing run and is not flagged.
+        stopped = []
+        for k, v in views.items():
+            hours = sorted(v["hours"].items())
+            wrote_hours = [h for h, b in hours if b["wrote"]]
+            if not wrote_hours:
+                continue
+            last_write = wrote_hours[-1]
+            trailing = [h for h, b in hours if h > last_write and b["read"] and not b["wrote"]]
+            if len(trailing) >= 2:
+                stopped.append((k, last_write, trailing, len(wrote_hours)))
+        for k, last_write, trailing, nwrote in sorted(stopped, key=lambda x: -len(x[2]))[:3]:
             add("warning", "inserts",
-                f"materialized view `{k}` stopped writing: {v['buckets_zero']} hour(s) read rows and wrote none, "
-                f"after {v['buckets_wrote']} hour(s) that wrote",
-                "not a filtering MV — it wrote earlier in the same window; check as_select and any table it JOINs",
+                f"materialized view `{k}` stopped writing: wrote until {last_write}, then {len(trailing)} hour(s) "
+                f"through {trailing[-1]} read rows and wrote none",
+                f"not a filtering MV — it wrote in {nwrote} hour(s) of the same window; check as_select and any table it JOINs",
                 "HC-7.7/P-35")
         never = [k for k, v in views.items() if v["written"] == 0 and v["read"] > 0]
         if never:

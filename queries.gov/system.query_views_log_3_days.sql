@@ -25,10 +25,17 @@
 -- real one. It would be a constant column.
 SELECT
     time,
-    hex(SHA256(concat(splitByChar('.', view_name)[1], '%salt%')))   AS view_database,
-    hex(SHA256(concat(splitByChar('.', view_name)[2], '%salt%')))   AS view_table,
-    hex(SHA256(concat(splitByChar('.', view_target)[1], '%salt%'))) AS target_database,
-    hex(SHA256(concat(splitByChar('.', view_target)[2], '%salt%'))) AS target_table,
+    -- view_name / view_target are 'db.table' as the server prints them
+    -- (getFullTableName): the table half is backquoted when it needs to be, and
+    -- an MV declared with an ENGINE writes to db.`.inner_id.<uuid>` — a name with
+    -- dots inside it. Split at the FIRST dot only (an unquoted database name
+    -- cannot contain one) and strip the backticks, so each hashed half equals
+    -- the hashed database / name in system.tables and the mapping CSV reverses
+    -- it. splitByChar('.', …)[2] gave a bare backtick for every inner target.
+    hex(SHA256(concat(trim(BOTH '`' FROM substring(view_name, 1, position(view_name, '.') - 1)), '%salt%'))) AS view_database,
+    hex(SHA256(concat(trim(BOTH '`' FROM substring(view_name, position(view_name, '.') + 1)), '%salt%')))    AS view_table,
+    if(view_target = '', '', hex(SHA256(concat(trim(BOTH '`' FROM substring(view_target, 1, position(view_target, '.') - 1)), '%salt%')))) AS target_database,
+    if(view_target = '', '', hex(SHA256(concat(trim(BOTH '`' FROM substring(view_target, position(view_target, '.') + 1)), '%salt%'))))    AS target_table,
     view_type,
     status,
     exception_code,
