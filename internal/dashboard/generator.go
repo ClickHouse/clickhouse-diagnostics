@@ -981,6 +981,10 @@ func (g *Generator) collect() map[string]interface{} {
 	// ── Dictionaries ──────────────────────────────────────────────────────────
 
 	p["dictionaries"] = g.safeQuery("dictionaries", g.dictionariesSQL())
+	// Review finding: system.dictionaries.source (and last_exception, which can
+	// quote a connection string) reached this panel unredacted on servers below
+	// 23.x. Same redactor as the JSONL collectors and the schema graph.
+	redactDictionaryPanel(p["dictionaries"].([]map[string]interface{}))
 
 	// ── Crash log ─────────────────────────────────────────────────────────────
 

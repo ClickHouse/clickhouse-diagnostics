@@ -201,3 +201,27 @@ func TestRedactCredentialsInText_StillUsesRemoved(t *testing.T) {
 		t.Errorf("got %q (n=%d)", got, n)
 	}
 }
+
+// Review finding: the keyword rule's [^'"]+ stopped at an escaped quote, so
+// password = 'pa\'ss' became '[HIDDEN]'ss' — the tail of the password stayed.
+// The value's end is now found by scanning the literal with SQL escaping.
+func TestRedactSQLText_QuotedValuesWithEscapedQuotes(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{`SETTINGS password = 'pa\'ss'`, `SETTINGS password = '[HIDDEN]'`},
+		{`SETTINGS password = 'pa''ss', x = 1`, `SETTINGS password = '[HIDDEN]', x = 1`},
+		{`kafka_sasl_password = 'ends\\', kafka_format = 'CSV'`, `kafka_sasl_password = '[HIDDEN]', kafka_format = 'CSV'`},
+		{`SOURCE(MYSQL(user 'u' password 'it''s' db 'd'))`, `SOURCE(MYSQL(user 'u' password '[HIDDEN]' db 'd'))`},
+		{`password = 'unterminated`, `password = '[HIDDEN]'`},
+	}
+	for _, c := range cases {
+		got, _ := RedactSQLText(c.in)
+		if got != c.want {
+			t.Errorf("\n in: %s\ngot: %s\nwant: %s", c.in, got, c.want)
+		}
+	}
+	// And the config sanitizer's path, with its own sentinel.
+	got, _ := RedactCredentialsInText(`# password = 'we\'ird' rotate quarterly`)
+	if got != `# password = REMOVED rotate quarterly` {
+		t.Errorf("config path: %q", got)
+	}
+}

@@ -80,19 +80,14 @@ func (g *Generator) collectSchemaGraph(version string) map[string]interface{} {
 		ORDER BY database, table, position`, schemaSysFilter))
 	// Definitions are shared across replicas, so system.dictionaries is read
 	// directly in every mode: clusterAllReplicas would return one row per
-	// replica and duplicate every dictionary node.
-	dicts := g.safeQuery("schema_dictionaries", `
-		SELECT database, name, source
-		FROM system.dictionaries
-		WHERE status IN ('LOADED', 'NOT_LOADED', 'LOADING')`)
+	// replica and duplicate every dictionary node. Every status is kept — the
+	// live page drops FAILED / FAILED_AND_RELOADING, but in a diagnostic
+	// bundle a failed dictionary is the node to look at first, so the sidebar
+	// shows its status and last error instead of losing it.
+	dicts := g.safeQuery("schema_dictionaries", schemaDictionariesSQL)
 	refreshes := []map[string]interface{}{}
 	if g.hasTable("view_refreshes") {
-		refreshes = g.safeQuery("schema_refreshes", `
-			SELECT database, view, status,
-			       toString(last_success_time) AS last_success_time,
-			       toString(next_refresh_time) AS next_refresh_time,
-			       exception
-			FROM system.view_refreshes`)
+		refreshes = g.safeQuery("schema_refreshes", schemaRefreshesSQL(g.sysTable("view_refreshes")))
 	}
 
 	// Credentials in DDL. Servers >= 23.x mask engine secrets as '[HIDDEN]'
@@ -101,7 +96,7 @@ func (g *Generator) collectSchemaGraph(version string) map[string]interface{} {
 	// collectors run through is applied here, so the sidebar's CREATE
 	// statement can never show more than the bundle does.
 	n := redactSchemaRecords(tables, "create_table_query", "engine_full")
-	n += redactSchemaRecords(dicts, "source")
+	n += redactSchemaRecords(dicts, "source", "last_exception")
 	if n > 0 {
 		fmt.Printf("  [dashboard] schema graph: %d credential(s) replaced with [HIDDEN]\n", n)
 	}
@@ -117,6 +112,39 @@ func (g *Generator) collectSchemaGraph(version string) map[string]interface{} {
 		"has_target":   strings.HasPrefix(targetCols, "target_"),
 		"has_refresh":  g.hasTable("view_refreshes"),
 	}
+}
+
+// schemaDictionariesSQL reads every dictionary regardless of status. A
+// dictionary declared in server config (XML) has database = ” and no
+// system.tables row; the page adds a node for it from this result.
+const schemaDictionariesSQL = `
+		SELECT database, name, source, status,
+		       leftUTF8(last_exception, 300) AS last_exception
+		FROM system.dictionaries`
+
+// schemaRefreshesSQL reads system.view_refreshes through the mode-aware table
+// reference — clusterAllReplicas in cloud — and folds the per-replica rows
+// into one per view. In a replicated database the refresh runs on ONE
+// replica: it reports Running / Scheduled, the others report
+// RunningOnAnotherReplica, so the informative row is the one that is not
+// that. hasTable is cloud-aware too, so reading only the local table here
+// would answer for one replica while claiming the cluster.
+func schemaRefreshesSQL(ref string) string {
+	return fmt.Sprintf(`
+		SELECT database, view,
+		       argMax(status, status != 'RunningOnAnotherReplica') AS status,
+		       toString(max(last_success_time))                    AS last_success_time,
+		       toString(max(next_refresh_time))                    AS next_refresh_time,
+		       argMax(exception, exception != '')                  AS exception
+		FROM %s
+		GROUP BY database, view`, ref)
+}
+
+// redactDictionaryPanel scrubs the dashboard's own Dictionaries panel rows —
+// source can embed a connection string with a password on servers below
+// 23.x, and last_exception can quote one.
+func redactDictionaryPanel(rows []map[string]interface{}) int {
+	return redactSchemaRecords(rows, "source", "last_exception")
 }
 
 // redactSchemaRecords runs RedactSQLText over the named string fields of every
@@ -335,6 +363,7 @@ body{font-family:var(--click-font-regular);margin:0;padding:0;background:var(--b
 .node.selected{border-color:var(--btn-primary-bg);box-shadow:0 0 0 3px var(--accent),0 4px 10px var(--shadow-color);z-index:6}
 .node.highlighted{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent);z-index:6}
 .node.dimmed{opacity:.25}
+.node:focus-visible{outline:3px solid var(--accent);outline-offset:2px;z-index:7}
 .node-header{padding:0.35rem 0.55rem;border-radius:5px 5px 0 0;font-weight:600;display:flex;justify-content:space-between;align-items:center;gap:0.4rem}
 .node-name{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1 1 auto;min-width:0;font-family:var(--click-font-mono)}
 .node-kind{font-size:0.7rem;opacity:.85;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:8rem;flex:0 1 auto;font-family:var(--click-font-mono)}
@@ -559,7 +588,28 @@ function loadFromBundle() {
         state.columnsByTable.get(k).push(c);
     }
     state.dictSources = new Map();
-    for (const x of dicts) state.dictSources.set(tableKey(x.database, x.name), x.source);
+    const tableKeys = new Set(tables.map(t => tableKey(t.database, t.name)));
+    for (const x of dicts) {
+        const k = tableKey(x.database, x.name);
+        state.dictSources.set(k, x);
+        /// A dictionary declared in server config (XML) lives in system.dictionaries
+        /// with database = '' and has no system.tables row, so it would have no node.
+        /// Give it one, labelled as config-defined; it has no dependency arrays, so it
+        /// draws without edges — its source text is still in the sidebar.
+        if (!tableKeys.has(k)) {
+            state.tables.push({
+                database: x.database || '(config)', name: x.name,
+                engine: 'Dictionary', engine_full: 'Dictionary (declared in server config)',
+                create_table_query: '', sorting_key: '', primary_key: '', partition_key: '', sampling_key: '',
+                total_rows: null, total_bytes: null, comment: '',
+                target_database: '', target_table: '',
+                dependencies_database: [], dependencies_table: [],
+                loading_dependencies_database: [], loading_dependencies_table: [],
+            });
+            tableKeys.add(k);
+            if (x.database === '') state.dictSources.set(tableKey('(config)', x.name), x);
+        }
+    }
     state.refreshes = new Map();
     for (const r of refreshes) state.refreshes.set(tableKey(r.database, r.view), r);
 
@@ -610,7 +660,7 @@ function buildGraph() {
             dependents: zipKeys(t.dependencies_database, t.dependencies_table),
             dependsOn: zipKeys(t.loading_dependencies_database, t.loading_dependencies_table),
             columns: state.columnsByTable.get(key) || [],
-            dictSource: state.dictSources.get(key),
+            dict: state.dictSources.get(key),
             refresh: state.refreshes.get(key),
             x: 0, y: 0, w: 0, h: 0,
             depth: 0,
@@ -1090,6 +1140,17 @@ function render() {
             e.stopPropagation();
             selectNode(n.key);
         });
+        /// Keyboard: a node is a button — Tab reaches it, Enter or Space opens it.
+        el.tabIndex = 0;
+        el.setAttribute('role', 'button');
+        el.setAttribute('aria-label', n.displayName + ', ' + (engineLabel(n) || n.engine || 'table'));
+        el.addEventListener('keydown', e => {
+            if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                e.stopPropagation();
+                selectNode(n.key);
+            }
+        });
 
         attachDrag(el, n);
 
@@ -1268,7 +1329,11 @@ function showSidebar(key) {
         if (n.refresh.next_refresh_time) rows.push(['Next refresh', n.refresh.next_refresh_time]);
         if (n.refresh.exception) rows.push(['Refresh error', n.refresh.exception]);
     }
-    if (n.dictSource) rows.push(['Dictionary source', n.dictSource]);
+    if (n.dict) {
+        if (n.dict.status) rows.push(['Dictionary status', n.dict.status]);
+        if (n.dict.source) rows.push(['Dictionary source', n.dict.source]);
+        if (n.dict.last_exception) rows.push(['Dictionary error', n.dict.last_exception]);
+    }
     for (const [k, v] of rows) {
         const tr = document.createElement('tr');
         const td1 = document.createElement('td'); td1.textContent = k;
@@ -1309,8 +1374,9 @@ function showSidebar(key) {
         wrap.className = 'related-table';
         for (const k of ins) {
             const a = document.createElement('a');
+            a.href = '#';
             a.textContent = (state.nodes.get(k) && state.nodes.get(k).displayName) || k;
-            a.onclick = () => selectNode(k);
+            a.onclick = (ev) => { ev.preventDefault(); selectNode(k); };
             wrap.appendChild(a);
         }
         c.appendChild(wrap);
@@ -1323,8 +1389,9 @@ function showSidebar(key) {
         wrap.className = 'related-table';
         for (const k of outs) {
             const a = document.createElement('a');
+            a.href = '#';
             a.textContent = (state.nodes.get(k) && state.nodes.get(k).displayName) || k;
-            a.onclick = () => selectNode(k);
+            a.onclick = (ev) => { ev.preventDefault(); selectNode(k); };
             wrap.appendChild(a);
         }
         c.appendChild(wrap);

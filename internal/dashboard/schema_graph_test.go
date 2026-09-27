@@ -98,7 +98,12 @@ func schemaGraphFixture() map[string]interface{} {
 		col("lake", "raw_s3", "id", "UInt64", 0, 0), col("lake", "raw_s3", "payload", "String", 0, 1),
 	}
 	dicts := []map[string]interface{}{
-		{"database": "shop", "name": "dict_users", "source": "ClickHouse: shop.users_src"},
+		{"database": "shop", "name": "dict_users", "source": "ClickHouse: shop.users_src", "status": "LOADED", "last_exception": ""},
+		// FAILED dictionaries are the ones to look at first; the live page dropped them.
+		{"database": "shop", "name": "dict_geo", "source": "MySQL: geo.regions", "status": "FAILED",
+			"last_exception": "Code: 1000. DB::Exception: mysqlxx::ConnectionFailed: Can't connect to MySQL server on 'geo-db:3306' (password = 'geo\\'pw')"},
+		// Declared in server config (XML): database is '' and there is no system.tables row.
+		{"database": "", "name": "country_codes", "source": "File: /etc/clickhouse-server/dictionaries/countries.csv", "status": "LOADED", "last_exception": ""},
 	}
 	refreshes := []map[string]interface{}{
 		{"database": "shop", "view": "rmv_daily", "status": "Scheduled",
@@ -155,6 +160,7 @@ func TestSchemaGraphTemplate_IsOfflineSelfContainedAndAttributed(t *testing.T) {
 func TestBuildSchemaGraphHTML_EmbedsFixtureAndCannotBreakOutOfTheScript(t *testing.T) {
 	fx := schemaGraphFixture()
 	redactSchemaRecords(fx["tables"].([]map[string]interface{}), "create_table_query", "engine_full")
+	redactSchemaRecords(fx["dictionaries"].([]map[string]interface{}), "source", "last_exception")
 	html := buildSchemaGraphHTML(fx)
 
 	start := strings.Index(html, "const DATA = ") + len("const DATA = ")
@@ -171,8 +177,9 @@ func TestBuildSchemaGraphHTML_EmbedsFixtureAndCannotBreakOutOfTheScript(t *testi
 			t.Errorf("page missing %q", want)
 		}
 	}
-	// The S3 secret was redacted before embedding; the key id too.
-	for _, gone := range []string{"wJalrXUtnFEMI", "AKIAIOSFODNN7EXAMPLE"} {
+	// The S3 secret was redacted before embedding; the key id too; and the
+	// password quoted inside a dictionary's last_exception.
+	for _, gone := range []string{"wJalrXUtnFEMI", "AKIAIOSFODNN7EXAMPLE", "geo\\'pw", "geo'pw"} {
 		if strings.Contains(html, gone) {
 			t.Errorf("credential %q reached the page", gone)
 		}
@@ -214,7 +221,7 @@ func TestRedactSchemaRecords(t *testing.T) {
 
 func TestSchemaGraphSummary(t *testing.T) {
 	got := schemaGraphSummary(schemaGraphFixture())
-	want := map[string]interface{}{"file": "schema_graph.html", "tables": 11, "columns": 26, "databases": 2, "mvs": 3, "refreshable": 1, "dictionaries": 1}
+	want := map[string]interface{}{"file": "schema_graph.html", "tables": 11, "columns": 26, "databases": 2, "mvs": 3, "refreshable": 1, "dictionaries": 3}
 	for k, v := range want {
 		if got[k] != v {
 			t.Errorf("%s = %v, want %v", k, got[k], v)
@@ -248,6 +255,7 @@ func TestDashboardTemplate_SchemaTabLoadsOnDemand(t *testing.T) {
 func TestBuildSchemaGraphHTML_Preview(t *testing.T) {
 	fx := schemaGraphFixture()
 	redactSchemaRecords(fx["tables"].([]map[string]interface{}), "create_table_query", "engine_full")
+	redactSchemaRecords(fx["dictionaries"].([]map[string]interface{}), "source", "last_exception")
 	html := buildSchemaGraphHTML(fx)
 	if dir := os.Getenv("DASHBOARD_PREVIEW_DIR"); dir != "" {
 		dst := filepath.Join(dir, "schema_graph_preview.html")
@@ -255,5 +263,56 @@ func TestBuildSchemaGraphHTML_Preview(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Logf("preview written: %s", dst)
+	}
+}
+
+// Review findings on the payload queries and the dashboard's own panel.
+func TestSchemaGraphQueries_ReviewFindings(t *testing.T) {
+	// FAILED / FAILED_AND_RELOADING dictionaries must not be filtered out.
+	if strings.Contains(schemaDictionariesSQL, "WHERE status") {
+		t.Error("schema dictionaries query filters by status — failed dictionaries are the nodes to inspect")
+	}
+	for _, want := range []string{"status", "last_exception"} {
+		if !strings.Contains(schemaDictionariesSQL, want) {
+			t.Errorf("schema dictionaries query lost %q", want)
+		}
+	}
+	// view_refreshes goes through the mode-aware reference and folds replicas.
+	cloud := schemaRefreshesSQL(NewGenerator(nil, "cloud").sysTable("view_refreshes"))
+	if !strings.Contains(cloud, "clusterAllReplicas(default, system.view_refreshes)") {
+		t.Errorf("cloud refreshes query reads the local table only:\n%s", cloud)
+	}
+	for _, want := range []string{"GROUP BY database, view", "RunningOnAnotherReplica", "argMax(exception"} {
+		if !strings.Contains(cloud, want) {
+			t.Errorf("refreshes query lost %q", want)
+		}
+	}
+	if onprem := schemaRefreshesSQL(NewGenerator(nil, "onprem").sysTable("view_refreshes")); !strings.Contains(onprem, "FROM system.view_refreshes") {
+		t.Errorf("onprem refreshes query: %s", onprem)
+	}
+
+	// The dashboard's Dictionaries panel embeds source / last_exception too.
+	rows := []map[string]interface{}{
+		{"name": "d", "source": "MySQL('h:3306', 'db', 'tbl', 'u', 'pw')", "last_exception": "cannot connect: password = 'pw2'"},
+	}
+	if n := redactDictionaryPanel(rows); n != 2 {
+		t.Errorf("panel redaction count = %d, want 2", n)
+	}
+	if strings.Contains(rows[0]["source"].(string), "'pw'") || strings.Contains(rows[0]["last_exception"].(string), "pw2") {
+		t.Errorf("panel rows still carry credentials: %v", rows[0])
+	}
+}
+
+// Review finding: nodes were clickable <div>s with no keyboard path.
+func TestSchemaGraphTemplate_KeyboardAccessible(t *testing.T) {
+	for _, want := range []string{
+		"el.tabIndex = 0;", "el.setAttribute('role', 'button');", "el.setAttribute('aria-label'",
+		"e.key === 'Enter' || e.key === ' '", ".node:focus-visible", "a.href = '#';",
+		// config-declared dictionaries get a node; failed ones show status and error
+		"'(config)'", "Dictionary status", "Dictionary error",
+	} {
+		if !strings.Contains(schemaGraphTail, want) {
+			t.Errorf("schema graph page lost %q", want)
+		}
 	}
 }

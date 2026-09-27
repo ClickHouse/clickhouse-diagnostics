@@ -126,25 +126,11 @@ func redactHeuristicsWith(s, quotedToken, token string) (string, int) {
 				return m
 			})
 		case "keyword_value_eq", "keyword_value_quoted":
-			// Keep the keyword + connector so the comment stays
-			// readable; redact only the value run (group 3).
-			s = p.re.ReplaceAllStringFunc(s, func(m string) string {
-				sub := p.re.FindStringSubmatch(m)
-				if len(sub) == 4 {
-					v := sub[3]
-					// Already redacted (a second pass, or a >= 23.x server that
-					// masked it first): leave it and do not count it.
-					if v == quotedToken || v == token {
-						return m
-					}
-					count++
-					if len(v) >= 2 && (v[0] == '\'' || v[0] == '"') {
-						return sub[1] + sub[2] + quotedToken
-					}
-					return sub[1] + sub[2] + token
-				}
-				return m
-			})
+			// Keep the keyword + connector so the text stays readable;
+			// redact only the value (group 3).
+			var n int
+			s, n = replaceKeywordValues(s, p.re, quotedToken, token)
+			count += n
 		default:
 			s = p.re.ReplaceAllStringFunc(s, func(m string) string {
 				count++
@@ -200,4 +186,66 @@ func isSensitiveName(name string) bool {
 		}
 	}
 	return false
+}
+
+// replaceKeywordValues applies one keyword = value rule. The regex locates the
+// keyword, the connector and the START of the value; for a quoted value the
+// END is found by scanning the literal with SQL escaping rules — \' and ”
+// inside '…', \" inside "…" — not by the regex's [^'"]+, which stops at the
+// first escaped quote. Without this, password = 'pa\'ss' redacted to
+// '[HIDDEN]'ss' and left the tail of the password on disk.
+func replaceKeywordValues(s string, re *regexp.Regexp, quotedToken, token string) (string, int) {
+	var b strings.Builder
+	count := 0
+	pos := 0
+	for pos < len(s) {
+		loc := re.FindStringSubmatchIndex(s[pos:])
+		if loc == nil || len(loc) < 8 {
+			break
+		}
+		vStart, vEnd := pos+loc[6], pos+loc[7] // group 3: the value
+		b.WriteString(s[pos:vStart])
+		v := s[vStart:vEnd]
+		// Already redacted (a second pass, or a >= 23.x server that masked
+		// it first): leave it and do not count it.
+		if v == quotedToken || v == token {
+			b.WriteString(v)
+			pos = vEnd
+			continue
+		}
+		count++
+		if q := s[vStart]; q == '\'' || q == '"' {
+			end := quotedLiteralEnd(s, vStart)
+			if end < 0 {
+				end = vEnd // unterminated literal: fall back to the regex span
+			}
+			b.WriteString(quotedToken)
+			pos = end
+			continue
+		}
+		b.WriteString(token)
+		pos = vEnd
+	}
+	b.WriteString(s[pos:])
+	return b.String(), count
+}
+
+// quotedLiteralEnd returns the index just past the closing quote of the
+// literal opening at start, honouring backslash escapes and a doubled quote,
+// or -1 when the literal never closes.
+func quotedLiteralEnd(s string, start int) int {
+	q := s[start]
+	for j := start + 1; j < len(s); j++ {
+		switch s[j] {
+		case '\\':
+			j++
+		case q:
+			if j+1 < len(s) && s[j+1] == q {
+				j++
+				continue
+			}
+			return j + 1
+		}
+	}
+	return -1
 }
