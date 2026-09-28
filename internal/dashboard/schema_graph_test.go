@@ -60,7 +60,7 @@ func schemaGraphFixture() map[string]interface{} {
 			"user_id", "user_id", "", 1000, 24000, [2]string{"", ""}, nil, nil),
 		tbl("shop", "v_recent", "View", "View",
 			"CREATE VIEW shop.v_recent (`ts` DateTime, `user_id` UInt64, `kind` LowCardinality(String), `amount` Float64) AS SELECT * FROM shop.events WHERE ts > (now() - toIntervalDay(1))",
-			"", "", "", 0, 0, [2]string{"", ""}, nil, [][2]string{{"shop", "events"}}),
+			"", "", "", 0, 0, [2]string{"", ""}, nil, nil), // a View: the server lists no dependency
 		tbl("shop", "users_src", "MergeTree", "MergeTree ORDER BY user_id SETTINGS index_granularity = 8192",
 			"CREATE TABLE shop.users_src (`user_id` UInt64, `name` String) ENGINE = MergeTree ORDER BY user_id SETTINGS index_granularity = 8192",
 			"user_id", "user_id", "", 1000, 30000, [2]string{"", ""}, [][2]string{{"shop", "dict_users"}}, nil),
@@ -69,10 +69,10 @@ func schemaGraphFixture() map[string]interface{} {
 			"", "", "", 1000, 65536, [2]string{"", ""}, nil, [][2]string{{"shop", "users_src"}}),
 		tbl("shop", "events_dist", "Distributed", "Distributed('default', 'shop', 'events', rand())",
 			"CREATE TABLE shop.events_dist (`ts` DateTime, `user_id` UInt64, `kind` LowCardinality(String), `amount` Float64) ENGINE = Distributed('default', 'shop', 'events', rand())",
-			"", "", "", 0, 0, [2]string{"", ""}, nil, [][2]string{{"shop", "events"}}),
+			"", "", "", 0, 0, [2]string{"", ""}, nil, nil), // Distributed: the local table is only an engine argument
 		tbl("shop", "rmv_daily", "MaterializedView", "MaterializedView",
 			"CREATE MATERIALIZED VIEW shop.rmv_daily\nREFRESH EVERY 1 HOUR OFFSET 5 MINUTE RANDOMIZE FOR 1 MINUTE\n(\n    `day` Date,\n    `c` UInt64\n)\nENGINE = MergeTree\nORDER BY day\nAS SELECT\n    toDate(ts) AS day,\n    count() AS c\nFROM shop.events\nGROUP BY day",
-			"", "", "", 0, 0, [2]string{"shop", ".inner_id.ab32b20f-6d2f-4554-80fc-3e501e082a40"}, nil, [][2]string{{"shop", "events"}}),
+			"", "", "", 0, 0, [2]string{"shop", ".inner_id.ab32b20f-6d2f-4554-80fc-3e501e082a40"}, nil, nil), // refreshable: not a dependent of its source
 		// A 22.x-style DDL with credentials in the engine arguments, plus a
 		// "</script>" in the comment to prove the embedding cannot be broken.
 		tbl("lake", "raw_s3", "S3", "S3('https://bucket.s3.amazonaws.com/raw/*.parquet', 'AKIAIOSFODNN7EXAMPLE', 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY', 'Parquet')",
@@ -403,4 +403,27 @@ func readSchemaGraphSource(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return string(b)
+}
+
+// Reviewer follow-up on #34: a refreshable MV, a plain view and a Distributed
+// table have empty dependency arrays on the server, so they floated free. The
+// page now infers their source edges from the DDL and draws them dashed.
+func TestSchemaGraph_InferredEdgesFromDDL(t *testing.T) {
+	for _, want := range []string{
+		"function parseSourceTables(ddl, defaultDb)", "function parseDistributedSource(engineFull, defaultDb)",
+		"addEdge(src, node.key, 'mv', true);", "addEdge(src, node.key, 'distributed', true);",
+		"inferred: !!isInferred", ".arrow.inferred{stroke-dasharray:6 4}", "inferred from DDL</span>",
+		"'· inferred from the DDL'",
+	} {
+		if !strings.Contains(schemaGraphTail, want) {
+			t.Errorf("schema graph page lost %q", want)
+		}
+	}
+	// Metadata edges must be added before inferred ones so a real dependency is
+	// never demoted to dashed: the second pass comes after the first loop.
+	first := strings.Index(schemaGraphTail, "for (const node of nodes.values()) {\n        /// MV/RMV: SELECT FROM dependsOn")
+	second := strings.Index(schemaGraphTail, "/// Second pass, after every metadata edge is in")
+	if first < 0 || second < 0 || second < first {
+		t.Error("inferred edges must be added after the metadata pass")
+	}
 }
