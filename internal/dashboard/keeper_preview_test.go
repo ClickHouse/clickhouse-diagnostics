@@ -84,7 +84,33 @@ func keeperIncidentFixture() map[string]interface{} {
 			"pct_of_usual": x.tx * 100 / 28010220,
 		})
 	}
+	// A real ClickHouse exception, anonymised: the frames are public source
+	// paths, the table and replica are invented. This is what made the alert
+	// panel unreadable before the messages collapsed — 1764 characters over
+	// 15 lines per row, of which the first 216 are the error.
+	trace := "Code: 999. Coordination::Exception: Session expired. (KEEPER_EXCEPTION) (version 26.2.1.390 (official build)), " +
+		"Stack trace (when copying this message, always include the lines below):\n\n" +
+		"0. ./ci/tmp/build/./src/Common/Exception.cpp:141:1: DB::Exception::Exception(DB::Exception::MessageMasked&&, int, bool) @ 0x000000001373469f\n" +
+		"1. ./src/Common/ZooKeeper/ZooKeeperImpl.cpp:1071: Coordination::ZooKeeper::pushRequest(Coordination::ZooKeeper::RequestInfo&&) @ 0x000000001a2b3c4d\n" +
+		"2. ./src/Common/ZooKeeper/ZooKeeper.cpp:412: zkutil::ZooKeeper::multiImpl(...) @ 0x000000001a2b9f10\n" +
+		"3. ./src/Storages/MergeTree/ReplicatedMergeTreeQueue.cpp:1188: DB::ReplicatedMergeTreeQueue::processEntry(...) @ 0x000000001c0d4a22\n" +
+		"4. ./src/Storages/StorageReplicatedMergeTree.cpp:3702: DB::StorageReplicatedMergeTree::processQueueEntry(...) @ 0x000000001bf51188\n" +
+		"5. ./src/Storages/MergeTree/MergeTreeBackgroundExecutor.cpp:288: DB::MergeTreeBackgroundExecutor<...>::threadFunction() @ 0x000000001c113d90\n" +
+		"6. ./base/poco/Foundation/src/ThreadPool.cpp:205:14: Poco::PooledThread::run() @ 0x000000002334b505\n" +
+		"7. ./base/poco/Foundation/src/Thread_POSIX.cpp:335:5: Poco::ThreadImpl::runnableEntry(void*) @ 0x0000000023348f01\n"
+	queueRows := []map[string]interface{}{}
+	for i, tbl := range []string{"events_local", "device_log", "sensor_raw", "job_history", "audit_trail", "shift_report", "line_state"} {
+		queueRows = append(queueRows, map[string]interface{}{
+			"database": "demo_app", "table": tbl, "replica_name": "r-0" + string(rune('1'+i)),
+			"type": "GET_PART", "create_time": "2026-09-10 15:0" + string(rune('1'+i)) + ":22",
+			"num_tries": 40 + i*17, "last_exception": trace,
+		})
+	}
+
 	alerts := []alert.Result{
+		{Name: "replication_queue_errors", Title: "Replication queue entries have exceptions", Severity: "critical", File: "replication_queue_errors.yaml", FiredAt: "2026-09-10T22:58:57Z",
+			Message: "{database}.{table} (replica {replica_name}): {type} failed after {num_tries} tries — {last_exception}",
+			Rows:    queueRows},
 		{Name: "keeper_health", Title: "Keeper unavailable: session loss storm while Keeper traffic collapsed", Severity: "critical", File: "keeper_health.yaml", FiredAt: "2026-09-10T22:58:57Z",
 			Message: "hour starting {hour}: {hw_exceptions} Keeper hardware exceptions, {transactions} Keeper transactions = {pct_of_usual}% of usual ({usual_transactions}/h median) — Keeper effectively unavailable to this server",
 			Rows:    keeperHealthRows},

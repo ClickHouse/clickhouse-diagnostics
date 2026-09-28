@@ -896,7 +896,7 @@ When `-skip-dashboard` is not set, the tool generates a single self-contained `d
 
 | # | Section | What it shows |
 |---|---|---|
-| 1 | 🚨 **Alert Summary** | Fired alerts grouped by severity (critical / warning / info), with the row-level message template expanded per instance. Rules that **could not run** appear with a ⚠ marker and a separate "Could not run" chip — they are never counted in the severity badge. Rules that are **not applicable** here are listed in a muted footnote. A green "no issues" banner appears when nothing fired. |
+| 1 | 🚨 **Alert Summary** | Fired alerts grouped by severity (critical / warning / info), with the row-level message template expanded per instance. Long content collapses: a message is shown up to the ClickHouse stack trace (a real one runs 1700+ characters over 15 lines, of which ~200 are the error) and capped at 260 characters, with the complete text one click away under *full message and stack trace*; only the first 5 instances are listed, the rest behind *N more instances*; and a rule description shows its first paragraph, the rest under *more about this rule*. Nothing is dropped from the page — `DATA.alerts` still carries every row in full. Rules that **could not run** appear with a ⚠ marker and a separate "Could not run" chip — they are never counted in the severity badge. Rules that are **not applicable** here are listed in a muted footnote. A green "no issues" banner appears when nothing fired. |
 | 2 | 📈 **Overview** | Top-level counters: server version, uptime, total databases, total tables, active parts, total size |
 | 3 | 📦 **Storage** | Size by database (horizontal bar), table-engine distribution (doughnut), and a top-20-by-size table list |
 | 4 | 📋 **Tables Explorer** | Searchable / paginated table of every user table with engine, parts, rows, size, partition / sorting keys, and storage policy |
@@ -921,11 +921,11 @@ A sticky top nav at the page header lets you jump straight to any section. Secti
 
 ### Previewing the Keeper Health panel without an outage
 
-`make dashboard-preview` renders `bin/keeper_incident_preview.html` from an anonymised fixture shaped like a real Keeper outage on a shared-storage cluster: 48 hours of Keeper counters (a blip on day one, quorum lost for eight hours on day two), the `keeper_health`, `keeper_connection_blips`, `merges_stalled`, `background_operation_failures`, `high_exception_rate` and `too_many_parts` alerts as they would fire, the error codes per hour and a re-established Keeper session. Use it to see what the panel and the alerts look like before an incident, or to review a theme or wording change.
+`make dashboard-preview` renders two pages from anonymised fixtures. `bin/alerts_preview.html` exercises every Alert Summary collapse case — a message carrying a stack trace, more instances than the inline cap, a short message that needs no disclosure, a rule whose query failed, a rule that was not applicable. `bin/keeper_incident_preview.html` is shaped like a real Keeper outage on a shared-storage cluster: 48 hours of Keeper counters (a blip on day one, quorum lost for eight hours on day two), the `keeper_health`, `keeper_connection_blips`, `merges_stalled`, `background_operation_failures`, `high_exception_rate` and `too_many_parts` alerts as they would fire, the error codes per hour and a re-established Keeper session. Use it to see what the panel and the alerts look like before an incident, or to review a theme or wording change.
 
 ### What's interactive vs static
 
-- **Interactive**: Tables Explorer (full text search, database/engine filters, pagination); all charts (hover tooltips, legend toggling).
+- **Interactive**: Tables Explorer (full text search, database/engine filters, pagination); all charts (hover tooltips, legend toggling); the Alert Summary disclosures (native `<details>`, so they work without JavaScript and survive `Ctrl-F` only when open).
 - **Static**: every other table — they render in a fixed order, but their underlying JSON is embedded in the page so you can `grep DATA dashboard.html | head` if you want raw values.
 
 ## Configuration Collection
