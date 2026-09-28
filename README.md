@@ -148,10 +148,10 @@ GRANT CREATE TEMPORARY TABLE ON *.* TO sys_read_only;
 So the full set for cloud is:
 
 ```
-┌─GRANTS FOR sys_read_only──────────────────────────────────────────────────────────────────┐
-│ GRANT SHOW DATABASES, SHOW TABLES, CREATE TEMPORARY TABLE, REMOTE ON *.* TO sys_read_only │
-│ GRANT SELECT ON system.* TO sys_read_only                                                 │
-└───────────────────────────────────────────────────────────────────────────────────────────┘
+┌─GRANTS FOR sys_read_only────────────────────────────────────────────────────────────────────────────────┐
+│ GRANT SHOW DATABASES, SHOW TABLES, SHOW COLUMNS, CREATE TEMPORARY TABLE, REMOTE ON *.* TO sys_read_only │
+│ GRANT SELECT ON system.* TO sys_read_only                                                               │
+└─────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 Unlike the `SHOW` grant, these fail loudly rather than truncating:

@@ -276,24 +276,40 @@ func main() {
 	// describes no user data at all. Five nodes of one cluster were collected
 	// that way and sent on before anyone noticed. Say it at the point where it
 	// can still be fixed, not in the execution log.
-	dbCount, dbErr := client.ExecuteQuery(
-		"SELECT count() FROM system.databases WHERE name NOT IN ('system','INFORMATION_SCHEMA','information_schema')",
-	)
-	// Two shapes of the same problem: with SELECT on system but no SHOW, the
-	// count comes back 0; with no grants at all the count itself is refused.
-	// Either way the archive will not describe the server.
-	if dbErr != nil || strings.TrimSpace(dbCount) == "0" {
-		if dbErr != nil {
-			fmt.Printf("Warning: user '%s' cannot read system.databases (%v), so most collectors "+
-				"will fail with Code: 497 and the bundle will be nearly empty.\n", username, dbErr)
-		} else {
+	//
+	// Not in dry-run: no query is really sent there (the client returns a
+	// synthetic empty response), so there is nothing to conclude from it.
+	if !client.IsDryRun() {
+		dbCount, dbErr := client.ExecuteQuery(
+			"SELECT count() FROM system.databases WHERE name NOT IN ('system','INFORMATION_SCHEMA','information_schema')",
+		)
+		grants := func() {
+			fmt.Println("    Grant the diagnostic privileges and re-run:")
+			fmt.Println("    GRANT SHOW DATABASES, SHOW TABLES, SHOW COLUMNS ON *.* TO " + username + ";")
+			fmt.Println("    GRANT SELECT ON system.* TO " + username + ";")
+		}
+		// Three outcomes, only two of which are about privileges. A refused
+		// query is a grants problem only when the server says so (Code: 497,
+		// ACCESS_DENIED); a timeout, a network error or an old server's parse
+		// error is not, and telling the operator to GRANT for those would send
+		// them the wrong way.
+		switch databaseVisibilityVerdict(dbCount, dbErr) {
+		case visibilityDenied:
+			fmt.Printf("Warning: user '%s' is not allowed to read system.databases (%v), so most "+
+				"collectors will fail with Code: 497 and the bundle will be nearly empty.\n", username, dbErr)
+			grants()
+		case visibilityNone:
 			fmt.Printf("Warning: user '%s' can see no databases outside system, so this bundle will "+
 				"not describe any of your tables, parts or replicas — the files will be empty rather "+
 				"than missing.\n", username)
+			grants()
+		case visibilityUnknown:
+			fmt.Printf("Warning: could not check which databases user '%s' can see (%v). Collection "+
+				"continues; if system.databases, system.tables and system.columns come back with 0 rows, "+
+				"the diagnostic grants are the fix:\n", username, dbErr)
+			fmt.Println("    GRANT SHOW DATABASES, SHOW TABLES, SHOW COLUMNS ON *.* TO " + username + ";")
+			fmt.Println("    GRANT SELECT ON system.* TO " + username + ";")
 		}
-		fmt.Println("    Grant the diagnostic privileges and re-run:")
-		fmt.Println("    GRANT SHOW DATABASES, SHOW TABLES, SHOW COLUMNS ON *.* TO " + username + ";")
-		fmt.Println("    GRANT SELECT ON system.* TO " + username + ";")
 	}
 
 	// Execution log: every collector with its outcome and wall time, every
@@ -1131,4 +1147,41 @@ func dashboardDecision(skipDashboard bool, mode string) (generate bool, skipReas
 			"dashboard is part of the support-bound archive."
 	}
 	return true, ""
+}
+
+// Outcomes of the pre-collection visibility probe (SELECT count() FROM
+// system.databases WHERE name NOT IN (system, …)).
+type visibilityVerdict int
+
+const (
+	visibilityOK      visibilityVerdict = iota // at least one user database is visible
+	visibilityNone                             // query ran, count is 0: SELECT on system.* without the SHOW grants
+	visibilityDenied                           // the server refused the query itself with Code: 497 / ACCESS_DENIED
+	visibilityUnknown                          // any other error: network, timeout, a server that could not parse it
+)
+
+// databaseVisibilityVerdict classifies the probe. Only an explicit access
+// denial is a grants problem; every other error means the check could not be
+// made, which is a different message with different advice.
+func databaseVisibilityVerdict(count string, err error) visibilityVerdict {
+	if err != nil {
+		if isAccessDenied(err) {
+			return visibilityDenied
+		}
+		return visibilityUnknown
+	}
+	if strings.TrimSpace(count) == "0" {
+		return visibilityNone
+	}
+	return visibilityOK
+}
+
+// isAccessDenied recognises ClickHouse's privilege error in the HTTP client's
+// error text: "Code: 497. DB::Exception: …: Not enough privileges. … (ACCESS_DENIED)".
+func isAccessDenied(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "Code: 497") || strings.Contains(msg, "ACCESS_DENIED")
 }
