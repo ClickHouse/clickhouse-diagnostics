@@ -92,3 +92,23 @@ func TestGovWithholdsConfig(t *testing.T) {
 		}
 	}
 }
+
+// TestCloudSkipsConfig: cloud runs the tool off the server, so without an
+// explicit -config-dir there is nothing to read and the interactive prompt
+// must not ask for one. An explicit directory opts back in; other modes
+// are untouched.
+func TestCloudSkipsConfig(t *testing.T) {
+	for _, mode := range []string{"cloud", "CLOUD", " Cloud "} {
+		if !cloudSkipsConfig(mode, "") {
+			t.Errorf("cloudSkipsConfig(%q, \"\") = false; cloud has no local config dir by default", mode)
+		}
+		if cloudSkipsConfig(mode, "/etc/clickhouse-server/config.d/") {
+			t.Errorf("cloudSkipsConfig(%q, explicit dir) = true; an explicit -config-dir must be honoured", mode)
+		}
+	}
+	for _, mode := range []string{"onprem", "gov", "ONPREM", ""} {
+		if cloudSkipsConfig(mode, "") {
+			t.Errorf("cloudSkipsConfig(%q, \"\") = true; only cloud skips by default", mode)
+		}
+	}
+}
