@@ -2944,10 +2944,23 @@ document.addEventListener('DOMContentLoaded',function(){
   // no writes, the browser already caps scroll events at the frame rate, and
   // rAF would make the highlight depend on a repaint — which never happens
   // under a headless --virtual-time-budget, so the behaviour could not be
-  // tested. Reading live also keeps it correct when a disclosure expands and
-  // shifts every section below it; a cached offset table would not.
+  // tested. Reading live keeps the MATH right when a disclosure expands and
+  // shifts every section below it (a cached offset table would not) — but
+  // the pass still has to be triggered, and opening a <details> is neither
+  // a scroll nor a resize. Left alone, the highlight named the pre-expansion
+  // section until the reader scrolled. So the page's own height is observed:
+  // any content change that moves a section — a disclosure, a table filter,
+  // a panel un-hiding after its data renders — re-runs the pass.
   window.addEventListener('scroll',syncNav,{passive:true});
   window.addEventListener('resize',syncNav,{passive:true});
+  const mainEl=document.querySelector('main');
+  if(window.ResizeObserver && mainEl){
+    new ResizeObserver(syncNav).observe(mainEl);
+  }
+  // toggle does not bubble, but a capturing listener at the document still
+  // sees it — the explicit hook for the disclosure case, and the fallback
+  // where ResizeObserver is missing.
+  document.addEventListener('toggle',syncNav,true);
   // Once now for the initial highlight, once after load — optional panels
   // un-hide as their data renders, which changes which sections exist.
   syncNav();

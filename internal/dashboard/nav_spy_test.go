@@ -24,7 +24,11 @@ func TestTemplate_NavScrollSpy(t *testing.T) {
 		`window.addEventListener('scroll',syncNav,{passive:true});`,
 		`window.addEventListener('resize',syncNav,{passive:true});`,
 		`window.addEventListener('load',syncNav);`, // panels un-hide after render
-		`a.setAttribute('aria-current','true')`,    // state, not just colour
+		// Opening a <details> moves every section below it without a scroll or
+		// a resize; the pass must be re-triggered by the content height itself.
+		`new ResizeObserver(syncNav).observe(mainEl);`,
+		`document.addEventListener('toggle',syncNav,true);`,
+		`a.setAttribute('aria-current','true')`, // state, not just colour
 	} {
 		if !strings.Contains(htmlTemplate, want) {
 			t.Errorf("nav scroll spy lost %q", want)
