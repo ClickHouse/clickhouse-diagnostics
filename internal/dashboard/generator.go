@@ -1560,8 +1560,11 @@ body{font-family:var(--click-font-regular);background:var(--surface-page);color:
    hardcodes this height either. */
 .topbar{position:sticky;top:0;z-index:100}
 header{background:var(--header-bg);color:var(--header-ink);padding:var(--click-space-3) var(--click-space-6);display:flex;align-items:center;gap:var(--click-space-3)}
+/* Brand block: the product name on the first line, the page title as a
+   smaller second line beneath it, so the header reads as one lockup. */
+header .brand{display:flex;flex-direction:column;line-height:1.15}
 header .logo{font-size:var(--click-font-size-5);font-weight:var(--click-font-weight-4);color:var(--header-logo);letter-spacing:-.5px}
-header h1{font-size:var(--click-font-size-4);font-weight:var(--click-font-weight-3);line-height:1.3}
+header h1{font-size:var(--click-font-size-1);font-weight:var(--click-font-weight-2);opacity:.8;letter-spacing:.2px}
 header .meta{margin-left:auto;text-align:right;font-size:var(--click-font-size-1);opacity:.75;line-height:var(--click-line-height-2)}
 #theme-toggle{margin-left:var(--click-space-4);background:transparent;color:var(--header-ink);border:var(--click-border-width-1) solid rgba(255,255,255,.25);border-radius:var(--click-radii-full);padding:var(--click-space-1) var(--click-space-3);font:inherit;font-size:var(--click-font-size-1);cursor:pointer;white-space:nowrap;transition:background var(--click-transition-smooth)}
 #theme-toggle:hover{background:rgba(255,255,255,.12)}
@@ -1710,11 +1713,11 @@ footer{text-align:center;color:var(--ink-muted);font-size:var(--click-font-size-
     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg>
     <span id="nav-current"></span>
   </button>
-  <div class="logo">ClickHouse</div>
-  <div>
+  <div class="brand">
+    <div class="logo">ClickHouse</div>
     <h1>Diagnostic Dashboard</h1>
-    <div id="hdr-badge"></div>
   </div>
+  <div id="hdr-badge"></div>
   <div class="meta" id="hdr-meta"></div>
   <button id="theme-toggle" type="button" aria-label="Toggle colour theme"></button>
 </header>

@@ -72,7 +72,7 @@ func TestTemplate_Sidebar(t *testing.T) {
 		`<button id="nav-toggle" type="button" aria-label="Hide section sidebar" aria-controls="main-nav" aria-expanded="true">`,
 		`<nav id="main-nav" aria-label="Sections">`,
 		`<span id="nav-current"></span>`,
-		":root{--nav-w:240px}",
+		":root{--nav-w:", // the one width everything is offset by; its value is free to change
 		"nav{position:fixed;top:var(--topbar-h,74px);left:0;bottom:0;width:var(--nav-w);", // under the measured band
 		"html.nav-collapsed nav{transform:translateX(-100%);visibility:hidden}",
 		"html:not(.nav-collapsed) main{padding-left:calc(var(--nav-w) + var(--click-space-5));", // content pushed, not covered
