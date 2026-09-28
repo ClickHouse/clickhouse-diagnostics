@@ -136,6 +136,18 @@ func main() {
 		fmt.Println("Error: --to is earlier than --from")
 		return
 	}
+	// A -to left over from an earlier incident silently truncates every log
+	// table at that instant while system.errors, system.parts and the other
+	// point-in-time tables still describe now — so the bundle looks complete
+	// and the recent hours are simply absent. One real case ran -to 2026-09-16
+	// on the 24th and lost the two session losses that had happened since.
+	if !collectTo.IsZero() {
+		if lag := time.Since(collectTo); lag > 2*time.Hour {
+			fmt.Printf("Warning: -to is %.0f hours in the past, so query_log, part_log, metric_log and "+
+				"text_log all stop there. Anything after that is missing from the bundle rather than "+
+				"healthy — widen -to if the problem is still live.\n", lag.Hours())
+		}
+	}
 
 	outputFormat, err := query.ParseOutputFormat(*outputFormatFlag)
 	if err != nil {
@@ -257,6 +269,32 @@ func main() {
 
 	fmt.Printf("ClickHouse server version: %d.%d.%d.%d\n",
 		serverVersion.Major, serverVersion.Minor, serverVersion.Patch, serverVersion.Build)
+
+	// Without the object-listing grants a run still "succeeds": the protected
+	// system tables fail with 497 and system.databases/tables/columns are
+	// filtered down to nothing, so the archive is a few hundred KB that
+	// describes no user data at all. Five nodes of one cluster were collected
+	// that way and sent on before anyone noticed. Say it at the point where it
+	// can still be fixed, not in the execution log.
+	dbCount, dbErr := client.ExecuteQuery(
+		"SELECT count() FROM system.databases WHERE name NOT IN ('system','INFORMATION_SCHEMA','information_schema')",
+	)
+	// Two shapes of the same problem: with SELECT on system but no SHOW, the
+	// count comes back 0; with no grants at all the count itself is refused.
+	// Either way the archive will not describe the server.
+	if dbErr != nil || strings.TrimSpace(dbCount) == "0" {
+		if dbErr != nil {
+			fmt.Printf("Warning: user '%s' cannot read system.databases (%v), so most collectors "+
+				"will fail with Code: 497 and the bundle will be nearly empty.\n", username, dbErr)
+		} else {
+			fmt.Printf("Warning: user '%s' can see no databases outside system, so this bundle will "+
+				"not describe any of your tables, parts or replicas — the files will be empty rather "+
+				"than missing.\n", username)
+		}
+		fmt.Println("    Grant the diagnostic privileges and re-run:")
+		fmt.Println("    GRANT SHOW DATABASES, SHOW TABLES, SHOW COLUMNS ON *.* TO " + username + ";")
+		fmt.Println("    GRANT SELECT ON system.* TO " + username + ";")
+	}
 
 	// Execution log: every collector with its outcome and wall time, every
 	// alert rule, every phase — written into the bundle as execution_log.txt
