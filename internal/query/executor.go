@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"clickhouse-diagnostic/internal"
+	"clickhouse-diagnostic/internal/collection"
 	"clickhouse-diagnostic/internal/runlog"
 	"clickhouse-diagnostic/pkg"
 )
@@ -198,6 +199,14 @@ func (e *Executor) executeQuery(query internal.QueryFile, outputDir, timestamp s
 		return fmt.Errorf("error executing query: %w", err)
 	}
 
+	// Credentials embedded in DDL. system.tables.create_table_query / engine_full
+	// / as_select and system.dictionaries.source carry engine arguments verbatim
+	// on servers below 23.x (an S3 secret key, a MySQL password); newer servers
+	// mask them as '[HIDDEN]' themselves. The config sanitizer never saw these
+	// files — it is wired to the XML/YAML collector only — so this is where the
+	// result text is scrubbed before it touches disk.
+	result, redactedNote := redactResult(query.Name, e.outputFormat().Ext, result)
+
 	// Generate output filename
 	baseFileName := strings.TrimSuffix(query.Name, filepath.Ext(query.Name))
 	outputFileName := fmt.Sprintf("%s_%s%s", baseFileName, timestamp, e.outputFormat().Ext)
@@ -222,8 +231,12 @@ func (e *Executor) executeQuery(query internal.QueryFile, outputDir, timestamp s
 			rows = 0
 		}
 	}
+	extra := outputFileName
+	if redactedNote != "" {
+		extra += "; " + redactedNote
+	}
 	e.rec.Record(runlog.Entry{Stage: "collector", Name: query.Name, Source: query.DirName, Status: "ok",
-		Duration: elapsed, Bytes: int64(len(result)), Rows: rows, Extra: outputFileName})
+		Duration: elapsed, Bytes: int64(len(result)), Rows: rows, Extra: extra})
 
 	if !e.client.IsDryRun() {
 		fmt.Printf("Query '%s' executed successfully. Result saved to %s\n\n", query.Name, outputPath)
@@ -238,4 +251,29 @@ func (e *Executor) ValidateQuery(queryPath string) error {
 		return fmt.Errorf("cannot read query file: %w", err)
 	}
 	return ValidateQueryContent(string(content))
+}
+
+// redactResult scrubs credentials from the DDL-bearing columns of a collector's
+// result before it is written. Only the collectors named in
+// collection.SensitiveCollectorFields are touched, and only in the JSONL format,
+// where a field can be located and rewritten without disturbing any other byte.
+// Native and TSV are opaque to a field-level pass, so they are written as-is
+// with a note in the execution log — one more reason the default format is the
+// one to ship.
+func redactResult(queryName, ext, result string) (string, string) {
+	fields, ok := collection.SensitiveCollectorFields[queryName]
+	if !ok {
+		return result, ""
+	}
+	if ext != ".jsonl" {
+		fmt.Printf("  warning: %s carries DDL text and is written as %s, which cannot be redacted field by field; "+
+			"credentials in engine arguments may be present — use the default jsonl format for a shareable bundle\n",
+			queryName, strings.TrimPrefix(ext, "."))
+		return result, "NOT redacted (non-JSONL format)"
+	}
+	out, n := collection.RedactJSONLFields(result, fields)
+	if n == 0 {
+		return out, ""
+	}
+	return out, fmt.Sprintf("%d credential(s) replaced with [HIDDEN]", n)
 }
