@@ -44,6 +44,15 @@ Windows: `*_7_days` files cover the last 7 days (or `-from/-to`); `system.text_l
 **Traps:** absent below 23.12 (not a finding); in cloud one row per replica — the refresh runs on one, the others report `RunningOnAnotherReplica`; gov has `has_exception` instead of the text.
 **Pairs with:** `system.tables` (the view's DDL and its `REFRESH` clause), `schema_graph.html` (these views are the pink nodes), `text_log` around `last_refresh_time`.
 
+### system.data_skipping_indices
+**Why we run it:** a slow filter on a column that *has* a skip index is a different finding from one that has none; the DDL says which, but only by reading every `CREATE`.
+**Question:** which tables carry data-skipping indices, on which expressions, of which type and granularity?
+**Read first:** indices on the tables that appear in slow-query findings; `type` against the predicate shape (`minmax` for ranges, `bloom_filter`/`tokenbf_v1`/`ngrambf_v1` for equality and substring); `granularity`.
+**Healthy looks like:** a handful of indices on the hot tables, on the columns the WHERE clauses actually use.
+**Red flags:** an index on a column no query filters by (cost with no benefit); a `bloom_filter` on a high-cardinality column used only in range predicates; `query_analysis` showing `SelectedMarks` ≈ total marks on a table with a matching index (P-53 — the index exists and is not pruning).
+**Traps:** definitions only — no per-replica size columns, so this cannot say how big an index is; gov drops `expr`.
+**Pairs with:** `system.tables` (the `ORDER BY` that makes or breaks pruning), `query_analysis/profile_events_compare`, `schema_graph.html` (the ribbon shows the index count per node).
+
 ### system.columns
 **Why we run it:** types drive merge memory, compression and MV compatibility; the failing column named in an error message is looked up here.
 **Question:** which types are in use, and how wide are the tables?

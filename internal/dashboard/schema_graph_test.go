@@ -71,7 +71,7 @@ func schemaGraphFixture() map[string]interface{} {
 			"CREATE TABLE shop.events_dist (`ts` DateTime, `user_id` UInt64, `kind` LowCardinality(String), `amount` Float64) ENGINE = Distributed('default', 'shop', 'events', rand())",
 			"", "", "", 0, 0, [2]string{"", ""}, nil, [][2]string{{"shop", "events"}}),
 		tbl("shop", "rmv_daily", "MaterializedView", "MaterializedView",
-			"CREATE MATERIALIZED VIEW shop.rmv_daily REFRESH EVERY 1 HOUR (`day` Date, `c` UInt64) ENGINE = MergeTree ORDER BY day AS SELECT toDate(ts) AS day, count() AS c FROM shop.events GROUP BY day",
+			"CREATE MATERIALIZED VIEW shop.rmv_daily\nREFRESH EVERY 1 HOUR OFFSET 5 MINUTE RANDOMIZE FOR 1 MINUTE\n(\n    `day` Date,\n    `c` UInt64\n)\nENGINE = MergeTree\nORDER BY day\nAS SELECT\n    toDate(ts) AS day,\n    count() AS c\nFROM shop.events\nGROUP BY day",
 			"", "", "", 0, 0, [2]string{"shop", ".inner_id.ab32b20f-6d2f-4554-80fc-3e501e082a40"}, nil, [][2]string{{"shop", "events"}}),
 		// A 22.x-style DDL with credentials in the engine arguments, plus a
 		// "</script>" in the comment to prove the embedding cannot be broken.
@@ -80,11 +80,17 @@ func schemaGraphFixture() map[string]interface{} {
 			"", "", "", 0, 0, [2]string{"", ""}, nil, nil),
 	}
 	col := func(db, table, name, typ string, key, def int) map[string]interface{} {
-		return map[string]interface{}{"database": db, "table": table, "name": name, "type": typ, "is_key": key, "has_default": def}
+		return map[string]interface{}{"database": db, "table": table, "name": name, "type": typ,
+			"is_key": key, "pk": key, "sk": key, "pt": 0, "sm": 0, "has_default": def}
+	}
+	// A sorting-key column that is ALSO the partition key, and a sampling column.
+	colRoles := func(db, table, name, typ string, pk, sk, pt, sm int) map[string]interface{} {
+		return map[string]interface{}{"database": db, "table": table, "name": name, "type": typ,
+			"is_key": pk | sk, "pk": pk, "sk": sk, "pt": pt, "sm": sm, "has_default": 0}
 	}
 	columns := []map[string]interface{}{
-		col("shop", "events", "ts", "DateTime", 1, 0), col("shop", "events", "user_id", "UInt64", 0, 0),
-		col("shop", "events", "kind", "LowCardinality(String)", 1, 0), col("shop", "events", "amount", "Float64", 0, 0),
+		colRoles("shop", "events", "ts", "DateTime", 0, 1, 1, 0), colRoles("shop", "events", "user_id", "UInt64", 0, 0, 0, 1),
+		colRoles("shop", "events", "kind", "LowCardinality(String)", 1, 1, 0, 0), col("shop", "events", "amount", "Float64", 0, 0),
 		col("shop", "events_by_kind", "kind", "LowCardinality(String)", 1, 0), col("shop", "events_by_kind", "day", "Date", 1, 0),
 		col("shop", "events_by_kind", "cnt", "UInt64", 0, 0), col("shop", "events_by_kind", "total", "Float64", 0, 0),
 		col("shop", "mv_events_by_kind", "kind", "LowCardinality(String)", 0, 0), col("shop", "mv_events_by_kind", "day", "Date", 0, 0),
@@ -98,7 +104,7 @@ func schemaGraphFixture() map[string]interface{} {
 		col("lake", "raw_s3", "id", "UInt64", 0, 0), col("lake", "raw_s3", "payload", "String", 0, 1),
 	}
 	dicts := []map[string]interface{}{
-		{"database": "shop", "name": "dict_users", "source": "ClickHouse: shop.users_src", "status": "LOADED", "last_exception": ""},
+		{"database": "shop", "name": "dict_users", "source": "ClickHouse: shop.users_src", "status": "LOADED", "last_exception": "", "lifetime_min": "0", "lifetime_max": "60"},
 		// FAILED dictionaries are the ones to look at first; the live page dropped them.
 		{"database": "shop", "name": "dict_geo", "source": "MySQL: geo.regions", "status": "FAILED",
 			"last_exception": "Code: 1000. DB::Exception: mysqlxx::ConnectionFailed: Can't connect to MySQL server on 'geo-db:3306' (password = 'geo\\'pw')"},
@@ -109,10 +115,14 @@ func schemaGraphFixture() map[string]interface{} {
 		{"database": "shop", "view": "rmv_daily", "status": "Scheduled",
 			"last_success_time": "2026-09-25 14:00:03", "next_refresh_time": "2026-09-25 15:00:00", "exception": ""},
 	}
+	indices := []map[string]interface{}{
+		{"database": "shop", "table": "events", "name": "idx_kind", "type": "bloom_filter", "expr": "kind", "granularity": "4"},
+		{"database": "shop", "table": "events", "name": "idx_uid", "type": "minmax", "expr": "user_id", "granularity": "2"},
+	}
 	return map[string]interface{}{
 		"generated_at": "2026-09-25 14:30:00 UTC", "version": "26.7.5.10", "mode": "onprem",
-		"tables": tables, "columns": columns, "dictionaries": dicts, "refreshes": refreshes,
-		"has_target": true, "has_refresh": true,
+		"tables": tables, "columns": columns, "dictionaries": dicts, "refreshes": refreshes, "indices": indices,
+		"has_target": true, "has_refresh": true, "ddl_formatted": true,
 	}
 }
 
@@ -221,7 +231,7 @@ func TestRedactSchemaRecords(t *testing.T) {
 
 func TestSchemaGraphSummary(t *testing.T) {
 	got := schemaGraphSummary(schemaGraphFixture())
-	want := map[string]interface{}{"file": "schema_graph.html", "tables": 11, "columns": 26, "databases": 2, "mvs": 3, "refreshable": 1, "dictionaries": 3}
+	want := map[string]interface{}{"file": "schema_graph.html", "tables": 11, "columns": 26, "databases": 2, "mvs": 3, "refreshable": 1, "dictionaries": 3, "indices": 2}
 	for k, v := range want {
 		if got[k] != v {
 			t.Errorf("%s = %v, want %v", k, got[k], v)
@@ -338,4 +348,59 @@ func TestSchemaGraphHasContent(t *testing.T) {
 	if got["tables"] != 0 || got["dictionaries"] != 1 {
 		t.Errorf("summary = %v", got)
 	}
+}
+
+// Reviewer suggestions on #34: the RMV schedule and the dictionary LIFETIME on
+// the node ribbon, key roles differentiated (and skip indices shown), and a
+// pretty-printed, highlighted CREATE statement.
+func TestSchemaGraph_ReviewerSuggestions(t *testing.T) {
+	for _, want := range []string{
+		// 1. schedule parsed from the DDL (system.view_refreshes has no interval)
+		"function parseRefresh(ddl)", "RANDOMIZE", "no RANDOMIZE FOR — every copy of this schedule fires at the same instant", "'Refresh schedule'",
+		// 2. LIFETIME from the columns, DDL as the fallback for an unloaded dictionary
+		"function dictLifetime(n)", "'Dictionary lifetime'",
+		// 3. server-side pretty print + client-side highlight, spans only
+		"function highlightSQL(pre, text)", "syn-hidden", "highlightSQL(pre, n.createQuery);",
+		// 4. four independent key roles, a legend for them, tags in the sidebar, skip indices
+		"function colRoles(c)", "key-primary", "key-sorting", "key-partition", "key-sampling",
+		"class=\"legend-col column-name key-partition\"", "'Skip indices ('", "role-tag",
+	} {
+		if !strings.Contains(schemaGraphTail, want) {
+			t.Errorf("schema graph page lost %q", want)
+		}
+	}
+	// The highlighter must not take the innerHTML shortcut.
+	hl := schemaGraphTail[strings.Index(schemaGraphTail, "function highlightSQL"):]
+	hl = hl[:strings.Index(hl, "function engineKind")]
+	if strings.Contains(hl, "innerHTML") {
+		t.Error("highlightSQL assigns innerHTML — customer DDL must go through textContent")
+	}
+	// Payload side.
+	for _, want := range []string{"is_in_partition_key AS pt", "is_in_sampling_key  AS sm", "formatQueryOrNull(create_table_query)", "fn:formatQueryOrNull"} {
+		if !strings.Contains(readSchemaGraphSource(t), want) {
+			t.Errorf("collectSchemaGraph lost %q", want)
+		}
+	}
+	if !strings.Contains(schemaDictionariesSQL, "lifetime_min, lifetime_max") {
+		t.Error("dictionaries query lost the LIFETIME columns")
+	}
+	if !strings.Contains(schemaIndicesSQL, "system.data_skipping_indices") || !strings.Contains(schemaIndicesSQL, "granularity") {
+		t.Error("indices query lost its table or granularity")
+	}
+	// A page built from the fixture carries the schedule text, the indices and the lifetime.
+	fx := schemaGraphFixture()
+	html := buildSchemaGraphHTML(fx)
+	for _, want := range []string{"REFRESH EVERY 1 HOUR OFFSET 5 MINUTE RANDOMIZE FOR 1 MINUTE", `"idx_kind"`, `"bloom_filter"`, `"lifetime_max":"60"`, `"pt":1`, `"sm":1`} {
+		if !strings.Contains(html, want) {
+			t.Errorf("page missing %q", want)
+		}
+	}
+}
+
+func readSchemaGraphSource(t *testing.T) string {
+	b, err := os.ReadFile("schema_graph.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
 }
