@@ -407,6 +407,19 @@ The shipped artefact is a `tar.gz`, and JSON's repeated keys compress away almos
 
 `jsonl` is 20% larger on disk but produces the **smallest archive** of the three, so the readable default costs nothing in what you actually send.
 
+## Schema graph
+
+![The schema graph: one database section with its tables, materialized views, dictionary and Distributed table, edges following the data flow, columns listed per node with key columns in red](docs/images/schema-graph.png)
+
+Every run in `cloud` or `onprem` mode also writes **`schema_graph.html`** next to `dashboard.html`: an interactive map of how data flows through the schema, adapted from ClickHouse's own `/schema` page and rendered entirely from data captured at collection time — it works from disk with no server and no network.
+
+- **One node per table**, grouped by database and coloured by engine: MergeTree family, materialized view, refreshable MV, dictionary, Distributed, view. Each node lists its columns (key columns in red, defaulted columns in green) and, for tables that hold data, the row count and size.
+- **Edges follow the data.** A materialized view sits between the table it reads and the table it writes — including the implicit `.inner_id.*` table of an MV declared with an `ENGINE`; a dictionary points at its source table; a Distributed table at the shard table behind it. Chains are laid out left to right, deepest first, so the longest MV pipeline is what you see at the top.
+- **Click a node** for its keys, partitioning, full column list, the tables it reads from and writes to, refresh status for a refreshable MV, dictionary status and last error, and the `CREATE` statement — with credentials in engine arguments shown as `[HIDDEN]`.
+- **Search** matches table *and* column names and dims everything else; filter to one database; drag nodes, zoom, re-layout; keyboard users can Tab to a node and press Enter.
+
+Open it from the dashboard's **Schema Graph** tab — the page loads into the frame only when you click, so nobody pays for it otherwise — or open the file directly from the bundle folder. Why it is a separate file, how the two pages share a theme, and what the credential redaction covers is under [Dashboard → Schema graph](#schema-graph-1).
+
 ## Dry-run mode
 
 Security-conscious customers can pass `-dry-run` to see exactly which queries the tool would execute, against which tables, **without** any actual data collection:
@@ -934,6 +947,8 @@ A sticky top nav at the page header lets you jump straight to any section. Secti
 
 
 ### Schema graph
+
+What the page looks like and what each element means is in [Schema graph](#schema-graph) above; this section is the design record.
 
 `schema_graph.html` is written next to `dashboard.html` and is an adaptation of ClickHouse's own `/schema` page (`programs/server/schema.html`, Apache-2.0), with every live query replaced by JSON embedded at collection time: `system.tables`, `system.columns`, `system.dictionaries` and `system.view_refreshes`, system databases excluded. Nodes are coloured by engine (MergeTree, MV, refreshable MV, dictionary, Distributed, view); edges follow `dependencies_*` / `loading_dependencies_*` and — on 26.6+ — `target_table`, the only source that names the implicit `.inner_id.*` table of an MV declared with an `ENGINE`. Click a node for its keys, columns, neighbours and `CREATE` statement; search matches table and column names; drag, zoom and filter by database.
 
