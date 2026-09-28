@@ -316,3 +316,26 @@ func TestSchemaGraphTemplate_KeyboardAccessible(t *testing.T) {
 		}
 	}
 }
+
+// Review finding: the collector returned before reading system.dictionaries
+// when system.tables had no user rows, so a server whose only user objects
+// are config-declared dictionaries got no graph despite the page knowing
+// how to draw them.
+func TestSchemaGraphHasContent(t *testing.T) {
+	d := []map[string]interface{}{{"database": "", "name": "country_codes"}}
+	tb := []map[string]interface{}{{"database": "shop", "name": "events"}}
+	if !schemaGraphHasContent(nil, d) {
+		t.Error("dictionaries alone must produce a graph")
+	}
+	if !schemaGraphHasContent(tb, nil) {
+		t.Error("tables alone must produce a graph")
+	}
+	if schemaGraphHasContent(nil, nil) {
+		t.Error("nothing to draw must produce no page")
+	}
+	// The summary counts a dictionaries-only payload honestly.
+	got := schemaGraphSummary(map[string]interface{}{"tables": []map[string]interface{}{}, "dictionaries": d})
+	if got["tables"] != 0 || got["dictionaries"] != 1 {
+		t.Errorf("summary = %v", got)
+	}
+}

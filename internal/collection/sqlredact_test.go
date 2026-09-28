@@ -225,3 +225,23 @@ func TestRedactSQLText_QuotedValuesWithEscapedQuotes(t *testing.T) {
 		t.Errorf("config path: %q", got)
 	}
 }
+
+// Review finding: the JSONL map redacted the dashboard's and graph's
+// last_exception but not the persisted system.dictionaries file.
+func TestSensitiveCollectorFields_DictionariesCoverLastException(t *testing.T) {
+	fields := SensitiveCollectorFields["system.dictionaries.sql"]
+	for _, want := range []string{"source", "last_exception"} {
+		found := false
+		for _, f := range fields {
+			found = found || f == want
+		}
+		if !found {
+			t.Errorf("system.dictionaries.sql redaction lacks %q (fields: %v)", want, fields)
+		}
+	}
+	line := `{"name":"d","status":"FAILED","source":"","last_exception":"mysqlxx::ConnectionFailed: Can't connect (password = 'geo\\'pw')"}` + "\n"
+	out, n := RedactJSONLFields(line, fields)
+	if n == 0 || strings.Contains(out, "geo") {
+		t.Errorf("last_exception not redacted (n=%d): %s", n, out)
+	}
+}

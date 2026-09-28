@@ -87,7 +87,11 @@ func s3Rule(args []string) []int {
 	if looksLikeFormat(args[1]) {
 		return nil
 	}
-	out := []int{3}
+	// Both halves of the pair: the key id (2) as well as the secret (3). The
+	// AWS-shape heuristic catches AKIA…/ASIA… ids, but an S3-compatible service
+	// (MinIO, GCS HMAC "GOOG1…", R2, OSS "LTAI…") issues ids of any shape, and
+	// the id is the credential's identifier, not a public value.
+	out := []int{2, 3}
 	if len(args) >= 4 && !looksLikeFormat(args[3]) && !looksLikeCompression(args[3]) {
 		out = append(out, 4) // session token
 	}
@@ -327,9 +331,12 @@ func maskLiteral(arg string) (string, bool) {
 // SensitiveCollectorFields names, per collector file, the JSONL columns whose
 // values are DDL or engine text and therefore pass through RedactSQLText before
 // the result is written. Keyed by the query file name as the executor sees it.
+// last_exception is here because a failed dictionary's error quotes the
+// connection it could not make — "mysqlxx::ConnectionFailed … password = …" —
+// and the same field is already scrubbed in the dashboard panel and the graph.
 var SensitiveCollectorFields = map[string][]string{
 	"system.tables.sql":       {"create_table_query", "engine_full", "as_select"},
-	"system.dictionaries.sql": {"source"},
+	"system.dictionaries.sql": {"source", "last_exception"},
 }
 
 // RedactJSONLFields applies RedactSQLText to the named string fields of every

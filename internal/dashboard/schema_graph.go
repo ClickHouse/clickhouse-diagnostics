@@ -68,9 +68,6 @@ func (g *Generator) collectSchemaGraph(version string) map[string]interface{} {
 		FROM system.tables
 		WHERE %s
 		ORDER BY database, name`, targetCols, schemaSysFilter))
-	if len(tables) == 0 {
-		return nil
-	}
 	columns := g.safeQuery("schema_columns", fmt.Sprintf(`
 		SELECT database, table, name, type,
 		       (is_in_primary_key OR is_in_sorting_key) AS is_key,
@@ -85,6 +82,12 @@ func (g *Generator) collectSchemaGraph(version string) map[string]interface{} {
 	// bundle a failed dictionary is the node to look at first, so the sidebar
 	// shows its status and last error instead of losing it.
 	dicts := g.safeQuery("schema_dictionaries", schemaDictionariesSQL)
+	// Decide only now whether there is anything to draw: a server whose only
+	// user objects are dictionaries declared in config has no system.tables
+	// rows for them, and the page builds their nodes from this result.
+	if !schemaGraphHasContent(tables, dicts) {
+		return nil
+	}
 	refreshes := []map[string]interface{}{}
 	if g.hasTable("view_refreshes") {
 		refreshes = g.safeQuery("schema_refreshes", schemaRefreshesSQL(g.sysTable("view_refreshes")))
@@ -138,6 +141,13 @@ func schemaRefreshesSQL(ref string) string {
 		       argMax(exception, exception != '')                  AS exception
 		FROM %s
 		GROUP BY database, view`, ref)
+}
+
+// schemaGraphHasContent says whether the payload would draw at least one
+// node. Tables alone, dictionaries alone, or both; an empty pair means the
+// page is not written and the dashboard shows no Schema tab.
+func schemaGraphHasContent(tables, dicts []map[string]interface{}) bool {
+	return len(tables) > 0 || len(dicts) > 0
 }
 
 // redactDictionaryPanel scrubs the dashboard's own Dictionaries panel rows —
