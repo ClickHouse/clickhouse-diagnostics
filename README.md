@@ -937,7 +937,7 @@ When `-skip-dashboard` is not set, the tool generates a single self-contained `d
 
 In addition, when `--query-id` or `--normalized-query-hash` is set, a **🔍 Query Analysis** section appears near the top of the nav. See [Query analysis mode](#query-analysis-mode) for what it contains.
 
-A sticky top nav at the page header lets you jump straight to any section. Sections that depend on cluster-specific or version-specific data (Crash Log, Cluster Nodes, Replicas Health, Async Inserts, Query Analysis) are hidden when there is nothing to show.
+A sidebar on the left lists every section and highlights the one you are reading. The arrow at the left of the sticky header hides or shows it (the choice is remembered in the browser, like the theme); while hidden, the arrow shows the name of the current section. Sections that depend on cluster-specific or version-specific data (Crash Log, Cluster Nodes, Replicas Health, Async Inserts, Query Analysis) are hidden when there is nothing to show.
 
 ### Previewing the Keeper Health panel without an outage
 

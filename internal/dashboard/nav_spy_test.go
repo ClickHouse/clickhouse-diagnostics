@@ -51,10 +51,55 @@ func TestTemplate_NavScrollSpy(t *testing.T) {
 	}
 
 	// Current section and hovered link must not look identical.
-	if !strings.Contains(htmlTemplate, "nav a.active{color:var(--ink);border-bottom-color:var(--status-info)") {
+	if !strings.Contains(htmlTemplate, "nav a.active{color:var(--ink);border-left-color:var(--status-info)") {
 		t.Error("the active nav link needs its own accent, distinct from :hover")
 	}
 	if strings.Contains(htmlTemplate, "nav a:hover,nav a.active{") {
 		t.Error("hover and active share one rule again — the current section stops being legible")
+	}
+}
+
+// TestTemplate_Sidebar: the section list is a fixed sidebar on the left with
+// an arrow in the header to hide and show it. The horizontal strip it
+// replaced overflowed the viewport at 22 sections and scrolled sideways,
+// which made the trailing sections effectively unreachable. These are the
+// parts that must hold: the arrow is labelled for assistive tech and reports
+// its state, the state is stamped before first paint and remembered, the
+// content moves over by exactly the sidebar's width, and the header names
+// the section being read once the highlighted link is hidden.
+func TestTemplate_Sidebar(t *testing.T) {
+	for _, want := range []string{
+		`<button id="nav-toggle" type="button" aria-label="Hide section sidebar" aria-controls="main-nav" aria-expanded="true">`,
+		`<nav id="main-nav" aria-label="Sections">`,
+		`<span id="nav-current"></span>`,
+		":root{--nav-w:240px}",
+		"nav{position:fixed;top:var(--topbar-h,74px);left:0;bottom:0;width:var(--nav-w);", // under the measured band
+		"html.nav-collapsed nav{transform:translateX(-100%);visibility:hidden}",
+		"html:not(.nav-collapsed) main{padding-left:calc(var(--nav-w) + var(--click-space-5));", // content pushed, not covered
+		"html.nav-collapsed #nav-toggle svg{transform:scaleX(-1)}",                              // the arrow flips with the state
+		"html.nav-collapsed #nav-current:not(:empty){display:block}",
+		`localStorage.getItem("chdiag-nav")`, // stamped in <head>, before layout
+		"localStorage.setItem('chdiag-nav',shown?'shown':'collapsed');",
+		"toggle.setAttribute('aria-expanded',shown?'true':'false');",
+		"@media (max-width:900px){nav{box-shadow:", // narrow: overlay instead of push
+		"@media (prefers-reduced-motion:reduce){nav,main,#nav-toggle svg{transition:none}}",
+		"@media print{nav,#nav-toggle{display:none}",
+		"if(label && name && label.textContent!==name) label.textContent=name;",
+	} {
+		if !strings.Contains(htmlTemplate, want) {
+			t.Errorf("sidebar nav lost %q", want)
+		}
+	}
+	// The sidebar must sit outside the sticky band: the band is measured for
+	// --topbar-h and the sidebar hangs from that measurement; inside it the
+	// fixed box would be counted in the band's own height.
+	top := strings.Index(htmlTemplate, `<div class="topbar">`)
+	end := strings.Index(htmlTemplate, `</div><!-- .topbar -->`)
+	if top < 0 || end < 0 || strings.Contains(htmlTemplate[top:end], `<nav id="main-nav"`) {
+		t.Error("the section sidebar must be a sibling of .topbar, not inside it")
+	}
+	// The old strip's overflow-x:auto is the bug this replaced.
+	if strings.Contains(htmlTemplate, "nav{background:var(--surface-card);border-bottom") {
+		t.Error("the horizontal nav strip is back")
 	}
 }

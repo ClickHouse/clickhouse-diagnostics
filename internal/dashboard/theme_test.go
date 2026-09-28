@@ -149,17 +149,20 @@ func TestSampleQueryCol_GovIsRedacted(t *testing.T) {
 	}
 }
 
-// Header and nav must stick as ONE band.
+// The header sticks as ONE measured band.
 //
-// They used to stick separately, with the nav pinned at a hardcoded top:53px
-// that had to equal the header's height. It did not — the header measures
-// ~74px — so once the page scrolled the header covered the top 21px of the
-// nav and its labels were sliced in half. Three separate constants were
-// guessing that same height (nav top, section scroll-margin, the scroll-spy
-// threshold); all three are now derived from one measured value.
+// Header and nav used to stick separately, with the nav pinned at a
+// hardcoded top:53px that had to equal the header's height. It did not — the
+// header measures ~74px — so once the page scrolled the header covered the
+// top 21px of the nav and its labels were sliced in half. Three separate
+// constants were guessing that same height (nav top, section scroll-margin,
+// the scroll-spy threshold); all three are now derived from one measured
+// value. The nav has since become a fixed sidebar (see TestTemplate_Sidebar)
+// that hangs from the same measurement, and the anchor offset and the
+// scroll-spy threshold still follow the band's measured height.
 func TestTemplate_TopbarSticksAsOneBand(t *testing.T) {
 	if !strings.Contains(htmlTemplate, ".topbar{position:sticky;top:0;") {
-		t.Error("header and nav must be wrapped in one sticky .topbar")
+		t.Error("the header must be wrapped in one sticky .topbar")
 	}
 	if !strings.Contains(htmlTemplate, `<div class="topbar">`) {
 		t.Error("the .topbar wrapper is missing from the markup")
