@@ -402,6 +402,7 @@ body{font-family:var(--click-font-regular);margin:0;padding:0;background:var(--b
 .legend-item{display:inline-flex;align-items:center;gap:0.35rem}
 .legend-swatch{display:inline-block;width:0.9rem;height:0.9rem;border-radius:2px;border:1px solid rgba(0,0,0,.2)}
 .legend-line{display:inline-block;width:1.6rem;height:2px}
+.legend-line.dashed{height:0;background:none !important;border-top:2px dashed var(--muted)}
 #status{margin-left:auto;font-family:var(--click-font-mono);font-size:var(--click-font-size-1);opacity:.8;white-space:pre-wrap}
 #status.error{color:var(--error-color);opacity:1;font-weight:600}
 
@@ -469,6 +470,7 @@ body{font-family:var(--click-font-regular);margin:0;padding:0;background:var(--b
 #sidebar .close:hover{color:var(--color)}
 #sidebar a{color:var(--link);cursor:pointer;text-decoration:underline;font-family:var(--click-font-mono)}
 #sidebar .related-table{display:flex;flex-direction:column;gap:0.25rem;padding:0.2rem 0}
+#sidebar .inferred-note{color:var(--muted);font-size:0.72rem;margin:-0.2rem 0 0 0.4rem}
 
 #empty{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:var(--muted);font-size:1rem;text-align:center;font-style:italic;max-width:36rem}
 #empty.hidden{display:none}
@@ -478,6 +480,7 @@ body{font-family:var(--click-font-regular);margin:0;padding:0;background:var(--b
 .arrow.mv{stroke:var(--edge-mv)}
 .arrow.dict{stroke:var(--edge-dict)}
 .arrow.distributed{stroke:var(--edge-distributed)}
+.arrow.inferred{stroke-dasharray:6 4}
 .arrow.highlighted{stroke:var(--edge-highlight);stroke-width:2.4px;opacity:1}
 .arrow.dimmed{opacity:.1}
 .arrowhead{fill:var(--edge)}
@@ -520,6 +523,7 @@ body{font-family:var(--click-font-regular);margin:0;padding:0;background:var(--b
       <span class="legend-item"><span class="legend-line" style="background:var(--edge-mv)"></span>MV flow</span>
       <span class="legend-item"><span class="legend-line" style="background:var(--edge-dict)"></span>Dictionary source</span>
       <span class="legend-item"><span class="legend-line" style="background:var(--edge-distributed)"></span>Distributed shard</span>
+      <span class="legend-item" title="system.tables lists no dependency for refreshable MVs, plain views or Distributed tables; these edges come from the FROM / JOIN clauses and the Distributed engine arguments in the DDL"><span class="legend-line dashed"></span>inferred from DDL</span>
       <span class="legend-item" style="margin-left:.6rem"><span class="legend-col column-name key-primary">col</span>primary key</span>
       <span class="legend-item"><span class="legend-col column-name key-sorting">col</span>sorting key</span>
       <span class="legend-item"><span class="legend-col column-name key-partition">col</span>partition key</span>
@@ -721,6 +725,45 @@ function highlightSQL(pre, text) {
     }
 }
 
+/// Source tables a view reads, taken from the DDL when the server's dependency
+/// arrays do not say. They do not for a refreshable MV (it does not fire on
+/// insert, so it is not registered as the source's dependent), for a plain
+/// View, or for a Distributed table (whose local table is an engine argument).
+/// Every "FROM x" / "JOIN x" in the statement — string literals removed first,
+/// ARRAY JOIN and table functions ("name(") skipped, an unqualified name
+/// resolved to the view's own database. Edges built from this are drawn dashed
+/// and labelled as inferred, because the text is evidence, not metadata.
+function parseSourceTables(ddl, defaultDb) {
+    if (!ddl) return [];
+    const at = ddl.search(/\bAS\s+(?:\(\s*)?(?:WITH|SELECT)\b/i);
+    if (at < 0) return [];
+    const body = ddl.slice(at).replace(/'(?:\\.|''|[^'\\])*'/g, "''");
+    const out = new Set();
+    const re = /\b(FROM|JOIN)\s+((?:` + "`" + `[^` + "`" + `]+` + "`" + `|[A-Za-z_][A-Za-z0-9_]*)(?:\s*\.\s*(?:` + "`" + `[^` + "`" + `]+` + "`" + `|[A-Za-z_][A-Za-z0-9_]*))?)(?!\s*\()/gi;
+    let m;
+    while ((m = re.exec(body)) !== null) {
+        if (/ARRAY\s*$/i.test(body.slice(Math.max(0, m.index - 8), m.index))) continue;
+        const parts = m[2].split(/\s*\.\s*/).map(x => x.replace(/^` + "`" + `|` + "`" + `$/g, ''));
+        if (parts.length === 1) {
+            if (/^(SELECT|WITH|VALUES|FINAL|SAMPLE|ARRAY|ONLY|CLUSTER)$/i.test(parts[0])) continue;
+            out.add(tableKey(defaultDb, parts[0]));
+        } else {
+            out.add(tableKey(parts[0], parts[1]));
+        }
+    }
+    return [...out];
+}
+
+/// Distributed('cluster', 'db', 'table'[, sharding_key[, policy]]) — the local
+/// table the Distributed table fans out to. When that table lives on this
+/// server it gets a dashed edge; on a remote-only cluster there is no node and
+/// nothing is drawn.
+function parseDistributedSource(engineFull, defaultDb) {
+    const m = /\bDistributed\s*\(\s*'[^']*'\s*,\s*'([^']*)'\s*,\s*'([^']*)'/i.exec(engineFull || '');
+    if (!m) return null;
+    return tableKey(m[1] || defaultDb, m[2]);
+}
+
 function engineKind(engine) {
     if (!engine) return 'other';
     if (engine === 'Dictionary') return 'dict';
@@ -854,13 +897,15 @@ function buildGraph() {
     /// Use loading_dependencies (depends_on) and dependents (already gives forward direction).
     const edges = [];
     const seen = new Set();
-    function addEdge(from, to, kind) {
+    const inferred = new Set();
+    function addEdge(from, to, kind, isInferred) {
         if (!nodes.has(from) || !nodes.has(to)) return;
         if (from === to) return;
         const k = from + '\x00' + to;
         if (seen.has(k)) return;
         seen.add(k);
-        edges.push({ from, to, kind });
+        edges.push({ from, to, kind, inferred: !!isInferred });
+        if (isInferred) inferred.add(k);
     }
 
     for (const node of nodes.values()) {
@@ -892,9 +937,25 @@ function buildGraph() {
         }
     }
 
+    /// Second pass, after every metadata edge is in (addEdge keeps the first of a
+    /// pair, so metadata wins): what the DDL says a view reads, and the local
+    /// table behind a Distributed table. Refreshable MVs and plain Views have
+    /// empty dependency arrays on the server, so without this they float free.
+    for (const node of nodes.values()) {
+        if (node.kind === 'mv' || node.kind === 'rmv' || node.kind === 'view') {
+            for (const src of parseSourceTables(node.createQuery, node.database)) {
+                addEdge(src, node.key, 'mv', true);
+            }
+        } else if (node.kind === 'distributed') {
+            const src = parseDistributedSource(node.engineFull, node.database);
+            if (src) addEdge(src, node.key, 'distributed', true);
+        }
+    }
+
     state.nodes = nodes;
     state.nodesByDb = nodesByDb;
     state.edges = edges;
+    state.inferredEdges = inferred;
 }
 
 function updateDbFilter() {
@@ -1434,10 +1495,15 @@ function drawEdges() {
         const a = state.nodes.get(e.from);
         const b = state.nodes.get(e.to);
         const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-        const kindClass = e.kind === 'normal' ? '' : e.kind;
+        const kindClass = (e.kind === 'normal' ? '' : e.kind) + (e.inferred ? ' inferred' : '');
         path.setAttribute('class', 'arrow ' + kindClass);
         path.setAttribute('data-from', e.from);
         path.setAttribute('data-to', e.to);
+        if (e.inferred) {
+            const t = document.createElementNS('http://www.w3.org/2000/svg', 'title');
+            t.textContent = 'inferred from the DDL (FROM / JOIN, or the Distributed engine arguments) — system.tables lists no dependency here';
+            path.appendChild(t);
+        }
 
         const x1 = a.x + a.w;
         const y1 = a.y + a.h / 2;
@@ -1449,7 +1515,7 @@ function drawEdges() {
 
         /// Arrowhead.
         const ah = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
-        ah.setAttribute('class', 'arrowhead ' + kindClass);
+        ah.setAttribute('class', 'arrowhead ' + kindClass.replace(' inferred', ''));
         ah.setAttribute('data-from', e.from);
         ah.setAttribute('data-to', e.to);
         const angle = Math.atan2(y2 - y1, (x2 - 8) - (x1 + dx));
@@ -1503,6 +1569,13 @@ function selectNode(key) {
     state.selectedKey = key;
     highlightSelection(key);
     showSidebar(key);
+}
+
+function inferredNote() {
+    const sp = document.createElement('span');
+    sp.className = 'inferred-note';
+    sp.textContent = '· inferred from the DDL';
+    return sp;
 }
 
 function showSidebar(key) {
@@ -1596,6 +1669,8 @@ function showSidebar(key) {
             a.textContent = (state.nodes.get(k) && state.nodes.get(k).displayName) || k;
             a.onclick = (ev) => { ev.preventDefault(); selectNode(k); };
             wrap.appendChild(a);
+            if (state.inferredEdges && state.inferredEdges.has(key + '\x00' + k)) wrap.appendChild(inferredNote());
+            if (state.inferredEdges && state.inferredEdges.has(k + '\x00' + key)) wrap.appendChild(inferredNote());
         }
         c.appendChild(wrap);
     }
