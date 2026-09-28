@@ -1574,7 +1574,7 @@ header .meta{margin-left:auto;text-align:right;font-size:var(--click-font-size-1
    offset by; when collapsed the sidebar slides off and <main> takes the
    space back. The state lives on <html> (class nav-collapsed) so the
    bootstrap script in <head> can stamp it before first paint. */
-:root{--nav-w:240px}
+:root{--nav-w:180px}
 #nav-toggle{display:inline-flex;align-items:center;gap:var(--click-space-2);background:transparent;color:var(--header-ink);border:var(--click-border-width-1) solid rgba(255,255,255,.25);border-radius:var(--click-radii-full);padding:var(--click-space-1) var(--click-space-2);font:inherit;font-size:var(--click-font-size-1);cursor:pointer;white-space:nowrap;flex:none;transition:background var(--click-transition-smooth)}
 #nav-toggle:hover{background:rgba(255,255,255,.12)}
 #nav-toggle svg{width:18px;height:18px;flex:none;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;transition:transform .2s ease}
