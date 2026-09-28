@@ -103,21 +103,23 @@ The tool is read-only and never reads customer tables — every query reads a `s
 ```sql
 CREATE USER sys_read_only IDENTIFIED WITH sha256_password BY '<password>';
 
-GRANT SHOW DATABASES, SHOW TABLES ON *.* TO sys_read_only;
-GRANT SELECT ON system.*                 TO sys_read_only;
+GRANT SHOW DATABASES, SHOW TABLES, SHOW COLUMNS ON *.* TO sys_read_only;
+GRANT SELECT ON system.*                               TO sys_read_only;
 ```
 
 ```
-┌─GRANTS FOR sys_read_only──────────────────────────────────┐
-│ GRANT SHOW DATABASES, SHOW TABLES ON *.* TO sys_read_only │
-│ GRANT SELECT ON system.* TO sys_read_only                 │
-└───────────────────────────────────────────────────────────┘
+┌─GRANTS FOR sys_read_only────────────────────────────────────────────────┐
+│ GRANT SHOW DATABASES, SHOW TABLES, SHOW COLUMNS ON *.* TO sys_read_only │
+│ GRANT SELECT ON system.* TO sys_read_only                               │
+└─────────────────────────────────────────────────────────────────────────┘
 ```
 
 | Grant | Why it is needed |
 |---|---|
 | `SELECT ON system.*` | Every diagnostic query, alert rule and dashboard panel reads a `system` table. Nothing outside `system` is ever selected. |
-| `SHOW DATABASES, SHOW TABLES ON *.*` | ClickHouse filters the object-listing system tables down to what the user holds *some* privilege on. Without it the tool sees only part of the cluster. |
+| `SHOW DATABASES, SHOW TABLES, SHOW COLUMNS ON *.*` | ClickHouse filters the object-listing system tables down to what the user holds *some* privilege on. Without `SHOW DATABASES`/`SHOW TABLES` the tool sees only part of the cluster; without `SHOW COLUMNS`, `system.columns` comes back with **no rows for your databases** while every other file looks normal. |
+
+> **Do not substitute `SELECT` on the data databases.** `GRANT SELECT ON <db>.*` also populates the listing tables, and collects exactly the same bundle — measured on 26.2.19.43, `system.tables` 2, `system.columns` 5, `system.databases` 2, `system.parts` 1 under either grant set — but it hands the diagnostic user read access to customer data, which the `SHOW` grants do not (a `SELECT` against a user table is refused with 497 under them).
 
 > **A missing `SHOW` grant does not produce an error — it silently truncates the results.** Every query still reports success; the bundle just describes a fraction of the server. Measured on a test instance with one user database:
 >
@@ -128,7 +130,9 @@ GRANT SELECT ON system.*                 TO sys_read_only;
 > | `system.columns` | 3258 | 2520 |
 > | `system.parts` | 102 | 101 |
 >
-> This is the failure mode to watch for: a bundle that looks complete but is missing the customer's own tables. If `system.databases` contains only `system`, the `SHOW` grant is missing.
+> This is the failure mode to watch for: a bundle that looks complete but is missing the customer's own tables. If `system.databases` contains only `system`, the `SHOW` grant is missing — the tool now prints a warning at startup when it can see no database outside `system`, but an older binary will not.
+>
+> With **neither** grant the run still completes: the protected system tables fail with `Code: 497 … Not enough privileges` (visible in `execution_log.txt`) while `system.tables`, `system.columns` and `system.databases` come back as **empty files** rather than errors, so the archive is a few hundred KB that describes nothing. Check the archive size against another node before sending it.
 
 Neither grant exposes customer data: `SHOW` reveals object *names* and metadata only, and `SELECT` is scoped to `system`.
 
@@ -144,10 +148,10 @@ GRANT CREATE TEMPORARY TABLE ON *.* TO sys_read_only;
 So the full set for cloud is:
 
 ```
-┌─GRANTS FOR sys_read_only──────────────────────────────────────────────────────────────────┐
-│ GRANT SHOW DATABASES, SHOW TABLES, CREATE TEMPORARY TABLE, REMOTE ON *.* TO sys_read_only │
-│ GRANT SELECT ON system.* TO sys_read_only                                                 │
-└───────────────────────────────────────────────────────────────────────────────────────────┘
+┌─GRANTS FOR sys_read_only────────────────────────────────────────────────────────────────────────────────┐
+│ GRANT SHOW DATABASES, SHOW TABLES, SHOW COLUMNS, CREATE TEMPORARY TABLE, REMOTE ON *.* TO sys_read_only │
+│ GRANT SELECT ON system.* TO sys_read_only                                                               │
+└─────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 Unlike the `SHOW` grant, these fail loudly rather than truncating:
