@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"clickhouse-diagnostic/internal"
 	"clickhouse-diagnostic/internal/version"
@@ -33,6 +34,23 @@ func (f *Finder) FindCompatibleQueries(rootDir string, serverVersion internal.Ve
 	err := filepath.Walk(rootDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
+		}
+
+		// Dotfiles are never query or alert files, and nothing downstream
+		// filters by extension — manager.go executes whatever this walk
+		// returns — so a `._system.parts.sql` is read and sent to the server.
+		// Unpacking the release on macOS and copying the folder to the node
+		// leaves an AppleDouble `._name` beside every file and directory: one
+		// real bundle came back with 47 of 84 collectors "failed" on
+		// "security validation failed for '._system.parts.sql'" and all 15
+		// alert rules failing to parse with "yaml: control characters are not
+		// allowed", which buried the three genuine failures. rootDir itself is
+		// exempt: it is legitimately allowed to be "." or "./queries.onprem".
+		if path != rootDir && strings.HasPrefix(filepath.Base(path), ".") {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
 		}
 
 		// Skip directories themselves

@@ -374,3 +374,67 @@ func TestFindVersionedFiles_ExtensionFilter(t *testing.T) {
 		t.Error("extension match should be case-insensitive")
 	}
 }
+
+// Unpacking the release on macOS and copying the folder to a server leaves an
+// AppleDouble "._name" beside every file and directory. Nothing downstream
+// filters by extension — manager.go executes whatever the walk returns — so
+// before the walk skipped dotfiles, "._system.parts.sql" was sent to the
+// server and rejected, and "._replica_readonly.yaml" failed to parse with
+// "yaml: control characters are not allowed". One real bundle reported 47 of
+// 84 collectors failed and 15 of 15 alert rules unparseable for this reason,
+// which buried the three genuine failures.
+func TestFindVersionedFiles_SkipsAppleDoubleAndDotfiles(t *testing.T) {
+	dir := t.TempDir()
+	writeFiles(t, dir, map[string]string{
+		"system.parts.sql":            "SELECT 1",
+		"._system.parts.sql":          "\x00\x05\x16\x07AppleDouble",
+		".DS_Store":                   "\x00\x00\x00\x01",
+		"._23.5.1.0":                  "\x00\x05\x16\x07AppleDouble",
+		"23.5.1.0/system.parts.sql":   "SELECT 2",
+		"23.5.1.0/._system.parts.sql": "\x00\x05\x16\x07AppleDouble",
+		"._24.8.1.0/system.parts.sql": "SELECT 3",
+	})
+
+	files, err := FindVersionedFiles(dir, v(25, 4, 1, 0), ".sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range files {
+		if strings.HasPrefix(filepath.Base(f.Name), ".") || strings.Contains(f.Path, string(filepath.Separator)+".") || strings.HasPrefix(f.Path, ".") {
+			t.Errorf("dotfile leaked into results: name=%q path=%q", f.Name, f.Path)
+		}
+	}
+	// The one real versioned override wins over the one real root file.
+	if len(files) != 1 {
+		t.Fatalf("want 1 selected file, got %d: %+v", len(files), files)
+	}
+	if got := files[0].DirName; got != "23.5.1.0" {
+		t.Errorf("want the 23.5.1.0 override, got DirName=%q path=%q", got, files[0].Path)
+	}
+}
+
+// The walk must not skip rootDir itself when the caller passes a relative or
+// dot-prefixed directory — "." and "./queries.onprem" are both legitimate.
+func TestFindCompatibleQueries_DotRootDirStillWalked(t *testing.T) {
+	dir := t.TempDir()
+	writeFiles(t, dir, map[string]string{"a.sql": "SELECT 1"})
+
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(wd) })
+
+	for _, root := range []string{".", "./"} {
+		files, err := NewFinder().FindCompatibleQueries(root, v(25, 4, 1, 0))
+		if err != nil {
+			t.Fatalf("rootDir %q: %v", root, err)
+		}
+		if len(files) != 1 {
+			t.Errorf("rootDir %q: want 1 file, got %d: %+v", root, len(files), files)
+		}
+	}
+}

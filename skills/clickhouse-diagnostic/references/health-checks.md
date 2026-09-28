@@ -20,7 +20,7 @@ Only sum `system.query_log_details_7_days` after fixing one `tables` value (see 
 | Host facts describe the right machine | `host_info.os.hostname` vs `system.clusters.host_name` / logs hostnames | if the tool ran on a laptop against a remote server, ignore `host_info` and say so |
 | Collectors that did not run | `execution_log.txt` *Failed collectors* | name each with its error; a missing result file is one of these, not an empty table. Code 159 = the tool's `-query-timeout`; 497 = grant; 60/139 = table or config not present on this server |
 | Collector's own timeouts | `query_log_details` / `system.errors` code 159 from the collector's user at collection time | the collector's `-query-timeout` (default 240 s) fired on a slow system table — that file is partial; not a customer problem |
-| Collector's own grants | `system.errors` code 497 near collection time; `system.databases` only `system`? (`system.tables` distinct `database`) | a bundle showing only `system` tables likely lacks `SHOW DATABASES/TABLES` — the bundle is incomplete, not the server empty |
+| Collector's own grants | `system.errors` code 497 near collection time; `system.databases` only `system`? (`system.tables` distinct `database`) | a bundle showing only `system` tables likely lacks `SHOW DATABASES/TABLES`, and an empty `system.columns` beside a populated `system.tables` lacks `SHOW COLUMNS` — the bundle is incomplete, not the server empty |
 
 ## HC-1 Availability and crashes
 
