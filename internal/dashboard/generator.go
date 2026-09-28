@@ -1565,7 +1565,8 @@ header{background:var(--header-bg);color:var(--header-ink);padding:var(--click-s
 header .brand{display:flex;flex-direction:column;line-height:1.15}
 header .logo{font-size:var(--click-font-size-5);font-weight:var(--click-font-weight-4);color:var(--header-logo);letter-spacing:-.5px}
 header h1{font-size:var(--click-font-size-1);font-weight:var(--click-font-weight-2);opacity:.8;letter-spacing:.2px}
-header .meta{margin-left:auto;text-align:right;font-size:var(--click-font-size-1);opacity:.75;line-height:var(--click-line-height-2)}
+header .meta{margin-left:auto;text-align:right;font-size:var(--click-font-size-1);color:rgba(255,255,255,.75);line-height:var(--click-line-height-2)}
+header .meta .badge{margin:0 var(--click-space-1) 0 0;vertical-align:1px}
 #theme-toggle{margin-left:var(--click-space-4);background:transparent;color:var(--header-ink);border:var(--click-border-width-1) solid rgba(255,255,255,.25);border-radius:var(--click-radii-full);padding:var(--click-space-1) var(--click-space-3);font:inherit;font-size:var(--click-font-size-1);cursor:pointer;white-space:nowrap;transition:background var(--click-transition-smooth)}
 #theme-toggle:hover{background:rgba(255,255,255,.12)}
 /* Section navigation is a fixed sidebar on the left, under the sticky
@@ -1717,7 +1718,6 @@ footer{text-align:center;color:var(--ink-muted);font-size:var(--click-font-size-
     <div class="logo">ClickHouse</div>
     <h1>Diagnostic Dashboard</h1>
   </div>
-  <div id="hdr-badge"></div>
   <div class="meta" id="hdr-meta"></div>
   <button id="theme-toggle" type="button" aria-label="Toggle colour theme"></button>
 </header>
@@ -3122,10 +3122,13 @@ document.addEventListener('DOMContentLoaded',function(){
   })();
 
   // header
-  document.getElementById('hdr-badge').innerHTML=
-    '<span class="badge badge-'+esc(DATA.mode)+'">'+esc(DATA.mode)+'</span>';
+  // The deployment type sits with the version it qualifies — "[cloud]
+  // Version: 26.6.2191" — rather than beside the title, because the mode
+  // says which system tables were collected, not what the page is.
   document.getElementById('hdr-meta').innerHTML=
-    'Generated: '+esc(DATA.generated_at)+'<br>Version: '+esc(DATA.version||'N/A');
+    'Generated: '+esc(DATA.generated_at)+'<br>'
+    +'<span class="badge badge-'+esc(DATA.mode)+'">'+esc(DATA.mode)+'</span>'
+    +' Version: '+esc(DATA.version||'N/A');
 
   // stats
   // esc() on both arguments: every caller currently passes a number, a
