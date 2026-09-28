@@ -245,3 +245,70 @@ func TestSensitiveCollectorFields_DictionariesCoverLastException(t *testing.T) {
 		t.Errorf("last_exception not redacted (n=%d): %s", n, out)
 	}
 }
+
+// Review finding: nextCall skipped only single-quoted literals, so a backtick
+// or double-quoted identifier or a comment containing "s3(" was taken for the
+// engine call. matchingParen then paired that '(' with the real call's ')'
+// (or ran off the end), and the real password sat outside the span the
+// positional rule inspects. Formatted DDL from system.tables rarely carries
+// such text, but a redaction path must not depend on that.
+func TestRedactSQLText_SkipsQuotedIdentifiersAndComments(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{
+			"CREATE TABLE d.`s3(` (`x` UInt8) ENGINE = S3('https://b/f.csv', 'AKIAIOSFODNN7EXAMPLE', 'wJalrXsecret', 'CSV')",
+			"CREATE TABLE d.`s3(` (`x` UInt8) ENGINE = S3('https://b/f.csv', '[HIDDEN]', '[HIDDEN]', 'CSV')",
+		},
+		{
+			`CREATE TABLE d."s3(" ("x" UInt8) ENGINE = S3('https://b/f.csv', 'AKIAIOSFODNN7EXAMPLE', 'wJalrXsecret', 'CSV')`,
+			`CREATE TABLE d."s3(" ("x" UInt8) ENGINE = S3('https://b/f.csv', '[HIDDEN]', '[HIDDEN]', 'CSV')`,
+		},
+		{
+			"/* loads via s3( */ SELECT * FROM s3('https://b/f.csv', 'AKIAIOSFODNN7EXAMPLE', 'wJalrXsecret', 'CSV')",
+			"/* loads via s3( */ SELECT * FROM s3('https://b/f.csv', '[HIDDEN]', '[HIDDEN]', 'CSV')",
+		},
+		{
+			"-- s3( is the source\nSELECT * FROM s3('https://b/f.csv', 'AKIAIOSFODNN7EXAMPLE', 'wJalrXsecret', 'CSV')",
+			"-- s3( is the source\nSELECT * FROM s3('https://b/f.csv', '[HIDDEN]', '[HIDDEN]', 'CSV')",
+		},
+		// A ')' or ',' inside a quoted identifier must not close or split the argument list.
+		{
+			"SELECT * FROM mysql('h:3306', 'db', `t)`, 'u', 'pw')",
+			"SELECT * FROM mysql('h:3306', 'db', `t)`, 'u', '[HIDDEN]')",
+		},
+		// Unterminated regions run to the end without panicking or looping.
+		{"SELECT `unterminated", "SELECT `unterminated"},
+		{"SELECT /* open", "SELECT /* open"},
+	}
+	for _, c := range cases {
+		got, _ := RedactSQLText(c.in)
+		if got != c.want {
+			t.Errorf("\n in: %s\ngot: %s\nwant: %s", c.in, got, c.want)
+		}
+	}
+}
+
+// Review finding: the JSONL field locator was a raw substring search. Valid
+// JSON escapes every quote inside a value, so the needle cannot occur there,
+// but the locator now also requires key position so the guarantee does not
+// rest on that. A value that spells out the key, and a longer key that ends
+// in the field name, must both be skipped in favour of the real member.
+func TestRedactJSONLFields_MatchesKeysNotValues(t *testing.T) {
+	line := `{"comment":"see {\"source\":\"MYSQL(password 'inner')\"}","x_source":"MYSQL(user 'u' password 'longer')","source":"MYSQL(user 'u' password 'real' db 'd')"}`
+	got, n := RedactJSONLFields(line, []string{"source"})
+	if n != 1 {
+		t.Fatalf("n = %d, want 1 (only the real source member): %s", n, got)
+	}
+	if strings.Contains(got, "'real'") {
+		t.Errorf("the real member's credential survived: %s", got)
+	}
+	for _, keep := range []string{`\"source\":\"MYSQL(password 'inner')\"`, `"x_source":"MYSQL(user 'u' password 'longer')"`} {
+		if !strings.Contains(got, keep) {
+			t.Errorf("a non-member occurrence was rewritten; lost %q: %s", keep, got)
+		}
+	}
+	// Whitespace after the separator is still key position.
+	spaced := `{"a": 1, "source": "MYSQL(user 'u' password 'p')"}`
+	if got, n := RedactJSONLFields(spaced, []string{"source"}); n != 1 || strings.Contains(got, "'p'") {
+		t.Errorf("spaced member not redacted: %s", got)
+	}
+}

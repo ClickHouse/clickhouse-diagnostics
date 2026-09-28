@@ -262,3 +262,14 @@ func TestGeneratorSQL_TruncatesWithLeftUTF8(t *testing.T) {
 		}
 	}
 }
+
+// Review finding: the template head carried two DOCTYPE declarations. Browsers
+// tolerate it, but a second one is a parse error under the HTML spec and the
+// kind of thing a strict validator or a downstream converter trips on.
+func TestTemplate_SingleDoctype(t *testing.T) {
+	for name, tpl := range map[string]string{"dashboard": htmlTemplate, "schema graph": schemaGraphHead} {
+		if n := strings.Count(tpl, "<!DOCTYPE"); n != 1 {
+			t.Errorf("%s template has %d DOCTYPE declarations, want 1", name, n)
+		}
+	}
+}

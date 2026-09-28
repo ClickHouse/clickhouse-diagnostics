@@ -279,12 +279,41 @@ func TestBuildSchemaGraphHTML_Preview(t *testing.T) {
 // Review findings on the payload queries and the dashboard's own panel.
 func TestSchemaGraphQueries_ReviewFindings(t *testing.T) {
 	// FAILED / FAILED_AND_RELOADING dictionaries must not be filtered out.
-	if strings.Contains(schemaDictionariesSQL, "WHERE status") {
+	dictSQL := schemaDictionariesSQL("system.dictionaries")
+	if strings.Contains(dictSQL, "WHERE status") || strings.Contains(dictSQL, "status IN ('LOADED'") {
 		t.Error("schema dictionaries query filters by status — failed dictionaries are the nodes to inspect")
 	}
 	for _, want := range []string{"status", "last_exception"} {
-		if !strings.Contains(schemaDictionariesSQL, want) {
+		if !strings.Contains(dictSQL, want) {
 			t.Errorf("schema dictionaries query lost %q", want)
+		}
+	}
+	// Review finding: dictionaries were read from the local table in every
+	// mode, so a graph built through one cloud pod showed a dictionary
+	// healthy that had FAILED on another. The query goes through the
+	// mode-aware reference, folds replicas to one row per dictionary, ranks
+	// FAILED above everything else, and excludes system databases like the
+	// other schema queries.
+	cloudDict := schemaDictionariesSQL(NewGenerator(nil, "cloud").sysTable("dictionaries"))
+	for _, want := range []string{
+		"FROM clusterAllReplicas(default, system.dictionaries)",
+		"GROUP BY database, name",
+		"argMax(status, _rank)",
+		"argMax(leftUTF8(last_exception, 300), _rank)",
+		"startsWith(toString(status), 'FAILED'), 3",
+		schemaSysFilter,
+	} {
+		if !strings.Contains(cloudDict, want) {
+			t.Errorf("cloud dictionaries query lost %q", want)
+		}
+	}
+	if !strings.Contains(dictSQL, "FROM system.dictionaries") {
+		t.Error("onprem dictionaries query must read the local table")
+	}
+	// The page's dictionary nodes read these columns by name.
+	for _, col := range []string{"AS source", "AS status", "AS lifetime_min", "AS lifetime_max", "AS last_exception"} {
+		if !strings.Contains(dictSQL, col) {
+			t.Errorf("dictionaries query lost output column %q", col)
 		}
 	}
 	// view_refreshes goes through the mode-aware reference and folds replicas.
@@ -381,7 +410,7 @@ func TestSchemaGraph_ReviewerSuggestions(t *testing.T) {
 			t.Errorf("collectSchemaGraph lost %q", want)
 		}
 	}
-	if !strings.Contains(schemaDictionariesSQL, "lifetime_min, lifetime_max") {
+	if d := schemaDictionariesSQL("system.dictionaries"); !strings.Contains(d, "any(lifetime_min) AS lifetime_min") || !strings.Contains(d, "any(lifetime_max) AS lifetime_max") {
 		t.Error("dictionaries query lost the LIFETIME columns")
 	}
 	if !strings.Contains(schemaIndicesSQL, "system.data_skipping_indices") || !strings.Contains(schemaIndicesSQL, "granularity") {

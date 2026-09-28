@@ -97,13 +97,14 @@ func (g *Generator) collectSchemaGraph(version string) map[string]interface{} {
 	if g.hasTable("data_skipping_indices") {
 		indices = g.safeQuery("schema_indices", fmt.Sprintf(schemaIndicesSQL, schemaSysFilter))
 	}
-	// Definitions are shared across replicas, so system.dictionaries is read
-	// directly in every mode: clusterAllReplicas would return one row per
-	// replica and duplicate every dictionary node. Every status is kept — the
-	// live page drops FAILED / FAILED_AND_RELOADING, but in a diagnostic
-	// bundle a failed dictionary is the node to look at first, so the sidebar
-	// shows its status and last error instead of losing it.
-	dicts := g.safeQuery("schema_dictionaries", schemaDictionariesSQL)
+	// Definitions are shared across replicas but STATUS is not: a dictionary
+	// LOADED here can be FAILED on another pod, and a graph built from one
+	// connection would show it healthy. So the mode-aware reference fans out
+	// in cloud and the query folds the per-replica rows back to one node per
+	// dictionary, keeping the worst status and its exception. Every status
+	// is kept — the live page drops FAILED / FAILED_AND_RELOADING, but in a
+	// diagnostic bundle a failed dictionary is the node to look at first.
+	dicts := g.safeQuery("schema_dictionaries", schemaDictionariesSQL(g.sysTable("dictionaries")))
 	// Decide only now whether there is anything to draw: a server whose only
 	// user objects are dictionaries declared in config has no system.tables
 	// rows for them, and the page builds their nodes from this result.
@@ -141,14 +142,35 @@ func (g *Generator) collectSchemaGraph(version string) map[string]interface{} {
 	}
 }
 
-// schemaDictionariesSQL reads every dictionary regardless of status. A
+// schemaDictionariesSQL reads every dictionary regardless of status through
+// ref — the mode-aware table reference, clusterAllReplicas in cloud — and
+// folds the per-replica rows into one per dictionary. The fold keeps the
+// WORST status and the exception that goes with it: FAILED on any replica
+// outranks LOADED elsewhere, so a graph built through one pod still shows
+// the failure. Definition columns are identical on every replica, so any()
+// is exact for them. On a single server the GROUP BY is a no-op. A
 // dictionary declared in server config (XML) has database = ” and no
-// system.tables row; the page adds a node for it from this result.
-const schemaDictionariesSQL = `
-		SELECT database, name, source, status,
-		       lifetime_min, lifetime_max,
-		       leftUTF8(last_exception, 300) AS last_exception
-		FROM system.dictionaries`
+// system.tables row; the page adds a node for it from this result. System
+// databases are excluded like every other schema query.
+func schemaDictionariesSQL(ref string) string {
+	return fmt.Sprintf(`
+		SELECT database, name,
+		       any(source) AS source,
+		       argMax(status, _rank) AS status,
+		       any(lifetime_min) AS lifetime_min,
+		       any(lifetime_max) AS lifetime_max,
+		       argMax(leftUTF8(last_exception, 300), _rank) AS last_exception
+		FROM (
+		    SELECT database, name, source, status, lifetime_min, lifetime_max, last_exception,
+		           multiIf(startsWith(toString(status), 'FAILED'), 3,
+		                   toString(status) IN ('LOADING', 'NOT_LOADED'), 2,
+		                   1) AS _rank
+		    FROM %s
+		    WHERE %s
+		)
+		GROUP BY database, name
+		ORDER BY database, name`, ref, schemaSysFilter)
+}
 
 // schemaIndicesSQL lists data-skipping indices per table. Definition columns
 // only, read directly in every mode: they are identical on every replica.

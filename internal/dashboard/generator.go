@@ -1517,7 +1517,7 @@ const themeTokensCSS = `:root{
 // source of truth (see themeTokensCSS).
 var htmlTemplate = htmlTemplateHead + themeTokensCSS + htmlTemplateTail
 
-const htmlTemplateHead = `<!DOCTYPE html><!DOCTYPE html>
+const htmlTemplateHead = `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
