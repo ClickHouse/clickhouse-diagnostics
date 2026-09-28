@@ -1602,7 +1602,7 @@ nav a.active{color:var(--ink);border-left-color:var(--status-info);font-weight:v
    section hides it again (see the toggle script). */
 @media (max-width:900px){nav{box-shadow:var(--click-shadow-5);z-index:95}}
 @media (prefers-reduced-motion:reduce){nav,main,#nav-toggle svg{transition:none}}
-@media print{nav,#nav-toggle{display:none}main{padding-left:var(--click-space-5);max-width:1600px}}
+@media print{nav,#nav-toggle{display:none}html:not(.nav-collapsed) main{padding-left:var(--click-space-5);max-width:1600px}}
 .badge{display:inline-block;padding:2px var(--click-space-2);border-radius:var(--click-radii-full);font-size:var(--click-font-size-0);font-weight:var(--click-font-weight-3);text-transform:uppercase;letter-spacing:.5px;margin-top:2px}
 .badge-cloud{background:var(--status-info);color:#fff}
 .badge-onprem{background:var(--status-good);color:#fff}
