@@ -58,8 +58,20 @@ func (g *Generator) collectSchemaGraph(version string) map[string]interface{} {
 	if g.hasColumn("tables", "target_table") {
 		targetCols = "target_database, target_table"
 	}
+	// The CREATE statement is pretty-printed by the server when it can be:
+	// formatQueryOrNull (24.x; formatQuery itself is 23.11) re-serialises the
+	// DDL one clause per line, and returns NULL rather than failing for a
+	// statement it cannot parse — 1 of 201 system DDLs on a 26.7 test server
+	// did, which is why the plain formatQuery is not used: one such row would
+	// fail the whole query. Older servers ship the single-line original.
+	ddlCol := "create_table_query"
+	ddlFormatted := g.probe("fn:formatQueryOrNull",
+		"SELECT count() FROM system.functions WHERE name = 'formatQueryOrNull'")
+	if ddlFormatted {
+		ddlCol = "coalesce(formatQueryOrNull(create_table_query), create_table_query) AS create_table_query"
+	}
 	tables := g.safeQuery("schema_tables", fmt.Sprintf(`
-		SELECT database, name, engine, engine_full, create_table_query,
+		SELECT database, name, engine, engine_full, %s,
 		       sorting_key, primary_key, partition_key, sampling_key,
 		       total_rows, total_bytes, comment,
 		       %s,
@@ -67,14 +79,24 @@ func (g *Generator) collectSchemaGraph(version string) map[string]interface{} {
 		       loading_dependencies_database, loading_dependencies_table
 		FROM system.tables
 		WHERE %s
-		ORDER BY database, name`, targetCols, schemaSysFilter))
+		ORDER BY database, name`, ddlCol, targetCols, schemaSysFilter))
+	// The four key roles are independent flags — a column can be in the
+	// sorting key AND the partition key — so all four travel, not one OR.
 	columns := g.safeQuery("schema_columns", fmt.Sprintf(`
 		SELECT database, table, name, type,
 		       (is_in_primary_key OR is_in_sorting_key) AS is_key,
+		       is_in_primary_key   AS pk,
+		       is_in_sorting_key   AS sk,
+		       is_in_partition_key AS pt,
+		       is_in_sampling_key  AS sm,
 		       default_kind != '' AS has_default
 		FROM system.columns
 		WHERE %s
 		ORDER BY database, table, position`, schemaSysFilter))
+	indices := []map[string]interface{}{}
+	if g.hasTable("data_skipping_indices") {
+		indices = g.safeQuery("schema_indices", fmt.Sprintf(schemaIndicesSQL, schemaSysFilter))
+	}
 	// Definitions are shared across replicas, so system.dictionaries is read
 	// directly in every mode: clusterAllReplicas would return one row per
 	// replica and duplicate every dictionary node. Every status is kept — the
@@ -105,15 +127,17 @@ func (g *Generator) collectSchemaGraph(version string) map[string]interface{} {
 	}
 
 	return map[string]interface{}{
-		"generated_at": time.Now().UTC().Format("2006-01-02 15:04:05 UTC"),
-		"version":      version,
-		"mode":         g.mode,
-		"tables":       tables,
-		"columns":      columns,
-		"dictionaries": dicts,
-		"refreshes":    refreshes,
-		"has_target":   strings.HasPrefix(targetCols, "target_"),
-		"has_refresh":  g.hasTable("view_refreshes"),
+		"generated_at":  time.Now().UTC().Format("2006-01-02 15:04:05 UTC"),
+		"version":       version,
+		"mode":          g.mode,
+		"tables":        tables,
+		"columns":       columns,
+		"dictionaries":  dicts,
+		"refreshes":     refreshes,
+		"indices":       indices,
+		"ddl_formatted": ddlFormatted,
+		"has_target":    strings.HasPrefix(targetCols, "target_"),
+		"has_refresh":   g.hasTable("view_refreshes"),
 	}
 }
 
@@ -122,8 +146,18 @@ func (g *Generator) collectSchemaGraph(version string) map[string]interface{} {
 // system.tables row; the page adds a node for it from this result.
 const schemaDictionariesSQL = `
 		SELECT database, name, source, status,
+		       lifetime_min, lifetime_max,
 		       leftUTF8(last_exception, 300) AS last_exception
 		FROM system.dictionaries`
+
+// schemaIndicesSQL lists data-skipping indices per table. Definition columns
+// only, read directly in every mode: they are identical on every replica.
+// %s is the system-database filter.
+const schemaIndicesSQL = `
+		SELECT database, table, name, type, expr, granularity
+		FROM system.data_skipping_indices
+		WHERE %s
+		ORDER BY database, table, name`
 
 // schemaRefreshesSQL reads system.view_refreshes through the mode-aware table
 // reference — clusterAllReplicas in cloud — and folds the per-replica rows
@@ -184,6 +218,7 @@ func schemaGraphSummary(sg map[string]interface{}) map[string]interface{} {
 	columns, _ := sg["columns"].([]map[string]interface{})
 	dicts, _ := sg["dictionaries"].([]map[string]interface{})
 	refreshes, _ := sg["refreshes"].([]map[string]interface{})
+	indices, _ := sg["indices"].([]map[string]interface{})
 	dbs := map[string]bool{}
 	mvs := 0
 	for _, t := range tables {
@@ -202,6 +237,7 @@ func schemaGraphSummary(sg map[string]interface{}) map[string]interface{} {
 		"mvs":          mvs,
 		"refreshable":  len(refreshes),
 		"dictionaries": len(dicts),
+		"indices":      len(indices),
 	}
 }
 
@@ -272,6 +308,9 @@ const schemaGraphTail = `
   --column-key:#B71C1C;
   --column-default:#2E7D32;
   --column-type:var(--ink-muted);
+  --key-partition:#B45309;
+  --key-sampling:#0E7490;
+  --syn-kw:#6A1B9A; --syn-type:#0277BD; --syn-str:#2E7D32; --syn-num:#B45309; --syn-cmt:var(--ink-muted); --syn-hidden:#B71C1C;
   --edge:#999999;
   --edge-mv:#6A1B9A;
   --edge-dict:#0277BD;
@@ -283,6 +322,9 @@ const schemaGraphTail = `
 @media (prefers-color-scheme:dark){
   :root:where(:not([data-cui-theme="light"])){
     --shadow-color:rgba(0,0,0,.35);
+    --key-partition:#F59E0B;
+    --key-sampling:#22D3EE;
+    --syn-kw:#CE93D8; --syn-type:#4FC3F7; --syn-str:#A5D6A7; --syn-num:#FFB74D; --syn-hidden:#EF9A9A;
     --header-mt:#FCFF74;          --header-mt-text:black;
     --header-mv:#AB47BC;          --header-mv-text:white;
     --header-rmv:#EC407A;         --header-rmv-text:white;
@@ -303,6 +345,9 @@ const schemaGraphTail = `
 }
 :root[data-cui-theme="dark"]{
   --shadow-color:rgba(0,0,0,.35);
+  --key-partition:#F59E0B;
+  --key-sampling:#22D3EE;
+  --syn-kw:#CE93D8; --syn-type:#4FC3F7; --syn-str:#A5D6A7; --syn-num:#FFB74D; --syn-hidden:#EF9A9A;
   --header-mt:#FCFF74;          --header-mt-text:black;
   --header-mv:#AB47BC;          --header-mv-text:white;
   --header-rmv:#EC407A;         --header-rmv-text:white;
@@ -389,10 +434,28 @@ body{font-family:var(--click-font-regular);margin:0;padding:0;background:var(--b
 .column{display:flex;justify-content:space-between;gap:0.5rem;font-family:var(--click-font-mono);font-size:0.78rem;line-height:1.45;border-bottom:1px dotted var(--border-color)}
 .column:last-child{border-bottom:none}
 .column-name{color:var(--color)}
-.column-name.key{color:var(--column-key);font-weight:600}
+.column-name.key,.column-name.key-sorting{color:var(--column-key)}
+.column-name.key-primary{color:var(--column-key);font-weight:700}
+.column-name.key-partition{text-decoration:underline dotted var(--key-partition);text-decoration-thickness:2px;text-underline-offset:3px}
+.column-name.key-sampling{border-bottom:2px dashed var(--key-sampling)}
 .column-name.default{color:var(--column-default)}
+.legend-col{font-family:var(--click-font-mono);font-size:0.78rem;padding:0 0.15rem}
+.role-tag{display:inline-block;font-size:0.62rem;font-family:var(--click-font-mono);padding:0 0.3rem;border-radius:3px;margin-left:0.3rem;background:var(--table-header-bg);color:var(--muted);border:1px solid var(--border-color);vertical-align:middle}
+.role-tag.pk{color:var(--column-key);border-color:var(--column-key)}
+.role-tag.pt{color:var(--key-partition);border-color:var(--key-partition)}
+.role-tag.sm{color:var(--key-sampling);border-color:var(--key-sampling)}
 .column-type{color:var(--column-type);font-size:0.72rem;text-align:right;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:50%}
-.node-stats{padding:0.2rem 0.55rem;background:var(--table-header-bg);border-top:1px solid var(--border-color);border-radius:0 0 5px 5px;font-size:0.72rem;color:var(--muted);display:flex;justify-content:space-between;font-family:var(--click-font-mono)}
+.node-stats{padding:0.2rem 0.55rem;background:var(--table-header-bg);border-top:1px solid var(--border-color);border-radius:0 0 5px 5px;font-size:0.72rem;color:var(--muted);display:flex;justify-content:space-between;gap:0.5rem;flex-wrap:wrap;font-family:var(--click-font-mono)}
+.node-stats .sched{color:var(--header-rmv);font-weight:600}
+.node-stats .sched.no-jitter{text-decoration:underline dotted}
+.node-stats .life{color:var(--header-dict);font-weight:600}
+.node-stats .idx{color:var(--key-partition)}
+#sidebar pre .syn-kw{color:var(--syn-kw);font-weight:600}
+#sidebar pre .syn-type{color:var(--syn-type)}
+#sidebar pre .syn-str{color:var(--syn-str)}
+#sidebar pre .syn-num{color:var(--syn-num)}
+#sidebar pre .syn-cmt{color:var(--syn-cmt);font-style:italic}
+#sidebar pre .syn-hidden{color:var(--syn-hidden);font-weight:700}
 
 #sidebar{position:fixed;right:0;top:0;bottom:0;width:30rem;max-width:100vw;background:var(--card-background);border-left:4px solid var(--header-background);padding:1rem 1.25rem;overflow-y:auto;z-index:200;display:none;box-shadow:-6px 0 18px var(--shadow-color)}
 #sidebar.open{display:block}
@@ -457,6 +520,11 @@ body{font-family:var(--click-font-regular);margin:0;padding:0;background:var(--b
       <span class="legend-item"><span class="legend-line" style="background:var(--edge-mv)"></span>MV flow</span>
       <span class="legend-item"><span class="legend-line" style="background:var(--edge-dict)"></span>Dictionary source</span>
       <span class="legend-item"><span class="legend-line" style="background:var(--edge-distributed)"></span>Distributed shard</span>
+      <span class="legend-item" style="margin-left:.6rem"><span class="legend-col column-name key-primary">col</span>primary key</span>
+      <span class="legend-item"><span class="legend-col column-name key-sorting">col</span>sorting key</span>
+      <span class="legend-item"><span class="legend-col column-name key-partition">col</span>partition key</span>
+      <span class="legend-item"><span class="legend-col column-name key-sampling">col</span>sampling key</span>
+      <span class="legend-item"><span class="legend-col column-name default">col</span>has default</span>
     </div>
   </div>
 
@@ -560,6 +628,99 @@ function backQuoteIfNeed(s) {
 }
 function quotedFullName(db, t) { return backQuoteIfNeed(db) + '.' + backQuoteIfNeed(t); }
 
+/// The refresh schedule of a refreshable MV lives only in its DDL —
+/// system.view_refreshes has no interval column. REFRESH EVERY|AFTER <interval>
+/// [OFFSET <interval>] [RANDOMIZE FOR <interval>], read up to the clause that
+/// follows it. Works on both the server's single-line DDL and the
+/// formatQuery() form, where the clause sits on its own line.
+function parseRefresh(ddl) {
+    if (!ddl) return null;
+    const m = /\bREFRESH\s+(EVERY|AFTER)\s+([\s\S]*?)(?=\s+(?:APPEND\b|TO\b|DEPENDS\b|ENGINE\b|AS\b|SETTINGS\b|COMMENT\b|DEFINER\b|SQL\b)|\s*\(|\s*$)/i.exec(ddl);
+    if (!m) return null;
+    let rest = m[2].replace(/\s+/g, ' ').trim();
+    const out = { kind: m[1].toUpperCase(), interval: rest, offset: '', randomize: '' };
+    const r = /\s+RANDOMIZE\s+FOR\s+(.+)$/i.exec(rest);
+    if (r) { out.randomize = r[1].trim(); rest = rest.slice(0, r.index); }
+    const o = /\s+OFFSET\s+(.+)$/i.exec(rest);
+    if (o) { out.offset = o[1].trim(); rest = rest.slice(0, o.index); }
+    out.interval = rest.trim();
+    return out;
+}
+function fmtSchedule(sc) {
+    if (!sc) return '';
+    let s = sc.kind + ' ' + sc.interval;
+    if (sc.offset) s += ' OFFSET ' + sc.offset;
+    if (sc.randomize) s += ' RANDOMIZE FOR ' + sc.randomize;
+    return s;
+}
+
+/// Dictionary LIFETIME: system.dictionaries.lifetime_min/max are populated only
+/// once the dictionary has loaded (a FAILED one reads 0/0), so the DDL's
+/// LIFETIME(MIN a MAX b) / LIFETIME(n) is the fallback.
+function dictLifetime(n) {
+    const d = n.dict || {};
+    const mn = Number(d.lifetime_min) || 0, mx = Number(d.lifetime_max) || 0;
+    if (mn || mx) return { min: mn, max: mx };
+    const m = /\bLIFETIME\s*\(\s*(?:MIN\s+(\d+)\s+MAX\s+(\d+)|(\d+))\s*\)/i.exec(n.createQuery || '');
+    if (!m) return null;
+    if (m[3] != null) return { min: 0, max: Number(m[3]) };
+    return { min: Number(m[1]), max: Number(m[2]) };
+}
+function fmtLifetime(lt) {
+    if (!lt) return '';
+    if (lt.min && lt.min !== lt.max) return 'LIFETIME ' + lt.min + '–' + lt.max + 's';
+    return 'LIFETIME ' + lt.max + 's';
+}
+
+/// Key roles of a column. Independent flags: a column can be in the sorting
+/// key and the partition key at once. Older payloads carry only is_key.
+function colRoles(c) {
+    const on = v => v === 1 || v === true;
+    const roles = [];
+    if (on(c.pk)) roles.push('pk');
+    else if (on(c.sk) || (c.pk == null && on(c.is_key))) roles.push('sk');
+    if (on(c.pt)) roles.push('pt');
+    if (on(c.sm)) roles.push('sm');
+    return roles;
+}
+const ROLE_LABEL = { pk: 'PRIMARY KEY', sk: 'ORDER BY', pt: 'PARTITION BY', sm: 'SAMPLE BY' };
+function applyColRoles(el, c) {
+    const roles = colRoles(c);
+    for (const r of roles) el.classList.add({ pk: 'key-primary', sk: 'key-sorting', pt: 'key-partition', sm: 'key-sampling' }[r]);
+    if (!roles.length && (c.has_default === 1 || c.has_default === true)) el.classList.add('default');
+    if (roles.length) el.title = roles.map(r => ROLE_LABEL[r]).join(', ');
+    return roles;
+}
+
+/// Syntax highlighting for the CREATE statement in the sidebar: a small
+/// tokenizer that emits <span>s by class — keywords, types, strings, numbers,
+/// comments, and the '[HIDDEN]' credential token. Text goes through
+/// textContent only; nothing customer-controlled reaches innerHTML.
+const SQL_KEYWORDS = new Set(('CREATE TABLE MATERIALIZED VIEW DICTIONARY DATABASE IF NOT EXISTS OR REPLACE TEMPORARY ON CLUSTER ENGINE ORDER BY PRIMARY KEY PARTITION SAMPLE SETTINGS TTL AS SELECT FROM WHERE GROUP HAVING JOIN INNER LEFT RIGHT FULL OUTER CROSS ANY ALL ASOF USING LIMIT OFFSET UNION DISTINCT WITH TO APPEND REFRESH EVERY AFTER RANDOMIZE FOR DEPENDS INDEX TYPE GRANULARITY PROJECTION CODEC DEFAULT ALIAS EPHEMERAL COMMENT LIFETIME MIN MAX LAYOUT SOURCE RANGE DEFINER SQL SECURITY INVOKER NONE NULL AND IN LIKE ILIKE BETWEEN CASE WHEN THEN ELSE END INTERVAL ASC DESC NULLS FIRST LAST ARRAY GLOBAL PREWHERE FINAL ONLY DELETE WHERE TRUE FALSE TABLES').split(' '));
+const SQL_TYPES = /^(U?Int(8|16|32|64|128|256)|Float(32|64)|BFloat16|Decimal(32|64|128|256)?|String|FixedString|Date(32)?|DateTime(64)?|Time(64)?|UUID|IPv[46]|Bool|Boolean|Enum(8|16)?|LowCardinality|Nullable|Array|Map|Tuple|Nested|JSON|Object|Variant|Dynamic|Nothing|Interval\w*|AggregateFunction|SimpleAggregateFunction|Point|Ring|Polygon|MultiPolygon|LineString|MultiLineString|QBit)$/;
+const SQL_TOKEN = /(--[^\n]*)|(\/\*[\s\S]*?\*\/)|('(?:\\.|''|[^'\\])*'?)|(` + "`" + `[^` + "`" + `]*` + "`" + `?)|(\b\d+(?:\.\d+)?(?:e[+-]?\d+)?\b)|([A-Za-z_][A-Za-z0-9_]*)|(\s+)|(.)/g;
+function highlightSQL(pre, text) {
+    pre.textContent = '';
+    SQL_TOKEN.lastIndex = 0;
+    let m;
+    while ((m = SQL_TOKEN.exec(text)) !== null) {
+        const tok = m[0];
+        let cls = '';
+        if (m[1] || m[2]) cls = 'syn-cmt';
+        else if (m[3]) cls = tok.indexOf('[HIDDEN]') >= 0 ? 'syn-hidden' : 'syn-str';
+        else if (m[5]) cls = 'syn-num';
+        else if (m[6]) cls = SQL_KEYWORDS.has(tok.toUpperCase()) ? 'syn-kw' : (SQL_TYPES.test(tok) ? 'syn-type' : '');
+        if (cls) {
+            const span = document.createElement('span');
+            span.className = cls;
+            span.textContent = tok;
+            pre.appendChild(span);
+        } else {
+            pre.appendChild(document.createTextNode(tok));
+        }
+    }
+}
+
 function engineKind(engine) {
     if (!engine) return 'other';
     if (engine === 'Dictionary') return 'dict';
@@ -589,6 +750,13 @@ function loadFromBundle() {
     const columns = d.columns || [];
     const dicts = d.dictionaries || [];
     const refreshes = d.refreshes || [];
+    const indices = d.indices || [];
+    state.indicesByTable = new Map();
+    for (const ix of indices) {
+        const k = tableKey(ix.database, ix.table);
+        if (!state.indicesByTable.has(k)) state.indicesByTable.set(k, []);
+        state.indicesByTable.get(k).push(ix);
+    }
 
     state.tables = tables;
     state.columnsByTable = new Map();
@@ -672,6 +840,8 @@ function buildGraph() {
             columns: state.columnsByTable.get(key) || [],
             dict: state.dictSources.get(key),
             refresh: state.refreshes.get(key),
+            indices: (state.indicesByTable && state.indicesByTable.get(key)) || [],
+            schedule: parseRefresh(t.create_table_query),
             x: 0, y: 0, w: 0, h: 0,
             depth: 0,
         };
@@ -1054,6 +1224,7 @@ function render() {
         for (const n of state.nodes.values()) {
             if (n.displayName.toLowerCase().includes(search)) filtered.add(n.key);
             else if (n.columns.some(c => c.name.toLowerCase().includes(search))) filtered.add(n.key);
+            else if (n.indices.some(ix => String(ix.name).toLowerCase().includes(search))) filtered.add(n.key);
         }
     }
 
@@ -1112,8 +1283,7 @@ function render() {
                 row.className = 'column';
                 const cn = document.createElement('span');
                 cn.className = 'column-name';
-                if (c.is_key === 1 || c.is_key === true) cn.classList.add('key');
-                else if (c.has_default === 1 || c.has_default === true) cn.classList.add('default');
+                applyColRoles(cn, c);
                 cn.textContent = c.name;
                 const ct = document.createElement('span');
                 ct.className = 'column-type';
@@ -1134,15 +1304,37 @@ function render() {
             el.appendChild(cols);
         }
 
+        /// The grey ribbon: rows and size for tables that hold data; the refresh
+        /// schedule for a refreshable MV (34 of them all on EVERY 2 MINUTE with no
+        /// RANDOMIZE is a finding you want to read off the picture); LIFETIME for
+        /// a dictionary; the number of skip indices.
+        const ribbon = [];
         if (n.totalRows && Number(n.totalRows) > 0) {
+            ribbon.push(['', fmtRows(n.totalRows) + ' rows']);
+            if (fmtBytes(n.totalBytes)) ribbon.push(['', fmtBytes(n.totalBytes)]);
+        }
+        if (n.kind === 'rmv' && n.schedule) {
+            const cls = 'sched' + (n.schedule.randomize ? '' : ' no-jitter');
+            ribbon.push([cls, fmtSchedule(n.schedule), n.schedule.randomize ? '' : 'no RANDOMIZE FOR — every copy of this schedule fires at the same instant']);
+        }
+        if (n.kind === 'dict') {
+            const lt = fmtLifetime(dictLifetime(n));
+            if (lt) ribbon.push(['life', lt]);
+        }
+        if (n.indices && n.indices.length) {
+            ribbon.push(['idx', n.indices.length + ' skip ' + (n.indices.length === 1 ? 'index' : 'indices'),
+                n.indices.map(ix => ix.name + ' ' + ix.type + '(' + ix.expr + ')').join('\n')]);
+        }
+        if (ribbon.length) {
             const stats = document.createElement('div');
             stats.className = 'node-stats';
-            const r = document.createElement('span');
-            r.textContent = fmtRows(n.totalRows) + ' rows';
-            const b = document.createElement('span');
-            b.textContent = fmtBytes(n.totalBytes);
-            stats.appendChild(r);
-            stats.appendChild(b);
+            for (const [cls, text, title] of ribbon) {
+                const sp = document.createElement('span');
+                if (cls) sp.className = cls;
+                sp.textContent = text;
+                if (title) sp.title = title;
+                stats.appendChild(sp);
+            }
             el.appendChild(stats);
         }
 
@@ -1333,6 +1525,11 @@ function showSidebar(key) {
     if (n.totalRows && Number(n.totalRows) > 0) rows.push(['Rows', fmtRows(n.totalRows)]);
     if (n.totalBytes && Number(n.totalBytes) > 0) rows.push(['Bytes', fmtBytes(n.totalBytes)]);
     if (n.comment) rows.push(['Comment', n.comment]);
+    if (n.schedule) {
+        rows.push(['Refresh schedule', n.schedule.kind + ' ' + n.schedule.interval]);
+        if (n.schedule.offset) rows.push(['Refresh offset', n.schedule.offset]);
+        rows.push(['Refresh jitter', n.schedule.randomize ? 'RANDOMIZE FOR ' + n.schedule.randomize : 'none — fires exactly on schedule']);
+    }
     if (n.refresh) {
         rows.push(['Refresh status', n.refresh.status]);
         if (n.refresh.last_success_time) rows.push(['Last refresh', n.refresh.last_success_time]);
@@ -1340,6 +1537,8 @@ function showSidebar(key) {
         if (n.refresh.exception) rows.push(['Refresh error', n.refresh.exception]);
     }
     if (n.dict) {
+        const lt = dictLifetime(n);
+        if (lt) rows.push(['Dictionary lifetime', lt.min && lt.min !== lt.max ? lt.min + '–' + lt.max + ' s (random within the range)' : lt.max + ' s']);
         if (n.dict.status) rows.push(['Dictionary status', n.dict.status]);
         if (n.dict.source) rows.push(['Dictionary source', n.dict.source]);
         if (n.dict.last_exception) rows.push(['Dictionary error', n.dict.last_exception]);
@@ -1361,8 +1560,17 @@ function showSidebar(key) {
         for (const col of n.columns) {
             const tr = document.createElement('tr');
             const td1 = document.createElement('td');
-            td1.textContent = col.name;
-            if (col.is_key === 1 || col.is_key === true) td1.style.color = 'var(--column-key)';
+            const nm = document.createElement('span');
+            nm.className = 'column-name';
+            nm.textContent = col.name;
+            const roles = applyColRoles(nm, col);
+            td1.appendChild(nm);
+            for (const r of roles) {
+                const tag = document.createElement('span');
+                tag.className = 'role-tag ' + r;
+                tag.textContent = ROLE_LABEL[r];
+                td1.appendChild(tag);
+            }
             const td2 = document.createElement('td');
             td2.textContent = col.type;
             td2.style.color = 'var(--muted)';
@@ -1407,14 +1615,33 @@ function showSidebar(key) {
         c.appendChild(wrap);
     }
 
+    if (n.indices && n.indices.length) {
+        const h = document.createElement('h3');
+        h.textContent = 'Skip indices (' + n.indices.length + ')';
+        c.appendChild(h);
+        const it = document.createElement('table');
+        for (const ix of n.indices) {
+            const tr = document.createElement('tr');
+            const td1 = document.createElement('td'); td1.textContent = ix.name;
+            const td2 = document.createElement('td');
+            td2.textContent = ix.type + '(' + ix.expr + ')  GRANULARITY ' + ix.granularity;
+            td2.style.whiteSpace = 'normal';
+            tr.appendChild(td1); tr.appendChild(td2);
+            it.appendChild(tr);
+        }
+        c.appendChild(it);
+    }
+
     if (n.createQuery) {
         const h = document.createElement('h3');
         h.textContent = 'CREATE statement';
         c.appendChild(h);
         const pre = document.createElement('pre');
-        /// Credentials in engine arguments read '[HIDDEN]': masked by the server on
-        /// >= 23.x, and by the collector's redactor for anything older or missed.
-        pre.textContent = n.createQuery;
+        /// Pretty-printed by the server (formatQueryOrNull, one clause per line)
+        /// when the version has it; highlighted here. Credentials in engine
+        /// arguments read '[HIDDEN]': masked by the server on >= 23.x, and by
+        /// the collector's redactor for anything older or missed.
+        highlightSQL(pre, n.createQuery);
         c.appendChild(pre);
     }
 
