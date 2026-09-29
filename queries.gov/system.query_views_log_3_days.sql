@@ -26,16 +26,17 @@
 SELECT
     time,
     -- view_name / view_target are 'db.table' as the server prints them
-    -- (getFullTableName): the table half is backquoted when it needs to be, and
-    -- an MV declared with an ENGINE writes to db.`.inner_id.<uuid>` — a name with
-    -- dots inside it. Split at the FIRST dot only (an unquoted database name
-    -- cannot contain one) and strip the backticks, so each hashed half equals
-    -- the hashed database / name in system.tables and the mapping CSV reverses
-    -- it. splitByChar('.', …)[2] gave a bare backtick for every inner target.
-    hex(SHA256(concat(trim(BOTH '`' FROM substring(view_name, 1, position(view_name, '.') - 1)), '%salt%'))) AS view_database,
-    hex(SHA256(concat(trim(BOTH '`' FROM substring(view_name, position(view_name, '.') + 1)), '%salt%')))    AS view_table,
-    if(view_target = '', '', hex(SHA256(concat(trim(BOTH '`' FROM substring(view_target, 1, position(view_target, '.') - 1)), '%salt%')))) AS target_database,
-    if(view_target = '', '', hex(SHA256(concat(trim(BOTH '`' FROM substring(view_target, position(view_target, '.') + 1)), '%salt%'))))    AS target_table,
+    -- (getFullTableName): either half is backquoted when it needs to be — a
+    -- database called a.b prints as `a.b`.mv, an MV declared with an ENGINE
+    -- writes to db.`.inner_id.<uuid>` — so a plain split on '.' is wrong in both
+    -- directions. The separator is the first '.' when the name starts bare, and
+    -- the '.' right after the closing backtick when it starts quoted; then the
+    -- backticks are stripped, so each hashed half equals the hashed database /
+    -- name in system.tables and the mapping CSV reverses it.
+    hex(SHA256(concat(trim(BOTH '`' FROM substring(view_name, 1, if(startsWith(view_name, '`'), position(view_name, '`.'), position(view_name, '.') - 1))), '%salt%'))) AS view_database,
+    hex(SHA256(concat(trim(BOTH '`' FROM substring(view_name, if(startsWith(view_name, '`'), position(view_name, '`.') + 2, position(view_name, '.') + 1))), '%salt%')))    AS view_table,
+    if(view_target = '', '', hex(SHA256(concat(trim(BOTH '`' FROM substring(view_target, 1, if(startsWith(view_target, '`'), position(view_target, '`.'), position(view_target, '.') - 1))), '%salt%')))) AS target_database,
+    if(view_target = '', '', hex(SHA256(concat(trim(BOTH '`' FROM substring(view_target, if(startsWith(view_target, '`'), position(view_target, '`.') + 2, position(view_target, '.') + 1))), '%salt%'))))    AS target_table,
     view_type,
     status,
     exception_code,
