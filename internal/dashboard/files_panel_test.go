@@ -23,8 +23,9 @@ func TestCollectBundleFiles(t *testing.T) {
 	mk("host_info.json", 512)
 	mk("logs/clickhouse-server.log", 3145728)
 	mk("configuration/20-keeper.xml", 100)
-	mk("dashboard.html", 999) // must not list itself
-	mk(".DS_Store", 6148)     // OS turd, not an artifact
+	mk("dashboard.html", 999)    // must not list itself
+	mk("schema_graph.html", 555) // its own graph page, opened from the Schema tab
+	mk(".DS_Store", 6148)        // OS turd, not an artifact
 
 	got := collectBundleFiles(dir)
 	names := make([]string, len(got))

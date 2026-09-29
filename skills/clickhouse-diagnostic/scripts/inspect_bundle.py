@@ -807,7 +807,7 @@ def analyse(base: str):
             "max_ms": v["max_ms"],
         } for k, v in sorted(views.items(), key=lambda kv: -kv[1]["executions"])[:10]]
 
-        # ---- HC-7.6 one finding per culprit
+        # ---- HC-7.7 one finding per culprit
         for c, g in sorted(groups.items(), key=lambda kv: -kv[1]["failures"])[:3]:
             code_src = g["self_codes"] if g["self_codes"] is not None else g["codes"]
             codes = ", ".join(f"{ERROR_NAMES.get(x, x)}({x})={n}" for x, n in code_src.most_common(3))
@@ -822,7 +822,7 @@ def analyse(base: str):
             add(sev, "inserts",
                 f"materialized view `{c}` failed {g['failures']} push(es) — the base part committed and the "
                 "target did not",
-                f"{codes}; named in the exception text; {mode}", "HC-7.6/P-36")
+                f"{codes}; named in the exception text; {mode}", "HC-7.7/P-36")
         if unattributed:
             total = sum(v["failures"] for _, v in unattributed)
             all_codes = Counter()
@@ -833,15 +833,15 @@ def analyse(base: str):
                 k, v = unattributed[0]
                 add("critical" if v["failures"] >= 100 else "warning", "inserts",
                     f"materialized view `{k}` failed {v['failures']} push(es) — the base part committed and the "
-                    "target did not", f"{codes}; the only failing view (no exception text to confirm)", "HC-7.6/P-36")
+                    "target did not", f"{codes}; the only failing view (no exception text to confirm)", "HC-7.7/P-36")
             else:
                 add("critical" if max(v["failures"] for _, v in unattributed) >= 100 else "warning", "inserts",
                     f"{len(unattributed)} materialized view(s) carry failed pushes, up to {max(v['failures'] for _, v in unattributed)} each "
                     "— the base parts committed and the targets did not; attribution unavailable (no exception "
                     "text names the view — gov, or a message without 'while pushing to view')",
-                    f"{codes}; views: " + ", ".join(k for k, _ in unattributed[:5]), "HC-7.6/P-36")
+                    f"{codes}; views: " + ", ".join(k for k, _ in unattributed[:5]), "HC-7.7/P-36")
 
-        # ---- HC-7.7 a view that STOPPED writing, vs one that never wrote.
+        # ---- HC-7.8 a view that STOPPED writing, vs one that never wrote.
         # Ordered: the last hour that wrote, then the run of LATER hours that read
         # rows and wrote none. The final bucket of the window is still filling
         # and is left out. The run must be longer than the view's own largest
@@ -868,13 +868,13 @@ def analyse(base: str):
                 f"through {trailing[-1]} read rows and wrote none",
                 f"not a filtering MV — it wrote in {nwrote} hour(s) of the same window and its longest earlier "
                 f"quiet gap was {max_gap} hour(s); check as_select and any table it JOINs",
-                "HC-7.7/P-35")
+                "HC-7.8/P-35")
         never = [k for k, v in views.items() if v["written"] == 0 and v["read"] > 0]
         if never:
             add("info", "inserts",
                 f"{len(never)} materialized view(s) read rows but never wrote one in the window",
                 "expected for a filtering MV — verify against system.tables.as_select before treating as a fault",
-                "HC-7.7/P-35")
+                "HC-7.8/P-35")
 
         # ---- HC-5.9 per-view memory step change: the hourly buckets split in
         # half by count, first half against second.
@@ -912,7 +912,7 @@ def analyse(base: str):
         if sum(t["failed_bg"].values()) > 50:
             flags.append("bg failures")
         # Threshold like every other flag: one failed push an hour for three days
-        # is a finding (HC-7.6 reports it), not 72 incident hours that push a
+        # is a finding (HC-7.7 reports it), not 72 incident hours that push a
         # real TOO_MANY_PARTS hour out of the 48-row table.
         if t.get("mv_failed", 0) >= 10:
             flags.append(f"mv failures {t['mv_failed']}")

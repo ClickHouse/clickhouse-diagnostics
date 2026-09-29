@@ -126,11 +126,16 @@ help:
 	@echo "  install   - Install binary to GOPATH/bin"
 	@echo "  help      - Show this help message"
 
-# Render the dashboard from an anonymised, incident-shaped fixture (a Keeper
-# outage on a shared-storage cluster) so the Keeper Health panel and the
-# Keeper alerts can be reviewed without a live server. Writes
-# bin/keeper_incident_preview.html (Chart.js from CDN).
+# Render three preview pages from anonymised fixtures, so panels can be
+# reviewed without a live server: the Keeper incident dashboard (a Keeper
+# outage on a shared-storage cluster — the Keeper Health panel and alerts),
+# the alert-collapse cases (stack traces, over-cap instances, failed and
+# not-applicable rules), and the schema graph from a small fixture pipeline.
+# Writes bin/keeper_incident_preview.html and bin/alerts_preview.html
+# (Chart.js from CDN) and bin/schema_graph_preview.html (no network at all).
 .PHONY: dashboard-preview
 dashboard-preview:
 	mkdir -p bin
-	DASHBOARD_PREVIEW_DIR=$(CURDIR)/bin go test ./internal/dashboard -run TestBuildHTML_KeeperIncidentPreview -count=1 >/dev/null && echo "bin/keeper_incident_preview.html"
+	DASHBOARD_PREVIEW_DIR=$(CURDIR)/bin go test ./internal/dashboard -run 'TestBuildHTML_(KeeperIncidentPreview|AlertsPreview)|TestBuildSchemaGraphHTML_Preview' -count=1 >/dev/null \
+	  && echo "bin/keeper_incident_preview.html" && echo "bin/alerts_preview.html" \
+	  && echo "bin/schema_graph_preview.html (also reachable from the preview dashboard's Schema tab)"

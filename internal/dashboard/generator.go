@@ -366,6 +366,21 @@ func (g *Generator) hasTable(table string) bool {
 func (g *Generator) Generate(outputDir string, alertResults []alert.Result) error {
 	fmt.Println("\nGenerating HTML dashboard...")
 	payload := g.collect()
+	// The schema graph is a second, self-contained page next to dashboard.html,
+	// loaded on demand from the Schema tab (see schema_graph.go for why it is
+	// not inlined). Written first, and the payload points at it only once it
+	// exists: a dashboard.html copied out of the bundle then shows a note where
+	// the tab would be, not a broken frame.
+	version, _ := payload["version"].(string)
+	if sg := g.collectSchemaGraph(version); sg != nil {
+		dst := filepath.Join(outputDir, schemaGraphFile)
+		if err := os.WriteFile(dst, []byte(buildSchemaGraphHTML(sg)), 0640); err != nil {
+			fmt.Printf("  [dashboard] schema graph not written: %v\n", err)
+		} else {
+			payload["schema_graph"] = schemaGraphSummary(sg)
+			fmt.Printf("Schema graph saved: %s\n", dst)
+		}
+	}
 	// Needs outputDir, so it happens here rather than in collect().
 	payload["bundle_files"] = collectBundleFiles(outputDir)
 	if alertResults == nil {
@@ -563,8 +578,9 @@ func collectBundleFiles(outputDir string) []map[string]interface{} {
 			return nil
 		}
 		rel = filepath.ToSlash(rel)
-		// The dashboard does not list itself, and OS turds are not artifacts.
-		if rel == "dashboard.html" || strings.HasPrefix(info.Name(), ".") {
+		// The dashboard does not list itself — nor its schema graph page, which
+		// it opens from its own tab — and OS turds are not artifacts.
+		if rel == "dashboard.html" || rel == schemaGraphFile || strings.HasPrefix(info.Name(), ".") {
 			return nil
 		}
 		dir := path0(rel)
@@ -965,6 +981,10 @@ func (g *Generator) collect() map[string]interface{} {
 	// ── Dictionaries ──────────────────────────────────────────────────────────
 
 	p["dictionaries"] = g.safeQuery("dictionaries", g.dictionariesSQL())
+	// Review finding: system.dictionaries.source (and last_exception, which can
+	// quote a connection string) reached this panel unredacted on servers below
+	// 23.x. Same redactor as the JSONL collectors and the schema graph.
+	redactDictionaryPanel(p["dictionaries"].([]map[string]interface{}))
 
 	// ── Crash log ─────────────────────────────────────────────────────────────
 
@@ -1365,33 +1385,13 @@ func buildHTML(data map[string]interface{}) string {
 
 // htmlTemplate is the complete self-contained dashboard page.
 // Chart.js is loaded from CDN; all ClickHouse data is embedded inline.
-const htmlTemplate = `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>ClickHouse Diagnostic Dashboard</title>
-<script>/* stamp the saved theme before first paint so the page never flashes */
-try{var _t=localStorage.getItem("chdiag-theme");if(_t)document.documentElement.setAttribute("data-cui-theme",_t);}catch(e){}
-</script>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
-<style>
-/* ─────────────────────────────────────────────────────────────────────────────
-   Click UI token layer.
-
-   Click UI ships as a React library (@clickhouse/click-ui + ClickUIProvider),
-   which this report cannot use: it is one self-contained HTML file opened
-   offline from a tarball, with no build step. The design system's documented
-   escape hatch for exactly that case is its token layer — CSS custom
-   properties, themed via data-cui-theme on <html>. So the values below are
-   vendored verbatim from ClickHouse/click-ui tokens/themes/{primitives,light,
-   dark}.json; every hex is a real token, none is eyeballed.
-
-   Surfaces are chosen so charts sit on #ffffff (light) / #1F1F1C (dark) — the
-   two surfaces the categorical palette in the script below was validated
-   against. Do not repoint --surface-card without re-running that validation.
-   ───────────────────────────────────────────────────────────────────────── */
-:root{
+// themeTokensCSS is the Click UI token layer — palette primitives, the light and
+// dark semantic roles, type, spacing, radii and shadows — declared once and
+// shared by dashboard.html and schema_graph.html so the two pages can never
+// drift apart in theme. Both dark scopes live here: the OS preference (media
+// query, zero specificity via :where()) and the in-page toggle
+// (data-cui-theme). See theme_test.go for what must survive an edit.
+const themeTokensCSS = `:root{
   color-scheme:light;
   /* primitives actually referenced */
   --click-palette-neutral-0:#ffffff;
@@ -1510,7 +1510,45 @@ try{var _t=localStorage.getItem("chdiag-theme");if(_t)document.documentElement.s
   --click-shadow-1:0 4px 6px -1px rgba(0,0,0,.5), 0 2px 4px -1px rgba(0,0,0,.4);
   --click-shadow-5:0 2px 2px 0 rgba(0,0,0,.3);
 }
+`
 
+// htmlTemplate is the complete self-contained dashboard page, assembled from
+// its head, the shared token layer and the body so the tokens are a single
+// source of truth (see themeTokensCSS).
+var htmlTemplate = htmlTemplateHead + themeTokensCSS + htmlTemplateTail
+
+const htmlTemplateHead = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ClickHouse Diagnostic Dashboard</title>
+<script>/* stamp the saved theme before first paint so the page never flashes */
+try{var _t=localStorage.getItem("chdiag-theme");if(_t)document.documentElement.setAttribute("data-cui-theme",_t);}catch(e){}
+/* same for the sidebar: a saved "collapsed" applies before layout, and a
+   narrow viewport starts collapsed unless the reader chose otherwise */
+try{var _n=localStorage.getItem("chdiag-nav");if(_n==="collapsed"||(!_n&&window.innerWidth<900))document.documentElement.classList.add("nav-collapsed");}catch(e){}
+</script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+<style>
+/* ─────────────────────────────────────────────────────────────────────────────
+   Click UI token layer.
+
+   Click UI ships as a React library (@clickhouse/click-ui + ClickUIProvider),
+   which this report cannot use: it is one self-contained HTML file opened
+   offline from a tarball, with no build step. The design system's documented
+   escape hatch for exactly that case is its token layer — CSS custom
+   properties, themed via data-cui-theme on <html>. So the values below are
+   vendored verbatim from ClickHouse/click-ui tokens/themes/{primitives,light,
+   dark}.json; every hex is a real token, none is eyeballed.
+
+   Surfaces are chosen so charts sit on #ffffff (light) / #1F1F1C (dark) — the
+   two surfaces the categorical palette in the script below was validated
+   against. Do not repoint --surface-card without re-running that validation.
+   ───────────────────────────────────────────────────────────────────────── */
+`
+
+const htmlTemplateTail = `
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:var(--click-font-regular);background:var(--surface-page);color:var(--ink);font-size:var(--click-font-size-2);line-height:var(--click-line-height-1)}
 /* Header and nav stick as ONE band. They used to stick separately, with the
@@ -1522,19 +1560,56 @@ body{font-family:var(--click-font-regular);background:var(--surface-page);color:
    hardcodes this height either. */
 .topbar{position:sticky;top:0;z-index:100}
 header{background:var(--header-bg);color:var(--header-ink);padding:var(--click-space-3) var(--click-space-6);display:flex;align-items:center;gap:var(--click-space-3)}
+/* Brand block: the product name on the first line, the page title as a
+   smaller second line beneath it, so the header reads as one lockup. */
+header .brand{display:flex;flex-direction:column;line-height:1.15}
 header .logo{font-size:var(--click-font-size-5);font-weight:var(--click-font-weight-4);color:var(--header-logo);letter-spacing:-.5px}
-header h1{font-size:var(--click-font-size-4);font-weight:var(--click-font-weight-3);line-height:1.3}
-header .meta{margin-left:auto;text-align:right;font-size:var(--click-font-size-1);opacity:.75;line-height:var(--click-line-height-2)}
+header h1{font-size:var(--click-font-size-1);font-weight:var(--click-font-weight-2);opacity:.8;letter-spacing:.2px}
+header .meta{margin-left:auto;text-align:right;font-size:var(--click-font-size-1);color:rgba(255,255,255,.75);line-height:var(--click-line-height-2)}
+header .meta .badge{margin:0 var(--click-space-1) 0 0;vertical-align:1px}
 #theme-toggle{margin-left:var(--click-space-4);background:transparent;color:var(--header-ink);border:var(--click-border-width-1) solid rgba(255,255,255,.25);border-radius:var(--click-radii-full);padding:var(--click-space-1) var(--click-space-3);font:inherit;font-size:var(--click-font-size-1);cursor:pointer;white-space:nowrap;transition:background var(--click-transition-smooth)}
 #theme-toggle:hover{background:rgba(255,255,255,.12)}
-nav{background:var(--surface-card);border-bottom:var(--click-border-width-1) solid var(--stroke);padding:0 var(--click-space-6);display:flex;overflow-x:auto}
-nav a{padding:var(--click-space-3) var(--click-space-4);color:var(--ink-muted);text-decoration:none;font-size:var(--click-font-size-1);font-weight:var(--click-font-weight-2);white-space:nowrap;border-bottom:2px solid transparent;display:block}
-nav a:hover,nav a.active{color:var(--ink);border-bottom-color:var(--ink)}
+/* Section navigation is a fixed sidebar on the left, under the sticky
+   header, with an arrow in the header to hide and show it. It used to be a
+   horizontal strip under the header; with 22 sections that overflowed the
+   viewport at ordinary widths and the overflow scrolled sideways, so the
+   sections past the edge were effectively unreachable. A vertical list
+   scales with the section count. --nav-w is the one width everything is
+   offset by; when collapsed the sidebar slides off and <main> takes the
+   space back. The state lives on <html> (class nav-collapsed) so the
+   bootstrap script in <head> can stamp it before first paint. */
+:root{--nav-w:180px}
+#nav-toggle{display:inline-flex;align-items:center;gap:var(--click-space-2);background:transparent;color:var(--header-ink);border:var(--click-border-width-1) solid rgba(255,255,255,.25);border-radius:var(--click-radii-full);padding:var(--click-space-1) var(--click-space-2);font:inherit;font-size:var(--click-font-size-1);cursor:pointer;white-space:nowrap;flex:none;transition:background var(--click-transition-smooth)}
+#nav-toggle:hover{background:rgba(255,255,255,.12)}
+#nav-toggle svg{width:18px;height:18px;flex:none;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;transition:transform .2s ease}
+/* one chevron, pointing at the sidebar's edge: left while shown (hide), right while hidden (show) */
+html.nav-collapsed #nav-toggle svg{transform:scaleX(-1)}
+/* the current section's name — redundant next to a visible sidebar, the
+   "you are here" once the sidebar is hidden */
+#nav-current{display:none;max-width:14em;overflow:hidden;text-overflow:ellipsis;padding-right:var(--click-space-1)}
+html.nav-collapsed #nav-current:not(:empty){display:block}
+nav{position:fixed;top:var(--topbar-h,74px);left:0;bottom:0;width:var(--nav-w);z-index:90;background:var(--surface-card);border-right:var(--click-border-width-1) solid var(--stroke);display:flex;flex-direction:column;overflow-y:auto;padding:var(--click-space-2) 0 var(--click-space-4);transition:transform .2s ease,visibility .2s}
+html.nav-collapsed nav{transform:translateX(-100%);visibility:hidden}
+.nav-head{padding:var(--click-space-2) var(--click-space-5);font-size:var(--click-font-size-0);font-weight:var(--click-font-weight-3);color:var(--ink-muted);text-transform:uppercase;letter-spacing:.5px}
+nav a{padding:var(--click-space-2) var(--click-space-5);color:var(--ink-muted);text-decoration:none;font-size:var(--click-font-size-1);font-weight:var(--click-font-weight-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border-left:3px solid transparent;display:block}
+nav a:hover{color:var(--ink);background:var(--surface-sunken)}
+nav a:focus-visible{outline:2px solid var(--status-info);outline-offset:-2px}
+/* The section you are in: accent bar + weight, so it reads as state rather
+   than as the link the pointer happens to be over. */
+nav a.active{color:var(--ink);border-left-color:var(--status-info);font-weight:var(--click-font-weight-3)}
+/* Below 900px the sidebar would leave too little room for the charts, so
+   when shown it overlays the content instead of pushing it, and picking a
+   section hides it again (see the toggle script). */
+@media (max-width:900px){nav{box-shadow:var(--click-shadow-5);z-index:95}}
+@media (prefers-reduced-motion:reduce){nav,main,#nav-toggle svg{transition:none}}
+@media print{nav,#nav-toggle{display:none}html:not(.nav-collapsed) main{padding-left:var(--click-space-5);max-width:1600px}}
 .badge{display:inline-block;padding:2px var(--click-space-2);border-radius:var(--click-radii-full);font-size:var(--click-font-size-0);font-weight:var(--click-font-weight-3);text-transform:uppercase;letter-spacing:.5px;margin-top:2px}
 .badge-cloud{background:var(--status-info);color:#fff}
 .badge-onprem{background:var(--status-good);color:#fff}
 .badge-gov{background:#8800CC;color:#fff}
-main{max-width:1600px;margin:0 auto;padding:var(--click-space-5) var(--click-space-5) var(--click-space-7)}
+main{max-width:1600px;margin:0 auto;padding:var(--click-space-5) var(--click-space-5) var(--click-space-7);transition:padding-left .2s ease}
+html:not(.nav-collapsed) main{padding-left:calc(var(--nav-w) + var(--click-space-5));max-width:calc(1600px + var(--nav-w))}
+@media (max-width:900px){html:not(.nav-collapsed) main{padding-left:var(--click-space-5);max-width:1600px}}
 section{margin-bottom:var(--click-space-6);scroll-margin-top:calc(var(--topbar-h, 124px) + var(--click-space-2))}
 section h2{font-size:var(--click-font-size-3);font-weight:var(--click-font-weight-3);color:var(--ink);margin-bottom:var(--click-space-3);padding-bottom:var(--click-space-2);border-bottom:var(--click-border-width-1) solid var(--stroke);display:flex;align-items:center;gap:var(--click-space-2)}
 .stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(155px,1fr));gap:var(--click-space-3);margin-bottom:var(--click-space-5)}
@@ -1574,6 +1649,11 @@ table.dt a:hover{text-decoration:underline}
 .pagination button{padding:var(--click-space-1) var(--click-space-3);border:var(--click-border-width-1) solid var(--stroke);border-radius:var(--click-radii-1);background:var(--surface-card);color:var(--ink);cursor:pointer;font:inherit;font-size:var(--click-font-size-1)}
 .pagination button:hover{background:var(--surface-hover)}
 .pagination .cur{font-weight:var(--click-font-weight-3);color:var(--ink)}
+/* schema graph tab */
+.schema-actions button{padding:var(--click-space-2) var(--click-space-4);border:var(--click-border-width-1) solid var(--stroke);border-radius:var(--click-radii-1);background:var(--click-global-color-accent-default);color:var(--surface-card);cursor:pointer;font:inherit;font-size:var(--click-font-size-1);font-weight:var(--click-font-weight-3)}
+.schema-actions button:hover{opacity:.85}
+.schema-actions a{color:var(--link);font-size:var(--click-font-size-1)}
+#schema-frame{width:100%;height:85vh;border:var(--click-border-width-1) solid var(--stroke);border-radius:var(--click-radii-2);background:var(--surface-card);display:block}
 /* subsection title */
 #tbl-host-tunables td:last-child,#tbl-host-os td:last-child{white-space:normal;max-width:38ch}
 #tbl-host-procs td:last-child{white-space:normal;max-width:60ch;font-family:var(--click-font-mono);font-size:var(--click-font-size-0)}
@@ -1603,6 +1683,19 @@ footer{text-align:center;color:var(--ink-muted);font-size:var(--click-font-size-
 .alert-messages{padding-left:18px;margin:0}
 .alert-messages li{font-size:var(--click-font-size-1);color:var(--ink);margin:3px 0;font-family:var(--click-font-mono);word-break:break-word;white-space:pre-wrap}
 .alert-err-msg{font-size:var(--click-font-size-1);color:var(--ink-muted);margin-top:var(--click-space-1);font-style:italic}
+/* Disclosures inside an alert. A ClickHouse exception carries its stack trace
+   inline — a measured one was 1764 chars over 15 lines, of which 216 were the
+   message — and a rule may return dozens of rows, so the verbose part sits
+   behind a <details> and the alert list stays scannable. */
+.alert-more{margin:2px 0 0}
+.alert-more>summary{cursor:pointer;color:var(--ink-muted);font-size:var(--click-font-size-0);font-family:var(--click-font-regular);font-style:normal;list-style:none;display:inline-flex;align-items:center;gap:4px;user-select:none}
+.alert-more>summary::-webkit-details-marker{display:none}
+.alert-more>summary::before{content:'\25B8';display:inline-block;transition:transform .12s ease}
+.alert-more[open]>summary::before{transform:rotate(90deg)}
+.alert-more>summary:hover{color:var(--ink);text-decoration:underline}
+.alert-more>summary:focus-visible{outline:2px solid var(--status-info);outline-offset:2px;border-radius:var(--click-radii-1)}
+.alert-full{background:var(--surface-sunken);border:var(--click-border-width-1) solid var(--stroke);border-radius:var(--click-radii-1);padding:var(--click-space-2);margin:var(--click-space-1) 0 var(--click-space-2);font-family:var(--click-font-mono);font-size:var(--click-font-size-0);line-height:var(--click-line-height-1);color:var(--ink-muted);white-space:pre-wrap;word-break:break-word;max-height:360px;overflow:auto}
+.alert-desc-rest{margin-top:var(--click-space-1)}
 .alert-tags{display:flex;gap:var(--click-space-1);flex-wrap:wrap;margin-top:var(--click-space-2)}
 .alert-tag{background:var(--surface-sunken);border:var(--click-border-width-1) solid var(--stroke);color:var(--ink-muted);border-radius:var(--click-radii-full);padding:1px var(--click-space-2);font-size:var(--click-font-size-0)}
 .alert-summary-bar{display:flex;gap:var(--click-space-2);flex-wrap:wrap;margin-bottom:var(--click-space-3)}
@@ -1617,21 +1710,30 @@ footer{text-align:center;color:var(--ink-muted);font-size:var(--click-font-size-
 
 <div class="topbar">
 <header>
-  <div class="logo">ClickHouse</div>
-  <div>
+  <button id="nav-toggle" type="button" aria-label="Hide section sidebar" aria-controls="main-nav" aria-expanded="true">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg>
+    <span id="nav-current"></span>
+  </button>
+  <div class="brand">
+    <div class="logo">ClickHouse</div>
     <h1>Diagnostic Dashboard</h1>
-    <div id="hdr-badge"></div>
   </div>
   <div class="meta" id="hdr-meta"></div>
   <button id="theme-toggle" type="button" aria-label="Toggle colour theme"></button>
 </header>
+</div><!-- .topbar -->
 
-<nav id="main-nav">
+<!-- Section sidebar. Outside .topbar on purpose: the band is sticky and
+     measured for --topbar-h, and the sidebar is positioned under it from
+     that measurement rather than being part of it. -->
+<nav id="main-nav" aria-label="Sections">
+  <div class="nav-head">Sections</div>
   <a href="#sec-alerts" id="nav-alerts">Alerts</a>
   <a href="#sec-qa" id="nav-qa" style="display:none">Query Analysis</a>
   <a href="#sec-overview">Overview</a>
   <a href="#sec-storage">Storage</a>
   <a href="#sec-tables">Tables</a>
+  <a href="#sec-schema" id="nav-schema" style="display:none">Schema Graph</a>
   <a href="#sec-queries">Query Activity</a>
   <a href="#sec-deepdive">Query Deep Dive</a>
   <a href="#sec-exceptions">Exceptions</a>
@@ -1649,7 +1751,6 @@ footer{text-align:center;color:var(--ink-muted);font-size:var(--click-font-size-
   <a href="#sec-server-errors">Server Errors</a>
   <a href="#sec-async-inserts" id="nav-async-inserts" style="display:none">Async Inserts</a>
 </nav>
-</div><!-- .topbar -->
 
 <main>
 
@@ -1790,6 +1891,25 @@ footer{text-align:center;color:var(--ink-muted);font-size:var(--click-font-size-
   </div>
   <div class="tbl-wrap"><div id="tbl-explorer"></div></div>
   <div class="pagination" id="tbl-pagination"></div>
+</section>
+
+<!-- ── SCHEMA GRAPH ── -->
+<!-- The graph lives in schema_graph.html beside this page and is loaded into
+     the frame only when asked for: assigning iframe.src is a navigation, which
+     file:// allows, while fetch()/XHR of a sibling file is blocked. Nothing is
+     paid for the graph until the tab is opened. -->
+<section id="sec-schema" style="display:none">
+  <h2>🕸 Schema Graph</h2>
+  <p class="host-note" id="schema-note"></p>
+  <div class="filter-bar schema-actions">
+    <button type="button" id="schema-load">Load the graph</button>
+    <a id="schema-open" href="schema_graph.html" target="_blank" rel="noopener">Open in a new tab ↗</a>
+    <span class="count-badge" id="schema-count"></span>
+  </div>
+  <div id="schema-frame-wrap" style="display:none">
+    <iframe id="schema-frame" title="Table dependency graph" loading="eager"></iframe>
+  </div>
+  <p class="host-note">Tables, materialized views, dictionaries and Distributed tables, with the edges data flows along. Nodes are coloured by engine; click one for its keys, columns and CREATE statement (credentials in engine arguments read <code>[HIDDEN]</code>). The page is written beside this one — if the frame stays blank, open the full bundle folder rather than a copied-out dashboard.html.</p>
 </section>
 
 <!-- ── QUERY ACTIVITY ── -->
@@ -2412,6 +2532,67 @@ function dictStatusBadge(status){
 })();
 
 // ── alerts renderer ───────────────────────────────────────────────────────────
+//
+// How much of one alert is shown before the reader has to ask for more. A
+// ClickHouse exception embeds its stack trace in the message text: one
+// measured in a real bundle ran 1764 characters over 15 lines, of which the
+// first 216 were the actual error. replication_queue_errors returns up to 50
+// such rows and keeper_health up to 168, so rendering every message in full
+// buried the rest of the page under stack frames.
+const ALERT_HEAD_CHARS=260;   // inline length of one instance line
+const ALERT_ROWS_SHOWN=5;     // instances listed before the rest collapse
+
+const ALERT_STACK_RE=/\s*Stack trace \(when copying this message[\s\S]*$/;
+// Every ClickHouse exception ends with the build it came from. It is the same
+// string on every row and the dashboard header already states the version, so
+// it is dropped from the inline line and kept in the full text.
+const ALERT_VERSION_RE=/\s*\(version [0-9][^)]*\([^)]*\)\)[\s,.;]*$/;
+
+// alertMessageParts splits a substituted message into the line shown inline
+// and the complete text kept for the disclosure. Returns truncated=false when
+// nothing was actually dropped, so a short message gets no useless toggle.
+function alertMessageParts(msg){
+  const full=String(msg==null?'':msg);
+  const flat=full.replace(/\s+/g,' ').trim();
+  let head=full.replace(ALERT_STACK_RE,'').replace(/\s+/g,' ').trim()
+               .replace(ALERT_VERSION_RE,'').replace(/[\s,;]+$/,'');
+  if(head.length>ALERT_HEAD_CHARS){
+    // ALERT_HEAD_CHARS is inclusive of the ellipsis: slice one short so the
+    // no-space fallback below yields 260 characters, not 261.
+    const cut=head.slice(0,ALERT_HEAD_CHARS-1);
+    const sp=cut.lastIndexOf(' ');
+    head=(sp>ALERT_HEAD_CHARS*0.6?cut.slice(0,sp):cut)+'\u2026';
+  }
+  if(!head) head=flat;
+  // truncated drives the toggle: offer it only when the inline line is not
+  // already the whole message, so a short single-line message gets no useless
+  // disclosure. Comparing against the flat message rather than a
+  // version-stripped copy also covers the degenerate case where the message
+  // is NOTHING BUT a version suffix: stripping empties head, the fallback
+  // above restores it, and head===flat then correctly reports that there is
+  // nothing to reveal.
+  return {head:head, full:full, truncated:head!==flat, hasStack:ALERT_STACK_RE.test(full)};
+}
+
+// alertDisclosure renders the "show the rest" toggle for one message.
+function alertDisclosure(parts){
+  if(!parts.truncated) return '';
+  const label=parts.hasStack?'full message and stack trace':'full message';
+  return '<details class="alert-more"><summary>'+label+'</summary>'
+        +'<pre class="alert-full">'+esc(parts.full)+'</pre></details>';
+}
+
+// alertRowLine renders one instance: the rule's message template with this
+// row's values substituted. The template is ours, the values are customer
+// data (table names, partition ids, raw server text), so the whole line is
+// escaped.
+function alertRowLine(a,row){
+  let msg=a.message;
+  Object.entries(row).forEach(([k,v])=>{msg=msg.split('{'+k+'}').join(String(v==null?'':v));});
+  const parts=alertMessageParts(msg);
+  return '<li>\u25B8 '+esc(parts.head)+alertDisclosure(parts)+'</li>';
+}
+
 function renderAlerts(){
   const alerts=DATA.alerts||[];
   const fired=alerts.filter(a=>(a.rows&&a.rows.length>0)||a.error);
@@ -2482,22 +2663,37 @@ function renderAlerts(){
     if((a.tags||[]).length) html+='<span class="alert-tags">'+a.tags.map(t=>'<span class="alert-tag">'+esc(t)+'</span>').join('')+'</span>';
     html+='</div>'; // header
 
-    if(a.description) html+='<div class="alert-desc">'+esc(a.description.trim()).replace(/\n/g,'<br>')+'</div>';
+    if(a.description){
+      // The rule descriptions are deliberately long — an explanation followed
+      // by what to check next. The first paragraph is the explanation; the
+      // rest is guidance the reader wants only once the alert is worth
+      // following, so it collapses.
+      const d=a.description.trim();
+      const brk=d.indexOf('\n\n');
+      const first=(brk>0?d.slice(0,brk):d).trim();
+      html+='<div class="alert-desc">'+esc(first).replace(/\n/g,'<br>');
+      if(brk>0){
+        html+='<details class="alert-more"><summary>more about this rule</summary>'
+             +'<div class="alert-desc-rest">'+esc(d.slice(brk).trim()).replace(/\n/g,'<br>')+'</div></details>';
+      }
+      html+='</div>';
+    }
 
     if(a.error){
-      // a.error is raw server exception text — customer-influenced.
-      html+='<div class="alert-err-msg">⚠ '+esc(a.error)+'</div>';
+      // a.error is raw server exception text — customer-influenced, and it
+      // carries a stack trace as often as a row message does.
+      const ep=alertMessageParts(a.error);
+      html+='<div class="alert-err-msg">⚠ '+esc(ep.head)+alertDisclosure(ep)+'</div>';
     } else if(a.message&&(a.rows||[]).length){
-      html+='<ul class="alert-messages">';
-      (a.rows||[]).forEach(row=>{
-        let msg=a.message;
-        // Row values are customer data (table names, partition ids, raw
-        // messages) substituted into the rule's message template — the
-        // template is ours, the values are not. Escape the whole line.
-        Object.entries(row).forEach(([k,v])=>{msg=msg.split('{'+k+'}').join(String(v??''));});
-        html+='<li>▸ '+esc(msg)+'</li>';
-      });
-      html+='</ul>';
+      // keeper_health can return one row per hour of a 7-day window; only the
+      // first few are listed, the rest stay one click away.
+      const rows=a.rows||[];
+      const shown=rows.slice(0,ALERT_ROWS_SHOWN), hidden=rows.slice(ALERT_ROWS_SHOWN);
+      html+='<ul class="alert-messages">'+shown.map(r=>alertRowLine(a,r)).join('')+'</ul>';
+      if(hidden.length){
+        html+='<details class="alert-more"><summary>'+hidden.length+' more instance'+(hidden.length===1?'':'s')+'</summary>'
+             +'<ul class="alert-messages">'+hidden.map(r=>alertRowLine(a,r)).join('')+'</ul></details>';
+      }
     }
 
     html+='</div>'; // item
@@ -2807,25 +3003,132 @@ document.addEventListener('DOMContentLoaded',function(){
     window.addEventListener('resize', measureTopbar, {passive:true});
   }
 
-  // nav active highlight on scroll
-  const secs=[...document.querySelectorAll('section[id]')];
+  // nav active highlight on scroll — "you are here" in the sticky band.
+  //
+  // Only RENDERED sections may win. Every optional panel starts at
+  // display:none, and a non-rendered element reports
+  // getBoundingClientRect().top = 0, which passes the "its top is above the
+  // line" test on every scroll. The last such section in the document
+  // therefore won every pass — on a typical bundle that is sec-async-inserts,
+  // whose nav link is hidden too, so the band showed no highlight at all.
+  // getClientRects() is empty for anything not rendered, and the list is
+  // rebuilt each pass because panels un-hide after their data renders.
   const navLinks=[...document.querySelectorAll('nav a')];
-  window.addEventListener('scroll',function(){
-    let cur='';
+  const navFor={};
+  navLinks.forEach(a=>{navFor[a.getAttribute('href')]=a;});
+  function spySections(){
+    return [...document.querySelectorAll('section[id]')]
+      .filter(s=>s.getClientRects().length && navFor['#'+s.id]);
+  }
+  function syncNav(){
+    const secs=spySections();
+    if(!secs.length) return;
     // A section counts as current once its top reaches the underside of the
-    // band, so the highlight matches what the reader can actually see.
-    const line=topbarH+8;
+    // band, so the highlight matches what the reader can actually see. The
+    // tolerance clears the subpixel gap an anchor jump leaves, which lands a
+    // heading at exactly scroll-margin-top.
+    const line=topbarH+16;
+    // Default to the first section: at the very top of the page nothing has
+    // crossed the line yet, and a blank band is what this replaced.
+    let cur=secs[0].id;
     secs.forEach(s=>{if(s.getBoundingClientRect().top<=line)cur=s.id;});
+    // At the end of the page a short final section can never reach the line,
+    // so the last one wins once the scroll cannot go further.
+    if(Math.ceil(window.innerHeight+window.scrollY)>=document.documentElement.scrollHeight-2){
+      cur=secs[secs.length-1].id;
+    }
     navLinks.forEach(a=>{
-      a.classList.toggle('active',a.getAttribute('href')==='#'+cur);
+      const on=a.getAttribute('href')==='#'+cur;
+      a.classList.toggle('active',on);
+      if(on) a.setAttribute('aria-current','true'); else a.removeAttribute('aria-current');
     });
-  },{passive:true});
+    // The header button carries the current section's name for when the
+    // sidebar is hidden — the "you are here" the highlighted link provides
+    // while it is shown. First text node only: the Alerts link also carries
+    // a count badge, and "Alerts 1" is not a section name.
+    const curLink=navFor['#'+cur];
+    const label=document.getElementById('nav-current');
+    const name=curLink?(curLink.firstChild&&curLink.firstChild.nodeType===3?curLink.firstChild.textContent:curLink.textContent).trim():'';
+    if(label && name && label.textContent!==name) label.textContent=name;
+    // Keep the highlighted link in view inside a sidebar shorter than its
+    // list. Only when the current section changes: a scroll pass runs per
+    // frame and scrolling the list on every one would fight the reader.
+    if(curLink && cur!==lastCur){
+      lastCur=cur;
+      if(curLink.getClientRects().length) curLink.scrollIntoView({block:'nearest'});
+    }
+  }
+  let lastCur=null;
+  // Called straight from the listener rather than coalesced through
+  // requestAnimationFrame. The pass is ~20 getBoundingClientRect reads with
+  // no writes, the browser already caps scroll events at the frame rate, and
+  // rAF would make the highlight depend on a repaint — which never happens
+  // under a headless --virtual-time-budget, so the behaviour could not be
+  // tested. Reading live keeps the MATH right when a disclosure expands and
+  // shifts every section below it (a cached offset table would not) — but
+  // the pass still has to be triggered, and opening a <details> is neither
+  // a scroll nor a resize. Left alone, the highlight named the pre-expansion
+  // section until the reader scrolled. So the page's own height is observed:
+  // any content change that moves a section — a disclosure, a table filter,
+  // a panel un-hiding after its data renders — re-runs the pass.
+  window.addEventListener('scroll',syncNav,{passive:true});
+  window.addEventListener('resize',syncNav,{passive:true});
+  const mainEl=document.querySelector('main');
+  if(window.ResizeObserver && mainEl){
+    new ResizeObserver(syncNav).observe(mainEl);
+  }
+  // toggle does not bubble, but a capturing listener at the document still
+  // sees it — the explicit hook for the disclosure case, and the fallback
+  // where ResizeObserver is missing.
+  document.addEventListener('toggle',syncNav,true);
+  // Once now for the initial highlight, once after load — optional panels
+  // un-hide as their data renders, which changes which sections exist.
+  syncNav();
+  window.addEventListener('load',syncNav);
+
+  // Sidebar toggle. The arrow in the header hides and shows the sidebar;
+  // the choice is remembered like the theme, so a reader who prefers the
+  // full width keeps it across bundles. Below 900px the sidebar overlays
+  // the content, so picking a section there hides it again. Focus follows
+  // the panel: into the current section's link on show, back to the arrow
+  // on hide, so keyboard readers never lose their place.
+  (function(){
+    const nav=document.getElementById('main-nav');
+    const toggle=document.getElementById('nav-toggle');
+    const root=document.documentElement;
+    if(!nav||!toggle) return;
+    const narrow=()=>window.matchMedia&&window.matchMedia('(max-width:900px)').matches;
+    function isShown(){ return !root.classList.contains('nav-collapsed'); }
+    function reflect(){
+      const shown=isShown();
+      toggle.setAttribute('aria-expanded',shown?'true':'false');
+      toggle.setAttribute('aria-label',shown?'Hide section sidebar':'Show section sidebar');
+    }
+    function setNav(shown,remember){
+      root.classList.toggle('nav-collapsed',!shown);
+      reflect();
+      if(remember){ try{ localStorage.setItem('chdiag-nav',shown?'shown':'collapsed'); }catch(e){} }
+      if(shown){
+        const a=nav.querySelector('a.active')||navLinks.find(l=>l.getClientRects().length);
+        if(a){ a.focus({preventScroll:true}); a.scrollIntoView({block:'nearest'}); }
+      } else {
+        toggle.focus({preventScroll:true});
+      }
+    }
+    reflect(); // the bootstrap script may have collapsed it before this ran
+    toggle.addEventListener('click',()=>setNav(!isShown(),true));
+    nav.addEventListener('click',e=>{ if(e.target.closest('a')&&narrow()) setNav(false,false); });
+    document.addEventListener('keydown',e=>{ if(e.key==='Escape'&&isShown()&&narrow()) setNav(false,false); });
+  })();
 
   // header
-  document.getElementById('hdr-badge').innerHTML=
-    '<span class="badge badge-'+esc(DATA.mode)+'">'+esc(DATA.mode)+'</span>';
+  // The deployment type sits with the version it qualifies — "[cloud]
+  // Version: 26.6.2191" — rather than beside the title, because the mode
+  // says which system tables were collected, not what the page is.
   document.getElementById('hdr-meta').innerHTML=
-    'Generated: '+esc(DATA.generated_at)+'<br>Version: '+esc(DATA.version||'N/A');
+    'Generated: '+esc(DATA.generated_at)+'<br>'
+    +'<span class="badge badge-'+esc(DATA.mode)+'">'+esc(DATA.mode)+'</span>'
+    +' Version: '+esc(DATA.version||'N/A');
 
   // stats
   // esc() on both arguments: every caller currently passes a number, a
@@ -3695,6 +3998,39 @@ document.addEventListener('DOMContentLoaded',function(){
       page=0; render();
     };
     render();
+  })();
+
+  // ── Schema graph ─────────────────────────────────────────────────────────
+  //
+  // Present only when the generator wrote schema_graph.html. The frame's src
+  // is assigned on the first click (from the nav link or the button), never
+  // at load, so a reader who does not open the tab downloads nothing extra.
+  (function(){
+    const sg=DATA.schema_graph;
+    if(!sg||!sg.file) return;
+    document.getElementById('sec-schema').style.display='';
+    document.getElementById('nav-schema').style.display='';
+    const bits=[sg.tables+' table(s)', sg.databases+' database(s)'];
+    if(sg.mvs) bits.push(sg.mvs+' materialized view(s)');
+    if(sg.refreshable) bits.push(sg.refreshable+' refreshable');
+    if(sg.dictionaries) bits.push(sg.dictionaries+' dictionar'+(sg.dictionaries===1?'y':'ies'));
+    document.getElementById('schema-count').textContent=bits.join(' · ');
+    document.getElementById('schema-note').textContent='Interactive map of how data flows between tables, built from system.tables, system.columns, system.dictionaries and system.view_refreshes at collection time (system databases excluded).';
+    document.getElementById('schema-open').href=sg.file;
+    const frame=document.getElementById('schema-frame');
+    const wrap=document.getElementById('schema-frame-wrap');
+    const btn=document.getElementById('schema-load');
+    let loaded=false;
+    function load(){
+      if(loaded) return;
+      loaded=true;
+      frame.src=sg.file;
+      wrap.style.display='';
+      btn.textContent='Loaded';
+      btn.disabled=true;
+    }
+    btn.addEventListener('click', load);
+    document.getElementById('nav-schema').addEventListener('click', load);
   })();
 
   // ── Collected files ───────────────────────────────────────────────────────

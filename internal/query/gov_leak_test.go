@@ -32,14 +32,17 @@ func TestGovQueries_NoRawIdentifiersOrDDL(t *testing.T) {
 		"as_select",
 		"metadata_path",
 		"data_paths",
-		"dependencies_database",
-		"dependencies_table",
-		"loading_dependencies_database",
-		"loading_dependencies_table",
 		"loading_dependent_database",
 		"loading_dependent_table",
 		"parameterized_view_parameters",
 	}
+	// dependencies_* / loading_dependencies_* used to be forbidden outright.
+	// They are the edges of the schema graph, and an array of hashed table
+	// names exposes no more than the hashed `database` / `name` columns next
+	// to it — so they moved to mustBeHashed below, where the guard is that the
+	// file wraps them in SHA256 (arrayMap over the elements) rather than that
+	// it never mentions them. loading_dependent_* stay forbidden: the graph
+	// does not need them, and one direction of every edge is enough.
 
 	// Identifier columns that must be hashed if the file selects them.
 	//
@@ -59,6 +62,11 @@ func TestGovQueries_NoRawIdentifiersOrDDL(t *testing.T) {
 		"database", "table", "name", "user", "path", "host_name", "host_address",
 		"last_exception", "postpone_reason", "last_error_message",
 		"partition", "origin", "replica_name", "comment", "source",
+		// Schema-graph edges and the MV write target (system.tables), and the
+		// view column of system.view_refreshes — all `db` / `table` names.
+		"dependencies_database", "dependencies_table",
+		"loading_dependencies_database", "loading_dependencies_table",
+		"target_database", "target_table", "view",
 	}
 
 	// Documented exemptions: the column name collides with an identifier

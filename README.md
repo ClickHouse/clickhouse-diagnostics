@@ -19,6 +19,8 @@ Under the hood: per-environment query sets (`cloud` / `onprem` / `gov`) selected
 | `system.replicas`, `system.replication_queue` | Is every replica writable and caught up; if not, why? | Read-only state, Keeper session loss and the shape of the queue locate replication problems. |
 | `system.query_log_details_7_days` (hourly aggregation of `system.query_log`) | What ran, how slow, how much memory, what failed, by whom? | Most incidents start with the workload; this is the aggregated view, with a 500-character sample per query pattern and no customer rows. |
 | `system.query_views_log_3_days` (3 days, hourly aggregation of `system.query_views_log`) | Did every materialized view fire, did any fail, and what does each cost? | An MV that "succeeds" while writing nothing is invisible in `query_log`. An MV that throws fails the parent INSERT by default (`query_log` shows `… while pushing to view X`), but with `materialized_views_ignore_errors = 1` the INSERT is clean and this is the only record. Either way the base part is already committed. |
+| `system.view_refreshes` (≥ 23.12) | Are the refreshable materialized views actually refreshing? | A `REFRESH EVERY` view never appears in `query_views_log`; this is the only place its schedule, last success and last error live. |
+| `system.data_skipping_indices` | Which tables carry data-skipping indices, on which expressions, at what granularity? | The evidence for "the index exists but the query does not use it"; also drawn on the schema graph. |
 | `system.errors`, `system.text_log` (24 h, severity first, ≤ 200 rows per logger) | Which errors, how often, with what message? | Fast triage by error code; the log slice gives the server's own words. |
 | `system.text_log_histogram_1_day` | Warning-and-worse log lines per hour, level and component, with one example each | Says *when* errors started and *which* component, independent of the 2000-row `text_log` cap. |
 | `system.error_log_7_days` (≥ 24.8) | Every error code raised anywhere in the server, per hour, background threads included | The history behind `system.errors`: puts 999 / 242 / 252 / 107 on a timeline even when no query failed. |
@@ -104,21 +106,23 @@ The tool is read-only and never reads customer tables — every query reads a `s
 ```sql
 CREATE USER sys_read_only IDENTIFIED WITH sha256_password BY '<password>';
 
-GRANT SHOW DATABASES, SHOW TABLES ON *.* TO sys_read_only;
-GRANT SELECT ON system.*                 TO sys_read_only;
+GRANT SHOW DATABASES, SHOW TABLES, SHOW COLUMNS ON *.* TO sys_read_only;
+GRANT SELECT ON system.*                               TO sys_read_only;
 ```
 
 ```
-┌─GRANTS FOR sys_read_only──────────────────────────────────┐
-│ GRANT SHOW DATABASES, SHOW TABLES ON *.* TO sys_read_only │
-│ GRANT SELECT ON system.* TO sys_read_only                 │
-└───────────────────────────────────────────────────────────┘
+┌─GRANTS FOR sys_read_only────────────────────────────────────────────────┐
+│ GRANT SHOW DATABASES, SHOW TABLES, SHOW COLUMNS ON *.* TO sys_read_only │
+│ GRANT SELECT ON system.* TO sys_read_only                               │
+└─────────────────────────────────────────────────────────────────────────┘
 ```
 
 | Grant | Why it is needed |
 |---|---|
 | `SELECT ON system.*` | Every diagnostic query, alert rule and dashboard panel reads a `system` table. Nothing outside `system` is ever selected. |
-| `SHOW DATABASES, SHOW TABLES ON *.*` | ClickHouse filters the object-listing system tables down to what the user holds *some* privilege on. Without it the tool sees only part of the cluster. |
+| `SHOW DATABASES, SHOW TABLES, SHOW COLUMNS ON *.*` | ClickHouse filters the object-listing system tables down to what the user holds *some* privilege on. Without `SHOW DATABASES`/`SHOW TABLES` the tool sees only part of the cluster; without `SHOW COLUMNS`, `system.columns` comes back with **no rows for your databases** while every other file looks normal. |
+
+> **Do not substitute `SELECT` on the data databases.** `GRANT SELECT ON <db>.*` also populates the listing tables, and collects exactly the same bundle — measured on 26.2.19.43, `system.tables` 2, `system.columns` 5, `system.databases` 2, `system.parts` 1 under either grant set — but it hands the diagnostic user read access to customer data, which the `SHOW` grants do not (a `SELECT` against a user table is refused with 497 under them).
 
 > **A missing `SHOW` grant does not produce an error — it silently truncates the results.** Every query still reports success; the bundle just describes a fraction of the server. Measured on a test instance with one user database:
 >
@@ -129,7 +133,9 @@ GRANT SELECT ON system.*                 TO sys_read_only;
 > | `system.columns` | 3258 | 2520 |
 > | `system.parts` | 102 | 101 |
 >
-> This is the failure mode to watch for: a bundle that looks complete but is missing the customer's own tables. If `system.databases` contains only `system`, the `SHOW` grant is missing.
+> This is the failure mode to watch for: a bundle that looks complete but is missing the customer's own tables. If `system.databases` contains only `system`, the `SHOW` grant is missing — the tool now prints a warning at startup when it can see no database outside `system`, but an older binary will not.
+>
+> With **neither** grant the run still completes: the protected system tables fail with `Code: 497 … Not enough privileges` (visible in `execution_log.txt`) while `system.tables`, `system.columns` and `system.databases` come back as **empty files** rather than errors, so the archive is a few hundred KB that describes nothing. Check the archive size against another node before sending it.
 
 Neither grant exposes customer data: `SHOW` reveals object *names* and metadata only, and `SELECT` is scoped to `system`.
 
@@ -145,10 +151,10 @@ GRANT CREATE TEMPORARY TABLE ON *.* TO sys_read_only;
 So the full set for cloud is:
 
 ```
-┌─GRANTS FOR sys_read_only──────────────────────────────────────────────────────────────────┐
-│ GRANT SHOW DATABASES, SHOW TABLES, CREATE TEMPORARY TABLE, REMOTE ON *.* TO sys_read_only │
-│ GRANT SELECT ON system.* TO sys_read_only                                                 │
-└───────────────────────────────────────────────────────────────────────────────────────────┘
+┌─GRANTS FOR sys_read_only────────────────────────────────────────────────────────────────────────────────┐
+│ GRANT SHOW DATABASES, SHOW TABLES, SHOW COLUMNS, CREATE TEMPORARY TABLE, REMOTE ON *.* TO sys_read_only │
+│ GRANT SELECT ON system.* TO sys_read_only                                                               │
+└─────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 Unlike the `SHOW` grant, these fail loudly rather than truncating:
@@ -183,7 +189,7 @@ You will be prompted for any value not supplied on the command line:
 | Username | _empty_ |
 | Password (hidden) | _empty_ |
 | Mode (cloud/onprem/gov) | `onprem` — only when `-mode` is absent entirely; see below |
-| Config directory | `/etc/clickhouse-server/config.d/` |
+| Config directory | `/etc/clickhouse-server/config.d/` — `onprem` only; `cloud` and `gov` do not ask (see below) |
 | Gov-mode salt (hidden, `gov` mode only) | _empty_ |
 
 #### How `-mode` is resolved
@@ -272,11 +278,11 @@ Any flag left empty on the command line is prompted for interactively (except th
 
 ### Examples
 
-Run against a Cloud cluster, no config collection (configs aren't accessible in Cloud):
+Run against a Cloud cluster (configuration files are skipped automatically in `cloud` mode: the server's config directory is not on the machine running the tool; pass `-config-dir` to collect one anyway):
 
 ```bash
 ./clickhouse-diagnostic -mode cloud -host my-service.us-east-1.aws.clickhouse.cloud \
-  -port 8443 -protocol https -user default -skip-config
+  -port 8443 -protocol https -user default
 ```
 
 Run against an on-prem node, write everything to a custom directory:
@@ -407,6 +413,21 @@ The shipped artefact is a `tar.gz`, and JSON's repeated keys compress away almos
 | `tsv` | 2.12 MB | 272 KB |
 
 `jsonl` is 20% larger on disk but produces the **smallest archive** of the three, so the readable default costs nothing in what you actually send.
+
+## Schema graph
+
+![The schema graph: one database section with its tables, materialized views, dictionary and Distributed table, edges following the data flow, columns listed per node with key columns in red](docs/images/schema-graph.png)
+
+Every run in `cloud` or `onprem` mode also writes **`schema_graph.html`** next to `dashboard.html`: an interactive map of how data flows through the schema, adapted from ClickHouse's own `/schema` page and rendered entirely from data captured at collection time — it works from disk with no server and no network.
+
+- **One node per table**, grouped by database and coloured by engine: MergeTree family, materialized view, refreshable MV, dictionary, Distributed, view. Each node lists its columns (key columns in red, defaulted columns in green) and, for tables that hold data, the row count and size.
+- **Edges follow the data.** A materialized view sits between the table it reads and the table it writes — including the implicit `.inner_id.*` table of an MV declared with an `ENGINE`; a dictionary points at its source table; a Distributed table at the shard table behind it. Chains are laid out left to right, deepest first, so the longest MV pipeline is what you see at the top. Where `system.tables` records no dependency — a refreshable MV, a plain view, a Distributed table — the source edge is **inferred from the DDL** (`FROM` / `JOIN`, or the Distributed engine arguments) and drawn **dashed**, and the sidebar says so.
+- **The grey ribbon** under a node carries what you would otherwise open the DDL for: row count and size for a table; for a refreshable MV its schedule — `EVERY 2 MINUTE OFFSET 30 SECOND RANDOMIZE FOR 10 SECOND` — with the schedule underlined when there is **no** `RANDOMIZE FOR`, so thirty views that all fire at the same instant read as thirty underlines; for a dictionary its `LIFETIME`; for a table the number of data-skipping indices.
+- **Column names show their role**, not one red: primary key bold red, sorting-only red, partition key dotted-underlined amber, sampling key dashed teal, defaulted columns green — a column can carry several. The sidebar tags each column `PRIMARY KEY` / `ORDER BY` / `PARTITION BY` / `SAMPLE BY` and lists the skip indices with type, expression and granularity.
+- **Click a node** for its keys, partitioning, full column list, the tables it reads from and writes to, refresh schedule and status for a refreshable MV, dictionary lifetime, status and last error, and the `CREATE` statement — **pretty-printed by the server** (`formatQueryOrNull`, one clause per line, on servers that have it) and syntax-highlighted on the page, with credentials in engine arguments shown as `[HIDDEN]`.
+- **Search** matches table *and* column names and dims everything else; filter to one database; drag nodes, zoom, re-layout; keyboard users can Tab to a node and press Enter.
+
+Open it from the dashboard's **Schema Graph** tab — the page loads into the frame only when you click, so nobody pays for it otherwise — or open the file directly from the bundle folder. Why it is a separate file, how the two pages share a theme, and what the credential redaction covers is under [Dashboard → Schema graph](#schema-graph-1).
 
 ## Dry-run mode
 
@@ -595,11 +616,13 @@ The tool targets **ClickHouse 22.8 and newer** for on-prem servers. Root-level q
 | `hostname` column in system log tables | 23.11 | `queries.*/23.11.1.0/` (roots use `hostName()`) |
 | `system.blob_storage_log` table (needs `<blob_storage_log>` config) | 23.11 | `queries.*/23.11.1.0/` (no root file — skipped below 23.11 in every mode) |
 | `system.tables.total_bytes_uncompressed` | 23.12 | `queries.query_analysis/23.12.1.0/` |
+| `system.view_refreshes` table | 23.12 | `queries.*/23.12.1.0/` (no root file — skipped below 23.12 in every mode) |
 | `system.mutations.is_killed` | 24.1 | `alerts/24.1.1.0/` (root omits the filter) |
 | `system.tables.metadata_version` | 24.2 | `queries.*/24.2.1.0/` |
 | `system.error_log` table | 24.8 | `queries.*/24.8.1.0/` (no root file — skipped below 24.8 in every mode) |
 | `system.zookeeper_log.duration_microseconds` (replaces `duration_ms`) | 24.3 | `queries.*/24.3.1.0/` (roots use `duration_ms`; output stays in ms on every rung) |
 | `system.tables.parameterized_view_parameters` | 25.4 | `queries.{onprem,cloud}/25.4.1.0/` (gov: not collected) |
+| `system.tables.target_database`, `target_table` (an MV's write target, including the implicit `.inner_id.*` table) | 26.6 | `queries.*/26.6.1.0/` (gov hashes both) |
 
 The dashboard (`internal/dashboard/generator.go`) builds its SQL dynamically, so instead of version directories it probes the live schema at runtime (`hasColumn`/`hasTable`) and adapts each panel — covering the same columns (`error_count`, `is_killed`, `bytes_on_disk`, the async table/`rows`, `crash_log`) plus optional tables that may be disabled by config.
 
@@ -898,7 +921,7 @@ When `-skip-dashboard` is not set, the tool generates a single self-contained `d
 
 | # | Section | What it shows |
 |---|---|---|
-| 1 | 🚨 **Alert Summary** | Fired alerts grouped by severity (critical / warning / info), with the row-level message template expanded per instance. Rules that **could not run** appear with a ⚠ marker and a separate "Could not run" chip — they are never counted in the severity badge. Rules that are **not applicable** here are listed in a muted footnote. A green "no issues" banner appears when nothing fired. |
+| 1 | 🚨 **Alert Summary** | Fired alerts grouped by severity (critical / warning / info), with the row-level message template expanded per instance. Long content collapses: a message is shown up to the ClickHouse stack trace (a real one runs 1700+ characters over 15 lines, of which ~200 are the error) and capped at 260 characters, with the complete text one click away under *full message and stack trace*; only the first 5 instances are listed, the rest behind *N more instances*; and a rule description shows its first paragraph, the rest under *more about this rule*. Nothing is dropped from the page — `DATA.alerts` still carries every row in full. Rules that **could not run** appear with a ⚠ marker and a separate "Could not run" chip — they are never counted in the severity badge. Rules that are **not applicable** here are listed in a muted footnote. A green "no issues" banner appears when nothing fired. |
 | 2 | 📈 **Overview** | Top-level counters: server version, uptime, total databases, total tables, active parts, total size |
 | 3 | 📦 **Storage** | Size by database (horizontal bar), table-engine distribution (doughnut), and a top-20-by-size table list |
 | 4 | 📋 **Tables Explorer** | Searchable / paginated table of every user table with engine, parts, rows, size, partition / sorting keys, and storage policy |
@@ -916,23 +939,34 @@ When `-skip-dashboard` is not set, the tool generates a single self-contained `d
 | 15 | 💾 **Disk Usage** | Free vs used space per disk plus a disk-details table |
 | 16 | 🛑 **Server Error Counters** | Top 20 cumulative error codes from `system.errors`, high-part-count partitions (>100 parts → potential code-252 `TOO_MANY_PARTS` risk), and TTL activity from `part_log` |
 | 17 | ⚡ **Async Insert Activity** (last 24 h) | Flush count per hour by status — section is hidden when `system.asynchronous_insert_log` is empty or in gov mode |
+| 18 | 🕸 **Schema Graph** | The table-dependency graph — tables, materialized views, dictionaries and Distributed tables with the edges data flows along — served from a second page, `schema_graph.html`, that the tab loads into a frame only when clicked. See *Schema graph* below. |
 
 In addition, when `--query-id` or `--normalized-query-hash` is set, a **🔍 Query Analysis** section appears near the top of the nav. See [Query analysis mode](#query-analysis-mode) for what it contains.
 
-A sticky top nav at the page header lets you jump straight to any section. Sections that depend on cluster-specific or version-specific data (Crash Log, Cluster Nodes, Replicas Health, Async Inserts, Query Analysis) are hidden when there is nothing to show.
+A sidebar on the left lists every section and highlights the one you are reading. The arrow at the left of the sticky header hides or shows it (the choice is remembered in the browser, like the theme); while hidden, the arrow shows the name of the current section. Sections that depend on cluster-specific or version-specific data (Crash Log, Cluster Nodes, Replicas Health, Async Inserts, Query Analysis) are hidden when there is nothing to show.
 
 ### Previewing the Keeper Health panel without an outage
 
-`make dashboard-preview` renders `bin/keeper_incident_preview.html` from an anonymised fixture shaped like a real Keeper outage on a shared-storage cluster: 48 hours of Keeper counters (a blip on day one, quorum lost for eight hours on day two), the `keeper_health`, `keeper_connection_blips`, `merges_stalled`, `background_operation_failures`, `high_exception_rate` and `too_many_parts` alerts as they would fire, the error codes per hour and a re-established Keeper session. Use it to see what the panel and the alerts look like before an incident, or to review a theme or wording change.
+`make dashboard-preview` renders three pages from anonymised fixtures. `bin/alerts_preview.html` exercises every Alert Summary collapse case — a message carrying a stack trace, more instances than the inline cap, a short message that needs no disclosure, a rule whose query failed, a rule that was not applicable. `bin/keeper_incident_preview.html` is shaped like a real Keeper outage on a shared-storage cluster: 48 hours of Keeper counters (a blip on day one, quorum lost for eight hours on day two), the `keeper_health`, `keeper_connection_blips`, `merges_stalled`, `background_operation_failures`, `high_exception_rate` and `too_many_parts` alerts as they would fire, the error codes per hour and a re-established Keeper session. Use it to see what the panel and the alerts look like before an incident, or to review a theme or wording change. `bin/schema_graph_preview.html` is a small fixture pipeline with every node kind — MergeTree source, MVs with explicit and implicit targets, a refreshable MV, a dictionary, a Distributed table, a view, and a table with credentials in its DDL — reachable from the preview dashboard's Schema tab.
 
 ### What's interactive vs static
 
-- **Interactive**: Tables Explorer (full text search, database/engine filters, pagination); all charts (hover tooltips, legend toggling).
+- **Interactive**: Tables Explorer (full text search, database/engine filters, pagination); all charts (hover tooltips, legend toggling); the Alert Summary disclosures (native `<details>`, so they work without JavaScript and survive `Ctrl-F` only when open).
 - **Static**: every other table — they render in a fixed order, but their underlying JSON is embedded in the page so you can `grep DATA dashboard.html | head` if you want raw values.
 
+
+### Schema graph
+
+What the page looks like and what each element means is in [Schema graph](#schema-graph) above; this section is the design record.
+
+`schema_graph.html` is written next to `dashboard.html` and is an adaptation of ClickHouse's own `/schema` page (`programs/server/schema.html`, Apache-2.0), with every live query replaced by JSON embedded at collection time: `system.tables`, `system.columns`, `system.dictionaries` and `system.view_refreshes`, system databases excluded. Nodes are coloured by engine (MergeTree, MV, refreshable MV, dictionary, Distributed, view); edges follow `dependencies_*` / `loading_dependencies_*` and — on 26.6+ — `target_table`, the only source that names the implicit `.inner_id.*` table of an MV declared with an `ENGINE`. Click a node for its keys, columns, neighbours and `CREATE` statement; search matches table and column names; drag, zoom and filter by database.
+
+Why a second file: the graph needs every column of every user table embedded, and that grows with the schema — ~750 KiB on a near-empty server, tens of MB on a service with thousands of tables. Inlining it would slow `dashboard.html` for every reader. Instead the dashboard's **Schema Graph** tab assigns the file as an `<iframe>` source on the first click (a navigation, which `file://` permits, where `fetch()` of a sibling file is blocked), so nobody pays for the graph until they ask for it. The two pages share the theme through `localStorage`; the frame cannot be scripted across the `file://` boundary and does not need to be. If the frame stays blank, the bundle folder was not copied whole.
+
+**Credentials.** `create_table_query`, `engine_full` and `system.dictionaries.source` carry engine arguments — an S3 secret key, a MySQL password, `kafka_sasl_password`. Servers from 23.x mask these as `'[HIDDEN]'` themselves; a 22.x server does not. Both the collected JSONL (`system.tables`, `system.dictionaries`) and the graph payload pass through a redactor (`internal/collection/sqlredact.go`) that masks the credential positions of every known engine and table function (S3-family, MySQL, PostgreSQL, MongoDB, `remote()`, Redis, Azure, …), plus the byte-shape heuristics the config sanitizer uses (URL basic-auth, AWS key ids, JWTs, `keyword = 'value'`), writing the server's own `[HIDDEN]` token so old and new bundles read alike. `execution_log.txt` notes how many values each collector replaced. This is field-level and JSONL-only: a `-output-format native|tsv` bundle carries the DDL unredacted and says so.
 ## Configuration Collection
 
-When `-skip-config` is not set, the tool reads files from `-config-dir` (default `/etc/clickhouse-server/config.d/`) and writes sanitised copies into the run's `configuration/` directory (inside `clickhouse_backup_<timestamp>/`), mirroring the source tree — `config.d/storage.xml` and `users.d/storage.xml` stay distinct, and the directory a file came from (which determines ClickHouse's merge order) is preserved.
+When `-skip-config` is not set, the tool reads files from `-config-dir` (default `/etc/clickhouse-server/config.d/`; in `cloud` mode collection is skipped unless `-config-dir` is given explicitly, and `gov` mode never collects) and writes sanitised copies into the run's `configuration/` directory (inside `clickhouse_backup_<timestamp>/`), mirroring the source tree — `config.d/storage.xml` and `users.d/storage.xml` stay distinct, and the directory a file came from (which determines ClickHouse's merge order) is preserved.
 
 Sanitisation runs in two layers — proper XML / YAML parsing first, then a heuristic byte-pattern pass over the result. If a file cannot be parsed, the tool **fails closed**: a warning is logged and the file is skipped rather than shipped un-sanitised.
 

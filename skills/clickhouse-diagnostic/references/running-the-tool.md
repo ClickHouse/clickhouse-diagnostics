@@ -14,8 +14,12 @@ Ship the binary **together with** `queries.cloud/ queries.onprem/ queries.gov/ a
 
 ```sql
 CREATE USER sys_read_only IDENTIFIED WITH sha256_password BY '<password>';
-GRANT SHOW DATABASES, SHOW TABLES ON *.* TO sys_read_only;
+GRANT SHOW DATABASES, SHOW TABLES, SHOW COLUMNS ON *.* TO sys_read_only;
 GRANT SELECT ON system.* TO sys_read_only;
+-- SHOW COLUMNS matters: without it system.columns comes back with no rows for
+-- user databases while every other file looks normal. Never substitute
+-- GRANT SELECT ON <db>.* — it yields the same bundle but lets the diagnostic
+-- user read customer data.
 -- cloud mode only (clusterAllReplicas fan-out):
 GRANT REMOTE ON *.* TO sys_read_only;
 GRANT CREATE TEMPORARY TABLE ON *.* TO sys_read_only;
@@ -130,7 +134,7 @@ Before sharing: open `configuration/` and confirm nothing sensitive remains (san
 | Logs truncated (`TRUNCATED` header) or rotated files needed | `-logs-max-mb 500 -logs-include-archives` |
 | `host_info.json` missing/degraded (tool ran remotely) | run the tool **on** the server, or `-host-info on` there |
 | Config missing | `-config-dir /etc/clickhouse-server` (point at the directory holding `config.xml`, `config.d/`, `users.d/`) |
-| Bundle shows only `system` tables | grant `SHOW DATABASES, SHOW TABLES ON *.*` and re-run |
+| Bundle shows only `system` tables, or `system.columns` is empty for user databases | grant `SHOW DATABASES, SHOW TABLES, SHOW COLUMNS ON *.*` and re-run (the tool now warns before collecting when the user can see no databases) |
 | Cloud: some tables errored with 497 | grant `REMOTE` + `CREATE TEMPORARY TABLE`, re-run |
 | Gov bundle lacks what the analysis needs | if policy allows, collect an `onprem` bundle and share only the summary; otherwise use the mapping CSV locally |
 | Track a trend (parts growth, error rates) | collect a second bundle hours/days later and diff `system.parts` counts and `system.errors` values |

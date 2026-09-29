@@ -7,6 +7,7 @@ SELECT
   data_paths,
   metadata_path,
   metadata_modification_time,
+  metadata_version,
   dependencies_database,
   dependencies_table,
   create_table_query,
@@ -27,5 +28,12 @@ SELECT
   loading_dependencies_database,
   loading_dependencies_table,
   loading_dependent_database,
-  loading_dependent_table
+  loading_dependent_table,
+  -- target_database / target_table (26.6): the table a materialized view
+  -- writes to — the explicit TO target, or the implicit .inner_id.<uuid> table
+  -- of an MV declared with an ENGINE. Before 26.6 the graph infers this edge
+  -- from dependencies_*, which misses the implicit target.
+  target_database,
+  target_table,
+  parameterized_view_parameters
 FROM system.tables

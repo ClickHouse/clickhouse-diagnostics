@@ -149,17 +149,20 @@ func TestSampleQueryCol_GovIsRedacted(t *testing.T) {
 	}
 }
 
-// Header and nav must stick as ONE band.
+// The header sticks as ONE measured band.
 //
-// They used to stick separately, with the nav pinned at a hardcoded top:53px
-// that had to equal the header's height. It did not — the header measures
-// ~74px — so once the page scrolled the header covered the top 21px of the
-// nav and its labels were sliced in half. Three separate constants were
-// guessing that same height (nav top, section scroll-margin, the scroll-spy
-// threshold); all three are now derived from one measured value.
+// Header and nav used to stick separately, with the nav pinned at a
+// hardcoded top:53px that had to equal the header's height. It did not — the
+// header measures ~74px — so once the page scrolled the header covered the
+// top 21px of the nav and its labels were sliced in half. Three separate
+// constants were guessing that same height (nav top, section scroll-margin,
+// the scroll-spy threshold); all three are now derived from one measured
+// value. The nav has since become a fixed sidebar (see TestTemplate_Sidebar)
+// that hangs from the same measurement, and the anchor offset and the
+// scroll-spy threshold still follow the band's measured height.
 func TestTemplate_TopbarSticksAsOneBand(t *testing.T) {
 	if !strings.Contains(htmlTemplate, ".topbar{position:sticky;top:0;") {
-		t.Error("header and nav must be wrapped in one sticky .topbar")
+		t.Error("the header must be wrapped in one sticky .topbar")
 	}
 	if !strings.Contains(htmlTemplate, `<div class="topbar">`) {
 		t.Error("the .topbar wrapper is missing from the markup")
@@ -184,7 +187,11 @@ func TestTemplate_TopbarSticksAsOneBand(t *testing.T) {
 	if !strings.Contains(htmlTemplate, "new ResizeObserver(measureTopbar)") {
 		t.Error("--topbar-h must be re-measured via ResizeObserver, not set once")
 	}
-	if !strings.Contains(htmlTemplate, "const line=topbarH+8;") {
+	// The threshold is the measured height plus a small tolerance: an anchor
+	// jump lands a heading at exactly scroll-margin-top, and a subpixel
+	// rounding there must not flip the comparison. The slack value is free to
+	// change; deriving it from topbarH is not.
+	if !strings.Contains(htmlTemplate, "const line=topbarH+") {
 		t.Error("the scroll-spy threshold must follow the measured band height")
 	}
 }
@@ -252,6 +259,17 @@ func TestGeneratorSQL_TruncatesWithLeftUTF8(t *testing.T) {
 		if bare.MatchString(strings.ReplaceAll(line, "leftUTF8(", "")) {
 			t.Errorf("generator.go:%d truncates with byte-wise left() — use leftUTF8(): %q",
 				i+1, strings.TrimSpace(line))
+		}
+	}
+}
+
+// Review finding: the template head carried two DOCTYPE declarations. Browsers
+// tolerate it, but a second one is a parse error under the HTML spec and the
+// kind of thing a strict validator or a downstream converter trips on.
+func TestTemplate_SingleDoctype(t *testing.T) {
+	for name, tpl := range map[string]string{"dashboard": htmlTemplate, "schema graph": schemaGraphHead} {
+		if n := strings.Count(tpl, "<!DOCTYPE"); n != 1 {
+			t.Errorf("%s template has %d DOCTYPE declarations, want 1", name, n)
 		}
 	}
 }
