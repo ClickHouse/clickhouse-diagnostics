@@ -768,10 +768,12 @@ def analyse(base: str):
                 continue
             if v["culprits"]:
                 for c, n in v["culprits"].items():
-                    g = groups.setdefault(c, {"failures": 0, "codes": Counter(), "siblings": set(), "self": False})
+                    g = groups.setdefault(c, {"failures": 0, "codes": Counter(), "self_codes": None, "siblings": set(), "self": False})
                     if c == k:
+                        # The culprit's own rows are the authoritative count and
+                        # codes; siblings only repeat them.
                         g["failures"] = max(g["failures"], v["failures"])
-                        g["codes"].update(v["codes"])
+                        g["self_codes"] = Counter(v["codes"])
                         g["self"] = True
                     else:
                         g["siblings"].add(k)
@@ -807,7 +809,8 @@ def analyse(base: str):
 
         # ---- HC-7.6 one finding per culprit
         for c, g in sorted(groups.items(), key=lambda kv: -kv[1]["failures"])[:3]:
-            codes = ", ".join(f"{ERROR_NAMES.get(x, x)}({x})={n}" for x, n in g["codes"].most_common(3))
+            code_src = g["self_codes"] if g["self_codes"] is not None else g["codes"]
+            codes = ", ".join(f"{ERROR_NAMES.get(x, x)}({x})={n}" for x, n in code_src.most_common(3))
             sev = "critical" if g["failures"] >= 100 else "warning"
             if g["siblings"]:
                 mode = (f"{len(g['siblings'])} sibling view(s) carry its message — the INSERTs failed "
