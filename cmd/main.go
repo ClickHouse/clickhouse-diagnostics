@@ -182,6 +182,17 @@ func main() {
 			"(they embed raw hostnames — macros, remote_servers, zookeeper — that cannot be hashed).")
 	}
 
+	// Cloud runs the tool somewhere other than the ClickHouse server, so
+	// there is no local config directory to read by default. An explicit
+	// -config-dir still opts in (self-hosted SharedMergeTree clusters run
+	// -mode cloud from a node), which is why this is a default, not a
+	// refusal like gov above.
+	if cloudSkipsConfig(mode, configDir) && !skipConfig {
+		skipConfig = true
+		fmt.Println("Cloud mode: not collecting configuration files " +
+			"(the server's config directory is not on this machine; pass -config-dir to collect one anyway).")
+	}
+
 	// Resolve the two local-filesystem collectors against the run mode.
 	// Both read the machine the tool is EXECUTING on, which is only the
 	// ClickHouse server in onprem deployments — hence the mode-dependent
@@ -794,8 +805,10 @@ func getUserInput(protocol, host, port, username, password, mode, configDir *str
 	// Display available modes for user reference
 	fmt.Printf("Available modes: %s\n", strings.Join(canonicalModes, ", "))
 
-	// Get config directory if not provided and not skipping config collection
-	if *configDir == "" && !skipConfig && *mode != "gov" {
+	// Get config directory if not provided and not skipping config
+	// collection. Gov never collects configs and cloud has none on this
+	// machine, so neither mode asks.
+	if *configDir == "" && !skipConfig && !govWithholdsConfig(*mode) && !cloudSkipsConfig(*mode, *configDir) {
 		fmt.Print("Enter ClickHouse config directory to collect [default: /etc/clickhouse-server/config.d/]: ")
 		input, _ := reader.ReadString('\n')
 		*configDir = strings.TrimSpace(input)
@@ -1116,6 +1129,17 @@ func describeWindow(from, to time.Time) string {
 // "-mode GOV" once slipped a collector past a bare == "gov" comparison.
 func govWithholdsConfig(mode string) bool {
 	return strings.ToLower(strings.TrimSpace(mode)) == "gov"
+}
+
+// cloudSkipsConfig reports whether cloud mode should skip configuration
+// collection: it does when no -config-dir was given, because the tool is
+// not running on the ClickHouse server and the default path would only
+// produce a "directory does not exist" notice. An explicit -config-dir is
+// honoured, the same opt-in that -host-info=on / -logs=on give the other
+// local-filesystem collectors in cloud mode. Normalises the mode itself
+// for the same reason resolveLocalCollector does.
+func cloudSkipsConfig(mode, configDir string) bool {
+	return strings.ToLower(strings.TrimSpace(mode)) == "cloud" && strings.TrimSpace(configDir) == ""
 }
 
 // dashboardDecision reports whether to build dashboard.html, and why not when

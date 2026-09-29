@@ -1517,7 +1517,7 @@ const themeTokensCSS = `:root{
 // source of truth (see themeTokensCSS).
 var htmlTemplate = htmlTemplateHead + themeTokensCSS + htmlTemplateTail
 
-const htmlTemplateHead = `<!DOCTYPE html><!DOCTYPE html>
+const htmlTemplateHead = `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -1525,6 +1525,9 @@ const htmlTemplateHead = `<!DOCTYPE html><!DOCTYPE html>
 <title>ClickHouse Diagnostic Dashboard</title>
 <script>/* stamp the saved theme before first paint so the page never flashes */
 try{var _t=localStorage.getItem("chdiag-theme");if(_t)document.documentElement.setAttribute("data-cui-theme",_t);}catch(e){}
+/* same for the sidebar: a saved "collapsed" applies before layout, and a
+   narrow viewport starts collapsed unless the reader chose otherwise */
+try{var _n=localStorage.getItem("chdiag-nav");if(_n==="collapsed"||(!_n&&window.innerWidth<900))document.documentElement.classList.add("nav-collapsed");}catch(e){}
 </script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
 <style>
@@ -1557,22 +1560,56 @@ body{font-family:var(--click-font-regular);background:var(--surface-page);color:
    hardcodes this height either. */
 .topbar{position:sticky;top:0;z-index:100}
 header{background:var(--header-bg);color:var(--header-ink);padding:var(--click-space-3) var(--click-space-6);display:flex;align-items:center;gap:var(--click-space-3)}
+/* Brand block: the product name on the first line, the page title as a
+   smaller second line beneath it, so the header reads as one lockup. */
+header .brand{display:flex;flex-direction:column;line-height:1.15}
 header .logo{font-size:var(--click-font-size-5);font-weight:var(--click-font-weight-4);color:var(--header-logo);letter-spacing:-.5px}
-header h1{font-size:var(--click-font-size-4);font-weight:var(--click-font-weight-3);line-height:1.3}
-header .meta{margin-left:auto;text-align:right;font-size:var(--click-font-size-1);opacity:.75;line-height:var(--click-line-height-2)}
+header h1{font-size:var(--click-font-size-1);font-weight:var(--click-font-weight-2);opacity:.8;letter-spacing:.2px}
+header .meta{margin-left:auto;text-align:right;font-size:var(--click-font-size-1);color:rgba(255,255,255,.75);line-height:var(--click-line-height-2)}
+header .meta .badge{margin:0 var(--click-space-1) 0 0;vertical-align:1px}
 #theme-toggle{margin-left:var(--click-space-4);background:transparent;color:var(--header-ink);border:var(--click-border-width-1) solid rgba(255,255,255,.25);border-radius:var(--click-radii-full);padding:var(--click-space-1) var(--click-space-3);font:inherit;font-size:var(--click-font-size-1);cursor:pointer;white-space:nowrap;transition:background var(--click-transition-smooth)}
 #theme-toggle:hover{background:rgba(255,255,255,.12)}
-nav{background:var(--surface-card);border-bottom:var(--click-border-width-1) solid var(--stroke);padding:0 var(--click-space-6);display:flex;overflow-x:auto}
-nav a{padding:var(--click-space-3) var(--click-space-4);color:var(--ink-muted);text-decoration:none;font-size:var(--click-font-size-1);font-weight:var(--click-font-weight-2);white-space:nowrap;border-bottom:2px solid transparent;display:block}
-nav a:hover{color:var(--ink);border-bottom-color:var(--stroke)}
-/* The section you are in: accent underline + weight, so it reads as state
-   rather than as the link the pointer happens to be over. */
-nav a.active{color:var(--ink);border-bottom-color:var(--status-info);font-weight:var(--click-font-weight-3)}
+/* Section navigation is a fixed sidebar on the left, under the sticky
+   header, with an arrow in the header to hide and show it. It used to be a
+   horizontal strip under the header; with 22 sections that overflowed the
+   viewport at ordinary widths and the overflow scrolled sideways, so the
+   sections past the edge were effectively unreachable. A vertical list
+   scales with the section count. --nav-w is the one width everything is
+   offset by; when collapsed the sidebar slides off and <main> takes the
+   space back. The state lives on <html> (class nav-collapsed) so the
+   bootstrap script in <head> can stamp it before first paint. */
+:root{--nav-w:180px}
+#nav-toggle{display:inline-flex;align-items:center;gap:var(--click-space-2);background:transparent;color:var(--header-ink);border:var(--click-border-width-1) solid rgba(255,255,255,.25);border-radius:var(--click-radii-full);padding:var(--click-space-1) var(--click-space-2);font:inherit;font-size:var(--click-font-size-1);cursor:pointer;white-space:nowrap;flex:none;transition:background var(--click-transition-smooth)}
+#nav-toggle:hover{background:rgba(255,255,255,.12)}
+#nav-toggle svg{width:18px;height:18px;flex:none;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;transition:transform .2s ease}
+/* one chevron, pointing at the sidebar's edge: left while shown (hide), right while hidden (show) */
+html.nav-collapsed #nav-toggle svg{transform:scaleX(-1)}
+/* the current section's name — redundant next to a visible sidebar, the
+   "you are here" once the sidebar is hidden */
+#nav-current{display:none;max-width:14em;overflow:hidden;text-overflow:ellipsis;padding-right:var(--click-space-1)}
+html.nav-collapsed #nav-current:not(:empty){display:block}
+nav{position:fixed;top:var(--topbar-h,74px);left:0;bottom:0;width:var(--nav-w);z-index:90;background:var(--surface-card);border-right:var(--click-border-width-1) solid var(--stroke);display:flex;flex-direction:column;overflow-y:auto;padding:var(--click-space-2) 0 var(--click-space-4);transition:transform .2s ease,visibility .2s}
+html.nav-collapsed nav{transform:translateX(-100%);visibility:hidden}
+.nav-head{padding:var(--click-space-2) var(--click-space-5);font-size:var(--click-font-size-0);font-weight:var(--click-font-weight-3);color:var(--ink-muted);text-transform:uppercase;letter-spacing:.5px}
+nav a{padding:var(--click-space-2) var(--click-space-5);color:var(--ink-muted);text-decoration:none;font-size:var(--click-font-size-1);font-weight:var(--click-font-weight-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border-left:3px solid transparent;display:block}
+nav a:hover{color:var(--ink);background:var(--surface-sunken)}
+nav a:focus-visible{outline:2px solid var(--status-info);outline-offset:-2px}
+/* The section you are in: accent bar + weight, so it reads as state rather
+   than as the link the pointer happens to be over. */
+nav a.active{color:var(--ink);border-left-color:var(--status-info);font-weight:var(--click-font-weight-3)}
+/* Below 900px the sidebar would leave too little room for the charts, so
+   when shown it overlays the content instead of pushing it, and picking a
+   section hides it again (see the toggle script). */
+@media (max-width:900px){nav{box-shadow:var(--click-shadow-5);z-index:95}}
+@media (prefers-reduced-motion:reduce){nav,main,#nav-toggle svg{transition:none}}
+@media print{nav,#nav-toggle{display:none}html:not(.nav-collapsed) main{padding-left:var(--click-space-5);max-width:1600px}}
 .badge{display:inline-block;padding:2px var(--click-space-2);border-radius:var(--click-radii-full);font-size:var(--click-font-size-0);font-weight:var(--click-font-weight-3);text-transform:uppercase;letter-spacing:.5px;margin-top:2px}
 .badge-cloud{background:var(--status-info);color:#fff}
 .badge-onprem{background:var(--status-good);color:#fff}
 .badge-gov{background:#8800CC;color:#fff}
-main{max-width:1600px;margin:0 auto;padding:var(--click-space-5) var(--click-space-5) var(--click-space-7)}
+main{max-width:1600px;margin:0 auto;padding:var(--click-space-5) var(--click-space-5) var(--click-space-7);transition:padding-left .2s ease}
+html:not(.nav-collapsed) main{padding-left:calc(var(--nav-w) + var(--click-space-5));max-width:calc(1600px + var(--nav-w))}
+@media (max-width:900px){html:not(.nav-collapsed) main{padding-left:var(--click-space-5);max-width:1600px}}
 section{margin-bottom:var(--click-space-6);scroll-margin-top:calc(var(--topbar-h, 124px) + var(--click-space-2))}
 section h2{font-size:var(--click-font-size-3);font-weight:var(--click-font-weight-3);color:var(--ink);margin-bottom:var(--click-space-3);padding-bottom:var(--click-space-2);border-bottom:var(--click-border-width-1) solid var(--stroke);display:flex;align-items:center;gap:var(--click-space-2)}
 .stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(155px,1fr));gap:var(--click-space-3);margin-bottom:var(--click-space-5)}
@@ -1673,16 +1710,24 @@ footer{text-align:center;color:var(--ink-muted);font-size:var(--click-font-size-
 
 <div class="topbar">
 <header>
-  <div class="logo">ClickHouse</div>
-  <div>
+  <button id="nav-toggle" type="button" aria-label="Hide section sidebar" aria-controls="main-nav" aria-expanded="true">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg>
+    <span id="nav-current"></span>
+  </button>
+  <div class="brand">
+    <div class="logo">ClickHouse</div>
     <h1>Diagnostic Dashboard</h1>
-    <div id="hdr-badge"></div>
   </div>
   <div class="meta" id="hdr-meta"></div>
   <button id="theme-toggle" type="button" aria-label="Toggle colour theme"></button>
 </header>
+</div><!-- .topbar -->
 
-<nav id="main-nav">
+<!-- Section sidebar. Outside .topbar on purpose: the band is sticky and
+     measured for --topbar-h, and the sidebar is positioned under it from
+     that measurement rather than being part of it. -->
+<nav id="main-nav" aria-label="Sections">
+  <div class="nav-head">Sections</div>
   <a href="#sec-alerts" id="nav-alerts">Alerts</a>
   <a href="#sec-qa" id="nav-qa" style="display:none">Query Analysis</a>
   <a href="#sec-overview">Overview</a>
@@ -1706,7 +1751,6 @@ footer{text-align:center;color:var(--ink-muted);font-size:var(--click-font-size-
   <a href="#sec-server-errors">Server Errors</a>
   <a href="#sec-async-inserts" id="nav-async-inserts" style="display:none">Async Inserts</a>
 </nav>
-</div><!-- .topbar -->
 
 <main>
 
@@ -2998,7 +3042,23 @@ document.addEventListener('DOMContentLoaded',function(){
       a.classList.toggle('active',on);
       if(on) a.setAttribute('aria-current','true'); else a.removeAttribute('aria-current');
     });
+    // The header button carries the current section's name for when the
+    // sidebar is hidden — the "you are here" the highlighted link provides
+    // while it is shown. First text node only: the Alerts link also carries
+    // a count badge, and "Alerts 1" is not a section name.
+    const curLink=navFor['#'+cur];
+    const label=document.getElementById('nav-current');
+    const name=curLink?(curLink.firstChild&&curLink.firstChild.nodeType===3?curLink.firstChild.textContent:curLink.textContent).trim():'';
+    if(label && name && label.textContent!==name) label.textContent=name;
+    // Keep the highlighted link in view inside a sidebar shorter than its
+    // list. Only when the current section changes: a scroll pass runs per
+    // frame and scrolling the list on every one would fight the reader.
+    if(curLink && cur!==lastCur){
+      lastCur=cur;
+      if(curLink.getClientRects().length) curLink.scrollIntoView({block:'nearest'});
+    }
   }
+  let lastCur=null;
   // Called straight from the listener rather than coalesced through
   // requestAnimationFrame. The pass is ~20 getBoundingClientRect reads with
   // no writes, the browser already caps scroll events at the frame rate, and
@@ -3026,11 +3086,49 @@ document.addEventListener('DOMContentLoaded',function(){
   syncNav();
   window.addEventListener('load',syncNav);
 
+  // Sidebar toggle. The arrow in the header hides and shows the sidebar;
+  // the choice is remembered like the theme, so a reader who prefers the
+  // full width keeps it across bundles. Below 900px the sidebar overlays
+  // the content, so picking a section there hides it again. Focus follows
+  // the panel: into the current section's link on show, back to the arrow
+  // on hide, so keyboard readers never lose their place.
+  (function(){
+    const nav=document.getElementById('main-nav');
+    const toggle=document.getElementById('nav-toggle');
+    const root=document.documentElement;
+    if(!nav||!toggle) return;
+    const narrow=()=>window.matchMedia&&window.matchMedia('(max-width:900px)').matches;
+    function isShown(){ return !root.classList.contains('nav-collapsed'); }
+    function reflect(){
+      const shown=isShown();
+      toggle.setAttribute('aria-expanded',shown?'true':'false');
+      toggle.setAttribute('aria-label',shown?'Hide section sidebar':'Show section sidebar');
+    }
+    function setNav(shown,remember){
+      root.classList.toggle('nav-collapsed',!shown);
+      reflect();
+      if(remember){ try{ localStorage.setItem('chdiag-nav',shown?'shown':'collapsed'); }catch(e){} }
+      if(shown){
+        const a=nav.querySelector('a.active')||navLinks.find(l=>l.getClientRects().length);
+        if(a){ a.focus({preventScroll:true}); a.scrollIntoView({block:'nearest'}); }
+      } else {
+        toggle.focus({preventScroll:true});
+      }
+    }
+    reflect(); // the bootstrap script may have collapsed it before this ran
+    toggle.addEventListener('click',()=>setNav(!isShown(),true));
+    nav.addEventListener('click',e=>{ if(e.target.closest('a')&&narrow()) setNav(false,false); });
+    document.addEventListener('keydown',e=>{ if(e.key==='Escape'&&isShown()&&narrow()) setNav(false,false); });
+  })();
+
   // header
-  document.getElementById('hdr-badge').innerHTML=
-    '<span class="badge badge-'+esc(DATA.mode)+'">'+esc(DATA.mode)+'</span>';
+  // The deployment type sits with the version it qualifies — "[cloud]
+  // Version: 26.6.2191" — rather than beside the title, because the mode
+  // says which system tables were collected, not what the page is.
   document.getElementById('hdr-meta').innerHTML=
-    'Generated: '+esc(DATA.generated_at)+'<br>Version: '+esc(DATA.version||'N/A');
+    'Generated: '+esc(DATA.generated_at)+'<br>'
+    +'<span class="badge badge-'+esc(DATA.mode)+'">'+esc(DATA.mode)+'</span>'
+    +' Version: '+esc(DATA.version||'N/A');
 
   // stats
   // esc() on both arguments: every caller currently passes a number, a

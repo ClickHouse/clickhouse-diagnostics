@@ -188,7 +188,7 @@ You will be prompted for any value not supplied on the command line:
 | Username | _empty_ |
 | Password (hidden) | _empty_ |
 | Mode (cloud/onprem/gov) | `onprem` — only when `-mode` is absent entirely; see below |
-| Config directory | `/etc/clickhouse-server/config.d/` |
+| Config directory | `/etc/clickhouse-server/config.d/` — `onprem` only; `cloud` and `gov` do not ask (see below) |
 | Gov-mode salt (hidden, `gov` mode only) | _empty_ |
 
 #### How `-mode` is resolved
@@ -277,11 +277,11 @@ Any flag left empty on the command line is prompted for interactively (except th
 
 ### Examples
 
-Run against a Cloud cluster, no config collection (configs aren't accessible in Cloud):
+Run against a Cloud cluster (configuration files are skipped automatically in `cloud` mode: the server's config directory is not on the machine running the tool; pass `-config-dir` to collect one anyway):
 
 ```bash
 ./clickhouse-diagnostic -mode cloud -host my-service.us-east-1.aws.clickhouse.cloud \
-  -port 8443 -protocol https -user default -skip-config
+  -port 8443 -protocol https -user default
 ```
 
 Run against an on-prem node, write everything to a custom directory:
@@ -941,7 +941,7 @@ When `-skip-dashboard` is not set, the tool generates a single self-contained `d
 
 In addition, when `--query-id` or `--normalized-query-hash` is set, a **🔍 Query Analysis** section appears near the top of the nav. See [Query analysis mode](#query-analysis-mode) for what it contains.
 
-A sticky top nav at the page header lets you jump straight to any section. Sections that depend on cluster-specific or version-specific data (Crash Log, Cluster Nodes, Replicas Health, Async Inserts, Query Analysis) are hidden when there is nothing to show.
+A sidebar on the left lists every section and highlights the one you are reading. The arrow at the left of the sticky header hides or shows it (the choice is remembered in the browser, like the theme); while hidden, the arrow shows the name of the current section. Sections that depend on cluster-specific or version-specific data (Crash Log, Cluster Nodes, Replicas Health, Async Inserts, Query Analysis) are hidden when there is nothing to show.
 
 ### Previewing the Keeper Health panel without an outage
 
@@ -964,7 +964,7 @@ Why a second file: the graph needs every column of every user table embedded, an
 **Credentials.** `create_table_query`, `engine_full` and `system.dictionaries.source` carry engine arguments — an S3 secret key, a MySQL password, `kafka_sasl_password`. Servers from 23.x mask these as `'[HIDDEN]'` themselves; a 22.x server does not. Both the collected JSONL (`system.tables`, `system.dictionaries`) and the graph payload pass through a redactor (`internal/collection/sqlredact.go`) that masks the credential positions of every known engine and table function (S3-family, MySQL, PostgreSQL, MongoDB, `remote()`, Redis, Azure, …), plus the byte-shape heuristics the config sanitizer uses (URL basic-auth, AWS key ids, JWTs, `keyword = 'value'`), writing the server's own `[HIDDEN]` token so old and new bundles read alike. `execution_log.txt` notes how many values each collector replaced. This is field-level and JSONL-only: a `-output-format native|tsv` bundle carries the DDL unredacted and says so.
 ## Configuration Collection
 
-When `-skip-config` is not set, the tool reads files from `-config-dir` (default `/etc/clickhouse-server/config.d/`) and writes sanitised copies into the run's `configuration/` directory (inside `clickhouse_backup_<timestamp>/`), mirroring the source tree — `config.d/storage.xml` and `users.d/storage.xml` stay distinct, and the directory a file came from (which determines ClickHouse's merge order) is preserved.
+When `-skip-config` is not set, the tool reads files from `-config-dir` (default `/etc/clickhouse-server/config.d/`; in `cloud` mode collection is skipped unless `-config-dir` is given explicitly, and `gov` mode never collects) and writes sanitised copies into the run's `configuration/` directory (inside `clickhouse_backup_<timestamp>/`), mirroring the source tree — `config.d/storage.xml` and `users.d/storage.xml` stay distinct, and the directory a file came from (which determines ClickHouse's merge order) is preserved.
 
 Sanitisation runs in two layers — proper XML / YAML parsing first, then a heuristic byte-pattern pass over the result. If a file cannot be parsed, the tool **fails closed**: a warning is logged and the file is skipped rather than shipped un-sanitised.
 

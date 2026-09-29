@@ -198,9 +198,53 @@ func redactCalls(s string) (string, int) {
 	return b.String(), count
 }
 
+// skipNonCode reports whether s[j] opens a lexical region that can never
+// contain a call, an argument separator or a closing paren of the code
+// around it — a backtick or double-quoted identifier, a `-- line` comment or
+// a `/* block */` comment — and returns the index of that region's last
+// byte. Every scanner below steps over these the same way. Without this a
+// table named `s3(` or a comment mentioning s3( was taken for the engine
+// call: matchingParen then paired that '(' with the real call's ')' and the
+// real password, now outside the span the rule inspects, was left in place.
+// Single-quoted literals are handled inline because their escape rules
+// differ between the scanners' callers. An unterminated region runs to the
+// end of the text.
+func skipNonCode(s string, j int) (end int, ok bool) {
+	switch {
+	case s[j] == '`' || s[j] == '"':
+		q := s[j]
+		for k := j + 1; k < len(s); k++ {
+			if s[k] == '\\' {
+				k++
+				continue
+			}
+			if s[k] == q {
+				if k+1 < len(s) && s[k+1] == q { // doubled quote escapes itself
+					k++
+					continue
+				}
+				return k, true
+			}
+		}
+		return len(s) - 1, true
+	case s[j] == '-' && j+1 < len(s) && s[j+1] == '-':
+		if k := strings.IndexByte(s[j:], '\n'); k >= 0 {
+			return j + k, true
+		}
+		return len(s) - 1, true
+	case s[j] == '/' && j+1 < len(s) && s[j+1] == '*':
+		if k := strings.Index(s[j+2:], "*/"); k >= 0 {
+			return j + 2 + k + 1, true
+		}
+		return len(s) - 1, true
+	}
+	return 0, false
+}
+
 // nextCall finds the next identifier immediately followed by '(' at or after
-// i, skipping over string literals so a quoted "s3(" is never a call. Returns
-// the name, its start index and the index of the '('; start = -1 when none.
+// i, skipping over string literals, quoted identifiers and comments so a
+// quoted or commented "s3(" is never a call. Returns the name, its start
+// index and the index of the '('; start = -1 when none.
 func nextCall(s string, i int) (name string, start, open int) {
 	inStr := false
 	for j := i; j < len(s); j++ {
@@ -209,8 +253,16 @@ func nextCall(s string, i int) (name string, start, open int) {
 			if c == '\\' {
 				j++
 			} else if c == '\'' {
-				inStr = false
+				if j+1 < len(s) && s[j+1] == '\'' {
+					j++
+				} else {
+					inStr = false
+				}
 			}
+			continue
+		}
+		if end, ok := skipNonCode(s, j); ok {
+			j = end
 			continue
 		}
 		switch {
@@ -238,7 +290,8 @@ func isIdentStart(c byte) bool { return c == '_' || (c|0x20 >= 'a' && c|0x20 <= 
 func isIdentByte(c byte) bool  { return isIdentStart(c) || (c >= '0' && c <= '9') }
 
 // matchingParen returns the index of the ')' closing the '(' at open, honouring
-// nested parentheses and single-quoted strings (\' and ” escapes). -1 if none.
+// nested parentheses, single-quoted strings (\' and ” escapes), quoted
+// identifiers and comments. -1 if none.
 func matchingParen(s string, open int) int {
 	depth := 0
 	inStr := false
@@ -254,6 +307,10 @@ func matchingParen(s string, open int) int {
 					inStr = false
 				}
 			}
+			continue
+		}
+		if end, ok := skipNonCode(s, j); ok {
+			j = end
 			continue
 		}
 		switch c {
@@ -290,6 +347,10 @@ func splitArgs(s string) []string {
 					inStr = false
 				}
 			}
+			continue
+		}
+		if end, ok := skipNonCode(s, j); ok {
+			j = end
 			continue
 		}
 		switch c {
@@ -365,33 +426,76 @@ func RedactJSONLFields(body string, fields []string) (string, int) {
 	return strings.Join(lines, "\n"), total
 }
 
-// replaceJSONStringField finds `"key":"…"` in one JSON object line and passes
-// the decoded string to fn; if fn changes it, the literal is re-encoded in
-// place. Returns the line and whether a substitution happened.
+// replaceJSONStringField finds the `"key":"…"` member of one JSON object
+// line and passes the decoded string to fn; if fn changes it, the literal is
+// re-encoded in place. Returns the line and whether a substitution happened.
+//
+// Only a match in KEY position counts: the bytes must follow the object's
+// '{' or a member-separating ','. Inside a string value every quote is
+// escaped, so valid JSON cannot reproduce the needle there — but the guard
+// costs nothing and means the redaction does not depend on that argument
+// holding for every producer, and a longer key that merely ends in the
+// field name (`"x_source"`) can never be mistaken for the field.
 func replaceJSONStringField(line, key string, fn func(string) string) (string, bool) {
-	needle := `"` + key + `":"`
-	at := strings.Index(line, needle)
-	if at < 0 {
-		return line, false
+	needle := `"` + key + `"`
+	from := 0
+	for from < len(line) {
+		rel := strings.Index(line[from:], needle)
+		if rel < 0 {
+			return line, false
+		}
+		at := from + rel
+		from = at + 1
+		if !atJSONKeyPosition(line, at) {
+			continue
+		}
+		// `"key"` then ':' then the opening quote of a string value, with
+		// optional blanks around the colon. ClickHouse emits none, but a
+		// hand-edited fixture may, and the member is the same member.
+		start := skipJSONBlanks(line, at+len(needle))
+		if start >= len(line) || line[start] != ':' {
+			continue
+		}
+		start = skipJSONBlanks(line, start+1)
+		if start >= len(line) || line[start] != '"' {
+			continue // not a string value: nothing to redact
+		}
+		end := jsonStringEnd(line, start)
+		if end < 0 {
+			return line, false
+		}
+		var v string
+		if err := json.Unmarshal([]byte(line[start:end+1]), &v); err != nil {
+			return line, false
+		}
+		nv := fn(v)
+		if nv == v {
+			return line, false
+		}
+		enc, err := json.Marshal(nv)
+		if err != nil {
+			return line, false
+		}
+		return line[:start] + string(enc) + line[end+1:], true
 	}
-	start := at + len(needle) - 1 // index of the opening quote of the value
-	end := jsonStringEnd(line, start)
-	if end < 0 {
-		return line, false
+	return line, false
+}
+
+// atJSONKeyPosition reports whether the '"' at line[at] can open an object
+// member's key: the previous non-blank byte is '{' or ','.
+func atJSONKeyPosition(line string, at int) bool {
+	k := at - 1
+	for k >= 0 && (line[k] == ' ' || line[k] == '\t') {
+		k--
 	}
-	var v string
-	if err := json.Unmarshal([]byte(line[start:end+1]), &v); err != nil {
-		return line, false
+	return k >= 0 && (line[k] == '{' || line[k] == ',')
+}
+
+func skipJSONBlanks(line string, k int) int {
+	for k < len(line) && (line[k] == ' ' || line[k] == '\t') {
+		k++
 	}
-	nv := fn(v)
-	if nv == v {
-		return line, false
-	}
-	enc, err := json.Marshal(nv)
-	if err != nil {
-		return line, false
-	}
-	return line[:start] + string(enc) + line[end+1:], true
+	return k
 }
 
 // jsonStringEnd returns the index of the closing quote of the JSON string
