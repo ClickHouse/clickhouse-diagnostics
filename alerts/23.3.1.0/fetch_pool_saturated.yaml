@@ -1,6 +1,8 @@
-# 23.4 override: background_*_pool_size moved from system.settings to
-# system.server_settings in 23.3; the root rule finds no size there and stays
-# quiet, this one reads the right table. Same rung as the server_settings collector.
+# 23.3 override: background_*_pool_size moved from system.settings to
+# system.server_settings in 23.3. system.settings still LISTS the names on
+# newer servers, with the old session-setting defaults (8 / 128) rather than
+# the server's real sizes (16 / 512), so the root rule would compare against
+# the wrong denominator there — this override reads the table that is right.
 name: fetch_pool_saturated
 title: "Background fetch pool saturated for hours"
 severity: warning

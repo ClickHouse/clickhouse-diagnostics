@@ -4,20 +4,22 @@ severity: warning
 description: |
   In at least 3 of the last 24 hours the hourly average of
   CurrentMetric_BackgroundSchedulePoolTask on a replica was at or above 95% of
-  background_schedule_pool_size. A saturated pool is a queue with no queue: work
-  that finds no free slot is dropped and retried later, silently.
-  The schedule pool (background_schedule_pool_size, default 512) runs every
-  table's periodic tasks — parts updates, cleanup, replication queue checks;
-  with tens of thousands of replicated tables it is the first pool to pin.
-  On a SharedMergeTree cluster a saturated fetch pool means new parts become
-  visible on this replica minutes to hours late — reads return fewer rows than
-  the same query on a sibling replica, and a restart helps only until the pool
-  fills again. The lasting fix is capacity: the pool size (applied on config
-  reload for the fetch pool), fewer and larger inserts, fewer tables and parts.
+  background_schedule_pool_size. The schedule pool runs every table's periodic
+  tasks — parts-set updates, replication queue processing and cleanup, TTL and
+  MV refresh scheduling — one task at a time per slot; with tens of thousands
+  of replicated tables it is the first pool to pin. When it is full the tasks
+  are not lost, they are late: a table's "parts updated" task waits for a slot,
+  so on SharedMergeTree new parts become visible minutes to hours after they
+  were written, and the replication queue on ReplicatedMergeTree is processed
+  behind schedule. A restart empties the pool only until the same tables fill
+  it again. The lasting fix is capacity: background_schedule_pool_size (a
+  server setting read at startup — plan a restart; default 512), fewer
+  replicated tables per replica, fewer tiny partitions.
 
-  Check: metric_log_7_days avg_/max_schedule_pool_tasks per hour against
-  the size; part_log DownloadPart per hour; on SMT, per-replica
-  max_block_number for a hot table (system.parts across replicas).
+  Check: metric_log_7_days avg_/max_schedule_pool_tasks per hour against the
+  size; system.tables count of Replicated*/Shared* engines; alongside
+  fetch_pool_saturated (both pinned on every replica is the capacity
+  signature); on SMT, per-replica max_block_number for a hot table.
 tags:
   - background-pools
   - capacity

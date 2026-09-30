@@ -241,6 +241,19 @@ def inventory(base: str):
 def detect_mode(base: str, files) -> str:
     """gov: no dashboard/crash_log/stack_trace, alerts_summary.json present, hashed names.
     cloud: clusters point at *.clickhouse.cloud or part_log carries several hostnames."""
+    # The collector wrote the mode it actually ran in (v0.5+ header); an
+    # onprem run that switched to cloud collection on a SharedMergeTree
+    # cluster says `mode: cloud` there while its part_log may still show one
+    # host. The heuristics below are for bundles without the header.
+    xl = os.path.join(base, "execution_log.txt")
+    if os.path.exists(xl):
+        with open(xl, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if line.startswith("Summary"):
+                    break
+                m = re.match(r"^mode:\s+(cloud|onprem|gov)\b", line)
+                if m:
+                    return m.group(1)
     names = {f["file"] for f in files}
     has = lambda prefix: any(n.startswith(prefix) for n in names)
     if not has("dashboard.html") and not has("system.crash_log_") and not has("system.stack_trace_") and "alerts_summary.json" in names:
@@ -1141,7 +1154,11 @@ def analyse(base: str):
         for label, col, setting, pct, hc in (("fetch", "avg_fetch_pool_tasks", "background_fetches_pool_size", 0.9, "HC-2.13"),
                                              ("schedule", "avg_schedule_pool_tasks", "background_schedule_pool_size", 0.95, "HC-2.14"),
                                              ("merge", "avg_merge_pool_tasks", "background_pool_size", 0.9, "HC-2.7")):
-            vals = [num(r.get(col)) for r in recent if r.get(col) is not None]
+            # Cloud files carry the max over replicas of the per-replica hourly
+            # average (v0.7+): one node at 16/16 among idle siblings must not
+            # be averaged below the threshold.
+            rcol = "max_replica_" + col
+            vals = [num(r.get(rcol) if r.get(rcol) is not None else r.get(col)) for r in recent if r.get(rcol) is not None or r.get(col) is not None]
             if not vals:
                 continue
             size = sizes.get(setting)

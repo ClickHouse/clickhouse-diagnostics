@@ -623,7 +623,7 @@ The tool targets **ClickHouse 22.8 and newer** for on-prem servers. Root-level q
 | `system.tables.total_bytes_uncompressed` | 23.12 | `queries.query_analysis/23.12.1.0/` |
 | `system.view_refreshes` table | 23.12 | `queries.*/23.12.1.0/` (no root file — skipped below 23.12 in every mode) |
 | `system.mutations.is_killed` | 24.1 | `alerts/24.1.1.0/` (root omits the filter) |
-| `background_*_pool_size` moved from `system.settings` to `system.server_settings` | 23.3 | `alerts/23.4.1.0/` (`fetch_pool_saturated`, `schedule_pool_saturated`; the root rule reads `system.settings` and finds no size on newer servers, so it stays quiet there) |
+| `background_*_pool_size` moved from `system.settings` to `system.server_settings` | 23.3 | `alerts/23.3.1.0/` (`fetch_pool_saturated`, `schedule_pool_saturated`; `system.settings` still lists the names on newer servers with the old session defaults, so the root rule would compare against the wrong size there) |
 | `system.tables.metadata_version` | 24.2 | `queries.*/24.2.1.0/` |
 | `system.error_log` table | 24.8 | `queries.*/24.8.1.0/` (no root file — skipped below 24.8 in every mode) |
 | `system.zookeeper_log.duration_microseconds` (replaces `duration_ms`) | 24.3 | `queries.*/24.3.1.0/` (roots use `duration_ms`; output stays in ms on every rung) |
@@ -785,7 +785,7 @@ In `message:`, `{column_name}` is replaced with the value from each result row. 
 
 ### Bundled alert rules
 
-The repo ships with 15 alert rules in `alerts/`. They are intended as a starting point — adjust thresholds to match your workload.
+The repo ships with 17 alert rules in `alerts/` (plus version-gated overrides in `alerts/<version>/`). They are intended as a starting point — adjust thresholds to match your workload.
 
 | Rule | Severity | Fires when |
 |---|---|---|

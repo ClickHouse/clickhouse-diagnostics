@@ -503,7 +503,11 @@ func main() {
 
 	// Resolve query-analysis options up front so an invalid --query-id
 	// or --normalized-query-hash fails fast, before any heavy work runs.
-	analysisOpts, err := resolveAnalysisOpts(client, mode, queryID, normalizedHash, fromStr, toStr)
+	// effectiveMode, not mode: after an onprem → cloud switch the --query-id /
+	// --normalized-query-hash preflight must search the same scope the
+	// analysis collector will read (every replica), or it can reject an id
+	// that exists on another replica.
+	analysisOpts, err := resolveAnalysisOpts(client, effectiveMode, queryID, normalizedHash, fromStr, toStr)
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
 		return

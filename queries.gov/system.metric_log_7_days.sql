@@ -14,6 +14,11 @@ SELECT
     max(CurrentMetric_BackgroundSchedulePoolTask)            AS max_schedule_pool_tasks,
     avg(CurrentMetric_BackgroundCommonPoolTask)              AS avg_common_pool_tasks,
     max(CurrentMetric_BackgroundCommonPoolTask)              AS max_common_pool_tasks,
+    -- Same column set as the cloud file, where these are the max over
+    -- replicas of each replica's hourly average; one host, so they equal avg_*.
+    avg(CurrentMetric_BackgroundFetchesPoolTask)             AS max_replica_avg_fetch_pool_tasks,
+    avg(CurrentMetric_BackgroundSchedulePoolTask)            AS max_replica_avg_schedule_pool_tasks,
+    avg(CurrentMetric_BackgroundMergesAndMutationsPoolTask)  AS max_replica_avg_merge_pool_tasks,
     avg(CurrentMetric_InterserverConnection)                 AS avg_interserver_connections,
     sum(ProfileEvent_ZooKeeperTransactions)                  AS zk_transactions,
     sum(ProfileEvent_ZooKeeperHardwareExceptions)            AS zk_hw_exceptions,

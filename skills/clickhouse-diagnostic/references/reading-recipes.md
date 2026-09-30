@@ -160,10 +160,12 @@ Server-side tracked memory and background pools per hour (the time series the da
 SELECT time, formatReadableSize(avg_memory_tracking_bytes) AS mem, round(avg_merge_pool_tasks,1) AS merge_pool,
        max_merge_pool_tasks, round(avg_fetch_pool_tasks,1) AS fetch_pool, max_fetch_pool_tasks,
        round(avg_schedule_pool_tasks,1) AS schedule_pool, max_schedule_pool_tasks,
-       round(avg_common_pool_tasks,1) AS common_pool, zk_transactions, zk_hw_exceptions
+       round(avg_common_pool_tasks,1) AS common_pool,
+       round(max_replica_avg_fetch_pool_tasks,1) AS worst_replica_fetch, round(max_replica_avg_schedule_pool_tasks,1) AS worst_replica_schedule,
+       zk_transactions, zk_hw_exceptions
 FROM file('$B/system.metric_log_7_days_*.jsonl', JSONEachRow) ORDER BY time
 ```
-(`*_fetch_pool_tasks` max and the schedule / common pool columns exist from v0.7; older bundles have only `max_merge_pool_tasks` and `avg_fetch_pool_tasks`.) Compare `avg_memory_tracking_bytes` peaks with `host_info.memory.total_bytes` and `clickhouse_relevant_tunables.cgroup_memory_limit_bytes`; each pool against its size — a pool pinned at its size for hours is saturated (HC-2.7 merge, HC-2.13 fetch, HC-2.14 schedule; P-59 on SharedMergeTree):
+(`*_fetch_pool_tasks` max, the schedule / common pool columns and the `max_replica_avg_*` columns — the worst replica's hourly average, the grain saturation is judged at in cloud — exist from v0.7; older bundles have only `max_merge_pool_tasks` and `avg_fetch_pool_tasks`.) Compare `avg_memory_tracking_bytes` peaks with `host_info.memory.total_bytes` and `clickhouse_relevant_tunables.cgroup_memory_limit_bytes`; each pool against its size — a pool pinned at its size for hours is saturated (HC-2.7 merge, HC-2.13 fetch, HC-2.14 schedule; P-59 on SharedMergeTree):
 ```sql
 SELECT name, value FROM file('$B/system.server_settings_*.jsonl', JSONEachRow)   -- system.settings_*.jsonl on < 23.3
 WHERE name IN ('background_pool_size','background_fetches_pool_size','background_schedule_pool_size','background_common_pool_size')
