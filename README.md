@@ -18,6 +18,7 @@ Under the hood: per-environment query sets (`cloud` / `onprem` / `gov`) selected
 | `system.merges`, `system.mutations` | What is merging or mutating right now; what is stuck? | A stuck merge or a mutation backlog is the usual reason parts pile up while the pool looks idle. |
 | `system.replicas`, `system.replication_queue` | Is every replica writable and caught up; if not, why? | Read-only state, Keeper session loss and the shape of the queue locate replication problems. |
 | `system.query_log_details_7_days` (hourly aggregation of `system.query_log`) | What ran, how slow, how much memory, what failed, by whom? | Most incidents start with the workload; this is the aggregated view, with a 500-character sample per query pattern and no customer rows. |
+| `system.query_views_log_3_days` (3 days, hourly aggregation of `system.query_views_log`) | Did every materialized view fire, did any fail, and what does each cost? | An MV that "succeeds" while writing nothing is invisible in `query_log`. An MV that throws fails the parent INSERT by default (`query_log` shows `… while pushing to view X`), but with `materialized_views_ignore_errors = 1` the INSERT is clean and this is the only record. Either way the base part is already committed. |
 | `system.view_refreshes` (≥ 23.12) | Are the refreshable materialized views actually refreshing? | A `REFRESH EVERY` view never appears in `query_views_log`; this is the only place its schedule, last success and last error live. |
 | `system.data_skipping_indices` | Which tables carry data-skipping indices, on which expressions, at what granularity? | The evidence for "the index exists but the query does not use it"; also drawn on the schema graph. |
 | `system.errors`, `system.text_log` (24 h, severity first, ≤ 200 rows per logger) | Which errors, how often, with what message? | Fast triage by error code; the log slice gives the server's own words. |
@@ -327,6 +328,7 @@ Most collection queries look back over a fixed period. Each declares its **own**
 |---|---|
 | `system.query_log_details_7_days` | 7 days |
 | `system.part_log_3_days` | 3 days |
+| `system.query_views_log_3_days` | 3 days |
 | `system.metric_log_7_days` | 7 days |
 | `system.asynchronous_insert_log_7_days` | 7 days |
 | `system.metric_log_coordination_3_days` | 3 days |

@@ -473,7 +473,8 @@ def analyse(base: str):
 
     def tl(h):
         return timeline.setdefault(h, {"queries": 0, "exceptions": 0, "codes": Counter(), "new_parts": 0,
-                                       "merges": 0, "failed_bg": Counter(), "zk_hw": 0, "zk_tx": None})
+                                       "merges": 0, "failed_bg": Counter(), "zk_hw": 0, "zk_tx": None,
+                                       "mv_failed": 0})
 
     if ql:
         seen = set()
@@ -662,6 +663,239 @@ def analyse(base: str):
         top = by_code.most_common(6)
         out["error_log_top"] = [{"code": c, "name": ERROR_NAMES.get(c, "?"), "count": n} for c, n in top]
 
+    # ---- query_views_log: materialized-view execution
+    #
+    # Reading rules that shape every check below (verified on 26.7; see P-36):
+    #   * By default an MV that throws FAILS the parent INSERT. query_log then
+    #     carries the failure ("… while pushing to view db.mv"), and the server
+    #     writes an ExceptionWhileProcessing row for EVERY view in the pipeline
+    #     with that same message — so rows tie, and only the message says which
+    #     view threw. Row counts across siblings are one failed INSERT counted
+    #     once per view, not N failures.
+    #   * Under materialized_views_ignore_errors = 1 the INSERT succeeds, only
+    #     the throwing view gets an ExceptionWhileProcessing row, and text_log
+    #     says "Error is ignored because the setting … is enabled".
+    #   * written_rows on an ExceptionWhileProcessing row counts rows that never
+    #     landed (the insert rolled back); only QueryFinish rows are real writes.
+    #   * zero_write_executions is normal for a filtering MV. Only a view that
+    #     STOPPED writing is evidence; a view that never wrote is a design (P-35).
+    #   * A refreshable MV (REFRESH EVERY / AFTER) never writes query_views_log.
+    qv = read_jsonl(first("system.query_views_log_3_days_*.jsonl", base))
+    tbl_rows = read_jsonl(first("system.tables_*.jsonl", base)) or []
+    refresh_re = re.compile(r"\bREFRESH\s+(EVERY|AFTER)\b", re.I)
+    mv_tables = [r for r in tbl_rows if r.get("engine") == "MaterializedView"]
+    # Refreshable MVs are excluded from the coverage gate: they do not fire on
+    # insert, so their absence from query_views_log means nothing. Gov ships no
+    # DDL, so there the exclusion cannot be made and the wording stays hedged.
+    insert_mvs = [r for r in mv_tables if not refresh_re.search(str(r.get("create_table_query") or ""))]
+    has_ddl = any(r.get("create_table_query") for r in tbl_rows)
+
+    def view_label(r):
+        # gov splits view_name into hashed database/table halves.
+        if r.get("view_name") is not None:
+            return str(r.get("view_name"))
+        return f"{r.get('view_database', '?')}.{r.get('view_table', '?')}"
+
+    if not qv and insert_mvs:
+        refreshable = len(mv_tables) - len(insert_mvs)
+        add("warning", "coverage",
+            f"{len(insert_mvs)} insert-driven materialized view(s) exist but query_views_log is absent/empty"
+            + (f" ({refreshable} refreshable MV(s) excluded — they never write it)" if refreshable else "")
+            + (" — MV kind could not be told apart without DDL (gov)" if not has_ddl else ""),
+            "possible causes: no INSERT hit those views in the window, log_query_views = 0, "
+            "<query_views_log> not configured, or log_queries_min_type / log_queries_min_query_duration_ms "
+            "filtering; either way 'no MV findings' here does NOT mean the MVs are healthy", "HC-0")
+    elif qv:
+        views = {}
+        last_hour_global = None
+        for r in qv:
+            # The server writes QueryFinish / ExceptionWhileProcessing for views
+            # (verified 26.7: no QueryStart rows). Skip them anyway, as the
+            # query_log pass does — a start row carries no resource data.
+            if r.get("status") == "QueryStart":
+                continue
+            v = views.setdefault(view_label(r), {
+                "executions": 0, "zero_write": 0, "read": 0, "written": 0, "failures": 0,
+                "codes": Counter(), "max_ms": 0, "hours": {}, "fail_hours": Counter(),
+                "culprits": Counter(), "mem": [],
+                "target": r.get("view_target") or r.get("target_table") or ""})
+            ex = num(r.get("executions")) or 0
+            zw = num(r.get("zero_write_executions")) or 0
+            rd = num(r.get("read_rows")) or 0
+            wr = num(r.get("written_rows")) or 0
+            v["executions"] += ex
+            v["max_ms"] = max(v["max_ms"], num(r.get("max_view_duration_ms")) or 0)
+            code = num(r.get("exception_code")) or 0
+            h = hour_key(r.get("time"))
+            if h and (last_hour_global is None or h > last_hour_global):
+                last_hour_global = h
+            if r.get("status") == "ExceptionWhileProcessing":
+                # Rows, bytes and zero-write counts on a failure row describe an
+                # insert that rolled back: not counted as writes.
+                v["failures"] += ex
+                if code:
+                    v["codes"][code] += ex
+                if h:
+                    v["fail_hours"][h] += ex
+                # Every failure row's message names the view that threw; keep
+                # ALL of them — two unrelated broken views name two culprits.
+                m = re.search(r"while pushing to view (\S+)", str(r.get("exception") or ""))
+                if m:
+                    v["culprits"][m.group(1).rstrip(".,;:")] += ex
+            else:
+                v["zero_write"] += zw
+                v["read"] += rd
+                v["written"] += wr
+                # Per-hour write history, ORDERED, for "stopped writing" vs
+                # "never wrote" vs "started writing".
+                if h:
+                    hb = v["hours"].setdefault(h, {"wrote": False, "read": False})
+                    hb["wrote"] = hb["wrote"] or wr > 0
+                    hb["read"] = hb["read"] or rd > 0
+                mem = num(r.get("median_peak_memory_usage"))
+                if h and mem is not None:
+                    v["mem"].append((h, mem, wr))
+
+        # ---- attribution: group failing views by the view their message names.
+        # Under the default setting every sibling carries the culprit's message;
+        # under ignore_errors only the culprit has rows. Either way the culprit
+        # is the named view, and its own row count is the number of failed
+        # INSERTs — the siblings are the same failures seen again.
+        groups = {}      # culprit -> {"failures", "codes", "siblings"}
+        unattributed = []
+        for k, v in views.items():
+            if not v["failures"]:
+                continue
+            if v["culprits"]:
+                for c, n in v["culprits"].items():
+                    g = groups.setdefault(c, {"failures": 0, "codes": Counter(), "self_codes": None, "siblings": set(), "self": False})
+                    if c == k:
+                        # The culprit's own rows are the authoritative count and
+                        # codes; siblings only repeat them.
+                        g["failures"] = max(g["failures"], v["failures"])
+                        g["self_codes"] = Counter(v["codes"])
+                        g["self"] = True
+                    else:
+                        g["siblings"].add(k)
+                        if not g["self"]:
+                            g["failures"] = max(g["failures"], n)
+                            g["codes"].update(v["codes"])
+            else:
+                unattributed.append((k, v))
+        # Per-hour failed INSERTs for the timeline: the max over views in that
+        # hour (siblings repeat the culprit's count), never the sum.
+        for h in set(hh for v in views.values() for hh in v["fail_hours"]):
+            tl(h)["mv_failed"] = max(v["fail_hours"].get(h, 0) for v in views.values())
+
+        total_exec = sum(v["executions"] for v in views.values())
+        out["query_views_log"] = {
+            "views": len(views), "executions": total_exec,
+            "written_rows": sum(v["written"] for v in views.values()),
+            "views_failing": len(groups) + len(unattributed),
+            "views_never_wrote": sum(1 for v in views.values()
+                                     if v["written"] == 0 and v["read"] > 0),
+        }
+
+        # ---- top views by executions (usage, not a finding). `failures` is the
+        # view's own ExceptionWhileProcessing count; for a sibling that is the
+        # culprit's failures seen again, which the findings below explain.
+        out["top_views"] = [{
+            "view": k, "executions": v["executions"], "written_rows": v["written"],
+            "zero_write_pct": (v["zero_write"] * 100 // v["executions"]) if v["executions"] else 0,
+            "failures": v["failures"],
+            "median_peak_mem": human(sorted(m[1] for m in v["mem"])[len(v["mem"]) // 2]) if v["mem"] else "",
+            "max_ms": v["max_ms"],
+        } for k, v in sorted(views.items(), key=lambda kv: -kv[1]["executions"])[:10]]
+
+        # ---- HC-7.7 one finding per culprit
+        for c, g in sorted(groups.items(), key=lambda kv: -kv[1]["failures"])[:3]:
+            code_src = g["self_codes"] if g["self_codes"] is not None else g["codes"]
+            codes = ", ".join(f"{ERROR_NAMES.get(x, x)}({x})={n}" for x, n in code_src.most_common(3))
+            sev = "critical" if g["failures"] >= 100 else "warning"
+            if g["siblings"]:
+                mode = (f"{len(g['siblings'])} sibling view(s) carry its message — the INSERTs failed "
+                        "(default setting), so every view in the pipeline was marked")
+            else:
+                mode = ("no sibling carries its message — consistent with materialized_views_ignore_errors = 1, "
+                        "where the INSERT succeeds and only the throwing view is recorded (text_log: "
+                        "'Error is ignored because the setting materialized_views_ignore_errors is enabled')")
+            add(sev, "inserts",
+                f"materialized view `{c}` failed {g['failures']} push(es) — the base part committed and the "
+                "target did not",
+                f"{codes}; named in the exception text; {mode}", "HC-7.7/P-36")
+        if unattributed:
+            total = sum(v["failures"] for _, v in unattributed)
+            all_codes = Counter()
+            for _, v in unattributed:
+                all_codes.update(v["codes"])
+            codes = ", ".join(f"{ERROR_NAMES.get(x, x)}({x})={n}" for x, n in all_codes.most_common(3))
+            if len(unattributed) == 1:
+                k, v = unattributed[0]
+                add("critical" if v["failures"] >= 100 else "warning", "inserts",
+                    f"materialized view `{k}` failed {v['failures']} push(es) — the base part committed and the "
+                    "target did not", f"{codes}; the only failing view (no exception text to confirm)", "HC-7.7/P-36")
+            else:
+                add("critical" if max(v["failures"] for _, v in unattributed) >= 100 else "warning", "inserts",
+                    f"{len(unattributed)} materialized view(s) carry failed pushes, up to {max(v['failures'] for _, v in unattributed)} each "
+                    "— the base parts committed and the targets did not; attribution unavailable (no exception "
+                    "text names the view — gov, or a message without 'while pushing to view')",
+                    f"{codes}; views: " + ", ".join(k for k, _ in unattributed[:5]), "HC-7.7/P-36")
+
+        # ---- HC-7.8 a view that STOPPED writing, vs one that never wrote.
+        # Ordered: the last hour that wrote, then the run of LATER hours that read
+        # rows and wrote none. The final bucket of the window is still filling
+        # and is left out. The run must be longer than the view's own largest
+        # earlier gap between writes — a view that writes every six hours has a
+        # five-hour gap by design, and three quiet hours at the end are not news.
+        stopped = []
+        for k, v in views.items():
+            hours = sorted(v["hours"].items())
+            wrote_hours = [h for h, b in hours if b["wrote"]]
+            if not wrote_hours:
+                continue
+            last_write = wrote_hours[-1]
+            trailing = [h for h, b in hours
+                        if h > last_write and h != last_hour_global and b["read"] and not b["wrote"]]
+            max_gap = 0
+            for a, b in zip(wrote_hours, wrote_hours[1:]):
+                gap = sum(1 for h, hb in hours if a < h < b and hb["read"] and not hb["wrote"])
+                max_gap = max(max_gap, gap)
+            if len(trailing) >= 2 and len(trailing) > max_gap:
+                stopped.append((k, last_write, trailing, len(wrote_hours), max_gap))
+        for k, last_write, trailing, nwrote, max_gap in sorted(stopped, key=lambda x: -len(x[2]))[:3]:
+            add("warning", "inserts",
+                f"materialized view `{k}` stopped writing: wrote until {last_write}, then {len(trailing)} hour(s) "
+                f"through {trailing[-1]} read rows and wrote none",
+                f"not a filtering MV — it wrote in {nwrote} hour(s) of the same window and its longest earlier "
+                f"quiet gap was {max_gap} hour(s); check as_select and any table it JOINs",
+                "HC-7.8/P-35")
+        never = [k for k, v in views.items() if v["written"] == 0 and v["read"] > 0]
+        if never:
+            add("info", "inserts",
+                f"{len(never)} materialized view(s) read rows but never wrote one in the window",
+                "expected for a filtering MV — verify against system.tables.as_select before treating as a fault",
+                "HC-7.8/P-35")
+
+        # ---- HC-5.9 per-view memory step change: the hourly buckets split in
+        # half by count, first half against second.
+        for k, v in views.items():
+            if len(v["mem"]) < 6:
+                continue
+            ms = sorted(v["mem"])
+            half = len(ms) // 2
+            a = [m[1] for m in ms[:half]]
+            b = [m[1] for m in ms[half:]]
+            wa = sum(m[2] for m in ms[:half])
+            wb = sum(m[2] for m in ms[half:])
+            med_a = sorted(a)[len(a) // 2]
+            med_b = sorted(b)[len(b) // 2]
+            if med_a > 0 and med_b >= 3 * med_a and wa > 0 and 0.8 <= wb / wa <= 1.25:
+                add("warning", "memory",
+                    f"materialized view `{k}` median peak memory rose {round(med_b / med_a, 1)}x "
+                    f"({human(med_a)} → {human(med_b)}) while written rows stayed flat",
+                    f"first half {ms[0][0]} → second half {ms[-1][0]}; check system.version for an upgrade",
+                    "HC-5.9/P-54")
+
     # ---- incident hours: elevated exceptions, stalled merges, Keeper loss, failing background ops
     exc_hours = [t["exceptions"] for t in timeline.values() if t["exceptions"]]
     med = sorted(exc_hours)[len(exc_hours) // 2] if exc_hours else 0
@@ -677,6 +911,11 @@ def analyse(base: str):
             flags.append(f"keeper {t['keeper']}")
         if sum(t["failed_bg"].values()) > 50:
             flags.append("bg failures")
+        # Threshold like every other flag: one failed push an hour for three days
+        # is a finding (HC-7.7 reports it), not 72 incident hours that push a
+        # real TOO_MANY_PARTS hour out of the 48-row table.
+        if t.get("mv_failed", 0) >= 10:
+            flags.append(f"mv failures {t['mv_failed']}")
         if flags:
             incident.append({"hour": h, "queries": t["queries"], "exceptions": t["exceptions"],
                              "top_codes": ", ".join(f"{ERROR_NAMES.get(c, c)}={n}" for c, n in t["codes"].most_common(3)),
@@ -1014,6 +1253,11 @@ def render_md(o) -> str:
         q = o["query_log"]
         codes = ", ".join(f"{c['name']}({c['code']})={c['count']}" for c in q["top_exception_codes"]) or "none"
         L.append(f"- query_log: {q['queries']} finished/failed queries in window · {q['exceptions']} exceptions · top codes: {codes}")
+    if o.get("query_views_log"):
+        v = o["query_views_log"]
+        L.append(f"- query_views_log: {v['views']} materialized view(s) · {v['executions']} execution(s) · "
+                 f"{v['written_rows']} rows written · {v['views_failing']} view(s) with failed pushes · "
+                 f"{v['views_never_wrote']} view(s) that read but never wrote")
     if o.get("execution_log"):
         x = o["execution_log"]
         L.append(f"- collectors: {x['ok']}/{x['collectors']} ok in {x['total_s']} s of query time · slowest: {', '.join(x['slowest'])}"
@@ -1075,6 +1319,14 @@ def render_md(o) -> str:
         for t in o["incident_hours"]:
             pct = "" if t.get("tx_pct") is None else f"{t['tx_pct']}%"
             L.append(f"| {t['hour']} | {t['queries']} | {t['exceptions']} | {t['top_codes']} | {t['new_parts']} | {t['merges']} | {t['failed_bg']} | {t['zk_hw']} | {pct} | {t['flags']} |")
+        L.append("")
+    if o.get("top_views"):
+        L.append("## Materialized views by execution count")
+        L.append("| view | executions | written rows | zero-write % | failed pushes | median peak mem | max ms |")
+        L.append("|---|---|---|---|---|---|---|")
+        for t in o["top_views"]:
+            L.append(f"| {t['view']} | {t['executions']} | {t['written_rows']} | {t['zero_write_pct']}% | "
+                     f"{t['failures']} | {t['median_peak_mem']} | {t['max_ms']} |")
         L.append("")
     if o.get("top_partitions"):
         L.append("## Top partitions by active parts")
