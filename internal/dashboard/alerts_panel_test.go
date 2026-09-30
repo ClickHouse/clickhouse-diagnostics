@@ -86,3 +86,53 @@ func TestBuildHTML_AlertStackTraceIsKeptButCollapsed(t *testing.T) {
 		t.Error("stack frames must survive into the payload")
 	}
 }
+
+// The header names the node the system tables describe and repeats the
+// execution log's collection note; the Replication section carries the
+// background-pools panel with the pool size as a reference line. Both came
+// out of a fetch-lag escalation where the node was misread and the pools
+// were read by hand from metric_log.
+func TestTemplate_NodeHeaderAndPoolsPanel(t *testing.T) {
+	for _, want := range []string{
+		"DATA.node?'<br>Node: '+esc(DATA.node)",
+		"' at collection'",
+		"DATA.collection?'<br>Collection: '+esc(DATA.collection)",
+		`id="chart-pool-fetch"`, `id="chart-pool-schedule"`, `id="chart-pool-merge"`,
+		"DATA.pools_hourly", "DATA.pool_sizes",
+		"label:'pool size'", // the dashed reference line
+		"[['fetch','fetch_tasks',0.9],['schedule','schedule_tasks',0.95],['merge','merge_tasks',0.9]]",
+		"const anchor=DATA.pools_now?T(DATA.pools_now):T(labels[labels.length-1]);", // collection-time anchor
+		"const cut=anchor-24*3600e3;", // 24 clock hours, not 24 samples
+		".chart-card.alert-card{",
+	} {
+		if !strings.Contains(htmlTemplate, want) {
+			t.Errorf("template lost %q", want)
+		}
+	}
+	// Customer hostnames in the header go through esc(), never raw.
+	for _, banned := range []string{"'+DATA.node+'", "'+DATA.collection+'"} {
+		if strings.Contains(htmlTemplate, banned) {
+			t.Errorf("header interpolates a hostname unescaped: %q", banned)
+		}
+	}
+}
+
+func TestBuildHTML_HeaderCarriesNodeAndCollection(t *testing.T) {
+	g := NewGenerator(nil, "cloud").WithCollection("ch-01 (ch-01.example.internal)", "4d 18h", "onprem → cloud: SharedMergeTree detected (cloud_mode = 1)")
+	if g.node == "" || g.nodeUptime != "4d 18h" || g.collection == "" {
+		t.Fatal("WithCollection dropped a value")
+	}
+	// collect() needs a live server; the payload keys it emits are pinned here
+	// with the same values it would copy from the generator.
+	html := buildHTML(map[string]interface{}{
+		"generated_at": "2026-09-30 10:00:00 UTC", "mode": "cloud", "version": "26.7.5.10",
+		"node": g.node, "uptime": g.nodeUptime, "collection": g.collection,
+		"pools_hourly": []map[string]interface{}{{"time": "2026-09-30 09:00:00", "fetch_tasks": 16, "schedule_tasks": 512, "merge_tasks": 3}},
+		"pool_sizes":   map[string]int64{"fetch": 16, "schedule": 512, "merge": 16},
+	})
+	for _, want := range []string{"ch-01.example.internal", "SharedMergeTree detected", `"schedule_tasks":512`} {
+		if !strings.Contains(html, want) {
+			t.Errorf("payload lost %q", want)
+		}
+	}
+}

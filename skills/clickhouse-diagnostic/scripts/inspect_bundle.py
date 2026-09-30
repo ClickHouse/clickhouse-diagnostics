@@ -241,6 +241,19 @@ def inventory(base: str):
 def detect_mode(base: str, files) -> str:
     """gov: no dashboard/crash_log/stack_trace, alerts_summary.json present, hashed names.
     cloud: clusters point at *.clickhouse.cloud or part_log carries several hostnames."""
+    # The collector wrote the mode it actually ran in (v0.5+ header); an
+    # onprem run that switched to cloud collection on a SharedMergeTree
+    # cluster says `mode: cloud` there while its part_log may still show one
+    # host. The heuristics below are for bundles without the header.
+    xl = os.path.join(base, "execution_log.txt")
+    if os.path.exists(xl):
+        with open(xl, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if line.startswith("Summary"):
+                    break
+                m = re.match(r"^mode:\s+(cloud|onprem|gov)\b", line)
+                if m:
+                    return m.group(1)
     names = {f["file"] for f in files}
     has = lambda prefix: any(n.startswith(prefix) for n in names)
     if not has("dashboard.html") and not has("system.crash_log_") and not has("system.stack_trace_") and "alerts_summary.json" in names:
@@ -1033,6 +1046,37 @@ def analyse(base: str):
     xl_path = os.path.join(base, "execution_log.txt")
     if os.path.exists(xl_path):
         rows = []
+        # The header answers "which node is this, and was it just restarted" —
+        # the two questions a fetch-lag escalation had to settle by hand from
+        # thread ids and uptime, twice. key:   value lines until the Summary.
+        run = {}
+        with open(xl_path, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if line.startswith("Summary"):
+                    break
+                m = re.match(r"^([a-z][a-z-]*):\s+(.*\S)\s*$", line)
+                if m and m.group(1) not in ("started", "finished"):
+                    run[m.group(1)] = m.group(2)
+        if run:
+            out["run"] = run
+            fanned = out["mode"] == "cloud"
+            if run.get("node"):
+                if fanned:
+                    out["notes"].append(f"identity probe answered by node {run['node']} (collected via {run.get('target', '?')}); the per-replica system tables "
+                                        "(query_log, part_log, errors, metric_log, text_log …) fan out over every replica, the shared tables (parts, tables, columns, "
+                                        "databases, replicas, replication_queue, mutations, detached_parts) are read from one replica — host facts, configuration and "
+                                        "log files, when present, are the collector machine's: this node's only when the header has no mixed-host warning")
+                else:
+                    out["notes"].append(f"this bundle describes node {run['node']} (collected via {run.get('target', '?')})")
+            up = re.match(r"^(\d+)\s*s\b", run.get("uptime-seconds", ""))
+            if up and int(up.group(1)) < 24 * 3600:
+                who = f"the replica that answered the identity probe ({run.get('node', '?')}) restarted" if fanned else "server restarted"
+                scope = ("its own parts, pools and Keeper session are post-restart; the other replicas' rows in the fanned-out tables are not affected"
+                         if fanned else "parts, replicas, metrics, zookeeper_connection and the pools describe the post-restart node; part_log / metric_log / text_log before the restart are still in the window")
+                add("info", "coverage", f"{who} {run.get('uptime', up.group(1) + ' s')} before collection — {scope}",
+                    "a restart clears a parts-propagation backlog only temporarily; a node captured after one looks healthier than the cluster is", "HC-0")
+            if run.get("warnings"):
+                add("warning", "coverage", f"the collector warned at run time: {run['warnings']}", "execution_log.txt header", "HC-0")
         with open(xl_path, encoding="utf-8", errors="replace") as fh:
             for line in fh:
                 if not line.startswith("| ") or line.startswith("| # |") or line.startswith("|---"):
@@ -1098,6 +1142,75 @@ def analyse(base: str):
         zk = sum(num(r.get("zk_hw_exceptions")) or 0 for r in ml)
         out["metric_log"] = {"hours": len(ml), "max_avg_memory_tracking": human(max(mem)), "max_merge_pool_tasks": max(pool),
                              "hours_pool_at_max": sum(1 for p in pool if p == max(pool)) if max(pool) else 0, "zk_hw_exceptions_total": zk}
+
+        # ---- background pool saturation (HC-2.13 / HC-2.14). Sizes come from
+        # system.server_settings (23.3+) or system.settings (older); the metric
+        # is the hourly avg of tasks in the pool. Per hour, not per window:
+        # 3 saturated hours in the last 24 is the finding.
+        # Sizes: system.server_settings from 23.3; system.settings only BELOW
+        # 23.3 — on newer servers it still lists background_*_pool_size with
+        # the old session defaults (8 / 128), not the server's real sizes, so a
+        # bundle without the server_settings file gets no sizes rather than
+        # wrong ones.
+        sizes = {}
+        vm = re.match(r"^(\d+)\.(\d+)", str(out.get("version") or ""))
+        pre_233 = bool(vm) and (int(vm.group(1)), int(vm.group(2))) < (23, 3)
+        size_files = ["system.server_settings_*.jsonl"] + (["system.settings_*.jsonl"] if pre_233 else [])
+        for f in size_files:
+            for r in read_jsonl(first(f, base)) or []:
+                n = r.get("name")
+                if n in ("background_fetches_pool_size", "background_schedule_pool_size", "background_pool_size",
+                         "background_common_pool_size") and n not in sizes:
+                    sizes[n] = num(r.get("value"))
+        # "Last 24 h" is anchored on collection time (the run's start, from the
+        # folder name), like the live alert's now() - 24 h — not on the newest
+        # sample, which a metric_log that stopped updating days ago would put
+        # in the past and turn stale buckets into a current finding.
+        last_hour = max((r.get("time") or "" for r in ml), default="")
+        anchor = run_ts or (parse_dt(last_hour) if last_hour else None)
+        recent = [r for r in ml if r.get("time") and parse_dt(r["time"]) and anchor and
+                  0 <= (anchor - parse_dt(r["time"])).total_seconds() <= 25 * 3600] if anchor else []
+        if ml and anchor and not recent and last_hour and parse_dt(last_hour):
+            gap_h = (anchor - parse_dt(last_hour)).total_seconds() / 3600
+            out["notes"].append(f"metric_log_7_days ends {gap_h:.0f} h before collection — the background-pool check (HC-2.7/2.13/2.14) has no recent hour to judge and is skipped")
+        pools = {}
+        # Each pool fails differently, so each gets its own consequence and pattern.
+        IMPACT = {
+            "fetch": ("a fetch that finds no free slot is dropped and retried later, silently — on SharedMergeTree that is parts-propagation lag; "
+                      "raise background_fetches_pool_size (applies on config reload), or reduce inserts/parts/tables", "P-59"),
+            "schedule": ("periodic tasks are not lost but late — parts-set updates, replication queue processing and cleanup wait for a slot, so new parts and "
+                         "queue entries are processed behind schedule; raise background_schedule_pool_size (read at startup, needs a restart) or reduce the "
+                         "number of replicated tables per replica", "P-59"),
+            "merge": ("merges wait and parts accumulate — the too-many-parts build-up; raise background_pool_size (applies on config reload) or slow the "
+                      "insert rate / batch inserts", "P-01"),
+        }
+        for label, col, setting, pct, hc in (("fetch", "avg_fetch_pool_tasks", "background_fetches_pool_size", 0.9, "HC-2.13"),
+                                             ("schedule", "avg_schedule_pool_tasks", "background_schedule_pool_size", 0.95, "HC-2.14"),
+                                             ("merge", "avg_merge_pool_tasks", "background_pool_size", 0.9, "HC-2.7")):
+            # Cloud files carry the max over replicas of the per-replica hourly
+            # average (v0.7+): one node at 16/16 among idle siblings must not
+            # be averaged below the threshold.
+            rcol = "max_replica_" + col
+            vals = [num(r.get(rcol) if r.get(rcol) is not None else r.get(col)) for r in recent if r.get(rcol) is not None or r.get(col) is not None]
+            if not vals:
+                continue
+            size = sizes.get(setting)
+            info = {"max_avg": round(max(vals), 1), "size": size}
+            if size:
+                sat = sum(1 for v in vals if v >= pct * size)
+                info["hours_saturated_24h"] = sat
+                if sat >= 3:
+                    # The bundle's settings file is read from ONE replica (the
+                    # cloud collector does not fan settings out); the alerts
+                    # compare each replica with its own size on the cluster.
+                    scope = " (size from the replica that answered the settings query; the alert compares per replica)" if out["mode"] == "cloud" else ""
+                    impact, pattern = IMPACT[label]
+                    add("warning", "merges" if label == "merge" else "replication",
+                        f"background {label} pool saturated: hourly average ≥ {int(pct * 100)}% of {setting} = {size}{scope} in {sat} of the last {len(vals)} hour(s) before collection (peak avg {info['max_avg']})",
+                        impact, f"{hc}/{pattern}")
+            pools[label] = info
+        if pools:
+            out["pools"] = pools
         if zk and not any(f["check"].startswith("HC-3.8") for f in findings):
             add("warning", "keeper", f"{zk} ZooKeeper/Keeper hardware exceptions over {len(ml)} hours", "metric_log.zk_hw_exceptions", "HC-3.5")
 
@@ -1232,6 +1345,18 @@ def render_md(o) -> str:
     L.append(f"# Bundle inspection — {o['bundle']}")
     L.append("")
     L.append(f"- ClickHouse version: **{o.get('version') or 'unknown'}** · mode: **{o['mode']}** · collected: {o.get('collected_at') or '?'} (collector local time)")
+    if o.get("run"):
+        r = o["run"]
+        bits = []
+        if r.get("node"): bits.append(f"node **{r['node']}**")
+        if r.get("target"): bits.append(f"collected via {r['target']}")
+        if r.get("uptime"): bits.append(f"server up {r['uptime']} at collection")
+        if r.get("collection"): bits.append(f"collection: {r['collection']}")
+        if bits: L.append("- " + " · ".join(bits))
+    if o.get("pools"):
+        L.append("- background pools (last 24 h, hourly avg vs size): " + " · ".join(
+            f"{k} {v['max_avg']}/{v['size'] if v.get('size') else '?'}" + (f" ({v['hours_saturated_24h']} h saturated)" if v.get("hours_saturated_24h") else "")
+            for k, v in o["pools"].items()))
     qw = o.get("query_log_window")
     if qw:
         L.append(f"- query_log window: {qw['from']} → {qw['to']} ({qw['hour_buckets']} hour buckets)")

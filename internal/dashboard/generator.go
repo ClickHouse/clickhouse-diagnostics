@@ -26,6 +26,9 @@ type Generator struct {
 	analysisDir   string
 	hostInfo      *hostinfo.Report
 	probeCache    map[string]bool // memoized hasColumn/hasTable results
+	node          string          // hostName() (FQDN()) of the server the system tables describe
+	nodeUptime    string          // how long that node had been up at collection
+	collection    string          // execution_log `collection:` note (SharedMergeTree onprem → cloud switch)
 }
 
 // NewGenerator creates a new Generator.
@@ -48,6 +51,16 @@ func (g *Generator) WithServerVersion(v internal.Version) *Generator {
 // omits the panel. Returns the receiver for chaining.
 func (g *Generator) WithHostInfo(r *hostinfo.Report) *Generator {
 	g.hostInfo = r
+	return g
+}
+
+// WithCollection repeats the execution log's node / uptime / collection
+// header lines in the dashboard header, so a reader who opens the HTML
+// first sees which node this is and whether the run switched to cloud
+// collection on a SharedMergeTree cluster. Empty strings leave the header
+// as it was. Returns the receiver for chaining.
+func (g *Generator) WithCollection(node, uptime, collection string) *Generator {
+	g.node, g.nodeUptime, g.collection = node, uptime, collection
 	return g
 }
 
@@ -770,6 +783,65 @@ func (g *Generator) keeperMetricSQL(hasWait, hasSession bool) string {
 		wait, sess, g.sysTable("metric_log"))
 }
 
+// poolsMetricSQL is the background pools panel's series: per hour, the
+// hourly average of tasks in the fetch, schedule and merge pools and the
+// max over replicas of that average, so one saturated node among idle ones
+// is not averaged away. Three narrow columns over 7 days of metric_log.
+func (g *Generator) poolsMetricSQL() string {
+	return fmt.Sprintf(
+		`SELECT time,
+				max(fetch)    AS fetch_tasks,
+				max(schedule) AS schedule_tasks,
+				max(merge)    AS merge_tasks
+		 FROM (
+			SELECT toString(toStartOfHour(event_time)) AS time, hostName() AS h,
+				   avg(CurrentMetric_BackgroundFetchesPoolTask)   AS fetch,
+				   avg(CurrentMetric_BackgroundSchedulePoolTask)  AS schedule,
+				   avg(CurrentMetric_BackgroundMergesAndMutationsPoolTask) AS merge
+			FROM %s
+			WHERE event_time > now() - INTERVAL 7 DAY
+			GROUP BY time, h)
+		 GROUP BY time ORDER BY time`,
+		g.sysTable("metric_log"))
+}
+
+// poolSizes reads background_*_pool_size from system.server_settings (23.3+)
+// or system.settings (older); one scalar per pool. On a cloud collection the
+// table fans out and min() over replicas is taken: the chart's series is the
+// worst replica's occupancy, so the smallest pool is the line it must be
+// judged against — a larger sibling's size would hide saturation. A missing
+// table or setting yields 0 — no reference line.
+func (g *Generator) poolSizes() map[string]int64 {
+	out := map[string]int64{"fetch": 0, "schedule": 0, "merge": 0}
+	// The source follows the server version, not table visibility: from 23.3
+	// the sizes live in system.server_settings, and system.settings keeps
+	// listing the names with the old session defaults (8 / 128 vs real
+	// 16 / 512). A 23.3+ server whose server_settings is unreadable (grant)
+	// therefore gets no line at all rather than a wrong one. With an unknown
+	// version (unit tests) fall back to whichever table exists.
+	table := "settings"
+	v := g.serverVersion
+	switch {
+	case v != (internal.Version{}) && (v.Major > 23 || (v.Major == 23 && v.Minor >= 3)):
+		if !g.hasTable("server_settings") {
+			return out
+		}
+		table = "server_settings"
+	case v != (internal.Version{}):
+		// below 23.3: system.settings is authoritative
+	case g.hasTable("server_settings"):
+		table = "server_settings"
+	}
+	for key, setting := range map[string]string{
+		"fetch": "background_fetches_pool_size", "schedule": "background_schedule_pool_size", "merge": "background_pool_size",
+	} {
+		if n, err := g.scalarCount(fmt.Sprintf("SELECT min(toUInt64OrZero(value)) FROM %s WHERE name = '%s'", g.sysTable(table), setting)); err == nil {
+			out[key] = n
+		}
+	}
+	return out
+}
+
 // keeperErrorsSQL counts the Keeper-dependent error codes per hour: 999
 // KEEPER_EXCEPTION, 242 TABLE_IS_READ_ONLY, 319 UNKNOWN_STATUS_OF_INSERT,
 // 571 DATABASE_REPLICATION_FAILED and 252 TOO_MANY_PARTS (the usual
@@ -822,7 +894,9 @@ func (g *Generator) collect() map[string]interface{} {
 		"generated_at":    time.Now().UTC().Format("2006-01-02 15:04:05 UTC"),
 		"mode":            g.mode,
 		"version":         "",
-		"uptime":          "",
+		"uptime":          g.nodeUptime,
+		"node":            g.node,
+		"collection":      g.collection,
 		"total_databases": 0,
 		"total_tables":    0,
 		"active_parts":    0,
@@ -836,11 +910,14 @@ func (g *Generator) collect() map[string]interface{} {
 		p["version"] = v
 	}
 
-	// uptime
-	if r, err := g.execJSON("SELECT formatReadableTimeDelta(uptime()) AS uptime"); err == nil && r.Rows > 0 {
-		var v string
-		_ = json.Unmarshal(r.Data[0][0], &v)
-		p["uptime"] = v
+	// uptime — the execution log's short form when the run recorded one, so
+	// both artefacts say the same thing; otherwise ask the server.
+	if g.nodeUptime == "" {
+		if r, err := g.execJSON("SELECT formatReadableTimeDelta(uptime()) AS uptime"); err == nil && r.Rows > 0 {
+			var v string
+			_ = json.Unmarshal(r.Data[0][0], &v)
+			p["uptime"] = v
+		}
 	}
 
 	// tables / databases summary
@@ -1092,6 +1169,29 @@ func (g *Generator) collect() map[string]interface{} {
 		p["keeper_wait_available"] = false
 		p["keeper_session_available"] = false
 	}
+	// ── Background pools ──────────────────────────────────────────────────────
+	//
+	// Hourly average tasks in the fetch / schedule / merge pools against the
+	// pool sizes (HC-2.13 / 2.14). Pool size 0 (setting not readable) draws
+	// no reference line. On cloud collection every replica's hours are folded
+	// into one series by max(): a saturated node must show even when its
+	// siblings are idle.
+	if g.hasTable("metric_log") {
+		p["pools_hourly"] = g.safeQuery("pools_hourly", g.poolsMetricSQL())
+	} else {
+		p["pools_hourly"] = []map[string]interface{}{}
+	}
+	p["pool_sizes"] = g.poolSizes()
+	// Server-side "now" for the pools panel's 24-hour window: anchored on
+	// collection time, like the live alert's now() - 24 h, so a metric_log
+	// that stopped updating days ago cannot turn a card amber today.
+	p["pools_now"] = ""
+	if r, err := g.execJSON("SELECT toString(now()) AS now"); err == nil && r.Rows > 0 {
+		var v string
+		_ = json.Unmarshal(r.Data[0][0], &v)
+		p["pools_now"] = v
+	}
+
 	useErrorLog := g.hasTable("error_log")
 	p["keeper_errors_hourly"] = g.safeQuery("keeper_errors_hourly", g.keeperErrorsSQL(useErrorLog))
 	if useErrorLog {
@@ -1620,6 +1720,7 @@ section h2{font-size:var(--click-font-size-3);font-weight:var(--click-font-weigh
 .stat-card .lbl{font-size:var(--click-font-size-1);color:var(--ink-muted);margin-top:var(--click-space-1)}
 .charts-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(460px,1fr));gap:var(--click-space-4)}
 .chart-card{background:var(--surface-card);border:var(--click-border-width-1) solid var(--stroke);border-radius:var(--click-radii-2);padding:var(--click-space-4);box-shadow:var(--click-shadow-5)}
+.chart-card.alert-card{border-color:var(--status-warning)}
 .chart-card h3{font-size:var(--click-font-size-2);font-weight:var(--click-font-weight-3);color:var(--ink);margin-bottom:var(--click-space-3)}
 .chart-wrap{position:relative}
 .h200{height:200px}.h220{height:220px}.h260{height:260px}.h300{height:300px}.h360{height:360px}.h420{height:420px}
@@ -2036,6 +2137,22 @@ footer{text-align:center;color:var(--ink-muted);font-size:var(--click-font-size-
 <section id="sec-replication">
   <h2>🔄 Replication Queue</h2>
   <div class="tbl-wrap"><div id="tbl-replication"></div></div>
+  <div class="sub-title">Background pools (last 7 days, hourly average tasks vs pool size)</div>
+  <p class="host-note" id="pools-note">Each pool fails differently when pinned at its size. <b>Fetch</b>: a queue with no queue — a fetch that finds no free slot is dropped and retried later, silently; on a SharedMergeTree replica that is parts-propagation lag (alert <code>fetch_pool_saturated</code>). <b>Schedule</b>: periodic tasks are not lost but late — parts-set updates, replication queue processing, cleanup wait for a slot; tens of thousands of replicated tables pin it first (<code>schedule_pool_saturated</code>). <b>Merge / mutation</b>: merges wait and parts accumulate — the classic too-many-parts build-up (HC-2.7). Dashed line = the pool size; the series is the worst replica's hourly average.</p>
+  <div class="charts-grid" id="pools-charts">
+    <div class="chart-card">
+      <h3>Fetch pool (BackgroundFetchesPoolTask)</h3>
+      <div class="chart-wrap h260"><canvas id="chart-pool-fetch"></canvas></div>
+    </div>
+    <div class="chart-card">
+      <h3>Schedule pool (BackgroundSchedulePoolTask)</h3>
+      <div class="chart-wrap h260"><canvas id="chart-pool-schedule"></canvas></div>
+    </div>
+    <div class="chart-card">
+      <h3>Merge / mutation pool (BackgroundMergesAndMutationsPoolTask)</h3>
+      <div class="chart-wrap h260"><canvas id="chart-pool-merge"></canvas></div>
+    </div>
+  </div>
 </section>
 
 <!-- ── CLUSTERS ── -->
@@ -3128,7 +3245,12 @@ document.addEventListener('DOMContentLoaded',function(){
   document.getElementById('hdr-meta').innerHTML=
     'Generated: '+esc(DATA.generated_at)+'<br>'
     +'<span class="badge badge-'+esc(DATA.mode)+'">'+esc(DATA.mode)+'</span>'
-    +' Version: '+esc(DATA.version||'N/A');
+    +' Version: '+esc(DATA.version||'N/A')
+    // Which node the system tables describe, and how long it had been up:
+    // a bundle read against the wrong host, or a node restarted just before
+    // collection, has to be visible before any chart is.
+    +(DATA.node?'<br>Node: '+esc(DATA.node)+(DATA.uptime?' &middot; up '+esc(DATA.uptime)+' at collection':''):'')
+    +(DATA.collection?'<br>Collection: '+esc(DATA.collection):'');
 
   // stats
   // esc() on both arguments: every caller currently passes a number, a
@@ -3754,6 +3876,45 @@ document.addEventListener('DOMContentLoaded',function(){
   // ── Keeper health ─────────────────────────────────────────────────────────
   //
   // Same verdict rule as alerts/keeper_health.yaml and the skill's HC-3.8, so
+
+  // ── background pools ──────────────────────────────────────────────────────
+  // One chart per pool, each with its size as a dashed reference: the
+  // question is "how close to the size, for how many hours", not the level
+  // itself. Hours at or above 90 % of the size are counted in the tooltip
+  // and the card title; below 3 in the last 24 h nothing is flagged.
+  {
+    const ph=DATA.pools_hourly||[], sizes=DATA.pool_sizes||{};
+    const N=v=>Number(v||0), T=t=>Date.parse(String(t).replace(' ','T')+'Z');
+    if(!ph.length){
+      document.getElementById('pools-charts').innerHTML='<p class="no-data">metric_log is not available on this server (pool occupancy comes from CurrentMetric_Background*PoolTask)</p>';
+    }else{
+      const labels=ph.map(r=>r.time);
+      const warn=themeVar('--status-warning')||C[2];
+      [['fetch','fetch_tasks',0.9],['schedule','schedule_tasks',0.95],['merge','merge_tasks',0.9]].forEach(([k,col,pct])=>{
+        const vals=ph.map(r=>N(r[col])), size=N(sizes[k]);
+        // The last 24 CLOCK hours, anchored on the newest sample: metric_log
+        // has gaps (downtime, a disabled hour), so the last 24 rows can reach
+        // back days and flag a pool the live alert (now() - 24 h) finds clean.
+        // Parsed as UTC on both sides so the browser's zone cancels out.
+        // Anchor: the server's now() at collection (pools_now); older
+        // payloads without it fall back to the newest sample.
+        const anchor=DATA.pools_now?T(DATA.pools_now):T(labels[labels.length-1]);
+        const cut=anchor-24*3600e3;
+        const last24=ph.filter(r=>T(r.time)>cut).map(r=>N(r[col])), sat=size?last24.filter(v=>v>=pct*size).length:0;
+        const el=document.getElementById('chart-pool-'+k);
+        const title=el.parentElement.parentElement.querySelector('h3');
+        if(size) title.textContent+=' — size '+size+(sat>=3?' — saturated '+sat+' of the last '+last24.length+' h':'');
+        if(sat>=3) el.parentElement.parentElement.classList.add('alert-card');
+        const ds=[{label:'avg tasks / h (max over replicas)',data:vals,borderColor:sat>=3?warn:C[0],backgroundColor:sat>=3?warn:C[0],tension:0.2,pointRadius:0,borderWidth:2}];
+        if(size) ds.push({label:'pool size',data:vals.map(()=>size),borderColor:OTHER,borderDash:[6,4],pointRadius:0,borderWidth:1});
+        mkChart(el,{type:'line',data:{labels,datasets:ds},
+          options:{responsive:true,maintainAspectRatio:false,interaction:{mode:'index',intersect:false},
+            plugins:{legend:{position:'top'}},
+            scales:{x:{ticks:{maxTicksLimit:10,maxRotation:45}},y:{beginAtZero:true,suggestedMax:size||undefined}}}});
+      });
+    }
+  }
+
   // the dashboard, the alert and the pre-pass never disagree about an hour.
   (function(){
     const rows=DATA.keeper_metric_hourly||[];

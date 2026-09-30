@@ -1,0 +1,72 @@
+# 23.3 override: background_*_pool_size moved from system.settings to
+# system.server_settings in 23.3. system.settings still LISTS the names on
+# newer servers, with the old session-setting defaults (8 / 128) rather than
+# the server's real sizes (16 / 512), so the root rule would compare against
+# the wrong denominator there — this override reads the table that is right.
+name: fetch_pool_saturated
+title: "Background fetch pool saturated for hours"
+severity: warning
+description: |
+  In at least 3 of the last 24 hours the hourly average of
+  CurrentMetric_BackgroundFetchesPoolTask on a replica was at or above 90% of
+  background_fetches_pool_size. A saturated pool is a queue with no queue: work
+  that finds no free slot is dropped and retried later, silently.
+  For the fetch pool (background_fetches_pool_size, default 16) the executor
+  has exactly that many slots and no queue: a table that schedules 32 part
+  fetches gets whichever slots happen to be free and its assignee backs off.
+  On a SharedMergeTree cluster a saturated fetch pool means new parts become
+  visible on this replica minutes to hours late — reads return fewer rows than
+  the same query on a sibling replica, and a restart helps only until the pool
+  fills again. The lasting fix is capacity: the pool size (applied on config
+  reload for the fetch pool), fewer and larger inserts, fewer tables and parts.
+
+  Check: metric_log_7_days avg_/max_fetch_pool_tasks per hour against
+  the size; part_log DownloadPart per hour; on SMT, per-replica
+  max_block_number for a hot table (system.parts across replicas).
+tags:
+  - background-pools
+  - capacity
+  - replication
+
+# Per replica (hostName()) on both sides: a cluster-wide average would hide
+# one saturated node among idle ones, and a cluster-wide pool size would
+# compare one replica's occupancy with another replica's denominator when
+# the sizes differ. In cloud mode {sys.server_settings} fans out too, so the
+# join on hostname pairs each replica with its own size; on one node both
+# sides are that node.
+query: |
+  WITH sizes AS
+    (
+      SELECT
+        hostName()                    AS hostname,
+        max(toUInt64OrZero(value))    AS pool_size
+      FROM {sys.server_settings}
+      WHERE name = 'background_fetches_pool_size'
+      GROUP BY hostname
+    ),
+    per_hour AS
+    (
+      SELECT
+        hostName()                              AS hostname,
+        toStartOfHour(event_time)               AS hour,
+        avg(CurrentMetric_BackgroundFetchesPoolTask) AS avg_tasks
+      FROM {sys.metric_log}
+      WHERE event_time > now() - INTERVAL 24 HOUR
+      GROUP BY hostname, hour
+    )
+  SELECT
+    p.hostname                                             AS hostname,
+    count()                                                AS hours_saturated,
+    round(avg(p.avg_tasks), 1)                             AS avg_tasks_in_pool,
+    any(s.pool_size)                                       AS pool_size,
+    round(100 * avg(p.avg_tasks) / greatest(any(s.pool_size), 1)) AS pct_of_size
+  FROM per_hour AS p
+  INNER JOIN sizes AS s USING (hostname)
+  WHERE s.pool_size > 0
+    AND p.avg_tasks >= 0.9 * s.pool_size
+  GROUP BY p.hostname
+  HAVING hours_saturated >= 3
+  ORDER BY hours_saturated DESC, hostname
+  LIMIT 100
+
+message: "{hostname}: background fetch pool at {pct_of_size}% of its size ({avg_tasks_in_pool} of background_fetches_pool_size = {pool_size}) for {hours_saturated} of the last 24 hours"
