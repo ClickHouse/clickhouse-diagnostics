@@ -1062,8 +1062,10 @@ def analyse(base: str):
             fanned = out["mode"] == "cloud"
             if run.get("node"):
                 if fanned:
-                    out["notes"].append(f"identity probe answered by node {run['node']} (collected via {run.get('target', '?')}); the system tables fan out over every replica — "
-                                        "host facts, configuration and log files, when present, are this node's")
+                    out["notes"].append(f"identity probe answered by node {run['node']} (collected via {run.get('target', '?')}); the per-replica system tables "
+                                        "(query_log, part_log, errors, metric_log, text_log …) fan out over every replica, the shared tables (parts, tables, columns, "
+                                        "databases, replicas, replication_queue, mutations, detached_parts) are read from one replica — host facts, configuration and "
+                                        "log files, when present, are this node's")
                 else:
                     out["notes"].append(f"this bundle describes node {run['node']} (collected via {run.get('target', '?')})")
             up = re.match(r"^(\d+)\s*s\b", run.get("uptime-seconds", ""))
@@ -1160,10 +1162,28 @@ def analyse(base: str):
                 if n in ("background_fetches_pool_size", "background_schedule_pool_size", "background_pool_size",
                          "background_common_pool_size") and n not in sizes:
                     sizes[n] = num(r.get("value"))
+        # "Last 24 h" is anchored on collection time (the run's start, from the
+        # folder name), like the live alert's now() - 24 h — not on the newest
+        # sample, which a metric_log that stopped updating days ago would put
+        # in the past and turn stale buckets into a current finding.
         last_hour = max((r.get("time") or "" for r in ml), default="")
-        recent = [r for r in ml if r.get("time") and last_hour and hour_key(r["time"]) and
-                  (parse_dt(last_hour) - parse_dt(r["time"])).total_seconds() <= 24 * 3600] if last_hour else ml
+        anchor = run_ts or (parse_dt(last_hour) if last_hour else None)
+        recent = [r for r in ml if r.get("time") and parse_dt(r["time"]) and anchor and
+                  0 <= (anchor - parse_dt(r["time"])).total_seconds() <= 25 * 3600] if anchor else []
+        if ml and anchor and not recent and last_hour and parse_dt(last_hour):
+            gap_h = (anchor - parse_dt(last_hour)).total_seconds() / 3600
+            out["notes"].append(f"metric_log_7_days ends {gap_h:.0f} h before collection — the background-pool check (HC-2.7/2.13/2.14) has no recent hour to judge and is skipped")
         pools = {}
+        # Each pool fails differently, so each gets its own consequence and pattern.
+        IMPACT = {
+            "fetch": ("a fetch that finds no free slot is dropped and retried later, silently — on SharedMergeTree that is parts-propagation lag; "
+                      "raise background_fetches_pool_size (applies on config reload), or reduce inserts/parts/tables", "P-59"),
+            "schedule": ("periodic tasks are not lost but late — parts-set updates, replication queue processing and cleanup wait for a slot, so new parts and "
+                         "queue entries are processed behind schedule; raise background_schedule_pool_size (read at startup, needs a restart) or reduce the "
+                         "number of replicated tables per replica", "P-59"),
+            "merge": ("merges wait and parts accumulate — the too-many-parts build-up; raise background_pool_size (applies on config reload) or slow the "
+                      "insert rate / batch inserts", "P-01"),
+        }
         for label, col, setting, pct, hc in (("fetch", "avg_fetch_pool_tasks", "background_fetches_pool_size", 0.9, "HC-2.13"),
                                              ("schedule", "avg_schedule_pool_tasks", "background_schedule_pool_size", 0.95, "HC-2.14"),
                                              ("merge", "avg_merge_pool_tasks", "background_pool_size", 0.9, "HC-2.7")):
@@ -1184,10 +1204,10 @@ def analyse(base: str):
                     # cloud collector does not fan settings out); the alerts
                     # compare each replica with its own size on the cluster.
                     scope = " (size from the replica that answered the settings query; the alert compares per replica)" if out["mode"] == "cloud" else ""
+                    impact, pattern = IMPACT[label]
                     add("warning", "merges" if label == "merge" else "replication",
-                        f"background {label} pool saturated: hourly average ≥ {int(pct * 100)}% of {setting} = {size}{scope} in {sat} of the last {len(vals)} hour(s) (peak avg {info['max_avg']})",
-                        "a pool with no free slot drops work and retries later, silently — on SharedMergeTree that is parts-propagation lag; "
-                        "raise the pool size (fetch pool applies on config reload), or reduce inserts/parts/tables", f"{hc}/P-59")
+                        f"background {label} pool saturated: hourly average ≥ {int(pct * 100)}% of {setting} = {size}{scope} in {sat} of the last {len(vals)} hour(s) before collection (peak avg {info['max_avg']})",
+                        impact, f"{hc}/{pattern}")
             pools[label] = info
         if pools:
             out["pools"] = pools

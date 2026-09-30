@@ -813,8 +813,23 @@ func (g *Generator) poolsMetricSQL() string {
 // table or setting yields 0 — no reference line.
 func (g *Generator) poolSizes() map[string]int64 {
 	out := map[string]int64{"fetch": 0, "schedule": 0, "merge": 0}
+	// The source follows the server version, not table visibility: from 23.3
+	// the sizes live in system.server_settings, and system.settings keeps
+	// listing the names with the old session defaults (8 / 128 vs real
+	// 16 / 512). A 23.3+ server whose server_settings is unreadable (grant)
+	// therefore gets no line at all rather than a wrong one. With an unknown
+	// version (unit tests) fall back to whichever table exists.
 	table := "settings"
-	if g.hasTable("server_settings") {
+	v := g.serverVersion
+	switch {
+	case v != (internal.Version{}) && (v.Major > 23 || (v.Major == 23 && v.Minor >= 3)):
+		if !g.hasTable("server_settings") {
+			return out
+		}
+		table = "server_settings"
+	case v != (internal.Version{}):
+		// below 23.3: system.settings is authoritative
+	case g.hasTable("server_settings"):
 		table = "server_settings"
 	}
 	for key, setting := range map[string]string{
@@ -897,10 +912,12 @@ func (g *Generator) collect() map[string]interface{} {
 
 	// uptime — the execution log's short form when the run recorded one, so
 	// both artefacts say the same thing; otherwise ask the server.
-	if r, err := g.execJSON("SELECT formatReadableTimeDelta(uptime()) AS uptime"); g.nodeUptime == "" && err == nil && r.Rows > 0 {
-		var v string
-		_ = json.Unmarshal(r.Data[0][0], &v)
-		p["uptime"] = v
+	if g.nodeUptime == "" {
+		if r, err := g.execJSON("SELECT formatReadableTimeDelta(uptime()) AS uptime"); err == nil && r.Rows > 0 {
+			var v string
+			_ = json.Unmarshal(r.Data[0][0], &v)
+			p["uptime"] = v
+		}
 	}
 
 	// tables / databases summary
@@ -1165,6 +1182,15 @@ func (g *Generator) collect() map[string]interface{} {
 		p["pools_hourly"] = []map[string]interface{}{}
 	}
 	p["pool_sizes"] = g.poolSizes()
+	// Server-side "now" for the pools panel's 24-hour window: anchored on
+	// collection time, like the live alert's now() - 24 h, so a metric_log
+	// that stopped updating days ago cannot turn a card amber today.
+	p["pools_now"] = ""
+	if r, err := g.execJSON("SELECT toString(now()) AS now"); err == nil && r.Rows > 0 {
+		var v string
+		_ = json.Unmarshal(r.Data[0][0], &v)
+		p["pools_now"] = v
+	}
 
 	useErrorLog := g.hasTable("error_log")
 	p["keeper_errors_hourly"] = g.safeQuery("keeper_errors_hourly", g.keeperErrorsSQL(useErrorLog))
@@ -2112,7 +2138,7 @@ footer{text-align:center;color:var(--ink-muted);font-size:var(--click-font-size-
   <h2>🔄 Replication Queue</h2>
   <div class="tbl-wrap"><div id="tbl-replication"></div></div>
   <div class="sub-title">Background pools (last 7 days, hourly average tasks vs pool size)</div>
-  <p class="host-note" id="pools-note">A pool pinned at its size is a queue with no queue: work that finds no free slot is dropped and retried later, silently. The fetch pool at its size on a SharedMergeTree replica is parts-propagation lag; the schedule pool pins first when tens of thousands of replicated tables each want their periodic tasks. Dashed line = the pool size.</p>
+  <p class="host-note" id="pools-note">Each pool fails differently when pinned at its size. <b>Fetch</b>: a queue with no queue — a fetch that finds no free slot is dropped and retried later, silently; on a SharedMergeTree replica that is parts-propagation lag (alert <code>fetch_pool_saturated</code>). <b>Schedule</b>: periodic tasks are not lost but late — parts-set updates, replication queue processing, cleanup wait for a slot; tens of thousands of replicated tables pin it first (<code>schedule_pool_saturated</code>). <b>Merge / mutation</b>: merges wait and parts accumulate — the classic too-many-parts build-up (HC-2.7). Dashed line = the pool size; the series is the worst replica's hourly average.</p>
   <div class="charts-grid" id="pools-charts">
     <div class="chart-card">
       <h3>Fetch pool (BackgroundFetchesPoolTask)</h3>
@@ -3870,7 +3896,10 @@ document.addEventListener('DOMContentLoaded',function(){
         // has gaps (downtime, a disabled hour), so the last 24 rows can reach
         // back days and flag a pool the live alert (now() - 24 h) finds clean.
         // Parsed as UTC on both sides so the browser's zone cancels out.
-        const cut=T(labels[labels.length-1])-24*3600e3;
+        // Anchor: the server's now() at collection (pools_now); older
+        // payloads without it fall back to the newest sample.
+        const anchor=DATA.pools_now?T(DATA.pools_now):T(labels[labels.length-1]);
+        const cut=anchor-24*3600e3;
         const last24=ph.filter(r=>T(r.time)>cut).map(r=>N(r[col])), sat=size?last24.filter(v=>v>=pct*size).length:0;
         const el=document.getElementById('chart-pool-'+k);
         const title=el.parentElement.parentElement.querySelector('h3');

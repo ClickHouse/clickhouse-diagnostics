@@ -182,11 +182,14 @@ func decideSMTCollection(fanoutErr error, singleNode bool, hint string) smtColle
 	default:
 		return smtCollectionDecision{
 			EffectiveMode: "cloud",
-			Note: "onprem → cloud: SharedMergeTree detected (cloud_mode = 1). Every system table fans out over the " +
-				"default cluster (clusterAllReplicas); host facts, configuration and log files are this node's",
-			Message: "SharedMergeTree cluster detected (cloud_mode = 1): switching to cloud collection so the system tables " +
-				"cover every replica, not just this node. Host facts, configuration and log files stay local to this node. " +
-				"Pass -single-node to collect this node only.",
+			Note: "onprem → cloud: SharedMergeTree detected (cloud_mode = 1). Every per-replica system table fans out over the " +
+				"default cluster (clusterAllReplicas); the shared tables (parts, tables, columns, databases, replicas, " +
+				"replication_queue, mutations, detached_parts) are read from one replica, as in any cloud collection; " +
+				"host facts, configuration and log files are this node's",
+			Message: "SharedMergeTree cluster detected (cloud_mode = 1): switching to cloud collection so the per-replica system tables " +
+				"(query_log, part_log, errors, metric_log, text_log …) cover every replica, not just this node; the shared tables " +
+				"(parts, tables, replicas …) are read once, as in any cloud collection. Host facts, configuration and log files stay " +
+				"local to this node. Pass -single-node to collect this node only.",
 		}
 	}
 }

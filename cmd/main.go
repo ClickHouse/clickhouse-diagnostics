@@ -353,7 +353,8 @@ func main() {
 
 	// SharedMergeTree clusters keep per-replica system tables; a -mode onprem
 	// run there collects one node of N. The run switches to cloud collection
-	// (every system table over clusterAllReplicas) while keeping this node's
+	// (per-replica system tables over clusterAllReplicas; shared tables such as
+	// system.parts stay single-copy — see query.SharedSystemTables) while keeping this node's
 	// host facts, configuration and log files — cloud mode alone never
 	// collects those. effectiveMode drives the query set, the alerts and the
 	// dashboard from here on; `mode` still says what the operator asked for.
