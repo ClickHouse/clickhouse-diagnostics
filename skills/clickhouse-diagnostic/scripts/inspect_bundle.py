@@ -1059,14 +1059,19 @@ def analyse(base: str):
                     run[m.group(1)] = m.group(2)
         if run:
             out["run"] = run
+            fanned = out["mode"] == "cloud"
             if run.get("node"):
-                out["notes"].append(f"this bundle describes node {run['node']} (collected via {run.get('target', '?')})")
+                if fanned:
+                    out["notes"].append(f"identity probe answered by node {run['node']} (collected via {run.get('target', '?')}); the system tables fan out over every replica — "
+                                        "host facts, configuration and log files, when present, are this node's")
+                else:
+                    out["notes"].append(f"this bundle describes node {run['node']} (collected via {run.get('target', '?')})")
             up = re.match(r"^(\d+)\s*s\b", run.get("uptime-seconds", ""))
             if up and int(up.group(1)) < 24 * 3600:
-                add("info", "coverage",
-                    f"server restarted {run.get('uptime', up.group(1) + ' s')} before collection — parts, replicas, metrics, "
-                    "zookeeper_connection and the pools describe the post-restart node; part_log / metric_log / text_log "
-                    "before the restart are still in the window",
+                who = f"the replica that answered the identity probe ({run.get('node', '?')}) restarted" if fanned else "server restarted"
+                scope = ("its own parts, pools and Keeper session are post-restart; the other replicas' rows in the fanned-out tables are not affected"
+                         if fanned else "parts, replicas, metrics, zookeeper_connection and the pools describe the post-restart node; part_log / metric_log / text_log before the restart are still in the window")
+                add("info", "coverage", f"{who} {run.get('uptime', up.group(1) + ' s')} before collection — {scope}",
                     "a restart clears a parts-propagation backlog only temporarily; a node captured after one looks healthier than the cluster is", "HC-0")
             if run.get("warnings"):
                 add("warning", "coverage", f"the collector warned at run time: {run['warnings']}", "execution_log.txt header", "HC-0")
@@ -1140,8 +1145,16 @@ def analyse(base: str):
         # system.server_settings (23.3+) or system.settings (older); the metric
         # is the hourly avg of tasks in the pool. Per hour, not per window:
         # 3 saturated hours in the last 24 is the finding.
+        # Sizes: system.server_settings from 23.3; system.settings only BELOW
+        # 23.3 — on newer servers it still lists background_*_pool_size with
+        # the old session defaults (8 / 128), not the server's real sizes, so a
+        # bundle without the server_settings file gets no sizes rather than
+        # wrong ones.
         sizes = {}
-        for f in ("system.server_settings_*.jsonl", "system.settings_*.jsonl"):
+        vm = re.match(r"^(\d+)\.(\d+)", str(out.get("version") or ""))
+        pre_233 = bool(vm) and (int(vm.group(1)), int(vm.group(2))) < (23, 3)
+        size_files = ["system.server_settings_*.jsonl"] + (["system.settings_*.jsonl"] if pre_233 else [])
+        for f in size_files:
             for r in read_jsonl(first(f, base)) or []:
                 n = r.get("name")
                 if n in ("background_fetches_pool_size", "background_schedule_pool_size", "background_pool_size",

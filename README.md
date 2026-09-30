@@ -28,7 +28,7 @@ Under the hood: per-environment query sets (`cloud` / `onprem` / `gov`) selected
 | `system.metric_log_7_days` (hourly aggregation of `system.metric_log`) | Memory and background-pool load over time | Tells "the server was overloaded" apart from "one query misbehaved". |
 | `system.disks`, `system.detached_parts` | Is disk running out; has data been set aside as broken? | A full disk explains many other symptoms; detached parts record corruption or replication leftovers. |
 | `system.tables`, `system.columns`, `system.dictionaries`, `system.clusters` | Schema, keys, materialized views, dictionaries, topology | Findings in parts and queries are *explained* by the schema and the cluster definition. |
-| `system.settings`, `system.server_settings` (≥ 23.4) | Which query/profile and server settings deviate from their defaults | Answers "what was tuned" without a config copy — cloud bundles have no `configuration/`; identifying server values are `REMOVED` in gov. |
+| `system.settings`, `system.server_settings` (≥ 23.3) | Which query/profile and server settings deviate from their defaults | Answers "what was tuned" without a config copy — cloud bundles have no `configuration/`; identifying server values are `REMOVED` in gov. |
 | `system.asynchronous_insert_log` (7 days) | Are async-insert flushes succeeding and how slow are they? | A lost flush is silent when `wait_for_async_insert = 0`. |
 | `system.crash_log`, `system.stack_trace` | Did the server crash; what were its threads doing? | Crash evidence needs the trace and the query that triggered it. |
 | `system.metrics`, `system.events`, `system.asynchronous_metrics` | Live gauges and cumulative counters: Keeper session and watches, read-only replicas, fetches in flight, object-storage requests, cache size, `Uptime` | The "right now" state the hourly aggregates cannot give; `Uptime` turns `system.errors` and `system.events` counts into rates. |
@@ -611,7 +611,7 @@ The tool targets **ClickHouse 22.8 and newer** for on-prem servers. Root-level q
 | `GROUP BY ALL` syntax | 22.12 | root files use explicit key lists |
 | `dateDiff('millisecond', …)` sub-second unit | after 22.12 | async latency uses float subtraction of `*_microseconds` |
 | `system.text_log.message_format_string` | 23.1 | `queries.query_analysis/23.1.1.0/` |
-| `system.server_settings` table | 23.3 | `queries.{onprem,gov}/23.4.1.0/` (no root file — skipped below 23.4; cloud carries it at root) |
+| `system.server_settings` table | 23.3 | `queries.{onprem,gov}/23.3.1.0/` (no root file — skipped below 23.3; cloud carries it at root) |
 | `system.asynchronous_insert_log.rows` | 23.4 | `queries.{onprem,gov}/23.4.1.0/` (22.10–23.3 report `bytes`) |
 | `system.settings.default` | 23.4 | `queries.{onprem,gov}/23.4.1.0/` (`default` is the only column their roots omit; the cloud root has it) |
 | `system.clusters` replicated-db columns (`database_shard_name`, `database_replica_name`, `is_active`, `name`) | 23.5 | `queries.*/23.5.1.0/` |

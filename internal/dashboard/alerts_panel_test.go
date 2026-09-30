@@ -101,6 +101,7 @@ func TestTemplate_NodeHeaderAndPoolsPanel(t *testing.T) {
 		"DATA.pools_hourly", "DATA.pool_sizes",
 		"label:'pool size'", // the dashed reference line
 		"[['fetch','fetch_tasks',0.9],['schedule','schedule_tasks',0.95],['merge','merge_tasks',0.9]]",
+		"const cut=T(labels[labels.length-1])-24*3600e3;", // 24 clock hours, not 24 samples
 		".chart-card.alert-card{",
 	} {
 		if !strings.Contains(htmlTemplate, want) {

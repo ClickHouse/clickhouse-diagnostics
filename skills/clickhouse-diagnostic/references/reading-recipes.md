@@ -155,7 +155,7 @@ SELECT name, type, free_pct, free_space, total_space FROM file('$B/system.disks_
 
 ## 5. Memory and CPU
 
-Server-side tracked memory and background pools per hour (the time series the dashboard does not draw):
+Server-side tracked memory and background pools per hour (the dashboard draws the three pool averages since v0.7; memory, the common pool and the Keeper counters only live here):
 ```sql
 SELECT time, formatReadableSize(avg_memory_tracking_bytes) AS mem, round(avg_merge_pool_tasks,1) AS merge_pool,
        max_merge_pool_tasks, round(avg_fetch_pool_tasks,1) AS fetch_pool, max_fetch_pool_tasks,

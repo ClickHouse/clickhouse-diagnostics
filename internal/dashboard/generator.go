@@ -3858,7 +3858,7 @@ document.addEventListener('DOMContentLoaded',function(){
   // and the card title; below 3 in the last 24 h nothing is flagged.
   {
     const ph=DATA.pools_hourly||[], sizes=DATA.pool_sizes||{};
-    const N=v=>Number(v||0);
+    const N=v=>Number(v||0), T=t=>Date.parse(String(t).replace(' ','T')+'Z');
     if(!ph.length){
       document.getElementById('pools-charts').innerHTML='<p class="no-data">metric_log is not available on this server (pool occupancy comes from CurrentMetric_Background*PoolTask)</p>';
     }else{
@@ -3866,7 +3866,12 @@ document.addEventListener('DOMContentLoaded',function(){
       const warn=themeVar('--status-warning')||C[2];
       [['fetch','fetch_tasks',0.9],['schedule','schedule_tasks',0.95],['merge','merge_tasks',0.9]].forEach(([k,col,pct])=>{
         const vals=ph.map(r=>N(r[col])), size=N(sizes[k]);
-        const last24=vals.slice(-24), sat=size?last24.filter(v=>v>=pct*size).length:0;
+        // The last 24 CLOCK hours, anchored on the newest sample: metric_log
+        // has gaps (downtime, a disabled hour), so the last 24 rows can reach
+        // back days and flag a pool the live alert (now() - 24 h) finds clean.
+        // Parsed as UTC on both sides so the browser's zone cancels out.
+        const cut=T(labels[labels.length-1])-24*3600e3;
+        const last24=ph.filter(r=>T(r.time)>cut).map(r=>N(r[col])), sat=size?last24.filter(v=>v>=pct*size).length:0;
         const el=document.getElementById('chart-pool-'+k);
         const title=el.parentElement.parentElement.querySelector('h3');
         if(size) title.textContent+=' — size '+size+(sat>=3?' — saturated '+sat+' of the last '+last24.length+' h':'');
