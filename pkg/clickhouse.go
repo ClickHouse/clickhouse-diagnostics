@@ -2,6 +2,7 @@ package pkg
 
 import (
 	"bytes"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"net/http"
@@ -154,13 +155,29 @@ func (c *ClickHouseClient) ExecuteQueryFreshConnection(query string) (string, er
 	return c.executeWith(freshConnectionClient(c.httpClient.Timeout), query)
 }
 
+// probeTimeout bounds one fresh-connection probe. The probes are trivial
+// queries that run sequentially at start-up, so they get a short overall
+// bound of their own rather than the collectors' query timeout — which can
+// be unbounded (-query-timeout 0) and would let a backend that accepts the
+// connection and then stalls hold the run indefinitely.
+const probeTimeout = 30 * time.Second
+
 // freshConnectionClient is an http.Client whose transport opens one
-// connection per request and never reuses it.
-func freshConnectionClient(timeout time.Duration) *http.Client {
-	return &http.Client{
-		Timeout:   timeout,
-		Transport: &http.Transport{DisableKeepAlives: true, Proxy: http.ProxyFromEnvironment},
+// connection per request and never reuses it. Cloned from the default
+// transport so the connection-level bounds every other request has — the
+// 30 s dial timeout and the 10 s TLS-handshake timeout — stay in force; a
+// zero-value Transport would have dropped both. HTTP/2 is left off: a
+// multiplexed h2 connection is exactly the reuse the probe must avoid.
+func freshConnectionClient(clientTimeout time.Duration) *http.Client {
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.DisableKeepAlives = true
+	tr.ForceAttemptHTTP2 = false
+	tr.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{}
+	timeout := probeTimeout
+	if clientTimeout > 0 && clientTimeout < timeout {
+		timeout = clientTimeout
 	}
+	return &http.Client{Timeout: timeout, Transport: tr}
 }
 
 // executeWith is the HTTP round-trip against a given client; executeReal

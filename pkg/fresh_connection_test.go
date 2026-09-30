@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // A load balancer pins a kept-alive connection to one backend, so a probe
@@ -54,7 +55,35 @@ func TestExecuteQueryFreshConnection_OpensANewConnectionPerCall(t *testing.T) {
 	if len(seen) != 3 {
 		t.Fatalf("fresh-connection probes must not share a connection, saw %d remote addrs: %v", len(seen), seen)
 	}
-	if tr, ok := freshConnectionClient(0).Transport.(*http.Transport); !ok || !tr.DisableKeepAlives {
-		t.Error("freshConnectionClient must disable keep-alives")
+}
+
+// The one-shot transport must keep the default transport's connection-level
+// bounds (a zero-value Transport has neither a dial nor a TLS-handshake
+// timeout), stay on HTTP/1.1 (h2 multiplexes — the reuse the probe avoids)
+// and never outlive the probe bound, even when the collectors' query
+// timeout is unbounded.
+func TestFreshConnectionClient_KeepsTransportBounds(t *testing.T) {
+	c := freshConnectionClient(0)
+	tr, ok := c.Transport.(*http.Transport)
+	if !ok {
+		t.Fatal("transport is not *http.Transport")
+	}
+	if !tr.DisableKeepAlives {
+		t.Error("keep-alives must be disabled")
+	}
+	if tr.DialContext == nil || tr.TLSHandshakeTimeout == 0 {
+		t.Error("dial and TLS-handshake bounds must come from the default transport")
+	}
+	if tr.ForceAttemptHTTP2 || tr.TLSNextProto == nil || len(tr.TLSNextProto) != 0 {
+		t.Error("HTTP/2 must be disabled for one-shot probes")
+	}
+	if c.Timeout != probeTimeout {
+		t.Errorf("unbounded client timeout must fall back to probeTimeout, got %v", c.Timeout)
+	}
+	if got := freshConnectionClient(5 * time.Second).Timeout; got != 5*time.Second {
+		t.Errorf("a shorter client timeout must win, got %v", got)
+	}
+	if got := freshConnectionClient(10 * time.Minute).Timeout; got != probeTimeout {
+		t.Errorf("a longer client timeout must be capped at probeTimeout, got %v", got)
 	}
 }
