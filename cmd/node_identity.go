@@ -72,15 +72,14 @@ func sameMachine(serverHost, serverFQDN, localHostname string) bool {
 	if l == "" {
 		return true // cannot tell; do not warn
 	}
+	// When both the server's FQDN and the local name are qualified, the
+	// FQDN decides alone — the short hostName() would otherwise match on
+	// the first label and hide the difference FQDN() proves.
+	if f := norm(serverFQDN); qualified(f) && qualified(l) {
+		return f == l
+	}
 	for _, s := range []string{serverHost, serverFQDN} {
-		s = norm(s)
-		switch {
-		case s == "":
-		case s == l:
-			return true
-		case qualified(s) && qualified(l):
-			// both qualified and different: not the same machine
-		case first(s) == first(l):
+		if s = norm(s); s != "" && (s == l || first(s) == first(l)) {
 			return true
 		}
 	}
