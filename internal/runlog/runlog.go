@@ -105,6 +105,19 @@ func (r *Recorder) SetMeta(key, value string) {
 	r.meta = append(r.meta, kv{key, value})
 }
 
+// Meta returns a header value set earlier, or "" — the dashboard header
+// repeats the node / uptime / collection lines so both artefacts agree.
+func (r *Recorder) Meta(key string) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, m := range r.meta {
+		if m.k == key {
+			return m.v
+		}
+	}
+	return ""
+}
+
 // Record appends one entry. Error text is capped here so the file never
 // carries a stack trace.
 func (r *Recorder) Record(e Entry) {

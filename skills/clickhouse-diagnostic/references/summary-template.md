@@ -5,7 +5,7 @@ Produce the summary inline (markdown) unless the user asks for a file. Keep it s
 ```markdown
 # ClickHouse diagnostic summary — <bundle folder name>
 
-**Coverage.** ClickHouse <version> · mode <cloud|onprem|gov> · collected <run timestamp, tz> · query_log window <min> → <max> (<N> hour-buckets) · text_log <N> rows covering <first>–<last> · files missing/empty: <list or none> · host facts: <describe the server | not collected | describe another machine (ignored)> · logs: <files, truncated?>.
+**Coverage.** ClickHouse <version> · mode <cloud|onprem|gov> · node <hostName() from the header | unknown> up <uptime> at collection <, restarted before collection if < 24 h> · <collection: onprem → cloud (SharedMergeTree) | one node of N | omit> · collected <run timestamp, tz> · query_log window <min> → <max> (<N> hour-buckets) · text_log <N> rows covering <first>–<last> · files missing/empty: <list or none> · host facts: <describe the server | not collected | describe another machine (ignored)> · logs: <files, truncated?>.
 <If the user's incident is outside the window, say so here and point to the re-collection command.>
 
 ## Headline

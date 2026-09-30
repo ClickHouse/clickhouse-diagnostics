@@ -47,6 +47,7 @@ clickhouse_backup_<ts>_gov_name_mapping.csv    # NEXT TO the folder, never insid
 | `system.text_log.message` | text | text | 64-hex hash (unreadable) |
 | `hostname` column in `part_log`/`query_log` files | yes (fan-out over replicas via `clusterAllReplicas`) | only on servers ≥ 23.11 (single host) | ≥ 23.11 (hashed) |
 | `host_info.json`, `logs/`, `configuration/` | off by default | on by default | never |
+| `execution_log.txt` header `mode:` | `cloud` — also for an **onprem run that switched** on a SharedMergeTree cluster (then `collection: onprem → cloud …` follows and `host_info.json` / `logs/` / `configuration/` are present too) | `onprem` | `gov` |
 
 Also read `system.version_*.jsonl` (`{"version":"25.3.2.39"}`) first — every version-dependent statement in this skill hangs off it.
 
@@ -162,7 +163,7 @@ The table-dependency graph, adapted from ClickHouse's `/schema` page and rendere
 
 ## 8a. `execution_log.txt`
 
-Plain text, written just before the archive. Header (`started`, `finished`, `mode`, `server`, `target`, `window`, `timeout`, `format`), a **Summary** (`collectors: N ok, M failed, K empty — T of query time`, alert counts, phase wall times), **Most expensive collectors** (top 10 by wall time with bytes and rows), **Failed collectors** with the ClickHouse error text (capped at 300 chars), then **All entries** as a pipe table — `| # | stage | name | source | status | duration_ms | bytes | rows | note | error |` — where `stage` ∈ collector / alert / text_log / analysis, `source` is the version directory (`root` = the base file) and `note` carries the output file name or the alert instance count. Read it **first**: a result file that is missing was a `failed` collector (its error is here), not an empty table; a collector with code 159 hit the tool's own `-query-timeout`; a collector taking tens of seconds on a small server is a window worth shortening. Bundles from tool builds before this file exist without it.
+Plain text, written just before the archive. Header (`started`, `finished`, `mode` — the mode the collectors actually ran in, `server`, `target`, `node` — `hostName()` (`FQDN()`) of the server that answered, `uptime` / `uptime-seconds` — how long that node had been up, `collection` — present when the run switched `onprem → cloud` on a SharedMergeTree cluster or stayed on one node and why, `warnings` — load-balancer / mixed-host warnings printed at run time, `window`, `timeout`, `format`), a **Summary** (`collectors: N ok, M failed, K empty — T of query time`, alert counts, phase wall times), **Most expensive collectors** (top 10 by wall time with bytes and rows), **Failed collectors** with the ClickHouse error text (capped at 300 chars), then **All entries** as a pipe table — `| # | stage | name | source | status | duration_ms | bytes | rows | note | error |` — where `stage` ∈ collector / alert / text_log / analysis, `source` is the version directory (`root` = the base file) and `note` carries the output file name or the alert instance count. Read it **first**: a result file that is missing was a `failed` collector (its error is here), not an empty table; a collector with code 159 hit the tool's own `-query-timeout`; a collector taking tens of seconds on a small server is a window worth shortening. Bundles from tool builds before this file exist without it.
 
 ## 9. `alerts_summary.json`
 

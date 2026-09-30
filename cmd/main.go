@@ -38,6 +38,7 @@ func main() {
 	skipArchiveFlag := flag.Bool("skip-archive", false, "Skip creating archive of results and configuration")
 	skipDashboardFlag := flag.Bool("skip-dashboard", false, "Skip generating HTML dashboard")
 	skipAlertsFlag := flag.Bool("skip-alerts", false, "Skip evaluating alert rules")
+	singleNodeFlag := flag.Bool("single-node", false, "On a SharedMergeTree cluster (cloud_mode = 1), keep -mode onprem collecting THIS node only instead of switching to cloud collection over clusterAllReplicas(default, ...)")
 	alertsDirFlag := flag.String("alerts-dir", "./alerts", "Directory containing alert YAML rule files")
 	saltFlag := flag.String("salt", "", "Gov-mode hashing salt (8–64 alphanumeric chars; prompts interactively if empty)")
 	queryIDFlag := flag.String("query-id", "", "Run query analysis focused on this query_id (UUID)")
@@ -99,6 +100,7 @@ func main() {
 		dryRun         = *dryRunFlag
 		skipDashboard  = *skipDashboardFlag
 		skipAlerts     = *skipAlertsFlag
+		singleNode     = *singleNodeFlag
 		alertsDir      = *alertsDirFlag
 		govSalt        = *saltFlag
 		queryID        = *queryIDFlag
@@ -328,7 +330,58 @@ func main() {
 	// so a reader can tell a failed collector from an empty table and see
 	// which queries are expensive on this server.
 	rec := runlog.New().WithGov(mode == "gov")
-	rec.SetMeta("mode", mode)
+
+	// Who answered, and for how long has it been up. Two bundles in one
+	// escalation were read against the wrong node — one collected through a
+	// load balancer, one on a sibling of the host the case was about — and a
+	// third described a replica restarted minutes before collection. The
+	// probe is three cheap round trips; a failure (no grant, dry run) leaves
+	// the header without a node line and the warnings silent.
+	var identity nodeIdentity
+	if !dryRun {
+		identity = probeNodeIdentity(client)
+		localHostname, _ := os.Hostname()
+		warnings := nodeWarnings(identity, host, localHostname, !skipHostInfo || !skipLogs || !skipConfig)
+		for _, w := range warnings {
+			fmt.Println(w)
+		}
+		// The warnings name hosts; gov keeps host names out of the log.
+		if len(warnings) > 0 && mode != "gov" {
+			rec.SetMeta("warnings", strings.Join(warnings, " | "))
+		}
+	}
+
+	// SharedMergeTree clusters keep per-replica system tables; a -mode onprem
+	// run there collects one node of N. The run switches to cloud collection
+	// (every system table over clusterAllReplicas) while keeping this node's
+	// host facts, configuration and log files — cloud mode alone never
+	// collects those. effectiveMode drives the query set, the alerts and the
+	// dashboard from here on; `mode` still says what the operator asked for.
+	// Skipped in dry-run: that contract allows only the version / preflight /
+	// EXPLAIN metadata queries to reach the server, and the probes are neither.
+	effectiveMode := mode
+	collectionNote := ""
+	if mode == "onprem" && !dryRun {
+		if cloudMode, err := client.ExecuteQuery("SELECT value FROM system.settings WHERE name = 'cloud_mode'"); err == nil && isSharedMergeTree(cloudMode) {
+			var fanoutErr error
+			if !singleNode {
+				_, fanoutErr = client.ExecuteQuery("SELECT count() FROM clusterAllReplicas(default, system.one)")
+			}
+			d := decideSMTCollection(fanoutErr, singleNode, sharedMergeTreeHint(mode, cloudMode))
+			fmt.Println(d.Message)
+			collectionNote = d.Note
+			if d.EffectiveMode != mode {
+				effectiveMode = d.EffectiveMode
+				if queriesDir, err = getQueriesDir(effectiveMode); err != nil {
+					fmt.Printf("Error: %v\n", err)
+					os.Exit(1)
+				}
+				fmt.Printf("Using query mode: %s (queries from: %s)\n", effectiveMode, queriesDir)
+			}
+		}
+	}
+
+	rec.SetMeta("mode", effectiveMode)
 	rec.SetMeta("server", fmt.Sprintf("%d.%d.%d.%d", serverVersion.Major, serverVersion.Minor, serverVersion.Patch, serverVersion.Build))
 	if mode == "gov" {
 		// The host is customer infrastructure; gov hashes host names in every
@@ -336,6 +389,20 @@ func main() {
 		rec.SetMeta("target", fmt.Sprintf("(host redacted in gov mode) via %s", protocol))
 	} else {
 		rec.SetMeta("target", fmt.Sprintf("%s:%s (%s)", host, port, protocol))
+		if identity.Err == nil && identity.Host != "" {
+			node := identity.Host
+			if identity.FQDN != "" && identity.FQDN != identity.Host {
+				node += " (" + identity.FQDN + ")"
+			}
+			rec.SetMeta("node", node)
+		}
+	}
+	if identity.Err == nil && identity.UptimeSeconds > 0 {
+		rec.SetMeta("uptime", humanUptime(identity.UptimeSeconds))
+		rec.SetMeta("uptime-seconds", fmt.Sprintf("%d s", identity.UptimeSeconds))
+	}
+	if collectionNote != "" {
+		rec.SetMeta("collection", collectionNote)
 	}
 	if collectFrom.IsZero() && collectTo.IsZero() {
 		rec.SetMeta("window", "each query's own default look-back (7 days for most log tables, 3 days for part_log and metric_log_coordination, 1 day for text_log and zookeeper_log)")
@@ -346,20 +413,6 @@ func main() {
 	rec.SetMeta("format", outputFormat.Name)
 	if dryRun {
 		rec.SetMeta("dry-run", "yes — no query was sent to the server, durations are not meaningful")
-	}
-
-	// SharedMergeTree clusters keep per-replica system tables; tell the
-	// operator when -mode onprem is about to collect one node of N. Best
-	// effort: a failed probe (no grant on system.settings, old server)
-	// simply produces no hint.
-	// Skipped in dry-run: that contract allows only the version / preflight /
-	// EXPLAIN metadata queries to reach the server, and this hint is neither.
-	if mode == "onprem" && !dryRun {
-		if cloudMode, err := client.ExecuteQuery("SELECT value FROM system.settings WHERE name = 'cloud_mode'"); err == nil {
-			if hint := sharedMergeTreeHint(mode, cloudMode); hint != "" {
-				fmt.Println(hint)
-			}
-		}
 	}
 
 	// Query analysis is not available in gov mode: its results embed raw
@@ -488,7 +541,7 @@ func main() {
 
 	// Find and execute queries - get the specific folder path
 	queryManager := query.NewManager().WithOutputFormat(outputFormat).
-		WithWindow(collectFrom, collectTo).WithMode(mode).WithRecorder(rec)
+		WithWindow(collectFrom, collectTo).WithMode(effectiveMode).WithRecorder(rec)
 	phaseStart := time.Now()
 	finalOutputDir, err := queryManager.ExecuteQueries(client, queriesDir, serverVersion, outputDir, govSalt)
 	rec.Phase("collectors", time.Since(phaseStart), "")
@@ -508,7 +561,7 @@ func main() {
 			Level:    textLogLevel,
 			RowLimit: textLogLimit,
 		}
-		tlColl := query.NewTextLogCollector(client, mode).WithOutputFormat(outputFormat)
+		tlColl := query.NewTextLogCollector(client, effectiveMode).WithOutputFormat(outputFormat)
 		phaseStart = time.Now()
 		path, err := tlColl.Collect(tlOpts, finalOutputDir, serverVersion)
 		tlStatus, tlErr := "ok", ""
@@ -530,7 +583,7 @@ func main() {
 	// handling prints each file instead of writing results) — otherwise
 	// "list every query the tool would execute" would omit the bundle.
 	if analysisOpts.Enabled() {
-		coll := query.NewAnalysisCollector(client, mode).WithOutputFormat(outputFormat)
+		coll := query.NewAnalysisCollector(client, effectiveMode).WithOutputFormat(outputFormat)
 		phaseStart = time.Now()
 		written, skipped, err := coll.Collect(analysisOpts, analysisDir, finalOutputDir, serverVersion)
 		qaStatus, qaErr := "ok", ""
@@ -626,7 +679,7 @@ func main() {
 	if !skipAlerts {
 		fmt.Println("Evaluating alert rules...")
 		phaseStart = time.Now()
-		alertResults = alert.NewEvaluator(client, mode).RunAll(alertsDir, serverVersion)
+		alertResults = alert.NewEvaluator(client, effectiveMode).RunAll(alertsDir, serverVersion)
 		rec.Phase("alerts", time.Since(phaseStart), "")
 		for _, r := range alertResults {
 			status := "clean"
@@ -669,10 +722,11 @@ func main() {
 	// the same reason query analysis is. Hashing every dashboard panel is
 	// the follow-up that would restore it.
 	dashboardWritten := false
-	if generate, skipReason := dashboardDecision(skipDashboard, mode); !generate {
+	if generate, skipReason := dashboardDecision(skipDashboard, effectiveMode); !generate {
 		fmt.Println(skipReason)
 	} else {
-		gen := dashboard.NewGenerator(client, mode).
+		gen := dashboard.NewGenerator(client, effectiveMode).
+			WithCollection(rec.Meta("node"), rec.Meta("uptime"), rec.Meta("collection")).
 			WithServerVersion(serverVersion).
 			WithAnalysis(analysisOpts, analysisDir).
 			WithHostInfo(hostReport)
@@ -700,7 +754,7 @@ func main() {
 	// state and the instance COUNT, never the matched rows (their columns are
 	// rule-defined, so in gov mode they would carry raw identifiers).
 	if !skipAlerts && !dashboardWritten && len(alertResults) > 0 {
-		if err := alert.WriteSummaryJSON(finalOutputDir, alertResults, mode); err != nil {
+		if err := alert.WriteSummaryJSON(finalOutputDir, alertResults, effectiveMode); err != nil {
 			fmt.Printf("Warning: alert summary could not be written: %v\n", err)
 		} else {
 			fmt.Println("Wrote alerts_summary.json (rule outcomes and instance counts; " +

@@ -158,10 +158,17 @@ SELECT name, type, free_pct, free_space, total_space FROM file('$B/system.disks_
 Server-side tracked memory and background pools per hour (the time series the dashboard does not draw):
 ```sql
 SELECT time, formatReadableSize(avg_memory_tracking_bytes) AS mem, round(avg_merge_pool_tasks,1) AS merge_pool,
-       max_merge_pool_tasks, round(avg_fetch_pool_tasks,1) AS fetch_pool, zk_transactions, zk_hw_exceptions
+       max_merge_pool_tasks, round(avg_fetch_pool_tasks,1) AS fetch_pool, max_fetch_pool_tasks,
+       round(avg_schedule_pool_tasks,1) AS schedule_pool, max_schedule_pool_tasks,
+       round(avg_common_pool_tasks,1) AS common_pool, zk_transactions, zk_hw_exceptions
 FROM file('$B/system.metric_log_7_days_*.jsonl', JSONEachRow) ORDER BY time
 ```
-Compare `avg_memory_tracking_bytes` peaks with `host_info.memory.total_bytes` and `clickhouse_relevant_tunables.cgroup_memory_limit_bytes`; `max_merge_pool_tasks` against `background_pool_size` (default 16) — a pool pinned at its size for hours is saturated.
+(`*_fetch_pool_tasks` max and the schedule / common pool columns exist from v0.7; older bundles have only `max_merge_pool_tasks` and `avg_fetch_pool_tasks`.) Compare `avg_memory_tracking_bytes` peaks with `host_info.memory.total_bytes` and `clickhouse_relevant_tunables.cgroup_memory_limit_bytes`; each pool against its size — a pool pinned at its size for hours is saturated (HC-2.7 merge, HC-2.13 fetch, HC-2.14 schedule; P-59 on SharedMergeTree):
+```sql
+SELECT name, value FROM file('$B/system.server_settings_*.jsonl', JSONEachRow)   -- system.settings_*.jsonl on < 23.3
+WHERE name IN ('background_pool_size','background_fetches_pool_size','background_schedule_pool_size','background_common_pool_size')
+```
+The pre-pass prints the same comparison as `background pools (last 24 h, hourly avg vs size)`; the alerts `fetch_pool_saturated` / `schedule_pool_saturated` fire per replica at ≥ 90 % / ≥ 95 % of the size in 3 of the last 24 hours.
 
 Host view: `host_info.json` → `cpu.logical_cpus`, `cpu.load_avg_1_5_15` (load ≫ CPUs = saturation at collection time), `memory.available_bytes` (< 2 GiB triggers ClickHouse's own startup warning), `swap_total_bytes - swap_free_bytes` (swap in use), `top_processes_by_rss` (is ClickHouse the only big process?).
 

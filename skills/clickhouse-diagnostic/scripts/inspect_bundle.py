@@ -1033,6 +1033,30 @@ def analyse(base: str):
     xl_path = os.path.join(base, "execution_log.txt")
     if os.path.exists(xl_path):
         rows = []
+        # The header answers "which node is this, and was it just restarted" —
+        # the two questions a fetch-lag escalation had to settle by hand from
+        # thread ids and uptime, twice. key:   value lines until the Summary.
+        run = {}
+        with open(xl_path, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if line.startswith("Summary"):
+                    break
+                m = re.match(r"^([a-z][a-z-]*):\s+(.*\S)\s*$", line)
+                if m and m.group(1) not in ("started", "finished"):
+                    run[m.group(1)] = m.group(2)
+        if run:
+            out["run"] = run
+            if run.get("node"):
+                out["notes"].append(f"this bundle describes node {run['node']} (collected via {run.get('target', '?')})")
+            up = re.match(r"^(\d+)\s*s\b", run.get("uptime-seconds", ""))
+            if up and int(up.group(1)) < 24 * 3600:
+                add("info", "coverage",
+                    f"server restarted {run.get('uptime', up.group(1) + ' s')} before collection — parts, replicas, metrics, "
+                    "zookeeper_connection and the pools describe the post-restart node; part_log / metric_log / text_log "
+                    "before the restart are still in the window",
+                    "a restart clears a parts-propagation backlog only temporarily; a node captured after one looks healthier than the cluster is", "HC-0")
+            if run.get("warnings"):
+                add("warning", "coverage", f"the collector warned at run time: {run['warnings']}", "execution_log.txt header", "HC-0")
         with open(xl_path, encoding="utf-8", errors="replace") as fh:
             for line in fh:
                 if not line.startswith("| ") or line.startswith("| # |") or line.startswith("|---"):
@@ -1098,6 +1122,41 @@ def analyse(base: str):
         zk = sum(num(r.get("zk_hw_exceptions")) or 0 for r in ml)
         out["metric_log"] = {"hours": len(ml), "max_avg_memory_tracking": human(max(mem)), "max_merge_pool_tasks": max(pool),
                              "hours_pool_at_max": sum(1 for p in pool if p == max(pool)) if max(pool) else 0, "zk_hw_exceptions_total": zk}
+
+        # ---- background pool saturation (HC-2.13 / HC-2.14). Sizes come from
+        # system.server_settings (23.3+) or system.settings (older); the metric
+        # is the hourly avg of tasks in the pool. Per hour, not per window:
+        # 3 saturated hours in the last 24 is the finding.
+        sizes = {}
+        for f in ("system.server_settings_*.jsonl", "system.settings_*.jsonl"):
+            for r in read_jsonl(first(f, base)) or []:
+                n = r.get("name")
+                if n in ("background_fetches_pool_size", "background_schedule_pool_size", "background_pool_size",
+                         "background_common_pool_size") and n not in sizes:
+                    sizes[n] = num(r.get("value"))
+        last_hour = max((r.get("time") or "" for r in ml), default="")
+        recent = [r for r in ml if r.get("time") and last_hour and hour_key(r["time"]) and
+                  (parse_dt(last_hour) - parse_dt(r["time"])).total_seconds() <= 24 * 3600] if last_hour else ml
+        pools = {}
+        for label, col, setting, pct, hc in (("fetch", "avg_fetch_pool_tasks", "background_fetches_pool_size", 0.9, "HC-2.13"),
+                                             ("schedule", "avg_schedule_pool_tasks", "background_schedule_pool_size", 0.95, "HC-2.14"),
+                                             ("merge", "avg_merge_pool_tasks", "background_pool_size", 0.9, "HC-2.7")):
+            vals = [num(r.get(col)) for r in recent if r.get(col) is not None]
+            if not vals:
+                continue
+            size = sizes.get(setting)
+            info = {"max_avg": round(max(vals), 1), "size": size}
+            if size:
+                sat = sum(1 for v in vals if v >= pct * size)
+                info["hours_saturated_24h"] = sat
+                if sat >= 3:
+                    add("warning", "merges" if label == "merge" else "replication",
+                        f"background {label} pool saturated: hourly average ≥ {int(pct * 100)}% of {setting} = {size} in {sat} of the last {len(vals)} hour(s) (peak avg {info['max_avg']})",
+                        "a pool with no free slot drops work and retries later, silently — on SharedMergeTree that is parts-propagation lag; "
+                        "raise the pool size (fetch pool applies on config reload), or reduce inserts/parts/tables", f"{hc}/P-59")
+            pools[label] = info
+        if pools:
+            out["pools"] = pools
         if zk and not any(f["check"].startswith("HC-3.8") for f in findings):
             add("warning", "keeper", f"{zk} ZooKeeper/Keeper hardware exceptions over {len(ml)} hours", "metric_log.zk_hw_exceptions", "HC-3.5")
 
@@ -1232,6 +1291,18 @@ def render_md(o) -> str:
     L.append(f"# Bundle inspection — {o['bundle']}")
     L.append("")
     L.append(f"- ClickHouse version: **{o.get('version') or 'unknown'}** · mode: **{o['mode']}** · collected: {o.get('collected_at') or '?'} (collector local time)")
+    if o.get("run"):
+        r = o["run"]
+        bits = []
+        if r.get("node"): bits.append(f"node **{r['node']}**")
+        if r.get("target"): bits.append(f"collected via {r['target']}")
+        if r.get("uptime"): bits.append(f"server up {r['uptime']} at collection")
+        if r.get("collection"): bits.append(f"collection: {r['collection']}")
+        if bits: L.append("- " + " · ".join(bits))
+    if o.get("pools"):
+        L.append("- background pools (last 24 h, hourly avg vs size): " + " · ".join(
+            f"{k} {v['max_avg']}/{v['size'] if v.get('size') else '?'}" + (f" ({v['hours_saturated_24h']} h saturated)" if v.get("hours_saturated_24h") else "")
+            for k, v in o["pools"].items()))
     qw = o.get("query_log_window")
     if qw:
         L.append(f"- query_log window: {qw['from']} → {qw['to']} ({qw['hour_buckets']} hour buckets)")

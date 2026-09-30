@@ -270,6 +270,9 @@ Run `./clickhouse-diagnostic -help` to see the full list. Current flags:
                        no archive. See "Dry-run mode" below.
 -skip-config           Skip collecting configuration files
 -skip-alerts           Skip evaluating alert rules
+-single-node           On a SharedMergeTree cluster (cloud_mode = 1), keep -mode onprem
+                       collecting THIS node only instead of switching to cloud
+                       collection over clusterAllReplicas(default, ...)
 -skip-dashboard        Skip generating HTML dashboard
 -skip-archive          Skip creating archive of results and configuration
 ```
@@ -482,6 +485,8 @@ Sample block of the output:
 
 ## Modes and Query Layout
 
+**SharedMergeTree auto-switch.** A `-mode onprem` run against a server with `cloud_mode = 1` (a self-hosted SharedMergeTree cluster) switches to the `queries.cloud/` set on its own — every system table fans out over the `default` cluster — while still collecting this node's host facts, configuration and log files, which cloud mode alone never does. The run says so, and `execution_log.txt` records `collection: onprem → cloud: SharedMergeTree detected`. It needs `REMOTE` and `CREATE TEMPORARY TABLE ON *.*`; without them the run stays on one node and records why. `-single-node` disables the switch. The header also records `node:` (`hostName()`, `FQDN()`) and `uptime:`, and the tool warns when repeated probes answer with different hostnames (a load balancer) or when `-host` is remote while local files are being collected — the two ways a bundle ends up describing the wrong machine.
+
 `-mode` selects which top-level query directory the tool reads from:
 
 | Mode | Query directory | Notes |
@@ -618,6 +623,7 @@ The tool targets **ClickHouse 22.8 and newer** for on-prem servers. Root-level q
 | `system.tables.total_bytes_uncompressed` | 23.12 | `queries.query_analysis/23.12.1.0/` |
 | `system.view_refreshes` table | 23.12 | `queries.*/23.12.1.0/` (no root file — skipped below 23.12 in every mode) |
 | `system.mutations.is_killed` | 24.1 | `alerts/24.1.1.0/` (root omits the filter) |
+| `background_*_pool_size` moved from `system.settings` to `system.server_settings` | 23.3 | `alerts/23.4.1.0/` (`fetch_pool_saturated`, `schedule_pool_saturated`; the root rule reads `system.settings` and finds no size on newer servers, so it stays quiet there) |
 | `system.tables.metadata_version` | 24.2 | `queries.*/24.2.1.0/` |
 | `system.error_log` table | 24.8 | `queries.*/24.8.1.0/` (no root file — skipped below 24.8 in every mode) |
 | `system.zookeeper_log.duration_microseconds` (replaces `duration_ms`) | 24.3 | `queries.*/24.3.1.0/` (roots use `duration_ms`; output stays in ms on every rung) |
@@ -793,6 +799,8 @@ The repo ships with 15 alert rules in `alerts/`. They are intended as a starting
 | `high_exception_rate` | warning | More than 50 query exceptions for a single exception code in one hour of the last 24 hours (one instance per hour and code, worst 24) |
 | `background_operation_failures` | warning | More than 50 failed merges / fetches / mutations with the same code in one hour of the last 24 (`part_log`) |
 | `merges_stalled` | warning | An hour in the last 24 with more than 100 `NewPart` events and zero completed merges (`part_log`) — Keeper down, pool paused or every merge failing |
+| `fetch_pool_saturated` | warning | Hourly average of `BackgroundFetchesPoolTask` at ≥ 90 % of `background_fetches_pool_size` in 3 of the last 24 hours, per replica — the fetch executor has no queue, so on SharedMergeTree this is parts-propagation lag |
+| `schedule_pool_saturated` | warning | Hourly average of `BackgroundSchedulePoolTask` at ≥ 95 % of `background_schedule_pool_size` in 3 of the last 24 hours, per replica — every table's periodic tasks run here; tens of thousands of replicated tables pin it first |
 | `too_many_simultaneous_queries` | warning | More than 10 code-202 (`TOO_MANY_SIMULTANEOUS_QUERIES`) errors in the last hour (`max_concurrent_queries` hit) |
 | `too_many_parts` | warning | A partition has more than 300 active parts (inserts are delayed from `parts_to_delay_insert` = 1000 and rejected with code 252 `TOO_MANY_PARTS` at `parts_to_throw_insert` = 3000) |
 | `large_parts` | warning | A single active part is larger than 150 GB |
