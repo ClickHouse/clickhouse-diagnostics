@@ -806,8 +806,11 @@ func (g *Generator) poolsMetricSQL() string {
 }
 
 // poolSizes reads background_*_pool_size from system.server_settings (23.3+)
-// or system.settings (older); one scalar per pool, max() over replicas on a
-// cloud collection. A missing table or setting yields 0 — no reference line.
+// or system.settings (older); one scalar per pool. On a cloud collection the
+// table fans out and min() over replicas is taken: the chart's series is the
+// worst replica's occupancy, so the smallest pool is the line it must be
+// judged against — a larger sibling's size would hide saturation. A missing
+// table or setting yields 0 — no reference line.
 func (g *Generator) poolSizes() map[string]int64 {
 	out := map[string]int64{"fetch": 0, "schedule": 0, "merge": 0}
 	table := "settings"
@@ -817,7 +820,7 @@ func (g *Generator) poolSizes() map[string]int64 {
 	for key, setting := range map[string]string{
 		"fetch": "background_fetches_pool_size", "schedule": "background_schedule_pool_size", "merge": "background_pool_size",
 	} {
-		if n, err := g.scalarCount(fmt.Sprintf("SELECT max(toUInt64OrZero(value)) FROM %s WHERE name = '%s'", g.sysTable(table), setting)); err == nil {
+		if n, err := g.scalarCount(fmt.Sprintf("SELECT min(toUInt64OrZero(value)) FROM %s WHERE name = '%s'", g.sysTable(table), setting)); err == nil {
 			out[key] = n
 		}
 	}

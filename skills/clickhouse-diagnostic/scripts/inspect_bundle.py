@@ -1167,8 +1167,12 @@ def analyse(base: str):
                 sat = sum(1 for v in vals if v >= pct * size)
                 info["hours_saturated_24h"] = sat
                 if sat >= 3:
+                    # The bundle's settings file is read from ONE replica (the
+                    # cloud collector does not fan settings out); the alerts
+                    # compare each replica with its own size on the cluster.
+                    scope = " (size from the replica that answered the settings query; the alert compares per replica)" if out["mode"] == "cloud" else ""
                     add("warning", "merges" if label == "merge" else "replication",
-                        f"background {label} pool saturated: hourly average ≥ {int(pct * 100)}% of {setting} = {size} in {sat} of the last {len(vals)} hour(s) (peak avg {info['max_avg']})",
+                        f"background {label} pool saturated: hourly average ≥ {int(pct * 100)}% of {setting} = {size}{scope} in {sat} of the last {len(vals)} hour(s) (peak avg {info['max_avg']})",
                         "a pool with no free slot drops work and retries later, silently — on SharedMergeTree that is parts-propagation lag; "
                         "raise the pool size (fetch pool applies on config reload), or reduce inserts/parts/tables", f"{hc}/P-59")
             pools[label] = info

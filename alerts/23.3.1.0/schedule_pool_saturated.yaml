@@ -30,16 +30,22 @@ tags:
   - capacity
   - replication
 
-# Per replica (hostName()): a cluster-wide average would hide one saturated
-# node among idle ones. The pool size is read from {sys.server_settings};
-# in cloud mode that table fans out too, so max() folds the replicas' values
-# (they are the same on a homogeneous cluster) into one scalar.
+# Per replica (hostName()) on both sides: a cluster-wide average would hide
+# one saturated node among idle ones, and a cluster-wide pool size would
+# compare one replica's occupancy with another replica's denominator when
+# the sizes differ. In cloud mode {sys.server_settings} fans out too, so the
+# join on hostname pairs each replica with its own size; on one node both
+# sides are that node.
 query: |
-  WITH (
-      SELECT max(toUInt64OrZero(value))
+  WITH sizes AS
+    (
+      SELECT
+        hostName()                    AS hostname,
+        max(toUInt64OrZero(value))    AS pool_size
       FROM {sys.server_settings}
       WHERE name = 'background_schedule_pool_size'
-    ) AS pool_size,
+      GROUP BY hostname
+    ),
     per_hour AS
     (
       SELECT
@@ -51,15 +57,16 @@ query: |
       GROUP BY hostname, hour
     )
   SELECT
-    hostname,
-    count()                                              AS hours_saturated,
-    round(avg(avg_tasks), 1)                             AS avg_tasks_in_pool,
-    pool_size,
-    round(100 * avg(avg_tasks) / greatest(pool_size, 1)) AS pct_of_size
-  FROM per_hour
-  WHERE pool_size > 0
-    AND avg_tasks >= 0.95 * pool_size
-  GROUP BY hostname
+    p.hostname                                             AS hostname,
+    count()                                                AS hours_saturated,
+    round(avg(p.avg_tasks), 1)                             AS avg_tasks_in_pool,
+    any(s.pool_size)                                       AS pool_size,
+    round(100 * avg(p.avg_tasks) / greatest(any(s.pool_size), 1)) AS pct_of_size
+  FROM per_hour AS p
+  INNER JOIN sizes AS s USING (hostname)
+  WHERE s.pool_size > 0
+    AND p.avg_tasks >= 0.95 * s.pool_size
+  GROUP BY p.hostname
   HAVING hours_saturated >= 3
   ORDER BY hours_saturated DESC, hostname
   LIMIT 100
