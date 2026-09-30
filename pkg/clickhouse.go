@@ -134,6 +134,39 @@ func (c *ClickHouseClient) ExecuteQueryWithFormat(query string) (string, error) 
 // can be used from inside dryRunIntercept (for the EXPLAIN ESTIMATE
 // metadata fetch) without recursion.
 func (c *ClickHouseClient) executeReal(query string) (string, error) {
+	return c.executeWith(c.httpClient, query)
+}
+
+// ExecuteQueryFreshConnection runs the query over a NEW TCP/TLS connection
+// that is closed afterwards, bypassing the shared client's keep-alive pool.
+//
+// Exists for the node-identity probe. The default transport keeps the
+// connection to the server alive, and a load balancer pins a connection to
+// one backend — so three hostName() probes over the shared client answered
+// as the same replica on a three-replica cloud endpoint that plain curl
+// (one connection per call) showed rotating. Only a fresh connection per
+// probe can see the balancer. Not for collectors: a new TLS handshake per
+// query would cost more than the queries.
+func (c *ClickHouseClient) ExecuteQueryFreshConnection(query string) (string, error) {
+	if c.dryRun {
+		return c.dryRunIntercept(query)
+	}
+	return c.executeWith(freshConnectionClient(c.httpClient.Timeout), query)
+}
+
+// freshConnectionClient is an http.Client whose transport opens one
+// connection per request and never reuses it.
+func freshConnectionClient(timeout time.Duration) *http.Client {
+	return &http.Client{
+		Timeout:   timeout,
+		Transport: &http.Transport{DisableKeepAlives: true, Proxy: http.ProxyFromEnvironment},
+	}
+}
+
+// executeWith is the HTTP round-trip against a given client; executeReal
+// passes the shared keep-alive client, ExecuteQueryFreshConnection a
+// one-shot one.
+func (c *ClickHouseClient) executeWith(httpClient *http.Client, query string) (string, error) {
 	// Build the URL with readonly setting to prevent write operations.
 	//
 	// output_format_json_quote_64bit_integers=1 is pinned rather than left
@@ -192,7 +225,7 @@ func (c *ClickHouseClient) executeReal(query string) (string, error) {
 	}
 
 	// Execute the request
-	resp, err := c.httpClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("error executing request: %w", err)
 	}
