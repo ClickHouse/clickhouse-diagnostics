@@ -27,6 +27,9 @@ func TestSameMachine(t *testing.T) {
 		{"ch-01", "ch-01.example.internal", "ch-01", true},
 		{"iad09p1fauch009", "iad09p1fauch009.vm.example", "laptop.local", false},
 		{"ch-01", "", "", true}, // unknown local name: cannot tell, do not warn
+		// Two qualified names that share a first label are two machines.
+		{"ch-01", "ch-01.site-a.example", "ch-01.site-b.example", false},
+		{"ch-01.site-a.example", "ch-01.site-a.example", "ch-01.site-a.example", true},
 	}
 	for _, c := range cases {
 		if got := sameMachine(c.host, c.fqdn, c.local); got != c.want {

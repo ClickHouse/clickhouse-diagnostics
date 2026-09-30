@@ -59,18 +59,28 @@ func loadBalancerSuspected(samples []string) bool {
 }
 
 // sameMachine says whether the server's reported name and the collector's
-// own hostname plausibly denote one machine: equal, or equal on the first
-// DNS label (a server reports "ch-01" while the OS says "ch-01.example.internal",
-// or the reverse).
+// own hostname plausibly denote one machine. Two qualified names must be
+// equal outright — "ch-01.site-a" and "ch-01.site-b" share a first label
+// and are two machines. The first-label match is only for the case where
+// one side is bare (a server reports "ch-01" while the OS says
+// "ch-01.example.internal", or the reverse).
 func sameMachine(serverHost, serverFQDN, localHostname string) bool {
 	norm := func(s string) string { return strings.ToLower(strings.TrimSpace(s)) }
-	first := func(s string) string { return strings.SplitN(norm(s), ".", 2)[0] }
+	qualified := func(s string) bool { return strings.Contains(s, ".") }
+	first := func(s string) string { return strings.SplitN(s, ".", 2)[0] }
 	l := norm(localHostname)
 	if l == "" {
 		return true // cannot tell; do not warn
 	}
 	for _, s := range []string{serverHost, serverFQDN} {
-		if s = norm(s); s != "" && (s == l || first(s) == first(l)) {
+		s = norm(s)
+		switch {
+		case s == "":
+		case s == l:
+			return true
+		case qualified(s) && qualified(l):
+			// both qualified and different: not the same machine
+		case first(s) == first(l):
 			return true
 		}
 	}
@@ -185,11 +195,12 @@ func decideSMTCollection(fanoutErr error, singleNode bool, hint string) smtColle
 			Note: "onprem → cloud: SharedMergeTree detected (cloud_mode = 1). Every per-replica system table fans out over the " +
 				"default cluster (clusterAllReplicas); the shared tables (parts, tables, columns, databases, replicas, " +
 				"replication_queue, mutations, detached_parts) are read from one replica, as in any cloud collection; " +
-				"host facts, configuration and log files are this node's",
+				"host facts, configuration and log files are the collector machine's — this node's when the tool runs on it " +
+				"(a warnings: line above says when it does not)",
 			Message: "SharedMergeTree cluster detected (cloud_mode = 1): switching to cloud collection so the per-replica system tables " +
 				"(query_log, part_log, errors, metric_log, text_log …) cover every replica, not just this node; the shared tables " +
-				"(parts, tables, replicas …) are read once, as in any cloud collection. Host facts, configuration and log files stay " +
-				"local to this node. Pass -single-node to collect this node only.",
+				"(parts, tables, replicas …) are read once, as in any cloud collection. Host facts, configuration and log files are " +
+				"still read from the machine running this tool. Pass -single-node to collect this node only.",
 		}
 	}
 }

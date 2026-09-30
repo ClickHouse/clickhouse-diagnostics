@@ -1065,7 +1065,7 @@ def analyse(base: str):
                     out["notes"].append(f"identity probe answered by node {run['node']} (collected via {run.get('target', '?')}); the per-replica system tables "
                                         "(query_log, part_log, errors, metric_log, text_log …) fan out over every replica, the shared tables (parts, tables, columns, "
                                         "databases, replicas, replication_queue, mutations, detached_parts) are read from one replica — host facts, configuration and "
-                                        "log files, when present, are this node's")
+                                        "log files, when present, are the collector machine's: this node's only when the header has no mixed-host warning")
                 else:
                     out["notes"].append(f"this bundle describes node {run['node']} (collected via {run.get('target', '?')})")
             up = re.match(r"^(\d+)\s*s\b", run.get("uptime-seconds", ""))
