@@ -349,6 +349,26 @@ func Summarize(results []Result) (evaluated, fired, errored, skipped int) {
 	return len(results) - skipped - errored, fired, errored, skipped
 }
 
+// knownModes is the closed set a rule may name in modes:. Kept here, next
+// to the gate, rather than imported from cmd (which owns the CLI's
+// canonicalisation) so the alert package stays importable from tests and
+// the dashboard without a cycle.
+var knownModes = map[string]bool{"cloud": true, "onprem": true, "gov": true}
+
+// validateModes rejects a modes: list naming a mode that does not exist.
+// Rules come from a user-selectable -alerts-dir, so a typo such as
+// `modes: [on-prem]` must surface as a broken definition, not silently
+// skip the rule in every run — the gate would otherwise read it as "some
+// other mode" forever.
+func (d Definition) validateModes() error {
+	for _, m := range d.Modes {
+		if !knownModes[strings.ToLower(strings.TrimSpace(m))] {
+			return fmt.Errorf("modes: unknown mode %q (known: cloud, onprem, gov)", m)
+		}
+	}
+	return nil
+}
+
 // appliesTo reports whether the rule runs in mode: every mode when Modes is
 // empty, else only the listed ones (case-insensitive, whitespace-tolerant).
 func (d Definition) appliesTo(mode string) bool {
@@ -472,6 +492,14 @@ func (ev *Evaluator) evalFile(path string) Result {
 	}
 	if r.Severity == "" {
 		r.Severity = SeverityWarning
+	}
+
+	// A malformed modes: list is a broken rule, reported like a YAML error
+	// — the gate below must never turn a typo into a silent skip.
+	if err := def.validateModes(); err != nil {
+		r.Error = err.Error()
+		fmt.Printf("  [alert] ERROR %q: %v\n", def.Name, err)
+		return r
 	}
 
 	// Mode gate before anything touches the server: a rule declared for

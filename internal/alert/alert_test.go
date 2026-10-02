@@ -741,6 +741,27 @@ func TestEvalFile_ModeGateSkipsWithoutQuerying(t *testing.T) {
 	}
 }
 
+// A typo in modes: must be an error on the rule, not a silent skip in every
+// mode. The evaluator has no client, so the test also proves the check runs
+// before any query.
+func TestEvalFile_UnknownModeIsAnError(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "typo.yaml")
+	if err := os.WriteFile(path, []byte("name: typo\ntitle: t\nmodes: [on-prem]\nquery: SELECT 1\nmessage: m\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ev := &Evaluator{mode: "onprem"}
+	r := ev.evalFile(path)
+	if r.Skipped || r.Error == "" || !strings.Contains(r.Error, "on-prem") {
+		t.Fatalf("unknown mode: skipped=%v error=%q — want an error naming the bad value", r.Skipped, r.Error)
+	}
+	for _, ok := range []Definition{{}, {Modes: []string{"cloud"}}, {Modes: []string{" Gov ", "ONPREM"}}} {
+		if err := ok.validateModes(); err != nil {
+			t.Errorf("modes %v should validate: %v", ok.Modes, err)
+		}
+	}
+}
+
 // shippedRuleModes maps the rules that must carry a modes: list to the exact
 // list they must carry. Extended by the PRs that add gated rules; a copy-paste
 // that drops the key would make a cluster-only rule fail with
