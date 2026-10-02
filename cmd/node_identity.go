@@ -23,11 +23,14 @@ type nodeIdentity struct {
 }
 
 // probeNodeIdentity asks the server who it is. Three separate round trips for
-// hostName() on purpose: through a load balancer they land on different
-// replicas, and that is the only cheap way to see one from the client side.
+// hostName() on purpose, each over a NEW connection: a load balancer pins a
+// kept-alive connection to one backend, so probes over the shared client
+// all answered as the same replica on a real three-replica endpoint and
+// the warning never fired. A fresh connection per probe is the only cheap
+// way to see the balancer from the client side.
 func probeNodeIdentity(client *pkg.ClickHouseClient) nodeIdentity {
 	var id nodeIdentity
-	raw, err := client.ExecuteQuery("SELECT hostName(), FQDN(), toString(uptime()) FORMAT TSV")
+	raw, err := client.ExecuteQueryFreshConnection("SELECT hostName(), FQDN(), toString(uptime()) FORMAT TSV")
 	if err != nil {
 		id.Err = err
 		return id
@@ -39,7 +42,7 @@ func probeNodeIdentity(client *pkg.ClickHouseClient) nodeIdentity {
 	}
 	id.Samples = append(id.Samples, id.Host)
 	for i := 0; i < 2; i++ {
-		if s, err := client.ExecuteQuery("SELECT hostName() FORMAT TSV"); err == nil {
+		if s, err := client.ExecuteQueryFreshConnection("SELECT hostName() FORMAT TSV"); err == nil {
 			id.Samples = append(id.Samples, strings.TrimSpace(s))
 		}
 	}
