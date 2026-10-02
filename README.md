@@ -715,13 +715,13 @@ Every run reports four distinct outcomes, because each means something different
 | **fired** | The rule ran and matched rows — a real finding. |
 | **clean** | The rule ran and matched nothing. |
 | **errored** | The rule could not run (bad SQL, a column missing on this version, no `SELECT` grant). **Not a finding** — counted and displayed separately, and excluded from "checked". |
-| **not applicable** (skipped) | The system table the rule queries doesn't exist here — `crash_log` on a healthy self-managed instance, or a config-disabled `text_log`/`query_log`. Excluded from "checked" so it never reads as a check that passed. |
+| **not applicable** (skipped) | The system table the rule queries doesn't exist here — `crash_log` on a healthy self-managed instance, or a config-disabled `text_log`/`query_log` — or the rule declares `modes:` and this run is in another mode (a per-replica comparison that needs the cloud fan-out, a replication-queue rule on SharedMergeTree). Excluded from "checked" so it never reads as a check that passed; the reason is recorded per rule. |
 
 ```
 Alert evaluation complete: 8 rule(s) checked, 1 fired, 2 errored, 1 not applicable
 ```
 
-Only rules that actually produced an answer count as *checked*. The dashboard mirrors this: findings get a severity badge, errored rules get a muted **⚠ N Could not run** chip (never a red severity count), and skipped rules are listed as "not applicable (table not present)".
+Only rules that actually produced an answer count as *checked*. The dashboard mirrors this: findings get a severity badge, errored rules get a muted **⚠ N Could not run** chip (never a red severity count), and skipped rules are listed as "not applicable" with their reason (table not present, or the rule's `modes:` exclude this run mode).
 
 A missing **column** is always an error, never "not applicable" — that's the signal that a rule needs [version-gating](#version-specific-queries).
 
@@ -748,6 +748,10 @@ description: |
 tags:
   - mutations
   - performance
+# modes: [cloud]                     # optional: run only in these modes (cloud | onprem | gov);
+                                     # elsewhere the rule is reported as not applicable, not errored —
+                                     # for queries that only make sense with a clusterAllReplicas
+                                     # fan-out, or with a replication queue SharedMergeTree lacks
 
 query: |
   SELECT database, table, mutation_id,
