@@ -15,6 +15,7 @@ import (
 	"clickhouse-diagnostic/internal/config"
 	"clickhouse-diagnostic/internal/dashboard"
 	"clickhouse-diagnostic/internal/hostinfo"
+	"clickhouse-diagnostic/internal/keeper"
 	"clickhouse-diagnostic/internal/logfiles"
 	"clickhouse-diagnostic/internal/query"
 	"clickhouse-diagnostic/internal/runlog"
@@ -57,6 +58,9 @@ func main() {
 	logsDirFlag := flag.String("logs-dir", "", "Directory holding ClickHouse server logs. Default: discovered from the server configuration's <log>/<errorlog>, falling back to /var/log/clickhouse-server")
 	logsMaxMBFlag := flag.Int("logs-max-mb", 50, "Per-file size cap for collected logs, in MiB. Larger files are tail-truncated (the recent end is kept)")
 	logsArchivesFlag := flag.Bool("logs-include-archives", false, "Also collect rotated log archives (*.gz, *.zst). Off by default — they are often larger than the rest of the bundle combined")
+	keeperMntrFlag := flag.String("keeper-mntr", "auto", "Ask every Keeper member in system.zookeeper_connection for ruok / srvr / mntr "+
+		"(leader or follower, outstanding requests, latency, node count, version) and write keeper/<host>_<port>.txt: auto|on|off. "+
+		"auto = on for onprem and gov (the tool runs beside the cluster; gov hashes the host), off for cloud (a managed service's Keeper is not reachable)")
 	collectTextLogFlag := flag.Bool("collect-text-log", false, "Collect a time-bounded slice of system.text_log. Requires --from and --to; not available in gov mode")
 	textLogLevelFlag := flag.String("text-log-level", "", "Minimum severity for --collect-text-log (Fatal|Critical|Error|Warning|Notice|Information|Debug|Trace). Default: all levels")
 	textLogLimitFlag := flag.Int("text-log-limit", 0, fmt.Sprintf("Row cap for --collect-text-log (default %d)", query.DefaultTextLogRowLimit))
@@ -113,6 +117,7 @@ func main() {
 		logsDir        = *logsDirFlag
 		logsMaxMB      = *logsMaxMBFlag
 		logsArchives   = *logsArchivesFlag
+		keeperMntrMode = *keeperMntrFlag
 		collectTextLog = *collectTextLogFlag
 		textLogLevel   = *textLogLevelFlag
 		textLogLimit   = *textLogLimitFlag
@@ -213,6 +218,19 @@ func main() {
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
 		return
+	}
+	// Keeper four-letter commands go over the network to the Keeper
+	// members, not to the local filesystem, so they have their own resolver
+	// (gov is allowed — the host is hashed; cloud is off by default because
+	// a managed service's Keeper is not reachable). Same post-getUserInput
+	// ordering as the two resolvers above.
+	skipKeeper, keeperWarn, err := keeper.Resolve(keeperMntrMode, mode)
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		return
+	}
+	if keeperWarn != "" {
+		fmt.Println(keeperWarn)
 	}
 	if dryRun {
 		// Host facts and log files are filesystem copies, not queries;
@@ -599,6 +617,55 @@ func main() {
 		rec.Record(runlog.Entry{Stage: "analysis", Name: "query_analysis/ (--query-id / --normalized-query-hash)", Status: qaStatus,
 			Duration: time.Since(phaseStart), Rows: -1, Extra: fmt.Sprintf("%d files written, %d skipped", written, skipped), Error: qaErr})
 		rec.Phase("query analysis", time.Since(phaseStart), "")
+	}
+
+	// Keeper's own view: ruok / srvr / mntr from every member this server is
+	// configured with (system.zookeeper_connection). Server-side facts no
+	// system table carries — leader or follower, outstanding requests,
+	// Keeper's own latency, node count, version — written as
+	// keeper/<host>_<port>.txt. An unreachable member is an outcome in the
+	// file and the execution log, never a failed run. Under --dry-run the
+	// members are listed and nothing is contacted. The member list is read
+	// with ExecuteQueryReal so the dry run can list it; it is a one-row-per-
+	// member metadata read, the same class as the version probe.
+	if !skipKeeper {
+		phaseStart = time.Now()
+		raw, qerr := client.ExecuteQueryReal(keeper.TargetsQuery)
+		targets := keeper.ParseTargets(raw)
+		switch {
+		case qerr != nil:
+			// system.zookeeper_connection exists from 23.8; a server without
+			// a <zookeeper> block has an empty one, not an error.
+			fmt.Printf("Keeper facts: skipped — system.zookeeper_connection could not be read (%s)\n", firstLine(qerr.Error()))
+			rec.Record(runlog.Entry{Stage: "keeper", Name: "system.zookeeper_connection", Status: "skipped",
+				Duration: time.Since(phaseStart), Rows: -1, Extra: "-keeper-mntr: no member list", Error: qerr.Error()})
+		case len(targets) == 0:
+			fmt.Println("Keeper facts: skipped — system.zookeeper_connection lists no Keeper member (no <zookeeper> configured)")
+			rec.Record(runlog.Entry{Stage: "keeper", Name: "system.zookeeper_connection", Status: "skipped",
+				Duration: time.Since(phaseStart), Rows: -1, Extra: "-keeper-mntr: no Keeper member configured"})
+		case dryRun:
+			fmt.Printf("\nKeeper facts (dry run): would send %s over TCP to %d member(s) and write %s/<host>_<port>.txt — contacting none now:\n",
+				strings.Join(keeper.Commands, ", "), len(targets), keeper.DirName)
+			for _, t := range targets {
+				fmt.Printf("  %s:%s\n", keeper.Label(t.Host, govSalt), t.Port)
+			}
+		default:
+			fmt.Printf("Collecting Keeper facts from %d member(s) (ruok / srvr / mntr)...\n", len(targets))
+			outcomes, kerr := keeper.Collect(finalOutputDir, targets, keeper.Options{GovSalt: govSalt})
+			if kerr != nil {
+				fmt.Printf("Warning: Keeper facts could not be written: %v\n", kerr)
+			}
+			fmt.Print(keeper.Summary(outcomes))
+			for _, o := range outcomes {
+				extra := ""
+				if o.File != "" {
+					extra = keeper.DirName + "/" + filepath.Base(o.File)
+				}
+				rec.Record(runlog.Entry{Stage: "keeper", Name: o.Label + ":" + o.Port, Status: o.Status,
+					Duration: o.Duration, Bytes: o.Bytes, Rows: -1, Extra: extra, Error: o.Err})
+			}
+			rec.Phase("keeper facts", time.Since(phaseStart), "")
+		}
 	}
 
 	if dryRun {

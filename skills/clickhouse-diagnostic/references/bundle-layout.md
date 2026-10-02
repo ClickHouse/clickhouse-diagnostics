@@ -12,6 +12,7 @@ clickhouse_backup_YYYYMMDD_HHMMSS/            # single top-level entry of the .t
 ├── configuration/…                            # sanitised XML/YAML, source tree preserved (never in gov)
 ├── host_info.json                             # onprem by default (never in gov)
 ├── logs/*.log                                 # onprem by default (never in gov)
+├── keeper/<host>_<port>.txt                   # ruok / srvr / mntr per Keeper member (onprem and gov by default; gov hashes the host; off in cloud)
 ├── dashboard.html                             # unless -skip-dashboard or gov
 ├── schema_graph.html                          # the table-dependency graph, beside dashboard.html and opened from its Schema tab (same conditions)
 ├── execution_log.txt                          # every collector: outcome, wall time, bytes, rows; alerts; phases (read first)
@@ -47,6 +48,7 @@ clickhouse_backup_<ts>_gov_name_mapping.csv    # NEXT TO the folder, never insid
 | `system.text_log.message` | text | text | 64-hex hash (unreadable) |
 | `hostname` column in `part_log`/`query_log` files | yes (fan-out over replicas via `clusterAllReplicas`) | only on servers ≥ 23.11 (single host) | ≥ 23.11 (hashed) |
 | `host_info.json`, `logs/`, `configuration/` | off by default | on by default | never |
+| `keeper/` | off by default (`-keeper-mntr on` to force) | on by default | on by default, host hashed |
 | `execution_log.txt` header `mode:` | `cloud` — also for an **onprem run that switched** on a SharedMergeTree cluster (then `collection: onprem → cloud …` follows and `host_info.json` / `logs/` / `configuration/` are present too) | `onprem` | `gov` |
 
 Also read `system.version_*.jsonl` (`{"version":"25.3.2.39"}`) first — every version-dependent statement in this skill hangs off it.
@@ -149,6 +151,33 @@ Fields are omitted when unreadable; `available: false` + `notes` marks a degrade
   The first surviving line is *not* the start of the log. Check for this header before reasoning about "when did it start".
 - Line format: `2026.08.25 12:06:56.858337 [ thread ] {query_id} <Level> Logger: message`. Grep, don't read top-to-bottom.
 
+## 6a. `keeper/`
+
+One `keeper/<host>_<port>.txt` per Keeper member in `system.zookeeper_connection` (bundles from v0.7+; absent on servers before 23.8, in cloud by default, or with `-keeper-mntr off`). Plain text:
+
+```
+# clickhouse-diagnostic — Keeper four-letter commands
+# target: <host or gov hash>:<port>
+# collected_at: RFC3339 UTC
+# commands: ruok, srvr, mntr (stat/cons are never sent — they list client addresses)
+
+## ruok
+imok
+## srvr
+ClickHouse Keeper version: v26.7.5.10-stable-…      # the Keeper VERSION — the server's own is in system.version
+Latency min/avg/max: 0/1/193                        # ms, since this member started
+Received: … / Sent: … / Connections: … / Outstanding: 0
+Zxid: 0x77e1
+Mode: leader | follower | standalone | observer
+Node count: 121
+## mntr
+zk_version  zk_avg_latency  zk_max_latency  zk_min_latency  zk_packets_received  zk_packets_sent
+zk_num_alive_connections  zk_outstanding_requests  zk_server_state  zk_znode_count  zk_watch_count
+zk_ephemerals_count  zk_approximate_data_size  zk_key_arena_size  zk_latest_snapshot_size
+zk_open_file_descriptor_count  zk_max_file_descriptor_count  zk_followers  zk_synced_followers   # the last two on the leader only
+```
+A command that failed is written as `error: connection refused` / `error: timeout after 10s` under its `##` header, and an empty reply as a note about `four_letter_word_white_list`. The per-member status (`ok` / `partial` / `refused` / `timeout`) is also one `keeper` line per member in `execution_log.txt`. In gov the host in the name and header is `hex(SHA256(host ‖ salt))` — the same value as `host` in the gov `system.zookeeper_connection` file, so the two join — and any reply line carrying an `ip:port` was dropped. Only the members *this* server is configured with are probed: a member missing from the directory is not necessarily down, it may simply not be in this server's `<zookeeper>` block.
+
 ## 7. `configuration/`
 
 Mirror of the config directory (`config.d/…`, `users.d/…`, sometimes `config.xml`). Credentials, keys, tokens, PEM blocks, long hex/base64 blobs are replaced; **hostnames, IPs, cluster topology, macros, paths, table names and every performance setting are kept**. Files that failed to parse were skipped (fail-closed), so a missing file is not proof a setting is unset.
@@ -181,4 +210,4 @@ Rule thresholds are in `health-checks.md` §1 so you can re-evaluate them yourse
 
 - Every `database`, `table`, `name`, `user`, hostname-like value is `hex(SHA256(value || salt))`. Hashes are **stable within one salt**, so you can still join files on them and count per table.
 - The mapping CSV (`database,table,database_hash,table_hash`) exists only on the collector's machine. If the user has it, offer to resolve hashes **locally**; never ask for the salt.
-- Not available in gov: dashboard and its schema graph, query analysis, query text, exception text, config, host facts, logs, `--collect-text-log`, `crash_log`, `stack_trace`. The hashed `dependencies_*` arrays in `system.tables` still let you count MVs per source and follow a chain by hash. Say which findings are therefore out of reach instead of guessing.
+- Not available in gov: dashboard and its schema graph, query analysis, query text, exception text, config, host facts, logs, `--collect-text-log`, `crash_log`, `stack_trace`. `keeper/` IS collected (counters only; the member host is hashed like every other identifier). The hashed `dependencies_*` arrays in `system.tables` still let you count MVs per source and follow a chain by hash. Say which findings are therefore out of reach instead of guessing.
