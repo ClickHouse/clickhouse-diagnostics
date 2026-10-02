@@ -100,6 +100,10 @@ func TestGovQueries_NoRawIdentifiersOrDDL(t *testing.T) {
 		// categorically ClickHouse-controlled the way system.errors.name is.
 		"system.settings.sql":        {"name": true},
 		"system.server_settings.sql": {"name": true},
+		// system.merge_tree_settings.name is the third settings layer with the
+		// same property. Its String values are handled in the SQL: policy and
+		// disk names hashed, path-shaped and column-list values REMOVED.
+		"system.merge_tree_settings.sql": {"name": true},
 	}
 
 	var files []string

@@ -255,6 +255,7 @@ func TestShippedQueryDefaultWindows(t *testing.T) {
 		"system.asynchronous_insert_log_7_days.sql": "7d",
 		"system.text_log.sql":                       "1d",
 		"system.metric_log_coordination_3_days.sql": "3d",
+		"system.metric_log_by_host_3_days.sql":      "3d",
 		"system.error_log_7_days.sql":               "7d",
 		"system.blob_storage_log_7_days.sql":        "7d",
 		"system.distributed_ddl_queue.sql":          "7d",
