@@ -21,8 +21,10 @@
 --     elections per hour (VirtualPartsUpdatesLeader*Election) size the
 --     schedule-pool load that shared_merge_tree_leader_update_period_seconds
 --     controls; ScheduleDataProcessingJob counts the rounds.
---   * CPU (OSCPUVirtualTimeMicroseconds, sum over threads — divide by 3600 s
---     × cores for a percentage) and PartsActive per host, so the catch-up
+--   * CPU (OSCPUVirtualTimeMicroseconds, summed over all threads in the
+--     hour; for a complete hourly bucket the utilisation in percent is
+--     cpu_us / (3 600 × 1e6 × cores) × 100 — a partial first or last bucket
+--     needs its own seconds) and PartsActive per host, so the catch-up
 --     after a pool increase (fetch surge, then merges draining the small
 --     parts) can be told apart from a node that stays hot.
 --
