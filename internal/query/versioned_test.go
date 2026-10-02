@@ -213,6 +213,10 @@ func TestFindVersionedFiles_RealRepoDirs(t *testing.T) {
 		"queries.onprem/system.view_refreshes.sql": true,
 		"queries.gov/system.view_refreshes.sql":    true,
 		"queries.cloud/system.view_refreshes.sql":  true,
+		// system.zookeeper_connection.xid arrived in 24.3; the rule reads it
+		// and has no root twin on purpose — on an older server the check is
+		// not applicable, not failed.
+		"alerts/keeper_xid_renewal_due.yaml": true,
 	}
 	dirs := map[string]string{
 		"../../queries.onprem":         ".sql",

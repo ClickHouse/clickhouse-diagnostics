@@ -1,0 +1,56 @@
+# 24.3 rung only: system.zookeeper_connection.xid was added in 24.3. No root
+# rule — on older servers the check is not applicable, not failed.
+name: keeper_xid_renewal_due
+title: "Keeper session XID renewal due within 24 hours"
+severity: info
+description: |
+  Every Keeper session numbers its requests with a 32-bit counter (xid). At
+  2^31 the client has to start a new session, and every replica whose
+  counter wraps reconnects: a short burst of ZooKeeperHardwareExceptions, a
+  few 999 / 319 errors for in-flight operations, then business as usual. At
+  8–12k transactions per second that is every ~63 hours per replica. This
+  rule projects the current xid forward at the last 24 hours' transaction
+  rate and reports replicas whose renewal falls within the next 24 hours —
+  so a burst of Keeper exceptions at that time is read as the renewal it is,
+  not as a Keeper incident.
+
+  Informational: the renewal is handled. It becomes a finding only when the
+  bursts coincide with failed inserts (error_log 999 / 319 in the same hour)
+  or when a replica renews far more often than its rate predicts (session
+  losses — see keeper_connection_blips).
+tags:
+  - keeper
+
+# Per host: xid and the transaction rate are both per session, i.e. per
+# replica. In cloud both {sys.*} fan out and the join on hostName() lines
+# them up; on one node both sides are that node.
+query: |
+  WITH rate AS
+  (
+    SELECT
+      hostName()                                                   AS hostname,
+      sum(ProfileEvent_ZooKeeperTransactions) / 86400              AS tx_per_s
+    FROM {sys.metric_log}
+    WHERE event_time > now() - INTERVAL 24 HOUR
+    GROUP BY hostname
+  )
+  SELECT
+    c.hostname                                                     AS hostname,
+    c.host                                                         AS keeper_host,
+    c.xid                                                          AS xid,
+    round(r.tx_per_s, 1)                                           AS tx_per_s,
+    round((2147483647 - c.xid) / greatest(r.tx_per_s, 0.001) / 3600, 1) AS hours_to_renewal,
+    round(2147483647 / greatest(r.tx_per_s, 0.001) / 3600, 1)      AS renewal_period_h
+  FROM
+  (
+    SELECT hostName() AS hostname, host, xid
+    FROM {sys.zookeeper_connection}
+    WHERE is_expired = 0
+  ) AS c
+  INNER JOIN rate AS r USING (hostname)
+  WHERE r.tx_per_s > 0
+    AND (2147483647 - c.xid) / r.tx_per_s < 86400
+  ORDER BY hours_to_renewal
+  LIMIT 100
+
+message: "{hostname}: Keeper session xid {xid} at {tx_per_s} tx/s — renewal (2^31) in ~{hours_to_renewal} h; this replica renews every ~{renewal_period_h} h, expect a short burst of Keeper exceptions then"
