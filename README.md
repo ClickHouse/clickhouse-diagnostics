@@ -39,6 +39,7 @@ Under the hood: per-environment query sets (`cloud` / `onprem` / `gov`) selected
 | `system.zookeeper_log_errors_1_day`, `system.blob_storage_log_7_days` (only when the tables are enabled) | Failed Keeper requests per hour, operation and error code (errors only — the table is far too large to aggregate whole); object-storage uploads, deletes and failures per hour | Direct evidence for "Keeper stopped answering" and "the blob was deleted / never written". |
 | `host_info.json` (onprem) | OS, CPU, RAM, disks, THP, overcommit, limits, cgroups | A large share of self-managed incidents are host settings ClickHouse itself warns about at startup. |
 | `logs/` (onprem) | Restarts, startup warnings, fatal stacks, the first error of an incident | System tables lose this on restart; the log files keep it. |
+| `keeper/<host>_<port>.txt` (onprem, gov with the host hashed) | What each Keeper member says about itself: leader or follower, outstanding requests, its own latency, znode count, version (`ruok` / `srvr` / `mntr`) | A Keeper-latency or session-loss finding is settled on the Keeper side; no `system.*` table carries these. |
 | `configuration/` | Which settings deviate from defaults | Memory limits, pools, Keeper, storage policies, log-table TTLs — with credentials removed. |
 | Alert results + `dashboard.html` | What is already over a threshold | Eleven read-only rules give the headline before anyone reads a file. |
 
@@ -91,6 +92,7 @@ Before sending an archive to anyone:
 - `-dry-run` prints every SELECT the tool would run, with `EXPLAIN ESTIMATE`, and collects nothing — use it for a security review first. See [Dry-run mode](#dry-run-mode).
 - `gov` mode hashes database/table/user/host names with your private salt and withholds the dashboard, query text, configs, host facts and logs. **The salt and the local `*_gov_name_mapping.csv` never leave your machine.**
 - `alerts_summary.json` (when written) contains rule names and counts only, never matched rows.
+- `keeper/` holds Keeper's own counters (`ruok`, `srvr`, `mntr`): version, latency, outstanding requests, zxid, node counts. The commands that list client addresses (`stat`, `cons`) are never sent; gov hashes the member's host. See [Keeper facts](#keeper--what-each-keeper-member-says-about-itself).
 
 ---
 
@@ -259,6 +261,10 @@ Run `./clickhouse-diagnostic -help` to see the full list. Current flags:
 -logs-max-mb int       Per-file cap for collected logs, in MiB (default 50).
                        Larger files are tail-truncated.
 -logs-include-archives Also collect rotated logs (*.gz, *.zst). Off by default.
+-keeper-mntr string    Ask every Keeper member in system.zookeeper_connection
+                       for ruok / srvr / mntr and write keeper/<host>_<port>.txt:
+                       auto|on|off (default "auto" — on for onprem and gov,
+                       off for cloud). See "Keeper facts" below.
 -collect-text-log      Collect a time-bounded slice of system.text_log.
                        Requires --from and --to; rejected in gov mode.
 -text-log-level string Minimum severity for --collect-text-log
@@ -458,6 +464,7 @@ What still reaches the server in dry-run:
 |---|---|
 | `SELECT version()` | Picks the right query variant for the server version |
 | Pre-flight for `--query-id` / `--normalized-query-hash` | Derives the hash + event_time (or the slowest query_id) so the printed analysis SQL has real values, not unbound `{query_id}` markers |
+| `SELECT DISTINCT host, port FROM system.zookeeper_connection` (`-keeper-mntr`) | Lists the Keeper members so the dry run can say which it would contact; printed when it runs |
 | `EXPLAIN ESTIMATE <query>` per SELECT | Read-only metadata only |
 
 Combine with the query-analysis flags to dry-run the focused bundle too:
@@ -653,6 +660,26 @@ Both collectors read the **machine executing the tool**, so `-host-info` and `-l
 | `gov` | **off**, unconditionally | Hostnames, mount paths, process command lines and log bodies are exactly what gov hashing protects, and none of them can be hashed while staying useful. `-host-info=on` is **rejected**, not ignored. |
 
 Both are also skipped under `--dry-run`, which promises to write nothing. The mode matrix is pinned by tests in `cmd/local_collector_test.go`.
+
+### `keeper/` — what each Keeper member says about itself
+
+`-keeper-mntr auto|on|off` (default `auto`) sends three four-letter commands to the Keeper members and writes one `keeper/<host>_<port>.txt` per member. The member list is the union of two sources: `system.zookeeper_connection`, which names the member each configured connection is **on right now** (one row per connection — the default `<zookeeper>` block and every auxiliary one — not one per ensemble member), and every `<zookeeper><node>` in the server configuration (`-config-dir` and the adjacent `config.xml`) when the tool runs on the server. The second is what reaches the followers this server is *not* connected to — the member a Keeper incident is usually about. A run without access to the configuration (remote `-host`, cloud, gov without `-config-dir`) probes the connected member only, and says so in the execution log.
+
+| Command | What it answers |
+|---|---|
+| `ruok` | liveness (`imok`) |
+| `srvr` | Keeper version, latency min/avg/max, received/sent, connections, **outstanding requests**, zxid, **mode** (leader / follower / standalone), node count |
+| `mntr` | the same as `zk_*` counters, plus followers and synced followers (on the leader), znode / watch / ephemeral counts, memory |
+
+These are the server-side facts a Keeper finding is settled with: `metric_log` says how long *this server* waited for Keeper, `zookeeper_connection` says which member it talks to, and only Keeper itself says whether that member is the leader, how many requests it has queued and what it runs. Each command opens its own TCP connection (3 s dial, 10 s read) because Keeper closes after one reply; a member that is down or refuses four-letter words is recorded as such in its file and in `execution_log.txt`, never a failed run. `stat` and `cons` are **never sent**: they list client addresses.
+
+| Mode | `auto` resolves to | Why |
+|---|---|---|
+| `onprem` | **on** | The tool runs beside the cluster, so the Keeper ports are reachable. |
+| `gov` | **on**, host hashed | The counters are numbers; the only identifier is the member's host, which is written as `hex(SHA256(host ‖ salt))` in the file name and header — the same form `system.zookeeper_connection` carries in a gov bundle, so the two join. Any reply line carrying an `ip:port` is dropped as a safeguard. |
+| `cloud` | **off** | A managed service's Keeper is not reachable from outside. `-keeper-mntr=on` is honoured with a warning for a self-managed cluster collected in cloud mode. |
+
+Under `--dry-run` the members are listed and nothing is contacted; the one-row-per-connection `SELECT` on `system.zookeeper_connection` that builds the list is a metadata pre-flight read, executed for real and printed like the version probe. Per-member statuses in `execution_log.txt`: `ok` (all three commands answered), `partial` (some did — usually a word missing from `four_letter_word_white_list`), `refused`, `timeout` (including a reply cut short by the 10 s deadline, kept in the file and marked truncated), `failed` (every command failed for another reason, or the file could not be written). Servers before 23.8 have no `system.zookeeper_connection`, so the step is skipped and says so. Keeper must allow the three words in `four_letter_word_white_list` (the default `*` does); an empty reply is annotated accordingly.
 
 ### `host_info.json` — OS, kernel and hardware
 
@@ -1025,6 +1052,7 @@ clickhouse_results/
 │   │   ├── config.d/…
 │   │   └── users.d/…
 │   ├── query_analysis/                                      #   only with --query-id / --hash
+│   ├── keeper/<host>_<port>.txt                             #   ruok / srvr / mntr per Keeper member (-keeper-mntr; gov hashes the host; not in cloud by default)
 │   ├── dashboard.html                                       #   unless -skip-dashboard or gov
 │   ├── execution_log.txt                                    #   every collector: outcome, wall time, size; alerts; phases
 │   └── alerts_summary.json                                  #   when alerts ran but dashboard.html is absent
@@ -1034,7 +1062,7 @@ clickhouse_backup_YYYYMMDD_HHMMSS.tar.gz                     # unless -skip-arch
 
 - **Query results**: one file per query, in the format chosen by [`-output-format`](#output-format) (default `jsonl`)
 - **Dashboard**: standalone `dashboard.html`, loads Chart.js from CDN
-- **Execution log**: `execution_log.txt` — one line per collector query with its version directory, outcome (`ok` / `failed` / `empty`), wall time, result bytes and rows, plus every alert rule with its outcome and duration and the wall time of each phase (collectors, host facts, logs, config, alerts, dashboard). The *Most expensive collectors* list is what to read before adapting a window in `queries.<mode>/`; the *Failed collectors* list is what separates "the table was empty" from "the query never ran". Contains file names, timings and ClickHouse error text only — no result data.
+- **Execution log**: `execution_log.txt` — one line per collector query with its version directory, outcome (`ok` / `failed` / `empty`), wall time, result bytes and rows, plus every alert rule with its outcome and duration, one `keeper` entry per Keeper member probed (`ok` / `partial` / `refused` / `timeout`), and the wall time of each phase (collectors, keeper facts, host facts, logs, config, alerts, dashboard). The *Most expensive collectors* list is what to read before adapting a window in `queries.<mode>/`; the *Failed collectors* list is what separates "the table was empty" from "the query never ran". Contains file names, timings and ClickHouse error text only — no result data.
 - **Archive**: `tar.gz` containing the per-run results directory — `configuration/` now lives *inside* it, tree intact, so a bundle can only ever contain this run's configs. (Before v0.3.0 it was a flat, process-wide `./configuration` beside the run directory; anything parsing bundles by that path needs updating.)
 - **Gov-mode mapping CSV** (gov mode only): sits next to the backup folder, **not inside it** — never goes into the archive. See [Gov mode and hashed names](#gov-mode-and-hashed-names).
 
