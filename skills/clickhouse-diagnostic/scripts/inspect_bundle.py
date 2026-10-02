@@ -376,7 +376,11 @@ def analyse(base: str):
 
     ro = [r for r in reps if num(r.get("is_readonly")) == 1]
     if ro:
-        add("critical", "replication", f"{len(ro)} replicated table(s) read-only",
+        # Per-host files repeat a table once per replica: count tables and
+        # rows separately so five hosts × one table does not read as five.
+        ro_tables = len({(r.get("database"), r.get("table")) for r in ro})
+        add("critical", "replication",
+            f"{ro_tables} replicated table(s) read-only" + (f" ({len(ro)} table rows across hosts)" if per_host and len(ro) != ro_tables else ""),
             "; ".join(f"{r.get('database')}.{r.get('table')}{rep_host(r)} session_expired={r.get('is_session_expired')}" for r in ro[:5]), "HC-1.4")
     delayed = [r for r in reps if (num(r.get("absolute_delay")) or 0) > 60]
     if delayed:
@@ -1292,10 +1296,14 @@ def analyse(base: str):
                     tasks = num(r.get(TASK_COL[label]))
                     if size and tasks is not None and tasks >= PCT[label] * size:
                         hours += 1
-                        size_sat = size  # the size the pool was pinned AT (a reload inside the window raises it later)
+                        size_sat = size  # the size the pool was pinned AT (an increase later in the window must not hide it)
                 if hours >= 3:
                     sat_hosts[h] = (hours, size_sat)
-                # A step in the live size is a config reload landing on that host.
+                # A step in the live size is a setting TRANSITION on that host.
+                # metric_log spans restarts, so an increase is consistent with a
+                # live reload or a restart with a new config; a decrease can
+                # only be a restart (or a replaced host) — IncreaseOnly pools
+                # cannot shrink live. The finding says which, never "reload".
                 prev = None
                 for r in rows:
                     sz = num(r.get(SIZE_COL[label]))
@@ -1316,8 +1324,14 @@ def analyse(base: str):
             by_change = Counter((st["pool"], st["from"], st["to"]) for st in summary["size_steps"])
             for (pool, a, b), n in by_change.most_common(3):
                 first_hour = min(st["hour"] for st in summary["size_steps"] if (st["pool"], st["from"], st["to"]) == (pool, a, b))
+                if (b or 0) > (a or 0):
+                    how = ("an increase — consistent with a live config reload or a restart with a new config (metric_log spans restarts); "
+                           "if the pool was pinned before it, the following hours are the catch-up, not the baseline")
+                else:
+                    how = ("a decrease — these pools are IncreaseOnly, so this can only be a restart with a smaller value or a replaced host; "
+                           "read the hours around it as a restart, not a tuning step")
                 add("info", "merges" if pool == "merge" else "replication",
-                    f"{pool} pool size changed {a} → {b} on {n} host(s) (first at {first_hour}) — a live config reload; the hours after it are the catch-up, not the baseline",
+                    f"{pool} pool size transition {a} → {b} on {n} host(s) (first at {first_hour}): {how}",
                     "system.metric_log_by_host_3_days max(CurrentMetric_Background*PoolSize)", "HC-2.15/P-59")
         # Fetch executor: parts selected for fetching vs fetches attempted.
         # The executor has no queue — a part that finds no free slot is
@@ -1328,8 +1342,12 @@ def analyse(base: str):
         ratios, att_per_h = {}, {}
         for h, rows in by_host.items():
             sel = sum((num(r.get(c)) or 0) for r in rows for c in SEL)
+            # Absent column = the counter does not exist on this version
+            # (regex-selected); present with 0 = parts were selected and
+            # NOTHING was attempted — the strongest drop signal, ratio 0.
+            att_present = any(ATT in r for r in rows)
             att = sum((num(r.get(ATT)) or 0) for r in rows)
-            if sel > 0 and att > 0:
+            if sel > 0 and att_present:
                 ratios[h] = att / sel
             rec = [v for v in ((num(r.get(ATT)) or 0) for r in recent_rows(rows)) if v > 0]
             if len(rec) >= 6:
@@ -1420,9 +1438,31 @@ def analyse(base: str):
     if is_smt and sat and (lag or smt_fetch.get("hosts_below_half")):
         where = (f"{lag['rows']} table row(s) are behind on {lag['hosts']} host(s) (worst {lag['worst']})" if lag
                  else f"fetches attempted / parts selected = {smt_fetch['min_ratio']}")
+        # Capacity: name the sizes this bundle shows, and quote the validated
+        # step only as a reference point from the defaults.
+        cur = {l: (pools.get(l) or {}).get("size") for l in ("fetch", "schedule")}
+        cur_txt = ", ".join(f"{l} {cur[l]}" for l in ("fetch", "schedule") if cur.get(l))
+        capacity = ("raise background_fetches_pool_size and background_schedule_pool_size (both IncreaseOnly — a config reload applies them live"
+                    + (f"; current {cur_txt}" if cur_txt else "")
+                    + "; from the defaults, 16 → 128 and 512 → 1024 cleared a backlog at tens of thousands of tables within the hour — size against fetch attempts/h and the table count, not to those numbers), "
+                    "a few replicas at a time while watching object-store latency and Keeper ms/tx, then plan a rolling restart so the schedule pool's per-type cap adopts the new size")
+        # Demand: the exact 32 → 64 / 30 → 300 transitions only apply while
+        # both SMT settings are still at their defaults; otherwise report what
+        # is set and leave the direction to capacity.
+        ss = out.get("smt_settings") or {}
+        b_val, p_val = ss.get("parts_load_batch_size"), ss.get("leader_update_period_seconds")
+        if b_val is not None and p_val is not None and str(b_val) == "32" and str(p_val) == "30":
+            demand = "raise shared_merge_tree_parts_load_batch_size 32 → 64 and shared_merge_tree_leader_update_period_seconds 30 → 300 (both at their defaults here)"
+        elif b_val is not None or p_val is not None:
+            demand = (f"shared_merge_tree_parts_load_batch_size = {b_val} and shared_merge_tree_leader_update_period_seconds = {p_val} are already set here — "
+                      "revisit them against fetch attempts/h and elections/s (a larger batch fetches more per round, a longer period lowers schedule-pool load) rather than applying fixed values")
+        else:
+            demand = ("check shared_merge_tree_parts_load_batch_size and shared_merge_tree_leader_update_period_seconds first (defaults 32 and 30 s; 64 and 300 were validated at tens of thousands of tables; "
+                      "system.merge_tree_settings is absent from this bundle)")
         add("warning", "replication",
             f"consistent with P-59 — SharedMergeTree parts-propagation lag from background pool saturation: the {' and '.join(sat)} pool(s) sat at their size for hours while {where}",
-            "remedy: raise background_fetches_pool_size and background_schedule_pool_size (both IncreaseOnly — a config reload applies them live; 16 → 128 and 512 → 1024 cleared a backlog at tens of thousands of tables within the hour), a few replicas at a time while watching object-store latency and Keeper ms/tx, then plan a rolling restart so the schedule pool's per-type cap adopts the new size; lower demand with shared_merge_tree_parts_load_batch_size 32 → 64, shared_merge_tree_leader_update_period_seconds 30 → 300, fewer and larger inserts, dropping empty tables; select_sequential_consistency = 1 for reads that must be consistent meanwhile — a restart only bulk-loads the parts once. Verify afterwards in the same files: pool size stepped on every host, fetch attempts surge then settle, inserts_in_queue → 0 per host",
+            f"remedy — capacity: {capacity}. Demand: {demand}; then fewer and larger inserts, and drop empty tables. Meanwhile select_sequential_consistency = 1 for reads that must be consistent — a restart only bulk-loads the parts once. "
+            "Verify afterwards in the same files: the live pool size increased on every host, fetch attempts surge then settle, inserts_in_queue → 0 per host",
             "P-59")
 
     # ---- host info

@@ -118,11 +118,12 @@ Applies when the bundle is a cloud collection (or an onprem run that switched) a
 **1. Who is behind, on what** — cloud `system.replicas` (v0.7: per host, problem rows first, ≤ 200 per host; on SMT `inserts_in_queue` = level-0 parts that replica has not fetched, `absolute_delay` = age of the oldest):
 ```sql
 SELECT hostname, count() AS tables_behind, max(absolute_delay) AS max_delay_s, sum(toUInt64(inserts_in_queue)) AS parts_behind,
-       argMax(concat(database, '.', table), absolute_delay) AS worst_table, countIf(cnt = 200) OVER () AS hosts_capped
+       argMax(concat(database, '.', table), absolute_delay) AS worst_table
 FROM file('$B/system.replicas_*.jsonl', JSONEachRow)
-WHERE absolute_delay > 60 GROUP BY hostname ORDER BY parts_behind DESC
-```
-(`hosts_capped` > 0 means some hosts hit the 200-row cap — their list is the worst 200, not all.) The same `oldest_part_to_get` on several hosts is one finding, not several.
+WHERE absolute_delay > 60 GROUP BY hostname ORDER BY parts_behind DESC;
+-- the cap is judged on the UNFILTERED row count per host: exactly 200 = capped, that host's list is its worst 200, not all
+SELECT hostname, count() AS rows FROM file('$B/system.replicas_*.jsonl', JSONEachRow) GROUP BY hostname HAVING rows = 200
+``` The same `oldest_part_to_get` on several hosts is one finding, not several.
 
 **2. Is it the pools, and on which hosts** — `system.metric_log_by_host_3_days`, each host against its **live** size:
 ```sql
@@ -139,7 +140,7 @@ FROM file('$B/system.metric_log_by_host_3_days_*.jsonl', JSONEachRow)
 WHERE time > (SELECT max(time) FROM file('$B/system.metric_log_by_host_3_days_*.jsonl', JSONEachRow)) - INTERVAL 24 HOUR
 GROUP BY hostname ORDER BY fetch_hours_pinned DESC, schedule_hours_pinned DESC
 ```
-Read it as: pinned hours ≥ 3 on a host = saturated (HC-2.15); `fetch_size ≠ fetch_size_min` = a reload landed inside the window; `attempted_per_selected` ≪ 1 = the executor drops work (no queue); `fetch_attempts_per_h` flat across hosts and hours ≈ `size × 3600 / s-per-fetch` = working at the ceiling, not stuck; schedule pinned where fetch is not = the schedule pool gating fetch; `elections_per_s` ≈ Shared* tables / `shared_merge_tree_leader_update_period_seconds`. If the regex columns are absent (older build), fall back to `avg_fetch_pool_tasks` against `server_settings` and `part_log` `DownloadPart` per 12 h for the throughput.
+Read it as: pinned hours ≥ 3 on a host = saturated (HC-2.15); `fetch_size ≠ fetch_size_min` = the live size changed inside the window (an increase is consistent with a config reload *or* a restart with a new config — `metric_log` spans restarts; a decrease can only be a restart, the pools are `IncreaseOnly`); `attempted_per_selected` ≪ 1 = the executor drops work (no queue); `fetch_attempts_per_h` flat across hosts and hours ≈ `size × 3600 / s-per-fetch` = working at the ceiling, not stuck; schedule pinned where fetch is not = the schedule pool gating fetch; `elections_per_s` ≈ Shared* tables / `shared_merge_tree_leader_update_period_seconds`. If the regex columns are absent (older build), fall back to `avg_fetch_pool_tasks` against `server_settings` and `part_log` `DownloadPart` per 12 h for the throughput.
 
 **3. Demand-side facts** — `system.merge_tree_settings` and `system.tables`:
 ```sql
@@ -151,7 +152,7 @@ FROM file('$B/system.tables_*.jsonl', JSONEachRow) WHERE engine LIKE 'Shared%'
 
 **Size the fix** (P-59): `background_fetches_pool_size` and `background_schedule_pool_size` are `IncreaseOnly` — a config reload applies them live; 16 → 128 and 512 → 1024 cleared the backlog at tens of thousands of tables; roll out a few hosts at a time watching object-store latency and Keeper ms/tx; plan a rolling restart afterwards for the schedule pool's per-type cap. Then `shared_merge_tree_parts_load_batch_size` 32 → 64, `shared_merge_tree_leader_update_period_seconds` 30 → 300, drop empty tables, batch inserts. `select_sequential_consistency = 1` for reads that must be consistent meanwhile.
 
-**Verify after** (a second bundle a few hours later): query 2 shows the size step on every host (`fetch_size_min` = old, `fetch_size` = new) and `fetch_attempts_per_h` surging then settling well below the new ceiling; query 1 returns no rows for the hot tables (a drop in `inserts_in_queue` can be merges elsewhere covering parts — 0 is the proof, recheck one count with `select_sequential_consistency = 1`); per host per hour `cpu_us / (3600e6 × cores) × 100` and `avg_merge_pool_tasks` back near the pre-incident hours once `max_parts_active` has fallen again — the catch-up merges the fetched small parts for a few hours.
+**Verify after** (a second bundle a few hours later): query 2 shows the size *increase* on every host (`fetch_size_min` = old, `fetch_size` = new — the transition, not proof of how it landed) and `fetch_attempts_per_h` surging then settling well below the new ceiling; query 1 returns no rows for the hot tables (a drop in `inserts_in_queue` can be merges elsewhere covering parts — 0 is the proof, recheck one count with `select_sequential_consistency = 1`); per host per hour `cpu_us / (3600e6 × cores) × 100` and `avg_merge_pool_tasks` back near the pre-incident hours once `max_parts_active` has fallen again — the catch-up merges the fetched small parts for a few hours.
 
 ## 3a. Keeper and object-storage files (added for Keeper incidents)
 
