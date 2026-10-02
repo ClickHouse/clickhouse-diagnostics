@@ -136,3 +136,13 @@ func TestBuildHTML_HeaderCarriesNodeAndCollection(t *testing.T) {
 		}
 	}
 }
+
+// The Keeper connection panel selects xid when the server has it (24.3+).
+// Without a client every probe fails open ("present"), which is the shape
+// this test can assert; the absent branch is exercised by the 22.8 run.
+func TestKeeperConnectionSQL_SelectsXidWhenPresent(t *testing.T) {
+	g := NewGenerator(nil, "onprem")
+	if !strings.Contains(g.keeperConnectionSQL(), "toString(xid) AS xid") {
+		t.Error("keeperConnectionSQL must select xid when the column exists")
+	}
+}
