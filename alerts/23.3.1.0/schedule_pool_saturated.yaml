@@ -17,9 +17,15 @@ description: |
   so on SharedMergeTree new parts become visible minutes to hours after they
   were written, and the replication queue on ReplicatedMergeTree is processed
   behind schedule. A restart empties the pool only until the same tables fill
-  it again. The lasting fix is capacity: background_schedule_pool_size (a
-  server setting read at startup — plan a restart; default 512), fewer
-  replicated tables per replica, fewer tiny partitions.
+  it again. The lasting fix is capacity: background_schedule_pool_size
+  (default 512; IncreaseOnly — a config reload raises it live with no
+  restart, only lowering it needs one; the pool's per-task-type cap adopts
+  the new size at the next restart, so plan a rolling restart after the
+  catch-up, not before), a longer
+  shared_merge_tree_leader_update_period_seconds (every table runs an
+  election per period on this pool), fewer replicated tables per replica
+  (empty ones included), fewer tiny partitions. A pinned schedule pool also
+  idles the fetch pool: the rounds that schedule fetches run here.
 
   Check: metric_log_7_days avg_/max_schedule_pool_tasks per hour against the
   size; system.tables count of Replicated*/Shared* engines; alongside

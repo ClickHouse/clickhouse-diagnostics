@@ -355,17 +355,62 @@ def analyse(base: str):
         add("critical", "availability", f"{len(crash)} crash_log row(s) — server received a fatal signal",
             "; ".join(f"{r.get('event_time')} signal {r.get('signal')} v{r.get('version')}" for r in crash[:3]), "HC-1.1")
 
+    # ---- SharedMergeTree? Read once: the replicas reading below, the coverage
+    # note and the per-host checks all depend on it. cloud_mode = 1 is the
+    # server's own flag; Shared* engines are the fallback for a bundle whose
+    # settings file is missing.
+    st_rows = read_jsonl(first("system.settings_*.jsonl", base))
+    cloud_mode = any(r.get("name") == "cloud_mode" and str(r.get("value")) in ("1", "true") for r in st_rows)
+    tb = read_jsonl(first("system.tables_*.jsonl", base))
+    shared_tables = [r for r in tb if str(r.get("engine", "")).startswith("Shared")]
+    is_smt = cloud_mode or bool(shared_tables)
+
     # ---- replicas / replication queue
     reps = read_jsonl(first("system.replicas_*.jsonl", base))
+    # Cloud collections from v0.7 carry hostName(): one row per table PER
+    # REPLICA, problem rows first, at most 200 per host.
+    per_host = bool(reps) and "hostname" in reps[0]
+
+    def rep_host(r):
+        return f" on {r.get('hostname')}" if per_host else ""
+
     ro = [r for r in reps if num(r.get("is_readonly")) == 1]
     if ro:
-        add("critical", "replication", f"{len(ro)} replicated table(s) read-only",
-            "; ".join(f"{r.get('database')}.{r.get('table')} session_expired={r.get('is_session_expired')}" for r in ro[:5]), "HC-1.4")
+        # Per-host files repeat a table once per replica: count tables and
+        # rows separately so five hosts × one table does not read as five.
+        ro_tables = len({(r.get("database"), r.get("table")) for r in ro})
+        add("critical", "replication",
+            f"{ro_tables} replicated table(s) read-only" + (f" ({len(ro)} table rows across hosts)" if per_host and len(ro) != ro_tables else ""),
+            "; ".join(f"{r.get('database')}.{r.get('table')}{rep_host(r)} session_expired={r.get('is_session_expired')}" for r in ro[:5]), "HC-1.4")
     delayed = [r for r in reps if (num(r.get("absolute_delay")) or 0) > 60]
     if delayed:
         worst = max(delayed, key=lambda r: num(r.get("absolute_delay")) or 0)
-        add("warning", "replication", f"{len(delayed)} table(s) with absolute_delay > 60 s",
-            f"max {worst.get('absolute_delay')} s on {worst.get('database')}.{worst.get('table')} queue_size={worst.get('queue_size')}", "HC-3.1")
+        if is_smt:
+            # On SharedMergeTree there is no replication queue to be behind on:
+            # inserts_in_queue is the number of level-0 parts this replica has
+            # not fetched yet and absolute_delay the age of the oldest. The
+            # count drops when a merge elsewhere covers those parts, so a
+            # falling number is not proof the replica caught up.
+            hosts = Counter(r.get("hostname") or "this replica" for r in delayed)
+            behind = sorted(delayed, key=lambda r: -(num(r.get("inserts_in_queue")) or 0))[:3]
+            out["smt_lag"] = {"rows": len(delayed), "hosts": len(hosts),
+                              "worst": f"{worst.get('database')}.{worst.get('table')}{rep_host(worst)} {worst.get('absolute_delay')} s / {worst.get('inserts_in_queue')} parts behind"}
+            add("warning", "replication",
+                f"{len(delayed)} table row(s) with absolute_delay > 60 s on a SharedMergeTree cluster"
+                + (f" across {len(hosts)} host(s)" if per_host else "") + " — parts not yet fetched by that replica",
+                "inserts_in_queue = level-0 parts this replica has not fetched, absolute_delay = age of the oldest (falls when a merge elsewhere covers them — not proof of catch-up); most behind: "
+                + "; ".join(f"{r.get('database')}.{r.get('table')}{rep_host(r)} {r.get('inserts_in_queue')} parts, {r.get('absolute_delay')} s"
+                            + (f", oldest {r.get('oldest_part_to_get')} written {r.get('inserts_oldest_time')}" if r.get("oldest_part_to_get") else "") for r in behind)
+                + (" · per host: " + ", ".join(f"{h}={c}" for h, c in hosts.most_common(6)) if per_host else ""),
+                "HC-3.1/P-59")
+        else:
+            add("warning", "replication", f"{len(delayed)} table(s) with absolute_delay > 60 s",
+                f"max {worst.get('absolute_delay')} s on {worst.get('database')}.{worst.get('table')}{rep_host(worst)} queue_size={worst.get('queue_size')}", "HC-3.1")
+    if per_host:
+        rows_by_host = Counter(r.get("hostname") for r in reps)
+        capped = [h for h, c in rows_by_host.items() if c == 200]
+        if capped:
+            out["notes"].append(f"system.replicas keeps 200 rows per host (problem rows first); {len(capped)} host(s) hit the cap, so their delayed/queued lists above are the worst 200 rows, not all of them — the replicated-table count is in system.tables")
     rq = read_jsonl(first("system.replication_queue_*.jsonl", base))
     if rq:
         by_type = Counter(r.get("type") for r in rq)
@@ -694,7 +739,7 @@ def analyse(base: str):
     #     STOPPED writing is evidence; a view that never wrote is a design (P-35).
     #   * A refreshable MV (REFRESH EVERY / AFTER) never writes query_views_log.
     qv = read_jsonl(first("system.query_views_log_3_days_*.jsonl", base))
-    tbl_rows = read_jsonl(first("system.tables_*.jsonl", base)) or []
+    tbl_rows = tb
     refresh_re = re.compile(r"\bREFRESH\s+(EVERY|AFTER)\b", re.I)
     mv_tables = [r for r in tbl_rows if r.get("engine") == "MaterializedView"]
     # Refreshable MVs are excluded from the coverage gate: they do not fire on
@@ -1115,14 +1160,8 @@ def analyse(base: str):
                 add("info", "coverage", f"{len(heavy)} collector(s) took over a minute — candidates for a shorter window on this server",
                     ", ".join(f"{r['name']} {r['ms'] / 1000:.0f} s" for r in heavy), "HC-0")
 
-    # ---- one node of a SharedMergeTree cluster?
-    st_rows = read_jsonl(first("system.settings_*.jsonl", base))
-    cloud_mode = any(r.get("name") == "cloud_mode" and str(r.get("value")) in ("1", "true") for r in st_rows)
-    shared = False
-    tb = read_jsonl(first("system.tables_*.jsonl", base))
-    if tb:
-        shared = any(str(r.get("engine", "")).startswith("Shared") for r in tb)
-    if (cloud_mode or shared) and out["mode"] == "onprem":
+    # ---- one node of a SharedMergeTree cluster? (is_smt computed above)
+    if is_smt and out["mode"] == "onprem":
         cl = read_jsonl(first("system.clusters_*.jsonl", base))
         n = len({(r.get("host_name"), r.get("port")) for r in cl if r.get("cluster") == "default"}) or "N"
         out["notes"].append(f"SharedMergeTree cluster collected in onprem mode: this bundle describes ONE replica of {n} (parts, errors, part_log, query_log, text_log are per replica) — propose -mode cloud for the cluster view")
@@ -1135,6 +1174,23 @@ def analyse(base: str):
             "; ".join(f"{d.get('database')}.{d.get('name')} {d.get('status')}" for d in bad[:5]), "HC-9.1")
 
     # ---- metric_log memory / pools
+    # Pool sizes first (used by the cluster-wide check below AND the per-host
+    # file after it): system.server_settings from 23.3; system.settings only
+    # BELOW 23.3 — on newer servers it still lists background_*_pool_size with
+    # the old session defaults (8 / 128), not the server's real sizes, so a
+    # bundle without the server_settings file gets no sizes rather than wrong
+    # ones.
+    sizes = {}
+    vm = re.match(r"^(\d+)\.(\d+)", str(out.get("version") or ""))
+    pre_233 = bool(vm) and (int(vm.group(1)), int(vm.group(2))) < (23, 3)
+    size_files = ["system.server_settings_*.jsonl"] + (["system.settings_*.jsonl"] if pre_233 else [])
+    for f in size_files:
+        for r in read_jsonl(first(f, base)) or []:
+            n = r.get("name")
+            if n in ("background_fetches_pool_size", "background_schedule_pool_size", "background_pool_size",
+                     "background_common_pool_size") and n not in sizes:
+                sizes[n] = num(r.get("value"))
+    pools = {}
     ml = read_jsonl(first("system.metric_log_7_days_*.jsonl", base))
     if ml:
         mem = [num(r.get("avg_memory_tracking_bytes")) or 0 for r in ml]
@@ -1147,21 +1203,6 @@ def analyse(base: str):
         # system.server_settings (23.3+) or system.settings (older); the metric
         # is the hourly avg of tasks in the pool. Per hour, not per window:
         # 3 saturated hours in the last 24 is the finding.
-        # Sizes: system.server_settings from 23.3; system.settings only BELOW
-        # 23.3 — on newer servers it still lists background_*_pool_size with
-        # the old session defaults (8 / 128), not the server's real sizes, so a
-        # bundle without the server_settings file gets no sizes rather than
-        # wrong ones.
-        sizes = {}
-        vm = re.match(r"^(\d+)\.(\d+)", str(out.get("version") or ""))
-        pre_233 = bool(vm) and (int(vm.group(1)), int(vm.group(2))) < (23, 3)
-        size_files = ["system.server_settings_*.jsonl"] + (["system.settings_*.jsonl"] if pre_233 else [])
-        for f in size_files:
-            for r in read_jsonl(first(f, base)) or []:
-                n = r.get("name")
-                if n in ("background_fetches_pool_size", "background_schedule_pool_size", "background_pool_size",
-                         "background_common_pool_size") and n not in sizes:
-                    sizes[n] = num(r.get("value"))
         # "Last 24 h" is anchored on collection time (the run's start, from the
         # folder name), like the live alert's now() - 24 h — not on the newest
         # sample, which a metric_log that stopped updating days ago would put
@@ -1173,14 +1214,15 @@ def analyse(base: str):
         if ml and anchor and not recent and last_hour and parse_dt(last_hour):
             gap_h = (anchor - parse_dt(last_hour)).total_seconds() / 3600
             out["notes"].append(f"metric_log_7_days ends {gap_h:.0f} h before collection — the background-pool check (HC-2.7/2.13/2.14) has no recent hour to judge and is skipped")
-        pools = {}
         # Each pool fails differently, so each gets its own consequence and pattern.
         IMPACT = {
-            "fetch": ("a fetch that finds no free slot is dropped and retried later, silently — on SharedMergeTree that is parts-propagation lag; "
-                      "raise background_fetches_pool_size (applies on config reload), or reduce inserts/parts/tables", "P-59"),
-            "schedule": ("periodic tasks are not lost but late — parts-set updates, replication queue processing and cleanup wait for a slot, so new parts and "
-                         "queue entries are processed behind schedule; raise background_schedule_pool_size (read at startup, needs a restart) or reduce the "
-                         "number of replicated tables per replica", "P-59"),
+            "fetch": ("a fetch that finds no free slot is dropped and re-selected next round, silently — on SharedMergeTree that is parts-propagation lag; "
+                      "raise background_fetches_pool_size (IncreaseOnly: a config reload applies it live, no restart; never assume 16 — read the live size), "
+                      "or reduce inserts/parts/tables", "P-59"),
+            "schedule": ("periodic tasks are not lost but late — parts-set updates, fetch scheduling rounds, leader elections and cleanup wait for a slot, so new parts "
+                         "are processed behind schedule (a pinned schedule pool leaves the fetch pool idle); raise background_schedule_pool_size (IncreaseOnly: a config "
+                         "reload applies it live — only the per-type task cap waits for the next restart, so plan a rolling restart after the catch-up), raise "
+                         "shared_merge_tree_leader_update_period_seconds, or drop empty tables", "P-59"),
             "merge": ("merges wait and parts accumulate — the too-many-parts build-up; raise background_pool_size (applies on config reload) or slow the "
                       "insert rate / batch inserts", "P-01"),
         }
@@ -1213,6 +1255,215 @@ def analyse(base: str):
             out["pools"] = pools
         if zk and not any(f["check"].startswith("HC-3.8") for f in findings):
             add("warning", "keeper", f"{zk} ZooKeeper/Keeper hardware exceptions over {len(ml)} hours", "metric_log.zk_hw_exceptions", "HC-3.5")
+
+    # ---- per-host pools, live pool sizes, SharedMergeTree fetch counters,
+    # leader elections and Keeper latency (system.metric_log_by_host_3_days,
+    # cloud collections from v0.7). metric_log_7_days folds the replicas; this
+    # file says WHICH host, at WHAT live size, and whether the fetch executor
+    # is dropping work. The regex-selected columns may be absent on a version
+    # without the counter — every read below tolerates a missing key.
+    bh = read_jsonl(first("system.metric_log_by_host_3_days_*.jsonl", base))
+    smt_fetch = {}
+    bh_saturated = {}
+    if bh:
+        SIZE_COL = {"fetch": "max(CurrentMetric_BackgroundFetchesPoolSize)",
+                    "schedule": "max(CurrentMetric_BackgroundSchedulePoolSize)",
+                    "merge": "max(CurrentMetric_BackgroundMergesAndMutationsPoolSize)"}
+        TASK_COL = {"fetch": "avg_fetch_pool_tasks", "schedule": "avg_schedule_pool_tasks", "merge": "avg_merge_pool_tasks"}
+        SETTING = {"fetch": "background_fetches_pool_size", "schedule": "background_schedule_pool_size", "merge": "background_pool_size"}
+        PCT = {"fetch": 0.9, "schedule": 0.95, "merge": 0.9}
+        by_host = {}
+        for r in bh:
+            by_host.setdefault(r.get("hostname") or "?", []).append(r)
+        for rows in by_host.values():
+            rows.sort(key=lambda r: r.get("time") or "")
+        hosts = sorted(by_host)
+        last_bh = max((r.get("time") or "" for r in bh), default="")
+        anchor_bh = run_ts or (parse_dt(last_bh) if last_bh else None)
+
+        def recent_rows(rows):
+            return [r for r in rows if r.get("time") and parse_dt(r["time"]) and anchor_bh
+                    and 0 <= (anchor_bh - parse_dt(r["time"])).total_seconds() <= 25 * 3600]
+
+        summary = {"hosts": len(hosts), "saturated": {}, "size_steps": []}
+        for label in ("fetch", "schedule", "merge"):
+            sat_hosts = {}
+            for h, rows in by_host.items():
+                rec = recent_rows(rows)
+                hours, size_sat = 0, None
+                for r in rec:
+                    size = num(r.get(SIZE_COL[label])) or sizes.get(SETTING[label])
+                    tasks = num(r.get(TASK_COL[label]))
+                    if size and tasks is not None and tasks >= PCT[label] * size:
+                        hours += 1
+                        size_sat = size  # the size the pool was pinned AT (an increase later in the window must not hide it)
+                if hours >= 3:
+                    sat_hosts[h] = (hours, size_sat)
+                # A step in the live size is a setting TRANSITION on that host.
+                # metric_log spans restarts, so an increase is consistent with a
+                # live reload or a restart with a new config; a decrease can
+                # only be a restart (or a replaced host) — IncreaseOnly pools
+                # cannot shrink live. The finding says which, never "reload".
+                prev = None
+                for r in rows:
+                    sz = num(r.get(SIZE_COL[label]))
+                    if sz is None:
+                        continue
+                    if prev is not None and sz != prev:
+                        summary["size_steps"].append({"pool": label, "host": h, "hour": r.get("time"), "from": prev, "to": sz})
+                    prev = sz
+            if sat_hosts:
+                summary["saturated"][label] = len(sat_hosts)
+                bh_saturated[label] = sat_hosts
+                shown = ", ".join(f"{h} {v[0]} h at size {v[1]}" for h, v in sorted(sat_hosts.items(), key=lambda kv: -kv[1][0])[:5])
+                add("warning", "merges" if label == "merge" else "replication",
+                    f"background {label} pool saturated on {len(sat_hosts)} of {len(hosts)} host(s): hourly average ≥ {int(PCT[label] * 100)}% of that host's live pool size in ≥ 3 of the last 24 h",
+                    f"system.metric_log_by_host_3_days — {shown}" + (" …" if len(sat_hosts) > 5 else ""),
+                    f"HC-2.15/{'P-01' if label == 'merge' else 'P-59'}")
+        if summary["size_steps"]:
+            by_change = Counter((st["pool"], st["from"], st["to"]) for st in summary["size_steps"])
+            for (pool, a, b), n in by_change.most_common(3):
+                first_hour = min(st["hour"] for st in summary["size_steps"] if (st["pool"], st["from"], st["to"]) == (pool, a, b))
+                if (b or 0) > (a or 0):
+                    how = ("an increase — consistent with a live config reload or a restart with a new config (metric_log spans restarts); "
+                           "if the pool was pinned before it, the following hours are the catch-up, not the baseline")
+                else:
+                    how = ("a decrease — these pools are IncreaseOnly, so this can only be a restart with a smaller value or a replaced host; "
+                           "read the hours around it as a restart, not a tuning step")
+                add("info", "merges" if pool == "merge" else "replication",
+                    f"{pool} pool size transition {a} → {b} on {n} host(s) (first at {first_hour}): {how}",
+                    "system.metric_log_by_host_3_days max(CurrentMetric_Background*PoolSize)", "HC-2.15/P-59")
+        # Fetch executor: parts selected for fetching vs fetches attempted.
+        # The executor has no queue — a part that finds no free slot is
+        # re-selected next round — so attempted ≪ selected is the drop.
+        SEL = ("sum(ProfileEvent_SharedMergeTreeSelectPartsForRendezvousFetchParts)",
+               "sum(ProfileEvent_SharedMergeTreeSelectPartsForCoordinatedFetchParts)")
+        ATT = "sum(ProfileEvent_SharedMergeTreeDataPartsFetchAttempt)"
+        ratios, att_per_h = {}, {}
+        for h, rows in by_host.items():
+            sel = sum((num(r.get(c)) or 0) for r in rows for c in SEL)
+            # Absent column = the counter does not exist on this version
+            # (regex-selected); present with 0 = parts were selected and
+            # NOTHING was attempted — the strongest drop signal, ratio 0.
+            att_present = any(ATT in r for r in rows)
+            att = sum((num(r.get(ATT)) or 0) for r in rows)
+            if sel > 0 and att_present:
+                ratios[h] = att / sel
+            rec = [v for v in ((num(r.get(ATT)) or 0) for r in recent_rows(rows)) if v > 0]
+            if len(rec) >= 6:
+                mean = sum(rec) / len(rec)
+                att_per_h[h] = (round(mean), round(100 * (max(rec) - min(rec)) / mean) if mean else 0)
+        if ratios:
+            worst_h = min(ratios, key=ratios.get)
+            smt_fetch = {"min_ratio": round(ratios[worst_h], 2), "host": worst_h,
+                         "hosts_below_half": sum(1 for v in ratios.values() if v < 0.5)}
+            if smt_fetch["hosts_below_half"]:
+                add("warning", "replication",
+                    f"fetch executor dropping work on {smt_fetch['hosts_below_half']} of {len(ratios)} host(s): fetches attempted / parts selected for fetching = {smt_fetch['min_ratio']} at worst ({worst_h}, 3 days)",
+                    "system.metric_log_by_host_3_days sum(ProfileEvent_SharedMergeTreeDataPartsFetchAttempt) vs sum(ProfileEvent_SharedMergeTreeSelectPartsFor*FetchParts) — no queue: a part with no free slot is re-selected next round",
+                    "HC-2.15/P-59")
+        if att_per_h and "fetch" in bh_saturated:
+            flat = [h for h, (mean, spread) in att_per_h.items() if spread <= 20 and h in bh_saturated["fetch"]]
+            if flat:
+                means = [att_per_h[h][0] for h in flat]
+                rng = f"{min(means)}" if min(means) == max(means) else f"{min(means)}–{max(means)}"
+                out["notes"].append(f"fetch throughput on {len(flat)} saturated host(s) is flat at ≈ {rng} fetch attempts/h (spread ≤ 20 % over the last 24 h) — a pool working at its ceiling, not a stall; the ceiling ≈ pool size × 3600 / seconds per fetch, so more slots raise it")
+        # Leader elections: one schedule-pool task per table per period.
+        ELE = ("sum(ProfileEvent_SharedMergeTreeVirtualPartsUpdatesLeaderSuccessfulElection)",
+               "sum(ProfileEvent_SharedMergeTreeVirtualPartsUpdatesLeaderFailedElection)")
+        el_rates = {}
+        for h, rows in by_host.items():
+            rec = recent_rows(rows)
+            tot = sum((num(r.get(c)) or 0) for r in rec for c in ELE)
+            if rec and tot:
+                el_rates[h] = tot / (3600 * len(rec))
+        if el_rates:
+            peak_h = max(el_rates, key=el_rates.get)
+            summary["elections_per_s_max"] = round(el_rates[peak_h], 1)
+            if el_rates[peak_h] >= 100:
+                add("info", "replication",
+                    f"SharedMergeTree leader elections ≈ {round(el_rates[peak_h])}/s on {peak_h} (last 24 h) — each one is a schedule-pool task; the rate is Shared* tables / shared_merge_tree_leader_update_period_seconds (default 30 s, 300 validated at tens of thousands of tables)",
+                    "system.metric_log_by_host_3_days sum(ProfileEvent_SharedMergeTreeVirtualPartsUpdatesLeader*Election)", "HC-2.16/P-59")
+        # Keeper latency per host against the fleet median.
+        lat = {}
+        for h, rows in by_host.items():
+            tx = sum((num(r.get("zk_transactions")) or 0) for r in rows)
+            wait = sum((num(r.get("zk_wait_us")) or 0) for r in rows)
+            if tx > 0:
+                lat[h] = wait / tx / 1000.0
+        if len(lat) >= 3:
+            med = sorted(lat.values())[len(lat) // 2]
+            slow = {h: v for h, v in lat.items() if v > 2 * med and v > 5}
+            if slow:
+                add("warning", "keeper",
+                    f"Keeper request latency on {len(slow)} host(s) is above 2× the fleet median ({med:.1f} ms/tx): "
+                    + ", ".join(f"{h} {v:.0f} ms" for h, v in sorted(slow.items(), key=lambda kv: -kv[1])[:5]),
+                    "system.metric_log_by_host_3_days zk_wait_us / zk_transactions — that replica's network or the Keeper member its session sits on (zookeeper_connection.host), not a Keeper-wide incident",
+                    "HC-3.17")
+        out["pools_by_host"] = summary
+
+    # ---- empty and tiny Shared* tables (system.tables.total_rows, collected
+    # since v0.6). Each one still runs its periodic schedule-pool tasks and a
+    # leader election per period, so they are load without data.
+    known = [r for r in shared_tables if num(r.get("total_rows")) is not None]
+    if known:
+        empty = sum(1 for r in known if num(r.get("total_rows")) == 0)
+        tiny = sum(1 for r in known if 0 < num(r.get("total_rows")) < 100)
+        out["shared_tables"] = {"total": len(shared_tables), "empty": empty, "under_100_rows": tiny}
+        if len(known) >= 100 and (empty + tiny) / len(known) > 0.2:
+            add("info", "schema",
+                f"{empty} of {len(known)} Shared*MergeTree tables are empty and {tiny} more hold fewer than 100 rows ({round(100 * (empty + tiny) / len(known))}%) — each still runs its schedule-pool tasks and leader elections; dropping or consolidating them lowers the load that pins the schedule pool",
+                "system.tables total_rows", "HC-2.16/P-59")
+
+    # ---- server-wide MergeTree settings (system.merge_tree_settings, v0.7)
+    mts = read_jsonl(first("system.merge_tree_settings_*.jsonl", base))
+    if mts:
+        out["merge_tree_settings_changed"] = [{"name": r.get("name"), "value": r.get("value")} for r in mts if num(r.get("changed")) == 1]
+        if shared_tables:
+            byname = {r.get("name"): r for r in mts}
+            batch = byname.get("shared_merge_tree_parts_load_batch_size", {})
+            period = byname.get("shared_merge_tree_leader_update_period_seconds", {})
+            per = num(period.get("value"))
+            out["smt_settings"] = {"parts_load_batch_size": batch.get("value"), "leader_update_period_seconds": period.get("value"),
+                                   "estimated_elections_per_s": round(len(shared_tables) / per, 1) if per else None}
+            if len(shared_tables) >= 5000 and per and num(batch.get("changed")) == 0 and num(period.get("changed")) == 0:
+                add("info", "settings",
+                    f"SharedMergeTree settings at their defaults with {len(shared_tables)} Shared* tables on this replica: shared_merge_tree_parts_load_batch_size = {batch.get('value')} (fetches one table schedules per round), shared_merge_tree_leader_update_period_seconds = {period.get('value')} (≈ {round(len(shared_tables) / per)} leader elections/s per replica)",
+                    "system.merge_tree_settings — 64 and 300 were validated at this scale; both are MergeTree settings (server <merge_tree> block, or ALTER … MODIFY SETTING per table)", "HC-2.16/P-59")
+
+    # ---- P-59 verdict: a pool at its size for hours AND parts visibly behind
+    sat = sorted({l for l, i in pools.items() if (i.get("hours_saturated_24h") or 0) >= 3 and l != "merge"}
+                 | {l for l in bh_saturated if l != "merge"})
+    lag = out.get("smt_lag")
+    if is_smt and sat and (lag or smt_fetch.get("hosts_below_half")):
+        where = (f"{lag['rows']} table row(s) are behind on {lag['hosts']} host(s) (worst {lag['worst']})" if lag
+                 else f"fetches attempted / parts selected = {smt_fetch['min_ratio']}")
+        # Capacity: name the sizes this bundle shows, and quote the validated
+        # step only as a reference point from the defaults.
+        cur = {l: (pools.get(l) or {}).get("size") for l in ("fetch", "schedule")}
+        cur_txt = ", ".join(f"{l} {cur[l]}" for l in ("fetch", "schedule") if cur.get(l))
+        capacity = ("raise background_fetches_pool_size and background_schedule_pool_size (both IncreaseOnly — a config reload applies them live"
+                    + (f"; current {cur_txt}" if cur_txt else "")
+                    + "; from the defaults, 16 → 128 and 512 → 1024 cleared a backlog at tens of thousands of tables within the hour — size against fetch attempts/h and the table count, not to those numbers), "
+                    "a few replicas at a time while watching object-store latency and Keeper ms/tx, then plan a rolling restart so the schedule pool's per-type cap adopts the new size")
+        # Demand: the exact 32 → 64 / 30 → 300 transitions only apply while
+        # both SMT settings are still at their defaults; otherwise report what
+        # is set and leave the direction to capacity.
+        ss = out.get("smt_settings") or {}
+        b_val, p_val = ss.get("parts_load_batch_size"), ss.get("leader_update_period_seconds")
+        if b_val is not None and p_val is not None and str(b_val) == "32" and str(p_val) == "30":
+            demand = "raise shared_merge_tree_parts_load_batch_size 32 → 64 and shared_merge_tree_leader_update_period_seconds 30 → 300 (both at their defaults here)"
+        elif b_val is not None or p_val is not None:
+            demand = (f"shared_merge_tree_parts_load_batch_size = {b_val} and shared_merge_tree_leader_update_period_seconds = {p_val} are already set here — "
+                      "revisit them against fetch attempts/h and elections/s (a larger batch fetches more per round, a longer period lowers schedule-pool load) rather than applying fixed values")
+        else:
+            demand = ("check shared_merge_tree_parts_load_batch_size and shared_merge_tree_leader_update_period_seconds first (defaults 32 and 30 s; 64 and 300 were validated at tens of thousands of tables; "
+                      "system.merge_tree_settings is absent from this bundle)")
+        add("warning", "replication",
+            f"consistent with P-59 — SharedMergeTree parts-propagation lag from background pool saturation: the {' and '.join(sat)} pool(s) sat at their size for hours while {where}",
+            f"remedy — capacity: {capacity}. Demand: {demand}; then fewer and larger inserts, and drop empty tables. Meanwhile select_sequential_consistency = 1 for reads that must be consistent — a restart only bulk-loads the parts once. "
+            "Verify afterwards in the same files: the live pool size increased on every host, fetch attempts surge then settle, inserts_in_queue → 0 per host",
+            "P-59")
 
     # ---- host info
     hi_path = os.path.join(base, "host_info.json")
@@ -1251,17 +1502,20 @@ def analyse(base: str):
         out["notes"].append("host_info.json absent (cloud default, or -host-info off)")
 
     # ---- changed settings (collected since Sept 2026; server_settings needs >= 23.4)
-    for fname, key in (("system.settings_*.jsonl", "settings_changed"), ("system.server_settings_*.jsonl", "server_settings_changed")):
+    for fname, key in (("system.settings_*.jsonl", "settings_changed"), ("system.server_settings_*.jsonl", "server_settings_changed"),
+                       ("system.merge_tree_settings_*.jsonl", "merge_tree_settings_changed")):
         rows = read_jsonl(first(fname, base))
         if rows:
             changed = [r for r in rows if num(r.get("changed")) == 1]
             out[key] = [{"name": r.get("name"), "value": r.get("value"), "default": r.get("default")} for r in changed]
             watch = {"max_server_memory_usage_to_ram_ratio", "max_memory_usage", "max_concurrent_queries", "background_pool_size",
-                     "background_fetches_pool_size", "number_of_free_entries_in_pool_to_execute_mutation", "compatibility",
-                     "wait_for_async_insert", "parallel_distributed_insert_select", "mark_cache_size", "uncompressed_cache_size"}
+                     "background_fetches_pool_size", "background_schedule_pool_size", "number_of_free_entries_in_pool_to_execute_mutation", "compatibility",
+                     "wait_for_async_insert", "parallel_distributed_insert_select", "mark_cache_size", "uncompressed_cache_size",
+                     "parts_to_throw_insert", "parts_to_delay_insert", "shared_merge_tree_parts_load_batch_size", "shared_merge_tree_leader_update_period_seconds"}
             hits = [f"{r.get('name')}={r.get('value')}" for r in changed if r.get("name") in watch]
             if hits:
-                add("info", "settings", f"{len(changed)} changed {'server ' if 'server' in key else ''}settings; notable: " + ", ".join(hits[:8]), fname, "HC-10.8")
+                kind = "server " if "server" in key else ("MergeTree " if "merge_tree" in key else "")
+                add("info", "settings", f"{len(changed)} changed {kind}settings; notable: " + ", ".join(hits[:8]), fname, "HC-10.8")
 
     # ---- query_analysis/ (only with --query-id / --normalized-query-hash)
     qa_dir = os.path.join(base, "query_analysis")
@@ -1357,6 +1611,23 @@ def render_md(o) -> str:
         L.append("- background pools (last 24 h, hourly avg vs size): " + " · ".join(
             f"{k} {v['max_avg']}/{v['size'] if v.get('size') else '?'}" + (f" ({v['hours_saturated_24h']} h saturated)" if v.get("hours_saturated_24h") else "")
             for k, v in o["pools"].items()))
+    if o.get("pools_by_host"):
+        p = o["pools_by_host"]
+        bits = [f"{p['hosts']} host(s)"]
+        if p.get("saturated"):
+            bits.append("saturated on: " + ", ".join(f"{k} {v}" for k, v in p["saturated"].items()))
+        if p.get("size_steps"):
+            bits.append(f"{len(p['size_steps'])} live pool-size step(s)")
+        if p.get("elections_per_s_max") is not None:
+            bits.append(f"leader elections ≤ {p['elections_per_s_max']}/s")
+        L.append("- per-host pools (3 days, metric_log_by_host): " + " · ".join(bits))
+    if o.get("shared_tables"):
+        st = o["shared_tables"]
+        line = f"- Shared*MergeTree tables: {st['total']} · empty {st['empty']} · under 100 rows {st['under_100_rows']}"
+        if o.get("smt_settings"):
+            ss = o["smt_settings"]
+            line += f" · parts_load_batch_size {ss['parts_load_batch_size']} · leader_update_period {ss['leader_update_period_seconds']} s (≈ {ss['estimated_elections_per_s']} elections/s)"
+        L.append(line)
     qw = o.get("query_log_window")
     if qw:
         L.append(f"- query_log window: {qw['from']} → {qw['to']} ({qw['hour_buckets']} hour buckets)")
@@ -1401,7 +1672,8 @@ def render_md(o) -> str:
         L.append(f"- text_log histogram: Error-level lines in {t['error_hours']} hour(s) · peak {t['peak_errors']} at {t['peak_hour']} (median hour {t['median_errors']}) · top classes: {', '.join(t['top_classes'])}")
     if o.get("empty_files"):
         L.append(f"- empty files: {', '.join(o['empty_files'])}")
-    for key, label in (("settings_changed", "query/profile settings changed"), ("server_settings_changed", "server settings changed")):
+    for key, label in (("settings_changed", "query/profile settings changed"), ("server_settings_changed", "server settings changed"),
+                       ("merge_tree_settings_changed", "MergeTree settings changed")):
         if o.get(key) is not None:
             names = ", ".join(f"{r['name']}={r['value']}" for r in o[key][:12])
             L.append(f"- {label}: {len(o[key])}" + (f" — {names}" + (" …" if len(o[key]) > 12 else "") if o[key] else ""))
