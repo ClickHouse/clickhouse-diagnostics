@@ -367,7 +367,7 @@ def analyse(base: str):
 
     # ---- replicas / replication queue
     reps = read_jsonl(first("system.replicas_*.jsonl", base))
-    # Cloud collections from v0.8 carry hostName(): one row per table PER
+    # Cloud collections from v0.7 carry hostName(): one row per table PER
     # REPLICA, problem rows first, at most 200 per host.
     per_host = bool(reps) and "hostname" in reps[0]
 
@@ -1254,7 +1254,7 @@ def analyse(base: str):
 
     # ---- per-host pools, live pool sizes, SharedMergeTree fetch counters,
     # leader elections and Keeper latency (system.metric_log_by_host_3_days,
-    # cloud collections from v0.8). metric_log_7_days folds the replicas; this
+    # cloud collections from v0.7). metric_log_7_days folds the replicas; this
     # file says WHICH host, at WHAT live size, and whether the fetch executor
     # is dropping work. The regex-selected columns may be absent on a version
     # without the counter — every read below tolerates a missing key.
@@ -1397,7 +1397,7 @@ def analyse(base: str):
                 f"{empty} of {len(known)} Shared*MergeTree tables are empty and {tiny} more hold fewer than 100 rows ({round(100 * (empty + tiny) / len(known))}%) — each still runs its schedule-pool tasks and leader elections; dropping or consolidating them lowers the load that pins the schedule pool",
                 "system.tables total_rows", "HC-2.16/P-59")
 
-    # ---- server-wide MergeTree settings (system.merge_tree_settings, v0.8)
+    # ---- server-wide MergeTree settings (system.merge_tree_settings, v0.7)
     mts = read_jsonl(first("system.merge_tree_settings_*.jsonl", base))
     if mts:
         out["merge_tree_settings_changed"] = [{"name": r.get("name"), "value": r.get("value")} for r in mts if num(r.get("changed")) == 1]

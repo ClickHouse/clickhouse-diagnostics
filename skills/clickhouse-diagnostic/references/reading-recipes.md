@@ -115,7 +115,7 @@ FROM file('$B/system.text_log_2*.jsonl', JSONEachRow) GROUP BY h HAVING expired 
 
 Applies when the bundle is a cloud collection (or an onprem run that switched) and `system.settings` has `cloud_mode = 1` / `system.tables` lists `Shared*MergeTree` engines. Three questions, three files.
 
-**1. Who is behind, on what** — cloud `system.replicas` (v0.8: per host, problem rows first, ≤ 200 per host; on SMT `inserts_in_queue` = level-0 parts that replica has not fetched, `absolute_delay` = age of the oldest):
+**1. Who is behind, on what** — cloud `system.replicas` (v0.7: per host, problem rows first, ≤ 200 per host; on SMT `inserts_in_queue` = level-0 parts that replica has not fetched, `absolute_delay` = age of the oldest):
 ```sql
 SELECT hostname, count() AS tables_behind, max(absolute_delay) AS max_delay_s, sum(toUInt64(inserts_in_queue)) AS parts_behind,
        argMax(concat(database, '.', table), absolute_delay) AS worst_table, countIf(cnt = 200) OVER () AS hosts_capped
