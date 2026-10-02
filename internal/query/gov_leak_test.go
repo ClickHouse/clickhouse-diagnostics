@@ -67,6 +67,11 @@ func TestGovQueries_NoRawIdentifiersOrDDL(t *testing.T) {
 		"dependencies_database", "dependencies_table",
 		"loading_dependencies_database", "loading_dependencies_table",
 		"target_database", "target_table", "view",
+		// Per-replica identity (hostName()) in parts_max_block_recent and
+		// every later per-host gov file. partition_id is NOT listed: every
+		// gov parts file ships it raw by convention (it is the `partition`
+		// expression that is hashed).
+		"hostname",
 	}
 
 	// Documented exemptions: the column name collides with an identifier
