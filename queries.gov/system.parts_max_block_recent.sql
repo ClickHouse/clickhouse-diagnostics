@@ -14,17 +14,27 @@
 -- is the `partition` expression that carries the key). Block numbers,
 -- times and counts stay clear: two gov bundles with the same salt still
 -- line up on the hashes.
+-- The `p.` alias on the WHERE columns is load-bearing, not style. Aliases are
+-- global in ClickHouse, so `AS database` on the hashed projection puts
+-- `database` in scope as THAT expression: a bare `WHERE database NOT IN
+-- ('system', …)` then compares a 64-character hash with 'system', is true for
+-- every row, and the system log tables are NOT excluded. Measured on 26.7:
+-- the bare form returned both groups (user and system) where the qualified
+-- form returns one, and a node with 6 user parts and 408 system parts filled
+-- this file's LIMIT 200 with system.metric_log / query_log partitions —
+-- pushing out the user tables the file exists to show. Same class as the
+-- `pl.` qualification in system.part_log_3_days.sql.
 SELECT
     hex(SHA256(concat(hostName(), '%salt%')))       AS hostname,
-    hex(SHA256(concat(database, '%salt%')))         AS database,
-    hex(SHA256(concat(table, '%salt%')))            AS table,
-    partition_id,
-    max(max_block_number)                           AS max_block,
-    max(modification_time)                          AS last_visible,
+    hex(SHA256(concat(p.database, '%salt%')))       AS database,
+    hex(SHA256(concat(p.table, '%salt%')))          AS table,
+    p.partition_id                                  AS partition_id,
+    max(p.max_block_number)                         AS max_block,
+    max(p.modification_time)                        AS last_visible,
     count()                                         AS active_parts
-FROM system.parts
-WHERE active
-  AND database NOT IN ('system', 'information_schema', 'INFORMATION_SCHEMA')
+FROM system.parts AS p
+WHERE p.active
+  AND p.database NOT IN ('system', 'information_schema', 'INFORMATION_SCHEMA')
 GROUP BY hostname, database, table, partition_id
 ORDER BY last_visible DESC, database, table, partition_id
 LIMIT 200
