@@ -28,11 +28,12 @@ Under the hood: per-environment query sets (`cloud` / `onprem` / `gov`) selected
 | `system.metric_log_7_days` (hourly aggregation of `system.metric_log`) | Memory and background-pool load over time | Tells "the server was overloaded" apart from "one query misbehaved". |
 | `system.disks`, `system.detached_parts` | Is disk running out; has data been set aside as broken? | A full disk explains many other symptoms; detached parts record corruption or replication leftovers. |
 | `system.tables`, `system.columns`, `system.dictionaries`, `system.clusters` | Schema, keys, materialized views, dictionaries, topology | Findings in parts and queries are *explained* by the schema and the cluster definition. |
-| `system.settings`, `system.server_settings` (≥ 23.3) | Which query/profile and server settings deviate from their defaults | Answers "what was tuned" without a config copy — cloud bundles have no `configuration/`; identifying server values are `REMOVED` in gov. |
+| `system.settings`, `system.server_settings` (≥ 23.3), `system.merge_tree_settings` | Which query/profile, server and server-wide MergeTree settings deviate from their defaults — the third layer carries the `TOO_MANY_PARTS` thresholds and, on SharedMergeTree, the per-table fetch batch size and leader-election period | Answers "what was tuned" without a config copy — cloud bundles have no `configuration/`; identifying server values are `REMOVED` in gov. |
 | `system.asynchronous_insert_log` (7 days) | Are async-insert flushes succeeding and how slow are they? | A lost flush is silent when `wait_for_async_insert = 0`. |
 | `system.crash_log`, `system.stack_trace` | Did the server crash; what were its threads doing? | Crash evidence needs the trace and the query that triggered it. |
 | `system.metrics`, `system.events`, `system.asynchronous_metrics` | Live gauges and cumulative counters: Keeper session and watches, read-only replicas, fetches in flight, object-storage requests, cache size, `Uptime` | The "right now" state the hourly aggregates cannot give; `Uptime` turns `system.errors` and `system.events` counts into rates. |
 | `system.metric_log_coordination_3_days` (3 days, hourly, columns selected by regex) | Keeper, object-storage, filesystem-cache and replication counters hour by hour | A Keeper outage or an S3 error burst at 03:00 is visible here even when no query failed. |
+| `system.metric_log_by_host_3_days` (cloud only; 3 days, hourly, per replica) | Which replica's background pools are pinned, at what live pool size, with what Keeper latency and CPU; on SharedMergeTree, parts selected for fetching against fetches started and leader elections per hour | `metric_log_7_days` folds the replicas together; this is the per-host view a parts-propagation-lag or Keeper-latency finding is placed with, and it shows a pool-size change arriving host by host. |
 | `system.zookeeper_connection` (≥ 23.8), `system.databases`, `system.storage_policies` | Which Keeper node, how old the session; how many `Replicated` databases; which disks back which policy | The coordination and storage topology behind replication and "file doesn't exist" findings. |
 | `system.distributed_ddl_queue` (7 days), `system.replicated_fetches` | Stuck or failed `ON CLUSTER` / Replicated-database DDL with per-host status; part fetches in flight | DDL replay storms (`TABLE_ALREADY_EXISTS` on `.tmp.inner_id` tables, code 571) and wedged fetches are visible only here. |
 | `system.zookeeper_log_errors_1_day`, `system.blob_storage_log_7_days` (only when the tables are enabled) | Failed Keeper requests per hour, operation and error code (errors only — the table is far too large to aggregate whole); object-storage uploads, deletes and failures per hour | Direct evidence for "Keeper stopped answering" and "the blob was deleted / never written". |
@@ -335,6 +336,7 @@ Most collection queries look back over a fixed period. Each declares its **own**
 | `system.metric_log_7_days` | 7 days |
 | `system.asynchronous_insert_log_7_days` | 7 days |
 | `system.metric_log_coordination_3_days` | 3 days |
+| `system.metric_log_by_host_3_days` | 3 days |
 | `system.blob_storage_log_7_days` | 7 days |
 | `system.error_log_7_days` | 7 days |
 | `system.distributed_ddl_queue` | 7 days |
