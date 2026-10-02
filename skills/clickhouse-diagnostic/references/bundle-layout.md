@@ -153,7 +153,7 @@ Fields are omitted when unreadable; `available: false` + `notes` marks a degrade
 
 ## 6a. `keeper/`
 
-One `keeper/<host>_<port>.txt` per Keeper member in `system.zookeeper_connection` (bundles from v0.7+; absent on servers before 23.8, in cloud by default, or with `-keeper-mntr off`). Plain text:
+One `keeper/<host>_<port>.txt` per Keeper member (bundles from v0.7+; absent on servers before 23.8, in cloud by default, or with `-keeper-mntr off`). Members are the union of `system.zookeeper_connection` (the member each configured connection is *on* — one row per connection, not per ensemble member) and the `<zookeeper><node>` entries of the server configuration when the tool ran on the server; a remote or cloud run therefore holds the connected member only. Plain text:
 
 ```
 # clickhouse-diagnostic — Keeper four-letter commands
@@ -176,7 +176,7 @@ zk_num_alive_connections  zk_outstanding_requests  zk_server_state  zk_znode_cou
 zk_ephemerals_count  zk_approximate_data_size  zk_key_arena_size  zk_latest_snapshot_size
 zk_open_file_descriptor_count  zk_max_file_descriptor_count  zk_followers  zk_synced_followers   # the last two on the leader only
 ```
-A command that failed is written as `error: connection refused` / `error: timeout after 10s` under its `##` header, and an empty reply as a note about `four_letter_word_white_list`. The per-member status (`ok` / `partial` / `refused` / `timeout`) is also one `keeper` line per member in `execution_log.txt`. In gov the host in the name and header is `hex(SHA256(host ‖ salt))` — the same value as `host` in the gov `system.zookeeper_connection` file, so the two join — and any reply line carrying an `ip:port` was dropped. Only the members *this* server is configured with are probed: a member missing from the directory is not necessarily down, it may simply not be in this server's `<zookeeper>` block.
+A command that failed is written as `error: connection refused` / `error: timeout after 10s` under its `##` header, and an empty reply as a note about `four_letter_word_white_list`. A reply cut short by the read deadline is kept and followed by `error: timeout after 10s — reply truncated`. The per-member status — `ok` (all three answered), `partial` (some did), `refused`, `timeout` (any command timed out, truncated replies included), `failed` (every command failed for another reason, or the file could not be written) — is also one `keeper` line per member in `execution_log.txt`. In gov the host in the name and header is `hex(SHA256(host ‖ salt))` — the same value as `host` in the gov `system.zookeeper_connection` file, so the two join — and any reply line carrying an `ip:port` was dropped. Only the members *this* server is configured with are probed: a member missing from the directory is not necessarily down, it may simply not be in this server's `<zookeeper>` block.
 
 ## 7. `configuration/`
 

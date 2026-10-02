@@ -209,3 +209,108 @@ func TestFileName_SafeForIPv6(t *testing.T) {
 		t.Errorf("colons survive in %s", got)
 	}
 }
+
+// The ensemble is declared in the server configuration, not in
+// system.zookeeper_connection (which names the connected member only). Both
+// config.d/ and the adjacent config.xml are read; a node without <port> gets
+// the ZooKeeper default; substitutions are skipped.
+func TestTargetsFromConfig(t *testing.T) {
+	root := t.TempDir()
+	cd := filepath.Join(root, "config.d")
+	if err := os.Mkdir(cd, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	must := func(name, body string) {
+		if err := os.WriteFile(name, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	must(filepath.Join(cd, "keeper.xml"), `<clickhouse><zookeeper>
+	  <node index="1"><host>keeper-a.example</host><port>9181</port></node>
+	  <node><host>keeper-b.example</host></node>
+	  <node><host>{env:ZK_HOST}</host><port>9181</port></node>
+	</zookeeper></clickhouse>`)
+	must(filepath.Join(root, "config.xml"), `<clickhouse><zookeeper><node><host>keeper-c.example</host><port>2181</port></node></zookeeper></clickhouse>`)
+	must(filepath.Join(cd, "notes.txt"), `<zookeeper><node><host>ignored.example</host></node></zookeeper>`)
+
+	got := TargetsFromConfig(cd)
+	want := []Target{{"keeper-a.example", "9181"}, {"keeper-b.example", DefaultPort}, {"keeper-c.example", "2181"}}
+	if len(got) != len(want) {
+		t.Fatalf("targets = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("target %d = %v, want %v", i, got[i], want[i])
+		}
+	}
+	// A non-*.d directory must not volunteer its parent.
+	if got := TargetsFromConfig(root); len(got) != 1 || got[0].Host != "keeper-c.example" {
+		t.Errorf("plain dir: %v, want only the config.xml node", got)
+	}
+	if TargetsFromConfig("") != nil || TargetsFromConfig(filepath.Join(root, "missing")) != nil {
+		t.Error("empty or unreadable dir must yield nil")
+	}
+	merged := MergeTargets([]Target{{"keeper-b.example", DefaultPort}}, []Target{{"keeper-b.example", DefaultPort}})
+	if len(merged) != 1 {
+		t.Errorf("merge must dedupe: %v", merged)
+	}
+	merged = MergeTargets([]Target{{"keeper-b.example", DefaultPort}}, want)
+	if len(merged) != 3 || merged[0].Host != "keeper-b.example" {
+		t.Errorf("merge keeps connected first and adds the rest: %v", merged)
+	}
+}
+
+// A member that answers part of mntr and then stalls until the deadline is
+// a timeout, not an ok: the partial text is kept but marked truncated.
+func TestCollect_PartialReplyThenStallIsTimeout(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	stop := make(chan struct{})
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				buf := make([]byte, 4)
+				_, _ = c.Read(buf)
+				_, _ = c.Write([]byte("zk_version\tv1\nzk_avg_latency\t1\n"))
+				<-stop // never finish, never close: the client's deadline must end it
+			}(c)
+		}
+	}()
+	defer close(stop)
+	host, port, _ := net.SplitHostPort(ln.Addr().String())
+
+	dir := t.TempDir()
+	out, err := Collect(dir, []Target{{host, port}}, Options{DialTimeout: time.Second, ReadTimeout: 300 * time.Millisecond})
+	if err != nil || len(out) != 1 {
+		t.Fatalf("collect: %v %v", out, err)
+	}
+	if out[0].Status != "timeout" {
+		t.Errorf("status = %q, want timeout (partial replies must not count as ok)", out[0].Status)
+	}
+	body, _ := os.ReadFile(out[0].File)
+	if !strings.Contains(string(body), "zk_avg_latency\t1") || !strings.Contains(string(body), "reply truncated") {
+		t.Errorf("file should keep the partial reply and mark it truncated:\n%s", body)
+	}
+}
+
+// IPv4-mapped and scoped IPv6 client addresses are addresses too.
+func TestGovFilter_IPv6Forms(t *testing.T) {
+	in := "zk_version\tv1\n /[::ffff:10.0.0.7]:60155[0](queued=0)\n /[fe80::1%eth0]:2181\n /10.0.0.7:60155\n /[2001:db8::1]:60155\nzk_znode_count\t5\n"
+	got := govFilter(in)
+	for _, bad := range []string{"::ffff:", "fe80::", "10.0.0.7", "2001:db8"} {
+		if strings.Contains(got, bad) {
+			t.Errorf("address %q survived the gov filter:\n%s", bad, got)
+		}
+	}
+	if !strings.Contains(got, "zk_version") || !strings.Contains(got, "zk_znode_count") {
+		t.Errorf("counter lines must survive:\n%s", got)
+	}
+}

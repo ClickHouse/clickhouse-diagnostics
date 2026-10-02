@@ -462,6 +462,7 @@ What still reaches the server in dry-run:
 |---|---|
 | `SELECT version()` | Picks the right query variant for the server version |
 | Pre-flight for `--query-id` / `--normalized-query-hash` | Derives the hash + event_time (or the slowest query_id) so the printed analysis SQL has real values, not unbound `{query_id}` markers |
+| `SELECT DISTINCT host, port FROM system.zookeeper_connection` (`-keeper-mntr`) | Lists the Keeper members so the dry run can say which it would contact; printed when it runs |
 | `EXPLAIN ESTIMATE <query>` per SELECT | Read-only metadata only |
 
 Combine with the query-analysis flags to dry-run the focused bundle too:
@@ -660,7 +661,7 @@ Both are also skipped under `--dry-run`, which promises to write nothing. The mo
 
 ### `keeper/` — what each Keeper member says about itself
 
-`-keeper-mntr auto|on|off` (default `auto`) sends three four-letter commands to every Keeper member listed in `system.zookeeper_connection` — the members *this* server is configured with — and writes one `keeper/<host>_<port>.txt` per member:
+`-keeper-mntr auto|on|off` (default `auto`) sends three four-letter commands to the Keeper members and writes one `keeper/<host>_<port>.txt` per member. The member list is the union of two sources: `system.zookeeper_connection`, which names the member each configured connection is **on right now** (one row per connection — the default `<zookeeper>` block and every auxiliary one — not one per ensemble member), and every `<zookeeper><node>` in the server configuration (`-config-dir` and the adjacent `config.xml`) when the tool runs on the server. The second is what reaches the followers this server is *not* connected to — the member a Keeper incident is usually about. A run without access to the configuration (remote `-host`, cloud, gov without `-config-dir`) probes the connected member only, and says so in the execution log.
 
 | Command | What it answers |
 |---|---|
@@ -676,7 +677,7 @@ These are the server-side facts a Keeper finding is settled with: `metric_log` s
 | `gov` | **on**, host hashed | The counters are numbers; the only identifier is the member's host, which is written as `hex(SHA256(host ‖ salt))` in the file name and header — the same form `system.zookeeper_connection` carries in a gov bundle, so the two join. Any reply line carrying an `ip:port` is dropped as a safeguard. |
 | `cloud` | **off** | A managed service's Keeper is not reachable from outside. `-keeper-mntr=on` is honoured with a warning for a self-managed cluster collected in cloud mode. |
 
-Under `--dry-run` the members are listed and nothing is contacted. Servers before 23.8 have no `system.zookeeper_connection`, so the step is skipped and says so. Keeper must allow the three words in `four_letter_word_white_list` (the default `*` does); an empty reply is annotated accordingly.
+Under `--dry-run` the members are listed and nothing is contacted; the one-row-per-connection `SELECT` on `system.zookeeper_connection` that builds the list is a metadata pre-flight read, executed for real and printed like the version probe. Per-member statuses in `execution_log.txt`: `ok` (all three commands answered), `partial` (some did — usually a word missing from `four_letter_word_white_list`), `refused`, `timeout` (including a reply cut short by the 10 s deadline, kept in the file and marked truncated), `failed` (every command failed for another reason, or the file could not be written). Servers before 23.8 have no `system.zookeeper_connection`, so the step is skipped and says so. Keeper must allow the three words in `four_letter_word_white_list` (the default `*` does); an empty reply is annotated accordingly.
 
 ### `host_info.json` — OS, kernel and hardware
 

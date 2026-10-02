@@ -619,28 +619,39 @@ func main() {
 		rec.Phase("query analysis", time.Since(phaseStart), "")
 	}
 
-	// Keeper's own view: ruok / srvr / mntr from every member this server is
-	// configured with (system.zookeeper_connection). Server-side facts no
-	// system table carries — leader or follower, outstanding requests,
-	// Keeper's own latency, node count, version — written as
-	// keeper/<host>_<port>.txt. An unreachable member is an outcome in the
-	// file and the execution log, never a failed run. Under --dry-run the
-	// members are listed and nothing is contacted. The member list is read
-	// with ExecuteQueryReal so the dry run can list it; it is a one-row-per-
-	// member metadata read, the same class as the version probe.
+	// Keeper's own view: ruok / srvr / mntr from the Keeper members. Server-
+	// side facts no system table carries — leader or follower, outstanding
+	// requests, Keeper's own latency, node count, version — written as
+	// keeper/<host>_<port>.txt. Two sources make the member list:
+	// system.zookeeper_connection names the member each configured
+	// connection is ON right now (one row per connection, not per ensemble
+	// member), and the server configuration's <zookeeper><node> entries name
+	// the whole ensemble when the tool runs on the server. Union of both,
+	// so a follower this server is not connected to is probed too — that
+	// is the member a Keeper incident is usually about. An unreachable
+	// member is an outcome in the file and the execution log, never a
+	// failed run. Under --dry-run the members are listed and nothing is
+	// contacted; the member query itself is a metadata pre-flight read like
+	// the version probe, executed for real with ExecuteQueryReal and printed
+	// so the dry run still shows every SELECT that reached the server.
 	if !skipKeeper {
 		phaseStart = time.Now()
+		if dryRun {
+			fmt.Printf("\n-- pre-flight (executed, metadata only): %s\n", keeper.TargetsQuery)
+		}
 		raw, qerr := client.ExecuteQueryReal(keeper.TargetsQuery)
-		targets := keeper.ParseTargets(raw)
+		connected := keeper.ParseTargets(raw)
+		configured := keeper.TargetsFromConfig(configDir)
+		targets := keeper.MergeTargets(connected, configured)
 		switch {
-		case qerr != nil:
+		case qerr != nil && len(targets) == 0:
 			// system.zookeeper_connection exists from 23.8; a server without
 			// a <zookeeper> block has an empty one, not an error.
 			fmt.Printf("Keeper facts: skipped — system.zookeeper_connection could not be read (%s)\n", firstLine(qerr.Error()))
 			rec.Record(runlog.Entry{Stage: "keeper", Name: "system.zookeeper_connection", Status: "skipped",
 				Duration: time.Since(phaseStart), Rows: -1, Extra: "-keeper-mntr: no member list", Error: qerr.Error()})
 		case len(targets) == 0:
-			fmt.Println("Keeper facts: skipped — system.zookeeper_connection lists no Keeper member (no <zookeeper> configured)")
+			fmt.Println("Keeper facts: skipped — no Keeper member in system.zookeeper_connection or the server configuration (no <zookeeper> configured)")
 			rec.Record(runlog.Entry{Stage: "keeper", Name: "system.zookeeper_connection", Status: "skipped",
 				Duration: time.Since(phaseStart), Rows: -1, Extra: "-keeper-mntr: no Keeper member configured"})
 		case dryRun:
@@ -650,7 +661,11 @@ func main() {
 				fmt.Printf("  %s:%s\n", keeper.Label(t.Host, govSalt), t.Port)
 			}
 		default:
-			fmt.Printf("Collecting Keeper facts from %d member(s) (ruok / srvr / mntr)...\n", len(targets))
+			src := fmt.Sprintf("%d connected", len(connected))
+			if extra := len(targets) - len(connected); extra > 0 {
+				src += fmt.Sprintf(" + %d more from the server configuration", extra)
+			}
+			fmt.Printf("Collecting Keeper facts from %d member(s) (%s; ruok / srvr / mntr)...\n", len(targets), src)
 			outcomes, kerr := keeper.Collect(finalOutputDir, targets, keeper.Options{GovSalt: govSalt})
 			if kerr != nil {
 				fmt.Printf("Warning: Keeper facts could not be written: %v\n", kerr)

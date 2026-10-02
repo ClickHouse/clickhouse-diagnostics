@@ -111,11 +111,96 @@ func Resolve(setting, mode string) (skip bool, warning string, err error) {
 	}
 }
 
-// TargetsQuery is the SELECT that lists the members; FORMAT TSV so
-// ParseTargets can read it. One row per configured member; a server whose
-// <zookeeper> block names three hosts lists three rows since 23.8 on most
-// versions, one row (the connected member) on some older ones.
+// TargetsQuery lists the member each configured Keeper connection is on
+// right now; FORMAT TSV so ParseTargets can read it. system.zookeeper_connection
+// has one row per connection (the default <zookeeper> block plus every
+// auxiliary one), each naming the member that connection is CONNECTED to —
+// not the whole ensemble. The remaining members come from the server
+// configuration (TargetsFromConfig); without it only the connected member
+// is probed, which the docs say.
 const TargetsQuery = "SELECT DISTINCT host, toString(port) FROM system.zookeeper_connection WHERE host != '' ORDER BY host, port FORMAT TSV"
+
+// DefaultPort is the <zookeeper><node><port> default when a node omits it.
+const DefaultPort = "2181"
+
+var (
+	reZKBlock = regexp.MustCompile(`(?is)<zookeeper\b[^>]*>(.*?)</zookeeper>`)
+	reZKNode  = regexp.MustCompile(`(?is)<node\b[^>]*>(.*?)</node>`)
+	reZKHost  = regexp.MustCompile(`(?is)<host>\s*([^<]*?)\s*</host>`)
+	reZKPort  = regexp.MustCompile(`(?is)<port>\s*([^<]*?)\s*</port>`)
+)
+
+// TargetsFromConfig reads every <zookeeper><node> from the server
+// configuration — configDir and, when configDir is a *.d directory, the
+// adjacent config.xml, the same two places logfiles.LogPathsFromConfig
+// scans. This is where the ENSEMBLE is declared; system.zookeeper_connection
+// only names the member this server is on, so a failed follower never
+// appears there. Unresolved substitutions ({…}, from_env) and empty hosts
+// are skipped; a node without <port> gets DefaultPort. Nothing is returned
+// when the directory is unreadable — the tool is then not on the server.
+func TargetsFromConfig(configDir string) []Target {
+	if configDir == "" {
+		return nil
+	}
+	roots := []string{configDir}
+	if base := filepath.Base(filepath.Clean(configDir)); strings.HasSuffix(base, ".d") {
+		if parent := filepath.Dir(filepath.Clean(configDir)); parent != "." {
+			roots = append(roots, parent)
+		}
+	}
+	seen := map[Target]bool{}
+	var out []Target
+	for _, root := range roots {
+		entries, err := os.ReadDir(root)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			name := strings.ToLower(e.Name())
+			if e.IsDir() || (!strings.HasSuffix(name, ".xml") && !strings.HasSuffix(name, ".conf")) {
+				continue
+			}
+			blob, err := os.ReadFile(filepath.Join(root, e.Name()))
+			if err != nil {
+				continue
+			}
+			for _, block := range reZKBlock.FindAllStringSubmatch(string(blob), -1) {
+				for _, node := range reZKNode.FindAllStringSubmatch(block[1], -1) {
+					h := reZKHost.FindStringSubmatch(node[1])
+					if h == nil || h[1] == "" || strings.Contains(h[1], "{") {
+						continue
+					}
+					port := DefaultPort
+					if pm := reZKPort.FindStringSubmatch(node[1]); pm != nil && pm[1] != "" && !strings.Contains(pm[1], "{") {
+						port = pm[1]
+					}
+					t := Target{Host: h[1], Port: port}
+					if !seen[t] {
+						seen[t] = true
+						out = append(out, t)
+					}
+				}
+			}
+		}
+	}
+	return out
+}
+
+// MergeTargets unions the connected member(s) with the configured ensemble,
+// connected first, without duplicates.
+func MergeTargets(connected, configured []Target) []Target {
+	seen := map[Target]bool{}
+	var out []Target
+	for _, list := range [][]Target{connected, configured} {
+		for _, t := range list {
+			if !seen[t] {
+				seen[t] = true
+				out = append(out, t)
+			}
+		}
+	}
+	return out
+}
 
 // ParseTargets turns the TSV of TargetsQuery into targets, dropping
 // malformed lines and duplicates.
@@ -139,7 +224,10 @@ func ParseTargets(tsv string) []Target {
 
 // FourLetter sends one command and returns the reply. Keeper closes the
 // connection after answering, so the reply is read to EOF; readTimeout
-// bounds a member that accepts but never answers.
+// bounds a member that accepts but never answers. A reply cut short by the
+// deadline is returned TOGETHER with the timeout error, so the caller can
+// keep what arrived and still record the member as timed out — a stalled
+// mntr must not pass for a complete one.
 func FourLetter(host, port, cmd string, dialTimeout, readTimeout time.Duration) (string, error) {
 	conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, port), dialTimeout)
 	if err != nil {
@@ -155,6 +243,12 @@ func FourLetter(host, port, cmd string, dialTimeout, readTimeout time.Duration) 
 	var b strings.Builder
 	r := bufio.NewReader(conn)
 	if _, err := io.Copy(&b, r); err != nil {
+		var ne net.Error
+		if errors.As(err, &ne) && ne.Timeout() {
+			// Deadline hit: whatever arrived is partial. Hand it back with
+			// the error so the file shows it marked as truncated.
+			return b.String(), err
+		}
 		// A reply followed by a reset is still a reply.
 		if b.Len() == 0 {
 			return "", err
@@ -163,10 +257,12 @@ func FourLetter(host, port, cmd string, dialTimeout, readTimeout time.Duration) 
 	return b.String(), nil
 }
 
-// reClientAddr matches an ip:port or [v6]:port token. srvr and mntr do not
-// print client addresses today; in gov the filter guards the file against
-// a future Keeper that does, because a hashed bundle must not carry one.
-var reClientAddr = regexp.MustCompile(`(\d{1,3}\.){3}\d{1,3}:\d+|\[[0-9a-fA-F:]+\]:\d+`)
+// reClientAddr matches an ip:port or [v6]:port token — the bracketed form
+// including IPv4-mapped addresses ([::ffff:10.0.0.7]:60155) and scoped ones
+// ([fe80::1%eth0]:2181). srvr and mntr do not print client addresses today;
+// in gov the filter guards the file against a future Keeper that does,
+// because a hashed bundle must not carry one.
+var reClientAddr = regexp.MustCompile(`(\d{1,3}\.){3}\d{1,3}:\d+|\[[0-9a-fA-F:.%A-Za-z0-9_-]+\]:\d+`)
 
 // govFilter drops any reply line carrying a client address.
 func govFilter(reply string) string {
@@ -243,11 +339,23 @@ func Collect(destDir string, targets []Target, opts Options) ([]Outcome, error) 
 			fmt.Fprintf(&b, "\n## %s\n", cmd)
 			if err != nil {
 				lastErr = err.Error()
+				// A timeout can carry a partial reply: keep it, but mark it
+				// truncated and count the command as timed out, never ok.
+				truncated := ""
+				if reply != "" {
+					if opts.GovSalt != "" {
+						reply = govFilter(reply)
+					}
+					if reply = strings.TrimRight(reply, "\n"); reply != "" {
+						fmt.Fprintf(&b, "%s\n", reply)
+						truncated = " — reply truncated"
+					}
+				}
 				var ne net.Error
 				switch {
 				case errors.As(err, &ne) && ne.Timeout():
 					timedOut++
-					fmt.Fprintf(&b, "error: timeout after %s\n", opts.ReadTimeout)
+					fmt.Fprintf(&b, "error: timeout after %s%s\n", opts.ReadTimeout, truncated)
 				case strings.Contains(err.Error(), "connection refused"):
 					refused++
 					fmt.Fprintf(&b, "error: connection refused\n")
