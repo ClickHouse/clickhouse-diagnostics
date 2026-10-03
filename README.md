@@ -35,6 +35,7 @@ Under the hood: per-environment query sets (`cloud` / `onprem` / `gov`) selected
 | `system.metric_log_coordination_3_days` (3 days, hourly, columns selected by regex) | Keeper, object-storage, filesystem-cache and replication counters hour by hour | A Keeper outage or an S3 error burst at 03:00 is visible here even when no query failed. |
 | `system.metric_log_by_host_3_days` (cloud only; 3 days, hourly, per replica) | Which replica's background pools are pinned, at what live pool size, with what Keeper latency and CPU; on SharedMergeTree, parts selected for fetching against fetches started and leader elections per hour | `metric_log_7_days` folds the replicas together; this is the per-host view a parts-propagation-lag or Keeper-latency finding is placed with, and it shows a pool-size change arriving host by host. |
 | `system.zookeeper_connection` (≥ 23.8), `system.databases`, `system.storage_policies` | Which Keeper node, how old the session; how many `Replicated` databases; which disks back which policy | The coordination and storage topology behind replication and "file doesn't exist" findings. |
+| `system.parts_max_block_recent` (all modes), `system.parts_max_block_by_replica` (cloud) | Each replica's newest block per partition for its 200 most recently written partitions; which replica is behind, by how many blocks, for how long | On SharedMergeTree a lagging replica returns fewer rows than its siblings — this names the replica and the partitions from one fan-out over `system.parts` (the full `system.parts` dump is read on one replica and keeps the 50 000 largest parts, which drops exactly the fresh small ones that show lag); on one node the recent file lines up two bundles collected on two replicas. |
 | `system.distributed_ddl_queue` (7 days), `system.replicated_fetches` | Stuck or failed `ON CLUSTER` / Replicated-database DDL with per-host status; part fetches in flight | DDL replay storms (`TABLE_ALREADY_EXISTS` on `.tmp.inner_id` tables, code 571) and wedged fetches are visible only here. |
 | `system.zookeeper_log_errors_1_day`, `system.blob_storage_log_7_days` (only when the tables are enabled) | Failed Keeper requests per hour, operation and error code (errors only — the table is far too large to aggregate whole); object-storage uploads, deletes and failures per hour | Direct evidence for "Keeper stopped answering" and "the blob was deleted / never written". |
 | `host_info.json` (onprem) | OS, CPU, RAM, disks, THP, overcommit, limits, cgroups | A large share of self-managed incidents are host settings ClickHouse itself warns about at startup. |
@@ -744,13 +745,13 @@ Every run reports four distinct outcomes, because each means something different
 | **fired** | The rule ran and matched rows — a real finding. |
 | **clean** | The rule ran and matched nothing. |
 | **errored** | The rule could not run (bad SQL, a column missing on this version, no `SELECT` grant). **Not a finding** — counted and displayed separately, and excluded from "checked". |
-| **not applicable** (skipped) | The system table the rule queries doesn't exist here — `crash_log` on a healthy self-managed instance, or a config-disabled `text_log`/`query_log`. Excluded from "checked" so it never reads as a check that passed. |
+| **not applicable** (skipped) | The system table the rule queries doesn't exist here — `crash_log` on a healthy self-managed instance, or a config-disabled `text_log`/`query_log` — or the rule declares `modes:` and this run is in another mode (a per-replica comparison that needs the cloud fan-out, a replication-queue rule on SharedMergeTree). Excluded from "checked" so it never reads as a check that passed; the reason is recorded per rule. |
 
 ```
 Alert evaluation complete: 8 rule(s) checked, 1 fired, 2 errored, 1 not applicable
 ```
 
-Only rules that actually produced an answer count as *checked*. The dashboard mirrors this: findings get a severity badge, errored rules get a muted **⚠ N Could not run** chip (never a red severity count), and skipped rules are listed as "not applicable (table not present)".
+Only rules that actually produced an answer count as *checked*. The dashboard mirrors this: findings get a severity badge, errored rules get a muted **⚠ N Could not run** chip (never a red severity count), and skipped rules are listed as "not applicable" with their reason (table not present, or the rule's `modes:` exclude this run mode).
 
 A missing **column** is always an error, never "not applicable" — that's the signal that a rule needs [version-gating](#version-specific-queries).
 
@@ -777,6 +778,10 @@ description: |
 tags:
   - mutations
   - performance
+# modes: [cloud]                     # optional: run only in these modes (cloud | onprem | gov);
+                                     # elsewhere the rule is reported as not applicable, not errored —
+                                     # for queries that only make sense with a clusterAllReplicas
+                                     # fan-out, or with a replication queue SharedMergeTree lacks
 
 query: |
   SELECT database, table, mutation_id,
@@ -814,7 +819,7 @@ In `message:`, `{column_name}` is replaced with the value from each result row. 
 
 ### Bundled alert rules
 
-The repo ships with 17 alert rules in `alerts/` (plus version-gated overrides in `alerts/<version>/`). They are intended as a starting point — adjust thresholds to match your workload.
+The repo ships with 18 alert rules in `alerts/` (plus version-gated overrides in `alerts/<version>/`). They are intended as a starting point — adjust thresholds to match your workload.
 
 | Rule | Severity | Fires when |
 |---|---|---|
@@ -830,6 +835,7 @@ The repo ships with 17 alert rules in `alerts/` (plus version-gated overrides in
 | `merges_stalled` | warning | An hour in the last 24 with more than 100 `NewPart` events and zero completed merges (`part_log`) — Keeper down, pool paused or every merge failing |
 | `fetch_pool_saturated` | warning | Hourly average of `BackgroundFetchesPoolTask` at ≥ 90 % of `background_fetches_pool_size` in 3 of the last 24 hours, per replica — the fetch executor has no queue, so on SharedMergeTree this is parts-propagation lag |
 | `schedule_pool_saturated` | warning | Hourly average of `BackgroundSchedulePoolTask` at ≥ 95 % of `background_schedule_pool_size` in 3 of the last 24 hours, per replica — every table's periodic tasks run here; tens of thousands of replicated tables pin it first |
+| `parts_propagation_lag` | warning | *(cloud only — `modes: [cloud]`)* A replica is ≥ 3 blocks and ≥ 10 min behind the newest replica on a partition of a SharedMergeTree table — parts-propagation lag; one instance per replica with its worst partition, the full list in `system.parts_max_block_by_replica` |
 | `too_many_simultaneous_queries` | warning | More than 10 code-202 (`TOO_MANY_SIMULTANEOUS_QUERIES`) errors in the last hour (`max_concurrent_queries` hit) |
 | `too_many_parts` | warning | A partition has more than 300 active parts (inserts are delayed from `parts_to_delay_insert` = 1000 and rejected with code 252 `TOO_MANY_PARTS` at `parts_to_throw_insert` = 3000) |
 | `large_parts` | warning | A single active part is larger than 150 GB |

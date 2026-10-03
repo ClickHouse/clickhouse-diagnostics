@@ -1,0 +1,76 @@
+name: parts_propagation_lag
+title: "A replica is behind on parts (SharedMergeTree propagation lag)"
+severity: warning
+description: |
+  On a SharedMergeTree cluster every replica keeps its own view of
+  system.parts and learns about new parts asynchronously. This rule
+  compares, per partition, each replica's newest block number with the
+  newest any replica has: a replica at least 3 blocks AND at least 10
+  minutes behind on any partition is lagging — the same query on that
+  replica returns fewer rows than on a sibling, and the gap grows until a
+  fetch slot frees up. One instance per lagging replica with its worst
+  partition; the full list of partitions behind is in the collected file
+  system.parts_max_block_by_replica.
+
+  Usual cause: a saturated background fetch or schedule pool (alerts
+  fetch_pool_saturated / schedule_pool_saturated, HC-2.13 / 2.14) — the fetch
+  executor has no queue, so a table needing more fetches than free slots
+  backs off silently. A restart clears the backlog only until the pool fills
+  again; the lasting fix is pool size, fewer and larger inserts, fewer tables.
+tags:
+  - replication
+  - shared-merge-tree
+  - capacity
+
+# Cloud only: the comparison needs every replica's system.parts, which only
+# a clusterAllReplicas fan-out gives ({sys.parts} is read on ONE node in
+# every mode because system.parts is a shared table for ordinary cloud
+# reads). On one node the rule has nothing to compare and is skipped.
+modes: [cloud]
+
+# Same shape as queries.cloud/system.parts_max_block_by_replica.sql — window
+# functions over one fan-out (a CTE joined to itself fans out twice), each
+# replica contributing its 20 000 most recently written partitions — rolled
+# up per replica so the alert is one instance per lagging node.
+query: |
+  SELECT
+    hostname,
+    count()                          AS partitions_behind,
+    max(blocks_behind)               AS max_blocks_behind,
+    max(seconds_behind)              AS max_seconds_behind,
+    argMax(concat(database, '.', table, ' / ', partition_id), seconds_behind) AS worst_partition
+  FROM
+  (
+    SELECT
+      hostname, database, table, partition_id,
+      cluster_max_block - max_block                                 AS blocks_behind,
+      dateDiff('second', last_part_time, cluster_last_part_time)    AS seconds_behind
+    FROM
+    (
+      SELECT
+        *,
+        max(max_block)      OVER w AS cluster_max_block,
+        max(last_part_time) OVER w AS cluster_last_part_time
+      FROM
+      (
+        SELECT
+          hostName()             AS hostname,
+          database, table, partition_id,
+          max(max_block_number)  AS max_block,
+          max(modification_time) AS last_part_time
+        FROM clusterAllReplicas(default, system.parts)
+        WHERE active
+          AND database NOT IN ('system', 'information_schema', 'INFORMATION_SCHEMA')
+        GROUP BY hostname, database, table, partition_id
+        ORDER BY hostname, last_part_time DESC
+        LIMIT 20000 BY hostname
+      )
+      WINDOW w AS (PARTITION BY database, table, partition_id)
+    )
+    WHERE blocks_behind >= 3 AND seconds_behind >= 600
+  )
+  GROUP BY hostname
+  ORDER BY max_seconds_behind DESC
+  LIMIT 100
+
+message: "{hostname}: behind on {partitions_behind} partition(s), worst {worst_partition} — {max_blocks_behind} blocks / {max_seconds_behind} s behind the newest replica"
