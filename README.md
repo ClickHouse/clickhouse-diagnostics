@@ -34,6 +34,7 @@ Under the hood: per-environment query sets (`cloud` / `onprem` / `gov`) selected
 | `system.metrics`, `system.events`, `system.asynchronous_metrics` | Live gauges and cumulative counters: Keeper session and watches, read-only replicas, fetches in flight, object-storage requests, cache size, `Uptime` | The "right now" state the hourly aggregates cannot give; `Uptime` turns `system.errors` and `system.events` counts into rates. |
 | `system.metric_log_coordination_3_days` (3 days, hourly, columns selected by regex) | Keeper, object-storage, filesystem-cache and replication counters hour by hour | A Keeper outage or an S3 error burst at 03:00 is visible here even when no query failed. |
 | `system.zookeeper_connection` (≥ 23.8), `system.databases`, `system.storage_policies` | Which Keeper node, how old the session; how many `Replicated` databases; which disks back which policy | The coordination and storage topology behind replication and "file doesn't exist" findings. |
+| `system.parts_max_block_recent` (all modes), `system.parts_max_block_by_replica` (cloud) | Each replica's newest block per partition for its 200 most recently written partitions; which replica is behind, by how many blocks, for how long | On SharedMergeTree a lagging replica returns fewer rows than its siblings — this names the replica and the partitions from one fan-out over `system.parts` (the full `system.parts` dump is read on one replica and keeps the 50 000 largest parts, which drops exactly the fresh small ones that show lag); on one node the recent file lines up two bundles collected on two replicas. |
 | `system.distributed_ddl_queue` (7 days), `system.replicated_fetches` | Stuck or failed `ON CLUSTER` / Replicated-database DDL with per-host status; part fetches in flight | DDL replay storms (`TABLE_ALREADY_EXISTS` on `.tmp.inner_id` tables, code 571) and wedged fetches are visible only here. |
 | `system.zookeeper_log_errors_1_day`, `system.blob_storage_log_7_days` (only when the tables are enabled) | Failed Keeper requests per hour, operation and error code (errors only — the table is far too large to aggregate whole); object-storage uploads, deletes and failures per hour | Direct evidence for "Keeper stopped answering" and "the blob was deleted / never written". |
 | `host_info.json` (onprem) | OS, CPU, RAM, disks, THP, overcommit, limits, cgroups | A large share of self-managed incidents are host settings ClickHouse itself warns about at startup. |
@@ -789,7 +790,7 @@ In `message:`, `{column_name}` is replaced with the value from each result row. 
 
 ### Bundled alert rules
 
-The repo ships with 17 alert rules in `alerts/` (plus version-gated overrides in `alerts/<version>/`). They are intended as a starting point — adjust thresholds to match your workload.
+The repo ships with 18 alert rules in `alerts/` (plus version-gated overrides in `alerts/<version>/`). They are intended as a starting point — adjust thresholds to match your workload.
 
 | Rule | Severity | Fires when |
 |---|---|---|
@@ -805,6 +806,7 @@ The repo ships with 17 alert rules in `alerts/` (plus version-gated overrides in
 | `merges_stalled` | warning | An hour in the last 24 with more than 100 `NewPart` events and zero completed merges (`part_log`) — Keeper down, pool paused or every merge failing |
 | `fetch_pool_saturated` | warning | Hourly average of `BackgroundFetchesPoolTask` at ≥ 90 % of `background_fetches_pool_size` in 3 of the last 24 hours, per replica — the fetch executor has no queue, so on SharedMergeTree this is parts-propagation lag |
 | `schedule_pool_saturated` | warning | Hourly average of `BackgroundSchedulePoolTask` at ≥ 95 % of `background_schedule_pool_size` in 3 of the last 24 hours, per replica — every table's periodic tasks run here; tens of thousands of replicated tables pin it first |
+| `parts_propagation_lag` | warning | *(cloud only — `modes: [cloud]`)* A replica is ≥ 3 blocks and ≥ 10 min behind the newest replica on a partition of a SharedMergeTree table — parts-propagation lag; one instance per replica with its worst partition, the full list in `system.parts_max_block_by_replica` |
 | `too_many_simultaneous_queries` | warning | More than 10 code-202 (`TOO_MANY_SIMULTANEOUS_QUERIES`) errors in the last hour (`max_concurrent_queries` hit) |
 | `too_many_parts` | warning | A partition has more than 300 active parts (inserts are delayed from `parts_to_delay_insert` = 1000 and rejected with code 252 `TOO_MANY_PARTS` at `parts_to_throw_insert` = 3000) |
 | `large_parts` | warning | A single active part is larger than 150 GB |

@@ -766,7 +766,9 @@ func TestEvalFile_UnknownModeIsAnError(t *testing.T) {
 // list they must carry. Extended by the PRs that add gated rules; a copy-paste
 // that drops the key would make a cluster-only rule fail with
 // CLUSTER_DOESNT_EXIST on every onprem run.
-var shippedRuleModes = map[string][]string{}
+var shippedRuleModes = map[string][]string{
+	"parts_propagation_lag": {"cloud"},
+}
 
 // Every shipped rule with a modes: list names real modes, and every rule in
 // shippedRuleModes is present with exactly that list.

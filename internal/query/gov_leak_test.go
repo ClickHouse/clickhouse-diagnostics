@@ -67,6 +67,11 @@ func TestGovQueries_NoRawIdentifiersOrDDL(t *testing.T) {
 		"dependencies_database", "dependencies_table",
 		"loading_dependencies_database", "loading_dependencies_table",
 		"target_database", "target_table", "view",
+		// Per-replica identity (hostName()) in parts_max_block_recent and
+		// every later per-host gov file. partition_id is NOT listed: every
+		// gov parts file ships it raw by convention (it is the `partition`
+		// expression that is hashed).
+		"hostname",
 	}
 
 	// Documented exemptions: the column name collides with an identifier
@@ -188,6 +193,75 @@ func TestGovQueries_NoRawIdentifiersOrDDL(t *testing.T) {
 				hashed := regexp.MustCompile(`(?i)SHA256\(.*\)\s*AS\s+` + id + `\b`).MatchString(body)
 				if (projected || aliased) && !hashed {
 					t.Errorf("projects identifier %q but never hashes it — looks like an unhashed copy of the onprem/cloud variant", id)
+				}
+			}
+		})
+	}
+}
+
+// TestGovQueries_HashedAliasDoesNotShadowAFilteredColumn guards a trap that
+// silently disables a filter instead of breaking the query.
+//
+// Aliases are global in ClickHouse. A gov file that projects
+// `hex(SHA256(concat(database, '…'))) AS database` puts `database` in scope as
+// the HASH, so a later bare `WHERE database NOT IN ('system', …)` compares a
+// 64-character hex string with 'system', matches every row, and the exclusion
+// is gone — the query still succeeds, which is why only a test catches it.
+// Found on queries.gov/system.parts_max_block_recent.sql, where it filled a
+// LIMIT 200 with system log partitions on a server holding 408 system parts
+// and 6 user parts. The fix is to qualify the filtered column with a table
+// alias (`p.database`), as system.part_log_3_days.sql does with `pl.`.
+func TestGovQueries_HashedAliasDoesNotShadowAFilteredColumn(t *testing.T) {
+	govDir := "../../queries.gov"
+	if _, err := os.Stat(govDir); os.IsNotExist(err) {
+		t.Skip("queries.gov/ not present")
+	}
+	// Columns gov hashes that also get filtered in practice.
+	cols := []string{"database", "table", "name", "user", "host_name", "partition", "origin", "source", "replica_name", "view"}
+	var files []string
+	err := filepath.Walk(govDir, func(p string, info os.FileInfo, err error) error {
+		if err == nil && !info.IsDir() && strings.HasSuffix(p, ".sql") {
+			files = append(files, p)
+		}
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) == 0 {
+		t.Fatal("no gov .sql files found")
+	}
+	for _, path := range files {
+		rel, _ := filepath.Rel(govDir, path)
+		t.Run(rel, func(t *testing.T) {
+			var sql strings.Builder
+			for _, line := range strings.Split(readFileForTest(t, path), "\n") {
+				if i := strings.Index(line, "--"); i >= 0 {
+					line = line[:i]
+				}
+				sql.WriteString(line + "\n")
+			}
+			body := sql.String()
+			lower := strings.ToLower(body)
+			cut := strings.Index(lower, "where")
+			if cut < 0 {
+				return // no filter, nothing to shadow
+			}
+			filter := body[cut:]
+			if g := strings.Index(strings.ToLower(filter), "group by"); g >= 0 {
+				filter = filter[:g] // GROUP BY on the alias is correct and intended
+			}
+			for _, c := range cols {
+				hashed := regexp.MustCompile(`SHA256\(concat\(\s*` + c + `\s*,`).MatchString(body)
+				aliased := regexp.MustCompile(`(?i)\bAS\s+` + c + `\b`).MatchString(body)
+				if !hashed || !aliased {
+					continue
+				}
+				// Unqualified use of that name in the filter resolves to the hash.
+				if regexp.MustCompile(`(^|[^.\w])` + c + `\s*(=|!=|<>|\bNOT\s+IN\b|\bIN\b|\bLIKE\b|\bNOT\s+LIKE\b)`).MatchString(filter) {
+					t.Errorf("%s: %q is hashed into an alias of the same name and then filtered unqualified — "+
+						"the alias shadows the column, so the filter matches every row. Qualify it with a table alias (e.g. p.%s).",
+						rel, c, c)
 				}
 			}
 		})
