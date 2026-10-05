@@ -11,10 +11,25 @@ description: |
   tables to a larger disk, or increase disk capacity. Check
   system.parts for the largest tables and system.disks for per-disk
   breakdown.
+
+  Self-managed only. On a service whose data lives on object storage the
+  disks that hold the data report 16 EiB free and can never trip this, while
+  the local disk is the filesystem cache and sits near-full by design — it is
+  sized to be filled. Measured on a healthy ClickHouse Cloud service: one
+  replica's local disk was 14.57 GiB free of 99.43 GiB, 14.7 %, which fired
+  this rule at critical with nothing wrong. A critical that a healthy service
+  produces on every run teaches the reader to skip it, so the rule is gated to
+  the modes where the local disk is the data disk. The numbers are still in
+  system.disks, and the pre-pass reports a cloud bundle's local disk as
+  information.
 tags:
   - storage
   - disk
   - reliability
+
+# Local disks on a cloud service are the filesystem cache, not capacity —
+# see the description. Data on object storage never reaches 15 %.
+modes: [onprem, gov]
 
 # Subquery aliases free_space / total_space to numeric *_b columns
 # first; the outer SELECT then formats and divides on the numeric

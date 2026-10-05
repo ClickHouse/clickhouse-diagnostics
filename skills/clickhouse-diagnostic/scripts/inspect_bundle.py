@@ -422,9 +422,29 @@ def analyse(base: str):
 
     # ---- disks
     disks = read_jsonl(first("system.disks_*.jsonl", base))
+    # On a cloud service the data sits on object storage — those disks report
+    # 16 EiB free and can never be low — while the local disk is the
+    # filesystem cache, sized to be filled and therefore near-full when the
+    # service is perfectly healthy (measured: 14.7 % free on a healthy Cloud
+    # replica). Reporting that as a capacity problem is a false critical on
+    # every cloud bundle, so it becomes information here and the
+    # disk_space_low rule is gated to onprem/gov. Below 5 % it is still worth
+    # a warning: the same filesystem holds temporary files for merges and
+    # spilled sorts.
+    cloud_object_storage = out["mode"] == "cloud" and any(
+        str(d.get("type", "")).lower().startswith("objectstorage") for d in disks)
     for d in disks:
         pct = num(d.get("free_pct"))
         if pct is None:
+            continue
+        is_local = str(d.get("type", "")).lower() == "local"
+        if cloud_object_storage and is_local:
+            if pct < 5:
+                add("warning", "disk", f"local disk `{d.get('name')}` only {pct}% free on a cloud service",
+                    f"free {d.get('free_space')} of {d.get('total_space')} — the local disk is the filesystem cache, but it also holds temporary files for merges and spilled sorts, so this little headroom can still bite", "HC-4.1")
+            elif pct < 15:
+                add("info", "disk", f"local disk `{d.get('name')}` {pct}% free on a cloud service — the filesystem cache, not capacity",
+                    f"free {d.get('free_space')} of {d.get('total_space')}; the data disks are object storage and report their own free space. Not a capacity finding — alert disk_space_low is onprem/gov only", "HC-4.1")
             continue
         # Same severity as alerts/disk_space_low.yaml and HC-4.1: below 15 % is
         # critical (merges need headroom, inserts fail with 243 and replicas go
@@ -1126,7 +1146,20 @@ def analyse(base: str):
                 add("info", "coverage", f"{who} {run.get('uptime', up.group(1) + ' s')} before collection — {scope}",
                     "a restart clears a parts-propagation backlog only temporarily; a node captured after one looks healthier than the cluster is", "HC-0")
             if run.get("warnings"):
-                add("warning", "coverage", f"the collector warned at run time: {run['warnings']}", "execution_log.txt header", "HC-0")
+                # The collector prefixes each line: "Warning:" for something
+                # that undermines the bundle, "Note:" for something expected
+                # that the reader still has to know. A load-balanced endpoint
+                # is a warning on a self-managed cluster and a note on a cloud
+                # service, where it is the only way to connect and the
+                # collection is built for it — so the prefix decides the
+                # severity here rather than the mere presence of the line.
+                for line in [w.strip() for w in str(run["warnings"]).split("|")]:
+                    if not line:
+                        continue
+                    if line.startswith("Note:"):
+                        add("info", "coverage", f"the collector noted at run time: {line}", "execution_log.txt header", "HC-0")
+                    else:
+                        add("warning", "coverage", f"the collector warned at run time: {line}", "execution_log.txt header", "HC-0")
         with open(xl_path, encoding="utf-8", errors="replace") as fh:
             for line in fh:
                 if not line.startswith("| ") or line.startswith("| # |") or line.startswith("|---"):

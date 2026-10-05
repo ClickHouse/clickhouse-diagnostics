@@ -359,11 +359,13 @@ func main() {
 	if !dryRun {
 		identity = probeNodeIdentity(client)
 		localHostname, _ := os.Hostname()
-		warnings := nodeWarnings(identity, host, localHostname, !skipHostInfo || !skipLogs || !skipConfig)
+		warnings := nodeWarnings(identity, host, localHostname, mode, !skipHostInfo || !skipLogs || !skipConfig)
 		for _, w := range warnings {
 			fmt.Println(w)
 		}
-		// The warnings name hosts; gov keeps host names out of the log.
+		// The warnings name hosts; gov keeps host names out of the log. In
+		// cloud mode the load-balancer line is a "Note:" rather than a
+		// "Warning:" — see nodeWarnings — and the pre-pass reads that prefix.
 		if len(warnings) > 0 && mode != "gov" {
 			rec.SetMeta("warnings", strings.Join(warnings, " | "))
 		}

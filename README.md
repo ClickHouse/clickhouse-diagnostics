@@ -827,7 +827,7 @@ The repo ships with 18 alert rules in `alerts/` (plus version-gated overrides in
 | `crash_log_entries` | critical | `system.crash_log` is non-empty (server crashed at least once) |
 | `replica_readonly` | critical | A replicated table is in read-only mode (lost Keeper session, disk full, network partition) |
 | `replication_queue_errors` | critical | Replication queue entries have a non-empty `last_exception` |
-| `disk_space_low` | critical | Any disk has less than 15% free space — **on any replica** in cloud mode, with the reporting host named in the message |
+| `disk_space_low` | critical | *(onprem / gov only)* Any disk has less than 15% free space, with the reporting host named in the message. Not evaluated in cloud mode: there the data lives on object storage, which reports 16 EiB free, and the local disk is the filesystem cache — sized to be filled, so a healthy service trips 15% on it. `system.disks` still carries the numbers and the pre-pass reports a cloud bundle's local disk as information |
 | `keeper_health` | critical | The two-signal Keeper health test per hour over 7 days: more than 1000 `ZooKeeperHardwareExceptions` **and** `ZooKeeperTransactions` below 50 % of the 7-day median — Keeper effectively unavailable (low traffic alone never fires: an idle hour is not an outage); catches outages that never reached `query_log` |
 | `keeper_connection_blips` | warning | More than 1000 `ZooKeeperHardwareExceptions` in an hour while Keeper traffic stayed at or above 50 % of usual (a positive 7-day median) — a session lost and re-established |
 | `keeper_exception_spike` | warning | More than 20 KEEPER_EXCEPTION (code 999) errors in one hour of the last 24 hours (one instance per hour) |
