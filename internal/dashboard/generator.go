@@ -2728,7 +2728,7 @@ function renderAlerts(){
   // definitions of one number is how the "11 fired" bug happened.)
   const evaluated=alerts.length-skipped.length-alerts.filter(a=>a.error).length;
   const skipNote=skipped.length
-    ? '<div class="alert-skipped">ℹ️ '+skipped.length+' rule(s) not applicable on this server (table not present): '+skipped.map(a=>a.name).join(', ')+'</div>'
+    ? '<div class="alert-skipped">ℹ️ '+skipped.length+' rule(s) not applicable on this server: '+skipped.map(a=>esc(a.name)+(a.skip_reason?' ('+esc(a.skip_reason)+')':'')).join(', ')+'</div>'
     : '';
   const panel=document.getElementById('alerts-panel');
   const bar=document.getElementById('alerts-summary-bar');

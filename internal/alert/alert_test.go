@@ -696,3 +696,114 @@ func TestAlertYAML_OverridesMatchRoot(t *testing.T) {
 		}
 	}
 }
+
+// ── modes gate ───────────────────────────────────────────────────────────────
+
+// A rule that only makes sense with a cluster fan-out (per-replica parts
+// comparison) declares `modes: [cloud]`; elsewhere it is skipped — never
+// run, never errored — so an onprem bundle does not show a failed rule for
+// a cluster it does not have.
+func TestDefinition_AppliesTo(t *testing.T) {
+	every := Definition{}
+	cloudOnly := Definition{Modes: []string{"cloud"}}
+	single := Definition{Modes: []string{"onprem", " Gov "}}
+	for _, c := range []struct {
+		d    Definition
+		mode string
+		want bool
+	}{
+		{every, "onprem", true}, {every, "cloud", true}, {every, "gov", true},
+		{cloudOnly, "cloud", true}, {cloudOnly, "onprem", false}, {cloudOnly, "gov", false},
+		{single, "onprem", true}, {single, "gov", true}, {single, "cloud", false},
+	} {
+		if got := c.d.appliesTo(c.mode); got != c.want {
+			t.Errorf("modes %v in %q: got %v, want %v", c.d.Modes, c.mode, got, c.want)
+		}
+	}
+}
+
+// evalFile must return a Skipped result for a rule gated to another mode
+// BEFORE touching the server: the evaluator here has no client, so any
+// attempt to run the query would panic.
+func TestEvalFile_ModeGateSkipsWithoutQuerying(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cloud_only.yaml")
+	if err := os.WriteFile(path, []byte("name: cloud_only\ntitle: t\nmodes: [cloud]\nquery: SELECT 1\nmessage: m\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ev := &Evaluator{mode: "onprem"}
+	r := ev.evalFile(path)
+	if !r.Skipped || r.Error != "" || len(r.Rows) != 0 {
+		t.Fatalf("gated rule: skipped=%v error=%q rows=%d", r.Skipped, r.Error, len(r.Rows))
+	}
+	if !strings.Contains(r.Reason, "onprem") || !strings.Contains(r.Reason, "cloud") {
+		t.Errorf("reason should name the run mode and the rule's modes: %q", r.Reason)
+	}
+}
+
+// A typo in modes: must be an error on the rule, not a silent skip in every
+// mode. The evaluator has no client, so the test also proves the check runs
+// before any query.
+func TestEvalFile_UnknownModeIsAnError(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "typo.yaml")
+	if err := os.WriteFile(path, []byte("name: typo\ntitle: t\nmodes: [on-prem]\nquery: SELECT 1\nmessage: m\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ev := &Evaluator{mode: "onprem"}
+	r := ev.evalFile(path)
+	if r.Skipped || r.Error == "" || !strings.Contains(r.Error, "on-prem") {
+		t.Fatalf("unknown mode: skipped=%v error=%q — want an error naming the bad value", r.Skipped, r.Error)
+	}
+	for _, ok := range []Definition{{}, {Modes: []string{"cloud"}}, {Modes: []string{" Gov ", "ONPREM"}}} {
+		if err := ok.validateModes(); err != nil {
+			t.Errorf("modes %v should validate: %v", ok.Modes, err)
+		}
+	}
+}
+
+// shippedRuleModes maps the rules that must carry a modes: list to the exact
+// list they must carry. Extended by the PRs that add gated rules; a copy-paste
+// that drops the key would make a cluster-only rule fail with
+// CLUSTER_DOESNT_EXIST on every onprem run.
+var shippedRuleModes = map[string][]string{
+	"parts_propagation_lag": {"cloud"},
+}
+
+// Every shipped rule with a modes: list names real modes, and every rule in
+// shippedRuleModes is present with exactly that list.
+func TestShippedRules_ModesAreGated(t *testing.T) {
+	files, err := filepath.Glob("../../alerts/*.yaml")
+	if err != nil || len(files) == 0 {
+		t.Fatalf("no alert files: %v", err)
+	}
+	sub, _ := filepath.Glob("../../alerts/*/*.yaml")
+	files = append(files, sub...)
+	seen := map[string]bool{}
+	for _, f := range files {
+		raw, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var d Definition
+		if err := yaml.Unmarshal(raw, &d); err != nil {
+			t.Fatalf("%s: %v", f, err)
+		}
+		for _, m := range d.Modes {
+			if m != "cloud" && m != "onprem" && m != "gov" {
+				t.Errorf("%s: unknown mode %q", f, m)
+			}
+		}
+		if w, ok := shippedRuleModes[d.Name]; ok {
+			seen[d.Name] = true
+			if strings.Join(d.Modes, ",") != strings.Join(w, ",") {
+				t.Errorf("%s: modes %v, want %v", f, d.Modes, w)
+			}
+		}
+	}
+	for n := range shippedRuleModes {
+		if !seen[n] {
+			t.Errorf("rule %s not found under alerts/", n)
+		}
+	}
+}

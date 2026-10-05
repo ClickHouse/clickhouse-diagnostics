@@ -16,6 +16,7 @@
 //	tags:
 //	  - mutations
 //	  - performance
+//	modes: [cloud]                                 (optional; default every mode)
 //	query: |
 //	  SELECT database, table, mutation_id,
 //	         dateDiff('hour', create_time, now()) AS hours_running,
@@ -25,6 +26,12 @@
 //	    AND dateDiff('hour', create_time, now()) > 3
 //	  ORDER BY hours_running DESC
 //	message: "Mutation {mutation_id} on {database}.{table} running {hours_running}h"
+//
+//	modes limits a rule to the run modes where its query has meaning —
+//	`[cloud]` for a per-replica comparison that needs the clusterAllReplicas
+//	fan-out, `[onprem, gov]` for a ReplicatedMergeTree replication queue
+//	that SharedMergeTree does not have. Elsewhere the rule is reported as
+//	not applicable (skipped), never errored and never counted as checked.
 //
 //	Keep root rules to columns/syntax available on the oldest supported
 //	server (22.8); gate anything newer behind a version subdirectory. For
@@ -95,6 +102,12 @@ type Definition struct {
 	Query       string   `yaml:"query"`
 	Message     string   `yaml:"message"`
 	Tags        []string `yaml:"tags"`
+	// Modes restricts the rule to these run modes (cloud / onprem / gov).
+	// Empty = every mode. A rule whose query only makes sense with a fan-out
+	// (a per-replica comparison over clusterAllReplicas) says `modes: [cloud]`
+	// and is reported as skipped elsewhere, not errored — the alternative
+	// was a rule that fails with CLUSTER_DOESNT_EXIST on every onprem run.
+	Modes []string `yaml:"modes"`
 }
 
 // Result holds the outcome of evaluating one alert rule.
@@ -336,6 +349,40 @@ func Summarize(results []Result) (evaluated, fired, errored, skipped int) {
 	return len(results) - skipped - errored, fired, errored, skipped
 }
 
+// knownModes is the closed set a rule may name in modes:. Kept here, next
+// to the gate, rather than imported from cmd (which owns the CLI's
+// canonicalisation) so the alert package stays importable from tests and
+// the dashboard without a cycle.
+var knownModes = map[string]bool{"cloud": true, "onprem": true, "gov": true}
+
+// validateModes rejects a modes: list naming a mode that does not exist.
+// Rules come from a user-selectable -alerts-dir, so a typo such as
+// `modes: [on-prem]` must surface as a broken definition, not silently
+// skip the rule in every run — the gate would otherwise read it as "some
+// other mode" forever.
+func (d Definition) validateModes() error {
+	for _, m := range d.Modes {
+		if !knownModes[strings.ToLower(strings.TrimSpace(m))] {
+			return fmt.Errorf("modes: unknown mode %q (known: cloud, onprem, gov)", m)
+		}
+	}
+	return nil
+}
+
+// appliesTo reports whether the rule runs in mode: every mode when Modes is
+// empty, else only the listed ones (case-insensitive, whitespace-tolerant).
+func (d Definition) appliesTo(mode string) bool {
+	if len(d.Modes) == 0 {
+		return true
+	}
+	for _, m := range d.Modes {
+		if strings.EqualFold(strings.TrimSpace(m), strings.TrimSpace(mode)) {
+			return true
+		}
+	}
+	return false
+}
+
 // isMissingTable reports whether err is a ClickHouse "table doesn't
 // exist" error (code 60 / UNKNOWN_TABLE). It deliberately does NOT match
 // UNKNOWN_IDENTIFIER (a missing column) — that must stay a genuine error
@@ -445,6 +492,24 @@ func (ev *Evaluator) evalFile(path string) Result {
 	}
 	if r.Severity == "" {
 		r.Severity = SeverityWarning
+	}
+
+	// A malformed modes: list is a broken rule, reported like a YAML error
+	// — the gate below must never turn a typo into a silent skip.
+	if err := def.validateModes(); err != nil {
+		r.Error = err.Error()
+		fmt.Printf("  [alert] ERROR %q: %v\n", def.Name, err)
+		return r
+	}
+
+	// Mode gate before anything touches the server: a rule declared for
+	// other modes is "not applicable" here, the same outcome as a missing
+	// table — never run, never errored, never counted as checked.
+	if !def.appliesTo(ev.mode) {
+		r.Skipped = true
+		r.Reason = "not applicable in " + ev.mode + " mode (rule modes: " + strings.Join(def.Modes, ", ") + ")"
+		fmt.Printf("  [alert] skipped %q (%s)\n", def.Name, r.Reason)
+		return r
 	}
 
 	sql := ev.expandQuery(def.Query)
