@@ -314,3 +314,46 @@ func TestGovFilter_IPv6Forms(t *testing.T) {
 		t.Errorf("counter lines must survive:\n%s", got)
 	}
 }
+
+// ClickHouse's stock config.xml ships a complete <zookeeper> example inside an
+// XML comment (example1 / example2 / example3, port 2181). Reading it as
+// configuration made an onprem run against the default -config-dir report four
+// Keeper members on a one-member cluster, write three files full of DNS
+// failures, and attempt to reach hosts the operator never named. Observed in a
+// container built from clickhouse/clickhouse-server:26.7.
+func TestTargetsFromConfig_IgnoresCommentedBlocks(t *testing.T) {
+	root := t.TempDir()
+	cd := filepath.Join(root, "config.d")
+	if err := os.Mkdir(cd, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// The parent config.xml, in the stock shape: the example block is commented.
+	if err := os.WriteFile(filepath.Join(root, "config.xml"), []byte(`<clickhouse>
+    <!-- ZooKeeper is used to store metadata about replicas, when using Replicated tables.
+      -->
+    <!--
+    <zookeeper>
+        <node><host>example1</host><port>2181</port></node>
+        <node><host>example2</host><port>2181</port></node>
+        <node><host>example3</host><port>2181</port></node>
+    </zookeeper>
+    -->
+</clickhouse>`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The operator's real block, in config.d, uncommented.
+	if err := os.WriteFile(filepath.Join(cd, "10-keeper.xml"), []byte(
+		`<clickhouse><zookeeper><node><host>keeper-a</host><port>9181</port></node></zookeeper></clickhouse>`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := TargetsFromConfig(cd)
+	if len(got) != 1 || got[0] != (Target{"keeper-a", "9181"}) {
+		t.Fatalf("targets = %v, want only the uncommented keeper-a:9181", got)
+	}
+	for _, tg := range got {
+		if strings.HasPrefix(tg.Host, "example") {
+			t.Errorf("a commented-out example host became a target: %v", tg)
+		}
+	}
+}
