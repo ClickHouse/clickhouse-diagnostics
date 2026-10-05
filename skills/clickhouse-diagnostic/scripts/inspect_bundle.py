@@ -502,9 +502,14 @@ def analyse(base: str):
         # below does — `number_of_mutations_to_throw` counts unfinished ones too.
         pending = [r for r in muts if (num(r.get("parts_to_do")) or 0) > 0]
         per_table = Counter((r.get("database"), r.get("table")) for r in pending)
-        for (db, tb), c in per_table.most_common(5):
+        # Loop variables leak into the function scope in Python, so these are
+        # named mdb/mtbl rather than db/tb: `tb` holds system.tables for the
+        # rest of analyse(), and a single unfinished mutation here used to
+        # rebind it to a table NAME — every later `r.get(...)` over it then
+        # raised AttributeError and the whole pre-pass produced nothing.
+        for (mdb, mtbl), c in per_table.most_common(5):
             if c > 100:
-                add("critical" if c >= 900 else "warning", "mutations", f"{db}.{tb} has {c} pending mutations (throws at number_of_mutations_to_throw, default 1000)",
+                add("critical" if c >= 900 else "warning", "mutations", f"{mdb}.{mtbl} has {c} pending mutations (throws at number_of_mutations_to_throw, default 1000)",
                     f"{len(muts) - len(pending)} finished mutations in the file excluded", "HC-8.2")
         if run_ts:
             for r in muts:
