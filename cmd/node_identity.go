@@ -100,16 +100,34 @@ func isLoopback(target string) bool {
 
 // nodeWarnings turns the identity probe into operator warnings. Each names
 // the consequence for the bundle, not just the fact.
-func nodeWarnings(id nodeIdentity, target, localHostname string, collectingLocalFiles bool) []string {
+//
+// mode decides how a load-balanced endpoint reads. In cloud collection it is
+// not a problem to report: a ClickHouse Cloud endpoint IS load-balanced across
+// the service's replicas, there is no per-replica endpoint to point at
+// instead, and the collection is built for it — the per-replica system tables
+// fan out with clusterAllReplicas and the shared ones are read once by design.
+// Calling that a warning on every Cloud bundle trains the reader to ignore the
+// line that matters on a self-managed cluster, where the same symptom means
+// the bundle silently describes no single node. So cloud gets a note and
+// everything else keeps the warning.
+func nodeWarnings(id nodeIdentity, target, localHostname, mode string, collectingLocalFiles bool) []string {
 	if id.Err != nil {
 		return nil
 	}
 	var out []string
 	if loadBalancerSuspected(id.Samples) {
-		out = append(out, fmt.Sprintf("Warning: -host %s answered as %s — it is a load balancer or a DNS round-robin. "+
-			"Every system table in this bundle will come from whichever replica answers each query, so the bundle "+
-			"describes no single node. Point -host at one replica (or run the tool on it).",
-			target, strings.Join(uniqueStrings(id.Samples), " and ")))
+		answered := strings.Join(uniqueStrings(id.Samples), " and ")
+		if strings.EqualFold(strings.TrimSpace(mode), "cloud") {
+			out = append(out, fmt.Sprintf("Note: -host %s answered as %s — the endpoint is load-balanced across the "+
+				"service's replicas, which is normal and is what cloud collection expects. The per-replica system tables "+
+				"(query_log, part_log, metric_log, errors, text_log …) fan out over every replica; the shared tables "+
+				"(parts, tables, columns, databases, replicas, replication_queue, mutations, detached_parts) come from "+
+				"whichever replica answered, as they always do in cloud mode.", target, answered))
+		} else {
+			out = append(out, fmt.Sprintf("Warning: -host %s answered as %s — it is a load balancer or a DNS round-robin. "+
+				"Every system table in this bundle will come from whichever replica answers each query, so the bundle "+
+				"describes no single node. Point -host at one replica (or run the tool on it).", target, answered))
+		}
 	}
 	if collectingLocalFiles && !isLoopback(target) && !sameMachine(id.Host, id.FQDN, localHostname) {
 		out = append(out, fmt.Sprintf("Warning: the system tables describe %s but host facts, configuration and log files "+

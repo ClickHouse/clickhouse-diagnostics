@@ -358,15 +358,6 @@ func main() {
 	var identity nodeIdentity
 	if !dryRun {
 		identity = probeNodeIdentity(client)
-		localHostname, _ := os.Hostname()
-		warnings := nodeWarnings(identity, host, localHostname, !skipHostInfo || !skipLogs || !skipConfig)
-		for _, w := range warnings {
-			fmt.Println(w)
-		}
-		// The warnings name hosts; gov keeps host names out of the log.
-		if len(warnings) > 0 && mode != "gov" {
-			rec.SetMeta("warnings", strings.Join(warnings, " | "))
-		}
 	}
 
 	// SharedMergeTree clusters keep per-replica system tables; a -mode onprem
@@ -397,6 +388,31 @@ func main() {
 				}
 				fmt.Printf("Using query mode: %s (queries from: %s)\n", effectiveMode, queriesDir)
 			}
+		}
+	}
+
+	// The identity warnings are derived HERE, not at the probe above, because
+	// how a load-balanced endpoint reads depends on how the bundle was
+	// actually collected — and that is only known after the SharedMergeTree
+	// decision. A -mode onprem run that switched to cloud collection writes
+	// `mode: cloud` in the header and fans the per-replica tables out, so the
+	// strong onprem warning ("the bundle describes no single node") would
+	// contradict its own bundle. effectiveMode is what the reader sees, so
+	// effectiveMode is what decides the wording. The mixed-host warning is
+	// unaffected: the hybrid really does read host facts, configuration and
+	// logs from the collector machine, and nodeWarnings still says so.
+	if !dryRun {
+		localHostname, _ := os.Hostname()
+		warnings := nodeWarnings(identity, host, localHostname, effectiveMode, !skipHostInfo || !skipLogs || !skipConfig)
+		for _, w := range warnings {
+			fmt.Println(w)
+		}
+		// The warnings name hosts; gov keeps host names out of the log. The
+		// load-balancer line is a "Note:" in cloud collection and a
+		// "Warning:" otherwise — see nodeWarnings — and the pre-pass reads
+		// that prefix rather than the presence of the line.
+		if len(warnings) > 0 && mode != "gov" {
+			rec.SetMeta("warnings", strings.Join(warnings, " | "))
 		}
 	}
 

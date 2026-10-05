@@ -11,10 +11,39 @@ description: |
   tables to a larger disk, or increase disk capacity. Check
   system.parts for the largest tables and system.disks for per-disk
   breakdown.
+
+  Only disks that hold user data are judged. A disk is counted when some user
+  table's storage policy puts a volume on it (system.storage_policies joined
+  with system.tables.storage_policy); when no user table declares a policy,
+  every disk is counted, because absence of evidence must not silence the
+  rule.
+
+  That filter exists because on a managed service the local disk is not
+  capacity at all. Measured on a healthy ClickHouse Cloud service (26.6,
+  three replicas): user tables are on the `s3_with_keeper` policy, whose only
+  disk is `s3WithKeeperDiskWithCache`, so the local `default` disk backs no
+  user data — it is the filesystem cache, sized to be filled, and it sat at
+  14.57 GiB free of 99.43 GiB, 14.7 %, firing this rule at critical with
+  nothing wrong. A critical that a healthy service produces on every run
+  teaches the reader to skip it.
+
+  The filter is deliberately NOT a mode check. `-mode cloud` is a query
+  layout, not proof of a managed service, and the tool supports pointing it at
+  a self-managed cluster: there a hot local data disk alongside an
+  object-storage tier must still raise a critical, and it does, because that
+  disk is in a user table's policy. A self-managed server with one local disk
+  is unchanged — verified on 26.7 and on the 22.8 floor, where
+  system.storage_policies.disks already exists.
+
+  The pre-pass applies the same test to a bundle and, for a disk that backs no
+  user data, reports it at a severity that matches what it is: information
+  below 15 % free, a warning below 5 %, because that filesystem still holds
+  temporary files for merges and spilled sorts.
 tags:
   - storage
   - disk
   - reliability
+
 
 # Subquery aliases free_space / total_space to numeric *_b columns
 # first; the outer SELECT then formats and divides on the numeric
@@ -23,12 +52,37 @@ tags:
 # UInt64 column in the WHERE clause, and `free_space / total_space`
 # becomes a String/String divide → ILLEGAL_TYPE_OF_ARGUMENT.
 #
-# {sys.disks} — not a hard-coded system.disks. Disks are per-replica, so
-# in cloud mode this must fan out via clusterAllReplicas: otherwise this
-# `critical` rule inspects only the serving node and a replica at 3% free
-# produces a clean run. hostName() attributes each row to the replica
-# that reported it, so a full disk is both detected and actionable.
+# {sys.disks} — not a hard-coded system.disks. Disks are per-replica, so in
+# cloud mode the placeholder fans out and a sibling at 3% free is found;
+# hostName() then says which replica reported the row. In onprem and gov it
+# resolves to the plain local table, so the rule sees only the node that
+# answered — cluster-wide coverage there means one bundle per node.
+# {sys.storage_policies} and {sys.tables} are shared tables, read once in
+# every mode, which is right: a storage policy is cluster-wide configuration.
+#
+# data_disks is the set of disks some user table's storage policy puts a
+# volume on. A disk outside it holds no user data — on a managed service that
+# is the local filesystem cache, sized to be filled, which would fire this
+# rule on every healthy run. An EMPTY set means no user table declares a
+# policy, and then every disk is judged: this filter must not become silence
+# on a server that has no tables yet and a full disk.
 query: |
+  WITH data_disks AS
+  (
+    SELECT groupUniqArray(disk) AS names
+    FROM
+    (
+      SELECT arrayJoin(sp.disks) AS disk
+      FROM {sys.storage_policies} AS sp
+      WHERE sp.policy_name IN
+      (
+        SELECT DISTINCT storage_policy
+        FROM {sys.tables}
+        WHERE database NOT IN ('system', 'information_schema', 'INFORMATION_SCHEMA')
+          AND storage_policy != ''
+      )
+    )
+  )
   SELECT
     hostname,
     disk_name,
@@ -44,7 +98,9 @@ query: |
     FROM {sys.disks}
     WHERE total_space > 0
       AND free_space / total_space < 0.15
-  )
+  ) AS d
+  CROSS JOIN data_disks AS dd
+  WHERE empty(dd.names) OR has(dd.names, d.disk_name)
   ORDER BY free_pct ASC
 
 message: "Disk '{disk_name}' on {hostname} is only {free_pct}% free ({free_space} of {total_space})"

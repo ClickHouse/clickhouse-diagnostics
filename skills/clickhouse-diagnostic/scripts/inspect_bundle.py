@@ -422,9 +422,35 @@ def analyse(base: str):
 
     # ---- disks
     disks = read_jsonl(first("system.disks_*.jsonl", base))
+    # Which disks actually hold user data: the disks named by the storage
+    # policies that user tables are on. A disk outside that set is not
+    # capacity for user data — on a managed service it is the local
+    # filesystem cache, sized to be filled, which read as a critical on every
+    # healthy bundle (measured: 14.7 % free on a healthy Cloud replica, while
+    # its user tables were on an object-storage policy). The test is the
+    # evidence in the bundle, not the collection mode: `-mode cloud` is a
+    # query layout and may be pointed at a self-managed cluster, where a hot
+    # local data disk alongside an object-storage tier must still be critical.
+    # No policy evidence in the bundle (either file missing, or no user table
+    # declares a policy) means every disk is judged — absence of evidence must
+    # not turn into silence. Mirrors alerts/disk_space_low.yaml.
+    pol = read_jsonl(first("system.storage_policies_*.jsonl", base))
+    user_policies = {r.get("storage_policy") for r in tb
+                     if r.get("storage_policy") and r.get("database") not in SYSTEM_DBS}
+    data_disks = {d for r in pol if r.get("policy_name") in user_policies
+                  for d in (r.get("disks") or []) if d}
     for d in disks:
         pct = num(d.get("free_pct"))
         if pct is None:
+            continue
+        if data_disks and d.get("name") not in data_disks:
+            where = f"free {d.get('free_space')} of {d.get('total_space')}"
+            if pct < 5:
+                add("warning", "disk", f"disk `{d.get('name')}` only {pct}% free — it holds no user data, but that little headroom still bites",
+                    f"{where}; no user table's storage policy uses this disk, so it is not data capacity — on a managed service it is the filesystem cache, which also holds temporary files for merges and spilled sorts", "HC-4.1")
+            elif pct < 15:
+                add("info", "disk", f"disk `{d.get('name')}` {pct}% free — holds no user data, so not a capacity finding",
+                    f"{where}; no user table's storage policy uses this disk (on a managed service: the filesystem cache, sized to be filled). The data disks are the ones in the policies — judge capacity from those", "HC-4.1")
             continue
         # Same severity as alerts/disk_space_low.yaml and HC-4.1: below 15 % is
         # critical (merges need headroom, inserts fail with 243 and replicas go
@@ -1126,7 +1152,20 @@ def analyse(base: str):
                 add("info", "coverage", f"{who} {run.get('uptime', up.group(1) + ' s')} before collection — {scope}",
                     "a restart clears a parts-propagation backlog only temporarily; a node captured after one looks healthier than the cluster is", "HC-0")
             if run.get("warnings"):
-                add("warning", "coverage", f"the collector warned at run time: {run['warnings']}", "execution_log.txt header", "HC-0")
+                # The collector prefixes each line: "Warning:" for something
+                # that undermines the bundle, "Note:" for something expected
+                # that the reader still has to know. A load-balanced endpoint
+                # is a warning on a self-managed cluster and a note on a cloud
+                # service, where it is the only way to connect and the
+                # collection is built for it — so the prefix decides the
+                # severity here rather than the mere presence of the line.
+                for line in [w.strip() for w in str(run["warnings"]).split("|")]:
+                    if not line:
+                        continue
+                    if line.startswith("Note:"):
+                        add("info", "coverage", f"the collector noted at run time: {line}", "execution_log.txt header", "HC-0")
+                    else:
+                        add("warning", "coverage", f"the collector warned at run time: {line}", "execution_log.txt header", "HC-0")
         with open(xl_path, encoding="utf-8", errors="replace") as fh:
             for line in fh:
                 if not line.startswith("| ") or line.startswith("| # |") or line.startswith("|---"):
