@@ -23,6 +23,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"clickhouse-diagnostic/internal/config"
 )
 
 // DefaultLogDir is the packaged location, used when configuration yields
@@ -193,7 +195,13 @@ func LogPathsFromConfig(configDir string) []string {
 			if err != nil {
 				continue
 			}
-			for _, m := range reLogPath.FindAllStringSubmatch(string(blob), -1) {
+			// Commented-out examples are not configuration: a <log> path
+			// inside a comment would otherwise put a directory the operator
+			// never configured on the list of places to copy files from.
+			// Not observably wrong on today's stock config.xml, whose real
+			// <log>/<errorlog> are live, but the same class as the
+			// <zookeeper> example that was.
+			for _, m := range reLogPath.FindAllStringSubmatch(string(config.StripComments(blob)), -1) {
 				p := strings.TrimSpace(m[2])
 				// Skip unresolved substitutions like <log from_env="..."/>
 				// and relative paths we can't anchor reliably.

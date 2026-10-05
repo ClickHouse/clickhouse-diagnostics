@@ -878,15 +878,22 @@ func (g *Generator) keeperConnectionSQL() string {
 	if g.mode == "cloud" {
 		host = "hostName() AS replica, "
 	}
+	// xid (24.3+) is the session's request counter; it wraps at 2^31 and the
+	// client renews the session — the alert keeper_xid_renewal_due turns it
+	// into hours of headroom, this column lets the reader see the raw value.
+	xid := ""
+	if g.hasColumn("zookeeper_connection", "xid") {
+		xid = ", toString(xid) AS xid"
+	}
 	return fmt.Sprintf(
 		`SELECT %sname, host, toString(port) AS port, toString(index) AS index,
 				toString(connected_time) AS connected_time,
 				toString(session_uptime_elapsed_seconds) AS session_uptime_s,
 				toString(is_expired) AS is_expired,
-				toString(keeper_api_version) AS api_version
+				toString(keeper_api_version) AS api_version%s
 		 FROM %s
 		 ORDER BY name`,
-		host, g.sysTable("zookeeper_connection"))
+		host, xid, g.sysTable("zookeeper_connection"))
 }
 
 func (g *Generator) collect() map[string]interface{} {

@@ -28,17 +28,19 @@ Under the hood: per-environment query sets (`cloud` / `onprem` / `gov`) selected
 | `system.metric_log_7_days` (hourly aggregation of `system.metric_log`) | Memory and background-pool load over time | Tells "the server was overloaded" apart from "one query misbehaved". |
 | `system.disks`, `system.detached_parts` | Is disk running out; has data been set aside as broken? | A full disk explains many other symptoms; detached parts record corruption or replication leftovers. |
 | `system.tables`, `system.columns`, `system.dictionaries`, `system.clusters` | Schema, keys, materialized views, dictionaries, topology | Findings in parts and queries are *explained* by the schema and the cluster definition. |
-| `system.settings`, `system.server_settings` (≥ 23.3) | Which query/profile and server settings deviate from their defaults | Answers "what was tuned" without a config copy — cloud bundles have no `configuration/`; identifying server values are `REMOVED` in gov. |
+| `system.settings`, `system.server_settings` (≥ 23.3), `system.merge_tree_settings` | Which query/profile, server and server-wide MergeTree settings deviate from their defaults — the third layer carries the `TOO_MANY_PARTS` thresholds and, on SharedMergeTree, the per-table fetch batch size and leader-election period | Answers "what was tuned" without a config copy — cloud bundles have no `configuration/`; identifying server values are `REMOVED` in gov. |
 | `system.asynchronous_insert_log` (7 days) | Are async-insert flushes succeeding and how slow are they? | A lost flush is silent when `wait_for_async_insert = 0`. |
 | `system.crash_log`, `system.stack_trace` | Did the server crash; what were its threads doing? | Crash evidence needs the trace and the query that triggered it. |
 | `system.metrics`, `system.events`, `system.asynchronous_metrics` | Live gauges and cumulative counters: Keeper session and watches, read-only replicas, fetches in flight, object-storage requests, cache size, `Uptime` | The "right now" state the hourly aggregates cannot give; `Uptime` turns `system.errors` and `system.events` counts into rates. |
 | `system.metric_log_coordination_3_days` (3 days, hourly, columns selected by regex) | Keeper, object-storage, filesystem-cache and replication counters hour by hour | A Keeper outage or an S3 error burst at 03:00 is visible here even when no query failed. |
-| `system.zookeeper_connection` (≥ 23.8), `system.databases`, `system.storage_policies` | Which Keeper node, how old the session; how many `Replicated` databases; which disks back which policy | The coordination and storage topology behind replication and "file doesn't exist" findings. |
-| `system.parts_max_block_recent` (all modes), `system.parts_max_block_by_replica` (cloud) | Each replica's newest block per partition for its 200 most recently written partitions; which replica is behind, by how many blocks, for how long | On SharedMergeTree a lagging replica returns fewer rows than its siblings — this names the replica and the partitions from one fan-out over `system.parts` (the full `system.parts` dump is read on one replica and keeps the 50 000 largest parts, which drops exactly the fresh small ones that show lag); on one node the recent file lines up two bundles collected on two replicas. |
+| `system.metric_log_by_host_3_days` (cloud only; 3 days, hourly, per replica) | Which replica's background pools are pinned, at what live pool size, with what Keeper latency and CPU; on SharedMergeTree, parts selected for fetching against fetches started and leader elections per hour | `metric_log_7_days` folds the replicas together; this is the per-host view a parts-propagation-lag or Keeper-latency finding is placed with, and it shows a pool-size change arriving host by host. |
+| `system.zookeeper_connection` (≥ 23.8; `xid` from 24.3), `system.databases`, `system.storage_policies` | Which Keeper node, how old the session, how far its request counter has run; how many `Replicated` databases; which disks back which policy | The coordination and storage topology behind replication and "file doesn't exist" findings. |
+| `system.parts_max_block_recent` (all modes), `system.parts_max_block_by_replica` (cloud) | Which replica is behind on which partition, by how many blocks, and which replicas hold none of a partition at all | On SharedMergeTree a lagging replica returns fewer rows than its siblings. Block numbers are allocated per partition and are monotonic, so the gap between a replica's newest block and the cluster's is a real count of parts it has not fetched — and a replica with no part of a partition, which contributes no row to compare, is found by subtracting the partition's replica set from the table's. The full `system.parts` dump is read on one replica and keeps the 50 000 largest parts, which drops exactly the fresh small ones that show lag. |
 | `system.distributed_ddl_queue` (7 days), `system.replicated_fetches` | Stuck or failed `ON CLUSTER` / Replicated-database DDL with per-host status; part fetches in flight | DDL replay storms (`TABLE_ALREADY_EXISTS` on `.tmp.inner_id` tables, code 571) and wedged fetches are visible only here. |
 | `system.zookeeper_log_errors_1_day`, `system.blob_storage_log_7_days` (only when the tables are enabled) | Failed Keeper requests per hour, operation and error code (errors only — the table is far too large to aggregate whole); object-storage uploads, deletes and failures per hour | Direct evidence for "Keeper stopped answering" and "the blob was deleted / never written". |
 | `host_info.json` (onprem) | OS, CPU, RAM, disks, THP, overcommit, limits, cgroups | A large share of self-managed incidents are host settings ClickHouse itself warns about at startup. |
 | `logs/` (onprem) | Restarts, startup warnings, fatal stacks, the first error of an incident | System tables lose this on restart; the log files keep it. |
+| `keeper/<host>_<port>.txt` (onprem, gov with the host hashed) | What each Keeper member says about itself: leader or follower, outstanding requests, its own latency, znode count, version (`ruok` / `srvr` / `mntr`) | A Keeper-latency or session-loss finding is settled on the Keeper side; no `system.*` table carries these. |
 | `configuration/` | Which settings deviate from defaults | Memory limits, pools, Keeper, storage policies, log-table TTLs — with credentials removed. |
 | Alert results + `dashboard.html` | What is already over a threshold | Eleven read-only rules give the headline before anyone reads a file. |
 
@@ -91,6 +93,7 @@ Before sending an archive to anyone:
 - `-dry-run` prints every SELECT the tool would run, with `EXPLAIN ESTIMATE`, and collects nothing — use it for a security review first. See [Dry-run mode](#dry-run-mode).
 - `gov` mode hashes database/table/user/host names with your private salt and withholds the dashboard, query text, configs, host facts and logs. **The salt and the local `*_gov_name_mapping.csv` never leave your machine.**
 - `alerts_summary.json` (when written) contains rule names and counts only, never matched rows.
+- `keeper/` holds Keeper's own counters (`ruok`, `srvr`, `mntr`): version, latency, outstanding requests, zxid, node counts. The commands that list client addresses (`stat`, `cons`) are never sent; gov hashes the member's host. See [Keeper facts](#keeper--what-each-keeper-member-says-about-itself).
 
 ---
 
@@ -259,6 +262,10 @@ Run `./clickhouse-diagnostic -help` to see the full list. Current flags:
 -logs-max-mb int       Per-file cap for collected logs, in MiB (default 50).
                        Larger files are tail-truncated.
 -logs-include-archives Also collect rotated logs (*.gz, *.zst). Off by default.
+-keeper-mntr string    Ask every Keeper member in system.zookeeper_connection
+                       for ruok / srvr / mntr and write keeper/<host>_<port>.txt:
+                       auto|on|off (default "auto" — on for onprem and gov,
+                       off for cloud). See "Keeper facts" below.
 -collect-text-log      Collect a time-bounded slice of system.text_log.
                        Requires --from and --to; rejected in gov mode.
 -text-log-level string Minimum severity for --collect-text-log
@@ -336,6 +343,7 @@ Most collection queries look back over a fixed period. Each declares its **own**
 | `system.metric_log_7_days` | 7 days |
 | `system.asynchronous_insert_log_7_days` | 7 days |
 | `system.metric_log_coordination_3_days` | 3 days |
+| `system.metric_log_by_host_3_days` | 3 days |
 | `system.blob_storage_log_7_days` | 7 days |
 | `system.error_log_7_days` | 7 days |
 | `system.distributed_ddl_queue` | 7 days |
@@ -457,6 +465,7 @@ What still reaches the server in dry-run:
 |---|---|
 | `SELECT version()` | Picks the right query variant for the server version |
 | Pre-flight for `--query-id` / `--normalized-query-hash` | Derives the hash + event_time (or the slowest query_id) so the printed analysis SQL has real values, not unbound `{query_id}` markers |
+| `SELECT DISTINCT host, port FROM system.zookeeper_connection` (`-keeper-mntr`) | Lists the Keeper members so the dry run can say which it would contact; printed when it runs |
 | `EXPLAIN ESTIMATE <query>` per SELECT | Read-only metadata only |
 
 Combine with the query-analysis flags to dry-run the focused bundle too:
@@ -618,6 +627,7 @@ The tool targets **ClickHouse 22.8 and newer** for on-prem servers. Root-level q
 | `system.clusters` replicated-db columns (`database_shard_name`, `database_replica_name`, `is_active`, `name`) | 23.5 | `queries.*/23.5.1.0/` |
 | `system.query_log.query_cache_usage` | 23.8 | `queries.query_analysis/23.8.1.0/` |
 | `system.zookeeper_connection` table | 23.8 | `queries.*/23.8.1.0/` (no root file — skipped below 23.8 in every mode) |
+| `system.zookeeper_connection.xid`, `last_zxid_seen`, `availability_zone` | 24.3 | `queries.*/24.3.1.0/`; `alerts/24.3.1.0/keeper_xid_renewal_due.yaml` (no root rule — not applicable below 24.3) |
 | `system.query_log.peak_threads_usage` | 23.9 | `queries.query_analysis/23.9.1.0/` |
 | `hostname` column in system log tables | 23.11 | `queries.*/23.11.1.0/` (roots use `hostName()`) |
 | `system.blob_storage_log` table (needs `<blob_storage_log>` config) | 23.11 | `queries.*/23.11.1.0/` (no root file — skipped below 23.11 in every mode) |
@@ -652,6 +662,26 @@ Both collectors read the **machine executing the tool**, so `-host-info` and `-l
 | `gov` | **off**, unconditionally | Hostnames, mount paths, process command lines and log bodies are exactly what gov hashing protects, and none of them can be hashed while staying useful. `-host-info=on` is **rejected**, not ignored. |
 
 Both are also skipped under `--dry-run`, which promises to write nothing. The mode matrix is pinned by tests in `cmd/local_collector_test.go`.
+
+### `keeper/` — what each Keeper member says about itself
+
+`-keeper-mntr auto|on|off` (default `auto`) sends three four-letter commands to the Keeper members and writes one `keeper/<host>_<port>.txt` per member. The member list is the union of two sources: `system.zookeeper_connection`, which names the member each configured connection is **on right now** (one row per connection — the default `<zookeeper>` block and every auxiliary one — not one per ensemble member), and every `<zookeeper><node>` in the server configuration (`-config-dir` and the adjacent `config.xml`) when the tool runs on the server. The second is what reaches the followers this server is *not* connected to — the member a Keeper incident is usually about. A run without access to the configuration (remote `-host`, cloud, gov without `-config-dir`) probes the connected member only, and says so in the execution log.
+
+| Command | What it answers |
+|---|---|
+| `ruok` | liveness (`imok`) |
+| `srvr` | Keeper version, latency min/avg/max, received/sent, connections, **outstanding requests**, zxid, **mode** (leader / follower / standalone), node count |
+| `mntr` | the same as `zk_*` counters, plus followers and synced followers (on the leader), znode / watch / ephemeral counts, memory |
+
+These are the server-side facts a Keeper finding is settled with: `metric_log` says how long *this server* waited for Keeper, `zookeeper_connection` says which member it talks to, and only Keeper itself says whether that member is the leader, how many requests it has queued and what it runs. Each command opens its own TCP connection (3 s dial, 10 s read) because Keeper closes after one reply; a member that is down or refuses four-letter words is recorded as such in its file and in `execution_log.txt`, never a failed run. `stat` and `cons` are **never sent**: they list client addresses.
+
+| Mode | `auto` resolves to | Why |
+|---|---|---|
+| `onprem` | **on** | The tool runs beside the cluster, so the Keeper ports are reachable. |
+| `gov` | **on**, host hashed | The counters are numbers; the only identifier is the member's host, which is written as `hex(SHA256(host ‖ salt))` in the file name and header — the same form `system.zookeeper_connection` carries in a gov bundle, so the two join. Any reply line carrying an `ip:port` is dropped as a safeguard. |
+| `cloud` | **off** | A managed service's Keeper is not reachable from outside. `-keeper-mntr=on` is honoured with a warning for a self-managed cluster collected in cloud mode. |
+
+Under `--dry-run` the members are listed and nothing is contacted; the one-row-per-connection `SELECT` on `system.zookeeper_connection` that builds the list is a metadata pre-flight read, executed for real and printed like the version probe. Per-member statuses in `execution_log.txt`: `ok` (all three commands answered), `partial` (some did — usually a word missing from `four_letter_word_white_list`), `refused`, `timeout` (including a reply cut short by the 10 s deadline, kept in the file and marked truncated), `failed` (every command failed for another reason, or the file could not be written). Servers before 23.8 have no `system.zookeeper_connection`, so the step is skipped and says so. Keeper must allow the three words in `four_letter_word_white_list` (the default `*` does); an empty reply is annotated accordingly.
 
 ### `host_info.json` — OS, kernel and hardware
 
@@ -790,7 +820,7 @@ In `message:`, `{column_name}` is replaced with the value from each result row. 
 
 ### Bundled alert rules
 
-The repo ships with 18 alert rules in `alerts/` (plus version-gated overrides in `alerts/<version>/`). They are intended as a starting point — adjust thresholds to match your workload.
+The repo ships with 18 alert rules in `alerts/` (plus version-gated overrides in `alerts/<version>/`, and one rule that exists only there — `keeper_xid_renewal_due`, 24.3+). They are intended as a starting point — adjust thresholds to match your workload.
 
 | Rule | Severity | Fires when |
 |---|---|---|
@@ -812,6 +842,7 @@ The repo ships with 18 alert rules in `alerts/` (plus version-gated overrides in
 | `large_parts` | warning | A single active part is larger than 150 GB |
 | `mutation_running_too_long` | warning | A mutation has been running for more than 3 hours |
 | `detached_parts_exist` | info | Parts exist in the `detached/` folder (failed merges, manual detach, replication conflicts) |
+| `keeper_xid_renewal_due` | info | *(24.3+ only)* A Keeper session is within 24 h of the **32-bit** counter limit (2³¹) at the rate its host is measured to use, where that host has one live Keeper connection and at least 2 h of `metric_log` behind the estimate. Reported as headroom, not as a renewal that will happen: with `use_xid_64` enabled in `<zookeeper>` the counter is 64-bit and never wraps, and no system table exposes that setting — check `configuration/`. On a default 32-bit counter the renewal is a short burst of Keeper exceptions and a reconnect; investigate only if INSERTs failed in those minutes (`query_log`, or flushes in `asynchronous_insert_log`) |
 
 Every rule is a single `SELECT` against system tables; rows returned become alert instances in the dashboard. Rules that read a log table look back **24 hours or 7 days, per hour**, not just the last hour — bundles are usually collected after recovery, and an hour-only rule is blind to the incident it exists to surface. Open the YAML files directly to see the exact thresholds and tweak them.
 
@@ -1029,6 +1060,7 @@ clickhouse_results/
 │   │   ├── config.d/…
 │   │   └── users.d/…
 │   ├── query_analysis/                                      #   only with --query-id / --hash
+│   ├── keeper/<host>_<port>.txt                             #   ruok / srvr / mntr per Keeper member (-keeper-mntr; gov hashes the host; not in cloud by default)
 │   ├── dashboard.html                                       #   unless -skip-dashboard or gov
 │   ├── execution_log.txt                                    #   every collector: outcome, wall time, size; alerts; phases
 │   └── alerts_summary.json                                  #   when alerts ran but dashboard.html is absent
@@ -1038,7 +1070,7 @@ clickhouse_backup_YYYYMMDD_HHMMSS.tar.gz                     # unless -skip-arch
 
 - **Query results**: one file per query, in the format chosen by [`-output-format`](#output-format) (default `jsonl`)
 - **Dashboard**: standalone `dashboard.html`, loads Chart.js from CDN
-- **Execution log**: `execution_log.txt` — one line per collector query with its version directory, outcome (`ok` / `failed` / `empty`), wall time, result bytes and rows, plus every alert rule with its outcome and duration and the wall time of each phase (collectors, host facts, logs, config, alerts, dashboard). The *Most expensive collectors* list is what to read before adapting a window in `queries.<mode>/`; the *Failed collectors* list is what separates "the table was empty" from "the query never ran". Contains file names, timings and ClickHouse error text only — no result data.
+- **Execution log**: `execution_log.txt` — one line per collector query with its version directory, outcome (`ok` / `failed` / `empty`), wall time, result bytes and rows, plus every alert rule with its outcome and duration, one `keeper` entry per Keeper member probed (`ok` / `partial` / `refused` / `timeout`), and the wall time of each phase (collectors, keeper facts, host facts, logs, config, alerts, dashboard). The *Most expensive collectors* list is what to read before adapting a window in `queries.<mode>/`; the *Failed collectors* list is what separates "the table was empty" from "the query never ran". Contains file names, timings and ClickHouse error text only — no result data.
 - **Archive**: `tar.gz` containing the per-run results directory — `configuration/` now lives *inside* it, tree intact, so a bundle can only ever contain this run's configs. (Before v0.3.0 it was a flat, process-wide `./configuration` beside the run directory; anything parsing bundles by that path needs updating.)
 - **Gov-mode mapping CSV** (gov mode only): sits next to the backup folder, **not inside it** — never goes into the archive. See [Gov mode and hashed names](#gov-mode-and-hashed-names).
 
