@@ -20,8 +20,10 @@ description: |
   this rule at critical with nothing wrong. A critical that a healthy service
   produces on every run teaches the reader to skip it, so the rule is gated to
   the modes where the local disk is the data disk. The numbers are still in
-  system.disks, and the pre-pass reports a cloud bundle's local disk as
-  information.
+  system.disks, and the pre-pass re-reads the same thresholds for a cloud
+  bundle's local disk at a severity that matches what it is: information below
+  15 % free, a warning below 5 % because that filesystem also holds temporary
+  files for merges and spilled sorts.
 tags:
   - storage
   - disk
@@ -38,11 +40,15 @@ modes: [onprem, gov]
 # UInt64 column in the WHERE clause, and `free_space / total_space`
 # becomes a String/String divide → ILLEGAL_TYPE_OF_ARGUMENT.
 #
-# {sys.disks} — not a hard-coded system.disks. Disks are per-replica, so
-# in cloud mode this must fan out via clusterAllReplicas: otherwise this
-# `critical` rule inspects only the serving node and a replica at 3% free
-# produces a clean run. hostName() attributes each row to the replica
-# that reported it, so a full disk is both detected and actionable.
+# {sys.disks} — not a hard-coded system.disks. Disks are per-replica, and
+# hostName() attributes each row to the replica that reported it, so on a
+# multi-replica self-managed cluster one node at 3% free is both detected and
+# actionable rather than hidden behind whichever node answered. The
+# placeholder resolves to the plain table in the two modes this rule runs in;
+# it keeps the cloud form only so the rule stays correct if the gate above is
+# ever widened — do not read the gate as "cloud is handled elsewhere", read
+# the description: on a cloud service the local disk is the cache and the data
+# disks are object storage, so there is nothing here for the rule to judge.
 query: |
   SELECT
     hostname,
