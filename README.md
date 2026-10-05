@@ -836,7 +836,7 @@ The repo ships with 17 alert rules in `alerts/` (plus version-gated overrides in
 | `large_parts` | warning | A single active part is larger than 150 GB |
 | `mutation_running_too_long` | warning | A mutation has been running for more than 3 hours |
 | `detached_parts_exist` | info | Parts exist in the `detached/` folder (failed merges, manual detach, replication conflicts) |
-| `keeper_xid_renewal_due` | info | *(24.3+ only)* A Keeper session's 32-bit request counter (`xid`) reaches 2³¹ within 24 h at the last day's transaction rate — the short burst of Keeper exceptions and the reconnect that follow are the session renewal, expected and handled, not an incident |
+| `keeper_xid_renewal_due` | info | *(24.3+ only)* A Keeper session is within 24 h of the **32-bit** counter limit (2³¹) at the rate its host is measured to use, where that host has one live Keeper connection and at least 2 h of `metric_log` behind the estimate. Reported as headroom, not as a renewal that will happen: with `use_xid_64` enabled in `<zookeeper>` the counter is 64-bit and never wraps, and no system table exposes that setting — check `configuration/`. On a default 32-bit counter the renewal is a short burst of Keeper exceptions and a reconnect; investigate only if INSERTs failed in those minutes (`query_log`, or flushes in `asynchronous_insert_log`) |
 
 Every rule is a single `SELECT` against system tables; rows returned become alert instances in the dashboard. Rules that read a log table look back **24 hours or 7 days, per hour**, not just the last hour — bundles are usually collected after recovery, and an hour-only rule is blind to the incident it exists to surface. Open the YAML files directly to see the exact thresholds and tweak them.
 

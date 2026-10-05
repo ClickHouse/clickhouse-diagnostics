@@ -68,7 +68,16 @@ query: |
       SELECT
         hostName()                                           AS hostname,
         sum(ProfileEvent_ZooKeeperTransactions)              AS tx,
-        dateDiff('second', min(event_time), max(event_time)) AS covered_s
+        dateDiff('second', min(event_time), max(event_time)) AS covered_s,
+        -- The measured rate, computed once and used for both the predicate
+        -- and the projections. An earlier version floored it with
+        -- greatest(rate, 0.001) in the projections only, so a genuinely quiet
+        -- session was admitted on its real rate and then reported against the
+        -- floor: 8 transactions over 86 399 s with xid at 2 147 483 640 came
+        -- out as 1.9 h of headroom where the predicate had accepted it at
+        -- 21.0 h. nullIf guards the division instead of a floor, so zero
+        -- coverage yields NULL and the row drops out of the predicate below.
+        tx / nullIf(covered_s, 0)                            AS measured_tx_per_s
       FROM {sys.metric_log}
       WHERE event_time > now() - INTERVAL 24 HOUR
       GROUP BY hostname
@@ -78,18 +87,18 @@ query: |
     c.connection_name                                                 AS connection_name,
     c.keeper_host                                                     AS keeper_host,
     c.xid                                                             AS xid,
-    round(r.tx / greatest(r.covered_s, 1), 2)                         AS tx_per_s,
+    round(r.measured_tx_per_s, 2)                                     AS tx_per_s,
     round(r.covered_s / 3600, 1)                                      AS measured_over_h,
-    round((2147483647 - c.xid) / greatest(r.tx / greatest(r.covered_s, 1), 0.001) / 3600, 1) AS headroom_h,
-    round(2147483647 / greatest(r.tx / greatest(r.covered_s, 1), 0.001) / 3600, 1)           AS period_at_this_rate_h
+    round((2147483647 - c.xid) / r.measured_tx_per_s / 3600, 1)       AS headroom_h,
+    round(2147483647 / r.measured_tx_per_s / 3600, 1)                 AS period_at_this_rate_h
   FROM conn AS c
   INNER JOIN rate AS r USING (hostname)
   WHERE c.sessions = 1
     AND c.xid > 0
     AND c.xid < 2147483647
     AND r.covered_s >= 7200
-    AND r.tx > 0
-    AND (2147483647 - c.xid) / (r.tx / r.covered_s) < 86400
+    AND r.measured_tx_per_s > 0
+    AND (2147483647 - c.xid) / r.measured_tx_per_s < 86400
   ORDER BY headroom_h
   LIMIT 100
 
