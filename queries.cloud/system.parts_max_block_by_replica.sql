@@ -1,22 +1,39 @@
 -- Parts-propagation lag per replica on a SharedMergeTree cluster: which
--- partitions a replica has not caught up on, by how many blocks, for how
--- long. Every replica keeps its own view of system.parts and learns about
--- new parts asynchronously (Keeper notification, then a fetch); a replica
--- still missing the newest part of a partition shows a lower
--- max_block_number than its siblings. That gap is the lag in blocks, and the
--- gap between the two last modification_time values is how long it has
--- lasted. Per (database, table, partition_id) because block numbers are
--- allocated per partition.
+-- partitions a replica is behind on, by how many blocks, and which partitions
+-- it has not got at all. Every replica keeps its own view of system.parts and
+-- learns about new parts asynchronously (Keeper notification, then a fetch); a
+-- replica still missing the newest parts of a partition shows a lower
+-- max_block_number than its siblings, and a replica that has fetched none of a
+-- partition contributes no row at all — which is why the replica set is
+-- compared explicitly (see replicas_missing_partition below). Per
+-- (database, table, partition_id) because block numbers are allocated per
+-- partition.
 --
--- Why beside system.replicas: on SharedMergeTree that table IS populated per
--- replica — inserts_in_queue counts the level-0 parts this replica has not
--- fetched yet, absolute_delay is the age of the oldest, oldest_part_to_get
--- names it — and it is the cheaper first look. But it counts level-0 parts
--- only (a merge completing elsewhere makes its sources stop counting even
--- though the merged part is not here yet), it says nothing about merged
--- parts, and it does not say what the newest block on the OTHER replicas
--- is. This file compares the replicas directly on system.parts, per
--- partition, and names the block each one has reached.
+-- Why not system.replicas: that table says, per replica, how many level-0
+-- parts it has not fetched (inserts_in_queue) and how old the oldest of them
+-- is (absolute_delay, inserts_oldest_time) — the server's own answer, and the
+-- one to use for "how long". It does not say which partition or which block
+-- each replica reached, which is what this file adds.
+--
+-- Columns that are easy to over-read:
+--   * blocks_behind is sound: block numbers are monotonic per partition, so
+--     cluster max minus this replica's max is a real count of blocks it has
+--     not got.
+--   * newest_part_skew_s is NOT the age of those missing blocks. It is the gap
+--     between two independently maximised modification_time values, and it
+--     misleads in three ways: after an idle spell it is large even when the
+--     missing blocks are seconds old; for a burst written within a few seconds
+--     it stays small however long the replica stays behind; and a merge on the
+--     lagging replica refreshes its modification_time without closing the
+--     block gap. Read it as skew between the newest part each replica holds —
+--     useful as corroboration, never as a duration. The duration lives in
+--     system.replicas.absolute_delay.
+--   * replicas_missing_partition names the replicas with NO active part in
+--     this partition, computed as the per-table replica set minus the
+--     per-partition one. For a recent partition that is the strongest lag
+--     signal there is. For an old one it can be an artefact of the per-host
+--     cap below, which keeps each replica's most recently written partitions
+--     and drops the rest: compare partitions_sampled_for_host with the cap.
 --
 -- Cost, and the two shapes this deliberately avoids:
 --   * window functions, not a CTE joined to itself — a WITH … AS (subquery)
@@ -27,9 +44,10 @@
 --     partition is still among ITS most recent), so the initiator holds at
 --     most replicas × 20 000 rows for the window step instead of every
 --     partition of every replica.
--- Only rows behind the cluster max are returned, worst first, capped at
--- 1000: an empty file on a cloud collection means no replica was behind at
--- collection time. The raw numbers are in parts_max_block_recent.
+-- Only rows that are behind or incomplete are returned, worst first, capped at
+-- 1000: an empty file on a cloud collection means no replica was behind and
+-- none was missing a partition at collection time. The raw numbers are in
+-- parts_max_block_recent.
 SELECT
     hostname,
     database,
@@ -40,16 +58,26 @@ SELECT
     cluster_max_block - max_block                                   AS blocks_behind,
     last_part_time,
     cluster_last_part_time,
-    dateDiff('second', last_part_time, cluster_last_part_time)      AS seconds_behind,
+    dateDiff('second', last_part_time, cluster_last_part_time)      AS newest_part_skew_s,
     active_parts,
-    replicas
+    replicas_with_partition,
+    replicas_with_table,
+    replicas_missing_partition,
+    partitions_sampled_for_host
 FROM
 (
     SELECT
         *,
-        max(max_block)        OVER w AS cluster_max_block,
-        max(last_part_time)   OVER w AS cluster_last_part_time,
-        count()               OVER w AS replicas
+        max(max_block)        OVER w_part AS cluster_max_block,
+        max(last_part_time)   OVER w_part AS cluster_last_part_time,
+        count()               OVER w_part AS replicas_with_partition,
+        uniqExact(hostname)   OVER w_tab  AS replicas_with_table,
+        -- The replicas that hold this table but no active part of this
+        -- partition. groupUniqArray as a window aggregate, so this stays one
+        -- pass over the fan-out.
+        arrayFilter(h -> NOT has(groupUniqArray(hostname) OVER w_part, h),
+                    groupUniqArray(hostname) OVER w_tab)            AS replicas_missing_partition,
+        count()               OVER w_host AS partitions_sampled_for_host
     FROM
     (
         SELECT
@@ -67,8 +95,12 @@ FROM
         ORDER BY hostname, last_part_time DESC
         LIMIT 20000 BY hostname
     )
-    WINDOW w AS (PARTITION BY database, table, partition_id)
+    WINDOW
+        w_part AS (PARTITION BY database, table, partition_id),
+        w_tab  AS (PARTITION BY database, table),
+        w_host AS (PARTITION BY hostname)
 )
 WHERE blocks_behind > 0
-ORDER BY blocks_behind DESC, seconds_behind DESC
+   OR notEmpty(replicas_missing_partition)
+ORDER BY length(replicas_missing_partition) DESC, blocks_behind DESC, newest_part_skew_s DESC
 LIMIT 1000

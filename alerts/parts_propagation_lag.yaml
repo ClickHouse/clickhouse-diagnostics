@@ -3,20 +3,44 @@ title: "A replica is behind on parts (SharedMergeTree propagation lag)"
 severity: warning
 description: |
   On a SharedMergeTree cluster every replica keeps its own view of
-  system.parts and learns about new parts asynchronously. This rule
-  compares, per partition, each replica's newest block number with the
-  newest any replica has: a replica at least 3 blocks AND at least 10
-  minutes behind on any partition is lagging — the same query on that
-  replica returns fewer rows than on a sibling, and the gap grows until a
-  fetch slot frees up. One instance per lagging replica with its worst
-  partition; the full list of partitions behind is in the collected file
-  system.parts_max_block_by_replica.
+  system.parts and learns about new parts asynchronously: Keeper says a part
+  exists, then the replica fetches it. A replica that is behind returns fewer
+  rows than its siblings for the same query, and the gap grows until a fetch
+  slot frees up.
+
+  Two things are reported, both read from one pass over system.parts:
+
+    * a replica whose newest block in a partition is at least 32 behind the
+      newest any replica has. Block numbers are monotonic per partition, so
+      that difference is a real count of blocks the replica has not got. The
+      floor is one full scheduling round — shared_merge_tree_parts_load_batch_size,
+      default 32 — so an ordinary propagation gap mid-insert does not fire it.
+    * a replica with NO active part in a partition at all, when that partition
+      was written in the last day. Such a replica contributes no row to a
+      per-partition comparison, so it has to be found by subtracting the
+      replica set of the partition from the replica set of the table;
+      otherwise the worst case — a replica that fetched none of a new
+      partition — is the one case that reads as healthy. The one-day window is
+      what makes this safe against the collector's per-host cap, which keeps
+      each replica's most recently written partitions and drops the oldest.
+
+  Deliberately NOT a duration. The difference between the newest
+  modification_time on two replicas is skew, not the age of the missing
+  blocks: it is large after an idle spell even when the missing blocks are
+  seconds old, stays small for a burst written within a few seconds however
+  long the replica lags, and a merge on the lagging replica refreshes it
+  without closing the block gap. max_newest_part_skew_s is reported as
+  corroboration only. For how long a replica has been behind, read
+  system.replicas — absolute_delay and inserts_oldest_time are the server's
+  own answer, per replica, in the same bundle.
 
   Usual cause: a saturated background fetch or schedule pool (alerts
   fetch_pool_saturated / schedule_pool_saturated, HC-2.13 / 2.14) — the fetch
-  executor has no queue, so a table needing more fetches than free slots
-  backs off silently. A restart clears the backlog only until the pool fills
-  again; the lasting fix is pool size, fewer and larger inserts, fewer tables.
+  executor has no queue, so a table needing more fetches than free slots backs
+  off silently. A restart clears the backlog only until the pool fills again;
+  the lasting fix is pool size, fewer and larger inserts, fewer tables. The
+  full per-partition list is in the collected file
+  system.parts_max_block_by_replica.
 tags:
   - replication
   - shared-merge-tree
@@ -28,49 +52,68 @@ tags:
 # reads). On one node the rule has nothing to compare and is skipped.
 modes: [cloud]
 
-# Same shape as queries.cloud/system.parts_max_block_by_replica.sql — window
-# functions over one fan-out (a CTE joined to itself fans out twice), each
-# replica contributing its 20 000 most recently written partitions — rolled
-# up per replica so the alert is one instance per lagging node.
+# Same shape as queries.cloud/system.parts_max_block_by_replica.sql: window
+# functions over ONE fan-out (a CTE read twice fans out twice), each replica
+# contributing its 20 000 most recently written partitions. Per partition the
+# windows carry every replica's newest block and the replicas that have none,
+# so both findings come out of the same pass; LIMIT 1 BY keeps one row per
+# partition and ARRAY JOIN turns it back into one row per lagging replica.
 query: |
   SELECT
     hostname,
-    count()                          AS partitions_behind,
-    max(blocks_behind)               AS max_blocks_behind,
-    max(seconds_behind)              AS max_seconds_behind,
-    argMax(concat(database, '.', table, ' / ', partition_id), seconds_behind) AS worst_partition
+    count()                                                                 AS partitions_affected,
+    countIf(no_parts_at_all = 1)                                            AS partitions_not_fetched,
+    max(blocks_behind)                                                      AS max_blocks_behind,
+    argMax(concat(database, '.', table, ' / ', partition_id), blocks_behind) AS worst_partition,
+    max(newest_part_skew_s)                                                 AS max_newest_part_skew_s
   FROM
   (
     SELECT
-      hostname, database, table, partition_id,
-      cluster_max_block - max_block                                 AS blocks_behind,
-      dateDiff('second', last_part_time, cluster_last_part_time)    AS seconds_behind
+      database, table, partition_id,
+      j.1 AS hostname, j.2 AS blocks_behind, j.3 AS no_parts_at_all, j.4 AS newest_part_skew_s
     FROM
     (
       SELECT
-        *,
-        max(max_block)      OVER w AS cluster_max_block,
-        max(last_part_time) OVER w AS cluster_last_part_time
+        database, table, partition_id,
+        arrayConcat(
+          arrayMap(x -> (x.1, toInt64(cluster_max_block) - toInt64(x.2), toUInt8(0),
+                         toInt64(dateDiff('second', x.3, cluster_last_part_time))),
+                   arrayFilter(x -> toInt64(cluster_max_block) - toInt64(x.2) >= 32, blocks)),
+          arrayMap(h -> (h, toInt64(cluster_max_block), toUInt8(1), toInt64(0)),
+                   if(cluster_last_part_time > now() - INTERVAL 1 DAY, missing, []))
+        ) AS lagging
       FROM
       (
         SELECT
-          hostName()             AS hostname,
           database, table, partition_id,
-          max(max_block_number)  AS max_block,
-          max(modification_time) AS last_part_time
-        FROM clusterAllReplicas(default, system.parts)
-        WHERE active
-          AND database NOT IN ('system', 'information_schema', 'INFORMATION_SCHEMA')
-        GROUP BY hostname, database, table, partition_id
-        ORDER BY hostname, last_part_time DESC
-        LIMIT 20000 BY hostname
+          max(max_block)      OVER w_part AS cluster_max_block,
+          max(last_part_time) OVER w_part AS cluster_last_part_time,
+          groupArray((hostname, max_block, last_part_time)) OVER w_part AS blocks,
+          arrayFilter(h -> NOT has(groupUniqArray(hostname) OVER w_part, h),
+                      groupUniqArray(hostname) OVER w_tab) AS missing
+        FROM
+        (
+          SELECT
+            hostName()             AS hostname,
+            database, table, partition_id,
+            max(max_block_number)  AS max_block,
+            max(modification_time) AS last_part_time
+          FROM clusterAllReplicas(default, system.parts)
+          WHERE active
+            AND database NOT IN ('system', 'information_schema', 'INFORMATION_SCHEMA')
+          GROUP BY hostname, database, table, partition_id
+          ORDER BY hostname, last_part_time DESC
+          LIMIT 20000 BY hostname
+        )
+        WINDOW w_part AS (PARTITION BY database, table, partition_id),
+               w_tab  AS (PARTITION BY database, table)
       )
-      WINDOW w AS (PARTITION BY database, table, partition_id)
+      LIMIT 1 BY database, table, partition_id
     )
-    WHERE blocks_behind >= 3 AND seconds_behind >= 600
+    ARRAY JOIN lagging AS j
   )
   GROUP BY hostname
-  ORDER BY max_seconds_behind DESC
+  ORDER BY max_blocks_behind DESC
   LIMIT 100
 
-message: "{hostname}: behind on {partitions_behind} partition(s), worst {worst_partition} — {max_blocks_behind} blocks / {max_seconds_behind} s behind the newest replica"
+message: "{hostname}: behind on {partitions_affected} partition(s) ({partitions_not_fetched} with no parts fetched at all), worst {worst_partition} at {max_blocks_behind} blocks behind the newest replica — read system.replicas absolute_delay for how long, not the {max_newest_part_skew_s} s newest-part skew"

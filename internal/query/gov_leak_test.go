@@ -252,7 +252,12 @@ func TestGovQueries_HashedAliasDoesNotShadowAFilteredColumn(t *testing.T) {
 				filter = filter[:g] // GROUP BY on the alias is correct and intended
 			}
 			for _, c := range cols {
-				hashed := regexp.MustCompile(`SHA256\(concat\(\s*` + c + `\s*,`).MatchString(body)
+				// The qualifier is optional on purpose: the file this guard was
+				// written for hashes `p.database`, and a detector that only
+				// matched the bare column skipped the very query it protects —
+				// removing `p.` from the WHERE would have recreated the
+				// regression with the test still green.
+				hashed := regexp.MustCompile(`SHA256\(concat\(\s*(?:[A-Za-z_]\w*\.)?` + c + `\s*,`).MatchString(body)
 				aliased := regexp.MustCompile(`(?i)\bAS\s+` + c + `\b`).MatchString(body)
 				if !hashed || !aliased {
 					continue
