@@ -767,9 +767,6 @@ func TestEvalFile_UnknownModeIsAnError(t *testing.T) {
 // that drops the key would make a cluster-only rule fail with
 // CLUSTER_DOESNT_EXIST on every onprem run.
 var shippedRuleModes = map[string][]string{
-	// The local disk on a cloud service is the filesystem cache and runs
-	// near-full by design; the data disks are object storage and report 16 EiB.
-	"disk_space_low":        {"onprem", "gov"},
 	"parts_propagation_lag": {"cloud"},
 }
 

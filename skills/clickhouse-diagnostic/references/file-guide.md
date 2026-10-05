@@ -103,7 +103,7 @@ Windows: `*_7_days` files cover the last 7 days (or `-from/-to`); `system.text_l
 **Question:** how much room is left on each volume ClickHouse can write to?
 **Read first:** `name`, `type`, `free_pct`; `unreserved_space` vs `free_space` (reservations by running merges).
 **Healthy looks like:** > 30 % free on the data volume(s) *(guideline)*, `type = 'local'` for hot data unless S3 tiering is intended.
-**Red flags:** `free_pct < 15` on a disk that holds data (critical, HC-4.1), `< 5` (inserts/merges failing with 243) — on a cloud bundle the `Local` disk is the filesystem cache and runs near-full by design, so judge capacity from the `ObjectStorage` disks there and read a low local disk as information unless it is under 5 %; an object-storage disk when 499 errors are present (P-45); a cold disk receiving fresh data (P-45 `move_factor`).
+**Red flags:** `free_pct < 15` on a disk that holds user data (critical, HC-4.1), `< 5` (inserts/merges failing with 243). Which disks those are comes from `system.storage_policies.disks` for the policies in `system.tables.storage_policy` — a disk no user table's policy names is not data capacity (on a managed service: the filesystem cache, sized to be filled), and a low reading there is information rather than critical; an object-storage disk when 499 errors are present (P-45); a cold disk receiving fresh data (P-45 `move_factor`).
 **Traps:** `free_space`/`total_space` are human-readable strings — use `free_pct` or parse; one row per replica in cloud; `unreserved_space` only on ≥ 22.10.
 **Pairs with:** `host_info.disks` (mount-level view), `system.parts` (what fills it), `configuration/` `<storage_configuration>`.
 

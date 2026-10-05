@@ -422,29 +422,35 @@ def analyse(base: str):
 
     # ---- disks
     disks = read_jsonl(first("system.disks_*.jsonl", base))
-    # On a cloud service the data sits on object storage — those disks report
-    # 16 EiB free and can never be low — while the local disk is the
-    # filesystem cache, sized to be filled and therefore near-full when the
-    # service is perfectly healthy (measured: 14.7 % free on a healthy Cloud
-    # replica). Reporting that as a capacity problem is a false critical on
-    # every cloud bundle, so it becomes information here and the
-    # disk_space_low rule is gated to onprem/gov. Below 5 % it is still worth
-    # a warning: the same filesystem holds temporary files for merges and
-    # spilled sorts.
-    cloud_object_storage = out["mode"] == "cloud" and any(
-        str(d.get("type", "")).lower().startswith("objectstorage") for d in disks)
+    # Which disks actually hold user data: the disks named by the storage
+    # policies that user tables are on. A disk outside that set is not
+    # capacity for user data — on a managed service it is the local
+    # filesystem cache, sized to be filled, which read as a critical on every
+    # healthy bundle (measured: 14.7 % free on a healthy Cloud replica, while
+    # its user tables were on an object-storage policy). The test is the
+    # evidence in the bundle, not the collection mode: `-mode cloud` is a
+    # query layout and may be pointed at a self-managed cluster, where a hot
+    # local data disk alongside an object-storage tier must still be critical.
+    # No policy evidence in the bundle (either file missing, or no user table
+    # declares a policy) means every disk is judged — absence of evidence must
+    # not turn into silence. Mirrors alerts/disk_space_low.yaml.
+    pol = read_jsonl(first("system.storage_policies_*.jsonl", base))
+    user_policies = {r.get("storage_policy") for r in tb
+                     if r.get("storage_policy") and r.get("database") not in SYSTEM_DBS}
+    data_disks = {d for r in pol if r.get("policy_name") in user_policies
+                  for d in (r.get("disks") or []) if d}
     for d in disks:
         pct = num(d.get("free_pct"))
         if pct is None:
             continue
-        is_local = str(d.get("type", "")).lower() == "local"
-        if cloud_object_storage and is_local:
+        if data_disks and d.get("name") not in data_disks:
+            where = f"free {d.get('free_space')} of {d.get('total_space')}"
             if pct < 5:
-                add("warning", "disk", f"local disk `{d.get('name')}` only {pct}% free on a cloud service",
-                    f"free {d.get('free_space')} of {d.get('total_space')} — the local disk is the filesystem cache, but it also holds temporary files for merges and spilled sorts, so this little headroom can still bite", "HC-4.1")
+                add("warning", "disk", f"disk `{d.get('name')}` only {pct}% free — it holds no user data, but that little headroom still bites",
+                    f"{where}; no user table's storage policy uses this disk, so it is not data capacity — on a managed service it is the filesystem cache, which also holds temporary files for merges and spilled sorts", "HC-4.1")
             elif pct < 15:
-                add("info", "disk", f"local disk `{d.get('name')}` {pct}% free on a cloud service — the filesystem cache, not capacity",
-                    f"free {d.get('free_space')} of {d.get('total_space')}; the data disks are object storage and report their own free space. Not a capacity finding — alert disk_space_low is onprem/gov only", "HC-4.1")
+                add("info", "disk", f"disk `{d.get('name')}` {pct}% free — holds no user data, so not a capacity finding",
+                    f"{where}; no user table's storage policy uses this disk (on a managed service: the filesystem cache, sized to be filled). The data disks are the ones in the policies — judge capacity from those", "HC-4.1")
             continue
         # Same severity as alerts/disk_space_low.yaml and HC-4.1: below 15 % is
         # critical (merges need headroom, inserts fail with 243 and replicas go
