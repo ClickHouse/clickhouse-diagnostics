@@ -1,0 +1,105 @@
+# 24.3 rung only: system.zookeeper_connection.xid was added in 24.3. No root
+# rule — on older servers the check is not applicable, not failed.
+name: keeper_xid_renewal_due
+title: "Keeper session request counter within a day of the 32-bit limit"
+severity: info
+description: |
+  A Keeper session numbers its requests with a counter (xid). With the default
+  32-bit counter the client must open a new session when it reaches 2^31: the
+  in-flight operations of the old session fail once, a short burst of
+  ZooKeeperHardwareExceptions and a few 999 / 319 appear on that replica, and
+  it carries on. At 8–12k requests per second that is roughly every 63 hours
+  per replica. This rule reports a session whose remaining headroom, at the
+  rate its host is actually observed to use, runs out within 24 hours — so a
+  burst of Keeper exceptions at that time can be read as the renewal it is
+  rather than as a Keeper incident.
+
+  It is informational and deliberately conservative. It reports headroom, not
+  a certainty, because nothing in the system tables says how wide a session's
+  counter is:
+
+    * With `use_xid_64` enabled in the `<zookeeper>` config (available from
+      24.10) the counter is 64-bit and the session never renews at 2^31. That
+      setting is not exposed in system.settings, system.server_settings,
+      system.zookeeper_connection or the Keeper feature flags (checked on
+      26.7), so this rule cannot test for it — read `<zookeeper>` in the
+      bundle's `configuration/` before treating a reported headroom as a
+      renewal that will happen. A session whose xid is already past 2^31 is
+      64-bit by proof and is excluded here.
+    * The rate comes from this host's ZooKeeperTransactions, which is
+      host-wide while each configured Keeper connection (the default one and
+      every auxiliary `<zookeeper>`) has its own xid. A host with more than
+      one live connection is therefore skipped rather than projected with
+      another session's traffic folded in.
+    * The rate is divided by the span metric_log actually covers, not by a
+      fixed 24 hours, and a host with less than 2 hours of samples is not
+      projected at all — otherwise a server that restarted this morning looks
+      four times quieter than it is and the renewal is missed.
+
+  The renewal itself needs no action. It becomes a finding only if inserts
+  fail in those minutes — look for failed INSERTs in `query_log` (or failed
+  flushes in `asynchronous_insert_log`) at the burst, not in
+  `system.error_log`, which also counts background Keeper errors that no
+  query ever saw and which does not exist before 24.8 — or if a replica
+  renews far more often than its rate predicts, which is session loss rather
+  than counter exhaustion (see keeper_connection_blips).
+tags:
+  - keeper
+
+# Per connection, and only where the host's traffic can be attributed to one
+# session. In cloud both {sys.*} fan out and the join on hostName() lines them
+# up; on one node both sides are that node.
+query: |
+  WITH
+    conn AS
+    (
+      SELECT
+        hostName()        AS hostname,
+        count()           AS sessions,
+        any(name)         AS connection_name,
+        any(host)         AS keeper_host,
+        max(xid)          AS xid
+      FROM {sys.zookeeper_connection}
+      WHERE is_expired = 0
+      GROUP BY hostname
+    ),
+    rate AS
+    (
+      SELECT
+        hostName()                                           AS hostname,
+        sum(ProfileEvent_ZooKeeperTransactions)              AS tx,
+        dateDiff('second', min(event_time), max(event_time)) AS covered_s,
+        -- The measured rate, computed once and used for both the predicate
+        -- and the projections. An earlier version floored it with
+        -- greatest(rate, 0.001) in the projections only, so a genuinely quiet
+        -- session was admitted on its real rate and then reported against the
+        -- floor: 8 transactions over 86 399 s with xid at 2 147 483 640 came
+        -- out as 1.9 h of headroom where the predicate had accepted it at
+        -- 21.0 h. nullIf guards the division instead of a floor, so zero
+        -- coverage yields NULL and the row drops out of the predicate below.
+        tx / nullIf(covered_s, 0)                            AS measured_tx_per_s
+      FROM {sys.metric_log}
+      WHERE event_time > now() - INTERVAL 24 HOUR
+      GROUP BY hostname
+    )
+  SELECT
+    c.hostname                                                        AS hostname,
+    c.connection_name                                                 AS connection_name,
+    c.keeper_host                                                     AS keeper_host,
+    c.xid                                                             AS xid,
+    round(r.measured_tx_per_s, 2)                                     AS tx_per_s,
+    round(r.covered_s / 3600, 1)                                      AS measured_over_h,
+    round((2147483647 - c.xid) / r.measured_tx_per_s / 3600, 1)       AS headroom_h,
+    round(2147483647 / r.measured_tx_per_s / 3600, 1)                 AS period_at_this_rate_h
+  FROM conn AS c
+  INNER JOIN rate AS r USING (hostname)
+  WHERE c.sessions = 1
+    AND c.xid > 0
+    AND c.xid < 2147483647
+    AND r.covered_s >= 7200
+    AND r.measured_tx_per_s > 0
+    AND (2147483647 - c.xid) / r.measured_tx_per_s < 86400
+  ORDER BY headroom_h
+  LIMIT 100
+
+message: "{hostname}: Keeper session '{connection_name}' on {keeper_host} is at xid {xid} of 2^31 and doing {tx_per_s} req/s (measured over {measured_over_h} h) — about {headroom_h} h of headroom, a counter this rate exhausts every ~{period_at_this_rate_h} h. On a default 32-bit counter it renews then: one short burst of Keeper exceptions on this replica, handled. Check use_xid_64 in <zookeeper> (configuration/) — with it enabled there is no renewal."

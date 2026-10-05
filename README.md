@@ -34,7 +34,7 @@ Under the hood: per-environment query sets (`cloud` / `onprem` / `gov`) selected
 | `system.metrics`, `system.events`, `system.asynchronous_metrics` | Live gauges and cumulative counters: Keeper session and watches, read-only replicas, fetches in flight, object-storage requests, cache size, `Uptime` | The "right now" state the hourly aggregates cannot give; `Uptime` turns `system.errors` and `system.events` counts into rates. |
 | `system.metric_log_coordination_3_days` (3 days, hourly, columns selected by regex) | Keeper, object-storage, filesystem-cache and replication counters hour by hour | A Keeper outage or an S3 error burst at 03:00 is visible here even when no query failed. |
 | `system.metric_log_by_host_3_days` (cloud only; 3 days, hourly, per replica) | Which replica's background pools are pinned, at what live pool size, with what Keeper latency and CPU; on SharedMergeTree, parts selected for fetching against fetches started and leader elections per hour | `metric_log_7_days` folds the replicas together; this is the per-host view a parts-propagation-lag or Keeper-latency finding is placed with, and it shows a pool-size change arriving host by host. |
-| `system.zookeeper_connection` (≥ 23.8), `system.databases`, `system.storage_policies` | Which Keeper node, how old the session; how many `Replicated` databases; which disks back which policy | The coordination and storage topology behind replication and "file doesn't exist" findings. |
+| `system.zookeeper_connection` (≥ 23.8; `xid` from 24.3), `system.databases`, `system.storage_policies` | Which Keeper node, how old the session, how far its request counter has run; how many `Replicated` databases; which disks back which policy | The coordination and storage topology behind replication and "file doesn't exist" findings. |
 | `system.distributed_ddl_queue` (7 days), `system.replicated_fetches` | Stuck or failed `ON CLUSTER` / Replicated-database DDL with per-host status; part fetches in flight | DDL replay storms (`TABLE_ALREADY_EXISTS` on `.tmp.inner_id` tables, code 571) and wedged fetches are visible only here. |
 | `system.zookeeper_log_errors_1_day`, `system.blob_storage_log_7_days` (only when the tables are enabled) | Failed Keeper requests per hour, operation and error code (errors only — the table is far too large to aggregate whole); object-storage uploads, deletes and failures per hour | Direct evidence for "Keeper stopped answering" and "the blob was deleted / never written". |
 | `host_info.json` (onprem) | OS, CPU, RAM, disks, THP, overcommit, limits, cgroups | A large share of self-managed incidents are host settings ClickHouse itself warns about at startup. |
@@ -626,6 +626,7 @@ The tool targets **ClickHouse 22.8 and newer** for on-prem servers. Root-level q
 | `system.clusters` replicated-db columns (`database_shard_name`, `database_replica_name`, `is_active`, `name`) | 23.5 | `queries.*/23.5.1.0/` |
 | `system.query_log.query_cache_usage` | 23.8 | `queries.query_analysis/23.8.1.0/` |
 | `system.zookeeper_connection` table | 23.8 | `queries.*/23.8.1.0/` (no root file — skipped below 23.8 in every mode) |
+| `system.zookeeper_connection.xid`, `last_zxid_seen`, `availability_zone` | 24.3 | `queries.*/24.3.1.0/`; `alerts/24.3.1.0/keeper_xid_renewal_due.yaml` (no root rule — not applicable below 24.3) |
 | `system.query_log.peak_threads_usage` | 23.9 | `queries.query_analysis/23.9.1.0/` |
 | `hostname` column in system log tables | 23.11 | `queries.*/23.11.1.0/` (roots use `hostName()`) |
 | `system.blob_storage_log` table (needs `<blob_storage_log>` config) | 23.11 | `queries.*/23.11.1.0/` (no root file — skipped below 23.11 in every mode) |
@@ -814,7 +815,7 @@ In `message:`, `{column_name}` is replaced with the value from each result row. 
 
 ### Bundled alert rules
 
-The repo ships with 17 alert rules in `alerts/` (plus version-gated overrides in `alerts/<version>/`). They are intended as a starting point — adjust thresholds to match your workload.
+The repo ships with 17 alert rules in `alerts/` (plus version-gated overrides in `alerts/<version>/`, and one rule that exists only there — `keeper_xid_renewal_due`, 24.3+). They are intended as a starting point — adjust thresholds to match your workload.
 
 | Rule | Severity | Fires when |
 |---|---|---|
@@ -835,6 +836,7 @@ The repo ships with 17 alert rules in `alerts/` (plus version-gated overrides in
 | `large_parts` | warning | A single active part is larger than 150 GB |
 | `mutation_running_too_long` | warning | A mutation has been running for more than 3 hours |
 | `detached_parts_exist` | info | Parts exist in the `detached/` folder (failed merges, manual detach, replication conflicts) |
+| `keeper_xid_renewal_due` | info | *(24.3+ only)* A Keeper session is within 24 h of the **32-bit** counter limit (2³¹) at the rate its host is measured to use, where that host has one live Keeper connection and at least 2 h of `metric_log` behind the estimate. Reported as headroom, not as a renewal that will happen: with `use_xid_64` enabled in `<zookeeper>` the counter is 64-bit and never wraps, and no system table exposes that setting — check `configuration/`. On a default 32-bit counter the renewal is a short burst of Keeper exceptions and a reconnect; investigate only if INSERTs failed in those minutes (`query_log`, or flushes in `asynchronous_insert_log`) |
 
 Every rule is a single `SELECT` against system tables; rows returned become alert instances in the dashboard. Rules that read a log table look back **24 hours or 7 days, per hour**, not just the last hour — bundles are usually collected after recovery, and an hour-only rule is blind to the incident it exists to surface. Open the YAML files directly to see the exact thresholds and tweak them.
 
