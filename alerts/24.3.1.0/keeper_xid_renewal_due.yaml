@@ -1,56 +1,96 @@
 # 24.3 rung only: system.zookeeper_connection.xid was added in 24.3. No root
 # rule — on older servers the check is not applicable, not failed.
 name: keeper_xid_renewal_due
-title: "Keeper session XID renewal due within 24 hours"
+title: "Keeper session request counter within a day of the 32-bit limit"
 severity: info
 description: |
-  Every Keeper session numbers its requests with a 32-bit counter (xid). At
-  2^31 the client has to start a new session, and every replica whose
-  counter wraps reconnects: a short burst of ZooKeeperHardwareExceptions, a
-  few 999 / 319 errors for in-flight operations, then business as usual. At
-  8–12k transactions per second that is every ~63 hours per replica. This
-  rule projects the current xid forward at the last 24 hours' transaction
-  rate and reports replicas whose renewal falls within the next 24 hours —
-  so a burst of Keeper exceptions at that time is read as the renewal it is,
-  not as a Keeper incident.
+  A Keeper session numbers its requests with a counter (xid). With the default
+  32-bit counter the client must open a new session when it reaches 2^31: the
+  in-flight operations of the old session fail once, a short burst of
+  ZooKeeperHardwareExceptions and a few 999 / 319 appear on that replica, and
+  it carries on. At 8–12k requests per second that is roughly every 63 hours
+  per replica. This rule reports a session whose remaining headroom, at the
+  rate its host is actually observed to use, runs out within 24 hours — so a
+  burst of Keeper exceptions at that time can be read as the renewal it is
+  rather than as a Keeper incident.
 
-  Informational: the renewal is handled. It becomes a finding only when the
-  bursts coincide with failed inserts (error_log 999 / 319 in the same hour)
-  or when a replica renews far more often than its rate predicts (session
-  losses — see keeper_connection_blips).
+  It is informational and deliberately conservative. It reports headroom, not
+  a certainty, because nothing in the system tables says how wide a session's
+  counter is:
+
+    * With `use_xid_64` enabled in the `<zookeeper>` config (available from
+      24.10) the counter is 64-bit and the session never renews at 2^31. That
+      setting is not exposed in system.settings, system.server_settings,
+      system.zookeeper_connection or the Keeper feature flags (checked on
+      26.7), so this rule cannot test for it — read `<zookeeper>` in the
+      bundle's `configuration/` before treating a reported headroom as a
+      renewal that will happen. A session whose xid is already past 2^31 is
+      64-bit by proof and is excluded here.
+    * The rate comes from this host's ZooKeeperTransactions, which is
+      host-wide while each configured Keeper connection (the default one and
+      every auxiliary `<zookeeper>`) has its own xid. A host with more than
+      one live connection is therefore skipped rather than projected with
+      another session's traffic folded in.
+    * The rate is divided by the span metric_log actually covers, not by a
+      fixed 24 hours, and a host with less than 2 hours of samples is not
+      projected at all — otherwise a server that restarted this morning looks
+      four times quieter than it is and the renewal is missed.
+
+  The renewal itself needs no action. It becomes a finding only if inserts
+  fail in those minutes — look for failed INSERTs in `query_log` (or failed
+  flushes in `asynchronous_insert_log`) at the burst, not in
+  `system.error_log`, which also counts background Keeper errors that no
+  query ever saw and which does not exist before 24.8 — or if a replica
+  renews far more often than its rate predicts, which is session loss rather
+  than counter exhaustion (see keeper_connection_blips).
 tags:
   - keeper
 
-# Per host: xid and the transaction rate are both per session, i.e. per
-# replica. In cloud both {sys.*} fan out and the join on hostName() lines
-# them up; on one node both sides are that node.
+# Per connection, and only where the host's traffic can be attributed to one
+# session. In cloud both {sys.*} fan out and the join on hostName() lines them
+# up; on one node both sides are that node.
 query: |
-  WITH rate AS
-  (
-    SELECT
-      hostName()                                                   AS hostname,
-      sum(ProfileEvent_ZooKeeperTransactions) / 86400              AS tx_per_s
-    FROM {sys.metric_log}
-    WHERE event_time > now() - INTERVAL 24 HOUR
-    GROUP BY hostname
-  )
+  WITH
+    conn AS
+    (
+      SELECT
+        hostName()        AS hostname,
+        count()           AS sessions,
+        any(name)         AS connection_name,
+        any(host)         AS keeper_host,
+        max(xid)          AS xid
+      FROM {sys.zookeeper_connection}
+      WHERE is_expired = 0
+      GROUP BY hostname
+    ),
+    rate AS
+    (
+      SELECT
+        hostName()                                           AS hostname,
+        sum(ProfileEvent_ZooKeeperTransactions)              AS tx,
+        dateDiff('second', min(event_time), max(event_time)) AS covered_s
+      FROM {sys.metric_log}
+      WHERE event_time > now() - INTERVAL 24 HOUR
+      GROUP BY hostname
+    )
   SELECT
-    c.hostname                                                     AS hostname,
-    c.host                                                         AS keeper_host,
-    c.xid                                                          AS xid,
-    round(r.tx_per_s, 1)                                           AS tx_per_s,
-    round((2147483647 - c.xid) / greatest(r.tx_per_s, 0.001) / 3600, 1) AS hours_to_renewal,
-    round(2147483647 / greatest(r.tx_per_s, 0.001) / 3600, 1)      AS renewal_period_h
-  FROM
-  (
-    SELECT hostName() AS hostname, host, xid
-    FROM {sys.zookeeper_connection}
-    WHERE is_expired = 0
-  ) AS c
+    c.hostname                                                        AS hostname,
+    c.connection_name                                                 AS connection_name,
+    c.keeper_host                                                     AS keeper_host,
+    c.xid                                                             AS xid,
+    round(r.tx / greatest(r.covered_s, 1), 2)                         AS tx_per_s,
+    round(r.covered_s / 3600, 1)                                      AS measured_over_h,
+    round((2147483647 - c.xid) / greatest(r.tx / greatest(r.covered_s, 1), 0.001) / 3600, 1) AS headroom_h,
+    round(2147483647 / greatest(r.tx / greatest(r.covered_s, 1), 0.001) / 3600, 1)           AS period_at_this_rate_h
+  FROM conn AS c
   INNER JOIN rate AS r USING (hostname)
-  WHERE r.tx_per_s > 0
-    AND (2147483647 - c.xid) / r.tx_per_s < 86400
-  ORDER BY hours_to_renewal
+  WHERE c.sessions = 1
+    AND c.xid > 0
+    AND c.xid < 2147483647
+    AND r.covered_s >= 7200
+    AND r.tx > 0
+    AND (2147483647 - c.xid) / (r.tx / r.covered_s) < 86400
+  ORDER BY headroom_h
   LIMIT 100
 
-message: "{hostname}: Keeper session xid {xid} at {tx_per_s} tx/s — renewal (2^31) in ~{hours_to_renewal} h; this replica renews every ~{renewal_period_h} h, expect a short burst of Keeper exceptions then"
+message: "{hostname}: Keeper session '{connection_name}' on {keeper_host} is at xid {xid} of 2^31 and doing {tx_per_s} req/s (measured over {measured_over_h} h) — about {headroom_h} h of headroom, a counter this rate exhausts every ~{period_at_this_rate_h} h. On a default 32-bit counter it renews then: one short burst of Keeper exceptions on this replica, handled. Check use_xid_64 in <zookeeper> (configuration/) — with it enabled there is no renewal."
