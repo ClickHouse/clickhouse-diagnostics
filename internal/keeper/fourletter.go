@@ -40,6 +40,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"clickhouse-diagnostic/internal/config"
 )
 
 // DirName is the bundle subdirectory the files land in.
@@ -164,7 +166,13 @@ func TargetsFromConfig(configDir string) []Target {
 			if err != nil {
 				continue
 			}
-			for _, block := range reZKBlock.FindAllStringSubmatch(string(blob), -1) {
+			// Comments first: ClickHouse's stock config.xml carries a whole
+			// <zookeeper> example inside one (example1 / example2 / example3),
+			// and reading it as configuration made the tool report four
+			// members on a one-member cluster and try to reach three hosts
+			// the operator never named. ClickHouse's own parser ignores
+			// comments; so must this.
+			for _, block := range reZKBlock.FindAllStringSubmatch(string(config.StripComments(blob)), -1) {
 				for _, node := range reZKNode.FindAllStringSubmatch(block[1], -1) {
 					h := reZKHost.FindStringSubmatch(node[1])
 					if h == nil || h[1] == "" || strings.Contains(h[1], "{") {
