@@ -4,6 +4,24 @@ Read this before opening any file in a bundle. It describes the archive produced
 
 ## 1. Tree
 
+**A bundle collected on Windows before the separator fix looks empty.** Tar
+names are slash-separated by definition, but those builds wrote them with the
+host separator, so every entry reads
+`clickhouse_backup_<ts>\system.parts_<ts>.jsonl`. Extracted on macOS or Linux
+that is one file whose *name contains a backslash* rather than a directory, so
+every glob here misses, `dashboard.html` will not open from the folder, and the
+bundle reports as unreadable. The pre-pass repairs this on extraction and says
+so in its coverage notes ("packed by a Windows build that wrote backslash path
+separators"). To repair one by hand:
+
+```bash
+cd <extracted bundle>
+for f in *\\*; do mv "$f" "$(basename "${f//\\//}")"; done
+```
+
+Confirm with `tar tzf <bundle>.tar.gz | head -3`: entries must contain `/`.
+
+
 ```
 clickhouse_backup_YYYYMMDD_HHMMSS/            # single top-level entry of the .tar.gz
 ├── system.<table>[_7_days|_3_days|_1_day]_<ts>.jsonl  # one file per collection query (JSONEachRow); the suffix is the window — bundles from older tool builds name part_log `_7_days`

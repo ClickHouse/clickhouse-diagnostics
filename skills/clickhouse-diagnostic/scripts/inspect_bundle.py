@@ -141,8 +141,34 @@ def parse_dt(s):
         return None
 
 
-def safe_extract(archive: str, dest: str) -> None:
+# Bundles collected with the Windows build before the separator fix name their
+# entries `clickhouse_backup_…\\system.parts_….jsonl`: tar names are
+# slash-separated by definition, but the collector built them with
+# filepath.Join, which uses the host separator. Extracted anywhere else that is
+# ONE file whose name contains a backslash instead of a directory, so every
+# glob below misses and the bundle reads as empty. Such bundles are already
+# sitting in open cases, so the separator is normalised on the way in rather
+# than asking those customers to collect again.
+WINDOWS_SEPARATOR_NOTE = (
+    "bundle was packed by a Windows build that wrote backslash path separators into the "
+    "archive (fixed in the collector); the entry names were normalised on extraction"
+)
+
+
+def _normalise_separators(tar: "tarfile.TarFile") -> bool:
+    """Rewrite backslash entry names to slashes. True when any was rewritten."""
+    touched = False
+    for m in tar.getmembers():
+        if "\\" in m.name:
+            m.name = m.name.replace("\\", "/")
+            touched = True
+    return touched
+
+
+def safe_extract(archive: str, dest: str) -> bool:
+    """Extract the bundle. Returns True when Windows separators were repaired."""
     with tarfile.open(archive, "r:*") as tar:
+        repaired = _normalise_separators(tar)
         for m in tar.getmembers():
             name = m.name
             if name.startswith("/") or ".." in name.split("/") or m.issym() or m.islnk():
@@ -153,6 +179,7 @@ def safe_extract(archive: str, dest: str) -> None:
             tar.extractall(dest, filter="data")  # Python ≥ 3.12
         except TypeError:
             tar.extractall(dest)
+    return repaired
 
 
 def find_run_dir(path: str) -> str:
@@ -1804,15 +1831,20 @@ def main() -> None:
     if os.path.isfile(path):
         dest = args.extract_to or tempfile.mkdtemp(prefix="chdiag_")
         os.makedirs(dest, exist_ok=True)
-        safe_extract(path, dest)
+        repaired_separators = safe_extract(path, dest)
         base = find_run_dir(dest)
         extracted_to = dest
     else:
+        # Already-extracted Windows bundles are a flat set of files whose names
+        # carry the separator; the run directory is then the parent itself.
+        repaired_separators = bool(glob.glob(os.path.join(path, "*\\system.version_*")))
         base = find_run_dir(path)
         extracted_to = None
 
     require_jsonl(base)
     result = analyse(base)
+    if repaired_separators:
+        result["notes"].insert(0, WINDOWS_SEPARATOR_NOTE)
     result["path"] = base
     if extracted_to:
         result["extracted_to"] = extracted_to

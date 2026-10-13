@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
+	"strings"
 )
 
 // CreateArchive creates a tar.gz archive of the specified directories
@@ -66,6 +68,25 @@ func filterExistingDirs(dirs []string) []string {
 	return existingDirs
 }
 
+// archiveEntryName builds the slash-separated name a tar entry must carry,
+// from a base directory and a host-separated relative path. Kept separate from
+// the walk so the Windows case is testable on any platform: the input is
+// whatever filepath.Rel produced on the collecting machine.
+//
+// The separator is replaced unconditionally rather than with filepath.ToSlash,
+// which is a no-op off Windows. CI runs on Linux, so a ToSlash guard could
+// never fail there and the regression this function exists to stop would ride
+// straight through. The cost is that a Unix filename containing a literal
+// backslash — legal, but impossible for the names this tool generates
+// (system.<table>_<ts>.jsonl and the files it copies out of the server's
+// config and log directories) — would be rewritten as a separator.
+func archiveEntryName(baseDir, relPath string) string {
+	if relPath == "." || relPath == "" {
+		return baseDir
+	}
+	return path.Join(baseDir, strings.ReplaceAll(relPath, `\`, "/"))
+}
+
 // addDirectoryToArchive adds a directory and its contents to the tar archive
 func addDirectoryToArchive(tarWriter *tar.Writer, dir string) (int, error) {
 	fileCount := 0
@@ -88,12 +109,21 @@ func addDirectoryToArchive(tarWriter *tar.Writer, dir string) (int, error) {
 			return err
 		}
 
-		// Set the name with directory structure
-		if relPath == "." {
-			header.Name = baseDir
-		} else {
-			header.Name = filepath.Join(baseDir, relPath)
-		}
+		// Set the name with directory structure.
+		//
+		// `path`, never `filepath`: tar names are slash-separated by
+		// definition, while filepath.Join and filepath.Rel use the host
+		// separator. On Windows this wrote entries like
+		// `clickhouse_backup_…\system.parts_….jsonl`, which is not a path in
+		// the archive at all — every other platform then extracts ONE file
+		// whose name contains a backslash instead of a directory, so the
+		// dashboard, the analysis skill and plain `tar` all see an empty
+		// bundle. Measured on a customer bundle collected with the Windows
+		// build: `tar` and Python both produced the single-file form, and the
+		// case lost two round trips to it. Slashes are correct everywhere —
+		// Windows accepts them in Win32 paths, and Python's tarfile maps them
+		// to os.sep on extraction.
+		header.Name = archiveEntryName(baseDir, relPath)
 
 		// Write the header
 		if err := tarWriter.WriteHeader(header); err != nil {
