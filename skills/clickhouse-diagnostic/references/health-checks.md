@@ -126,7 +126,7 @@ Distinguish from **client-side** Keeper noise: 999 with `Bad version` / `No node
 | 6.3 | `query_log_details` `Select`, one `tables` value | patterns with avg duration > 10 s or `read_bytes/count` > 10 GiB *(guideline)*; top-20 by `query_duration_ms/count` | info→warning | Candidates for `--normalized-query-hash` analysis. Look at `query` sample: `SELECT *`, `FINAL`, no filter on ORDER BY prefix, `LIKE '%…%'`, `JOIN` big right side, `uniqExact`/`COUNT DISTINCT`. P-21, P-50…P-55. |
 | 6.4 | `query_log_details` | 159 (`TIMEOUT_EXCEEDED`) or 394 (cancelled) clustered in hours | warning | Slow queries hitting `max_execution_time` / client timeouts; check whether the same hours show 241, high merge activity or Keeper errors — contention, not the query alone. |
 | 6.5 | `query_log_details` by `user` | one non-internal user > 70 % of `count` or of `read_bytes` *(guideline)* | info | Workload concentration; useful for the follow-up prompts. |
-| 6.6 | `query_log_details` | `query_kind = 'Insert'` count per hour ≫ 1000 with `written_rows/count < 1000` *(guideline)* | warning | Same finding as HC-2.3 seen from the client side. |
+| 6.6 | `query_log_details` (20-minute buckets — sum three for an hour) | `query_kind = 'Insert'` count per hour ≫ 1000 with `written_rows/count < 1000` *(guideline)* | warning | Same finding as HC-2.3 seen from the client side. |
 | 6.7 | `query_analysis/profile_events_compare` | large `delta` in `SelectedParts`/`SelectedMarks`/`ReadBufferFromS3*`/`OSCPUWait*`/`MemoryTracker*` | info | Explains slow vs fast: pruning lost, cold cache, CPU wait, memory. `text_log_parts`: "Selected N/N parts" = no pruning. |
 
 ## HC-7 Inserts

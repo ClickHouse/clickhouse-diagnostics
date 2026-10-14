@@ -313,8 +313,13 @@ def analyse(base: str):
         times = [parse_dt(r.get("time")) for r in ql]
         times = [t for t in times if t]
         if times:
+            # The collector buckets this file in 20 minutes (hourly before
+            # v0.8), so count the HOURS covered — stable across both — and
+            # report the bucket count beside it. Everything downstream folds to
+            # hours with hour_key(), which works either way.
             out["query_log_window"] = {"from": min(times).isoformat(sep=" "), "to": max(times).isoformat(sep=" "),
-                                       "hour_buckets": len(set(times))}
+                                       "hour_buckets": len({hour_key(t.isoformat(sep=" ")) for t in times}),
+                                       "buckets": len(set(times))}
     tl = read_jsonl(first("system.text_log_2*.jsonl", base))  # not the histogram / keeper-marker files
     if tl:
         ts = [parse_dt(r.get("event_time")) for r in tl]
@@ -1674,7 +1679,9 @@ def render_md(o) -> str:
         L.append(line)
     qw = o.get("query_log_window")
     if qw:
-        L.append(f"- query_log window: {qw['from']} → {qw['to']} ({qw['hour_buckets']} hour buckets)")
+        _b = qw.get("buckets")
+        _extra = f", {_b} buckets of 20 min" if _b and _b > qw["hour_buckets"] else ""
+        L.append(f"- query_log window: {qw['from']} → {qw['to']} ({qw['hour_buckets']} hour(s) covered{_extra})")
     tw = o.get("text_log_window")
     if tw:
         L.append(f"- text_log slice: {tw['rows']} rows, {tw['from']} → {tw['to']}")
