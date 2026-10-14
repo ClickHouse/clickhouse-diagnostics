@@ -196,6 +196,43 @@ SELECT name, type, free_pct, free_space, total_space FROM file('$B/system.disks_
 ```
 (`free_space`/`total_space` are strings; `free_pct` is numeric; cloud has one row per replica.) Cross-check `host_info.json → disks[]` where `mount_point` covers the ClickHouse `path` in `configuration/`. Size by database/engine from `system.parts` (`active = 1`, `sum(bytes_on_disk)`), compression ratio = `data_uncompressed_bytes / data_compressed_bytes`.
 
+## 4a. Is the disk the limit? (added when merges or inserts look slow)
+
+Device throughput and the share of thread time spent waiting on it, per hour.
+`cores` comes from `host_info.json` (`cpu.logical_cpus`); an hour is
+3 600 s × cores × 1e6 µs of thread time, so `io_wait_pct` is what fraction of
+the machine was blocked on storage rather than working:
+
+```sql
+SELECT time,
+       round("sum(ProfileEvent_OSReadBytes)"  / 1048576 / 3600, 1)  AS read_mib_s,
+       round("sum(ProfileEvent_OSWriteBytes)" / 1048576 / 3600, 1)  AS write_mib_s,
+       round("sum(ProfileEvent_DiskReadElapsedMicroseconds)"  / 1e6, 1) AS read_wait_s,
+       round("sum(ProfileEvent_DiskWriteElapsedMicroseconds)" / 1e6, 1) AS write_wait_s,
+       round(100 * "sum(ProfileEvent_OSIOWaitMicroseconds)" / (3600 * 1e6 * <cores>), 1) AS io_wait_pct,
+       round("sum(ProfileEvent_OSReadBytes)" / nullIf("sum(ProfileEvent_ReadBufferFromFileDescriptorReadBytes)", 0), 2) AS os_vs_asked
+FROM file('$B/system.metric_log_7_days_*.jsonl', JSONEachRow)
+ORDER BY time
+```
+
+`io_wait_pct` above 100 % is not a reading: the first metric_log sample after a
+server start carries that counter's accumulated total (measured: 3.5e12 µs in
+one 1-second sample on a replica that had just restarted), so the hour holding
+a restart is not a rate — the `uptime:` header says which one. On a service
+whose data is on object storage the counter is ~0 by design and
+`read_mib_s` / `write_mib_s` from `OSReadBytes` / `OSWriteBytes` are what to
+read instead.
+
+Read it with the merge columns beside it: `io_wait_pct` sustained above ~20 %
+while `max_merge_pool_tasks` sits at `background_pool_size` means the **device**
+is the limit and a bigger pool only lengthens the queue — the levers are faster
+storage or fewer, larger parts (HC-4.6, P-01). `os_vs_asked` well below 1 means
+the page cache is absorbing the reads, so throughput is not the constraint yet.
+On cloud the same columns are per replica in
+`system.metric_log_by_host_3_days_*.jsonl`; on a service whose data is on
+object storage they are near zero by design and the S3 counters in
+`metric_log_coordination_3_days` are the equivalent (HC-4.10).
+
 ## 5. Memory and CPU
 
 Server-side tracked memory and background pools per hour (the dashboard draws the three pool averages since v0.7; memory, the common pool and the Keeper counters only live here):

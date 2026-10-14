@@ -22,6 +22,25 @@ SELECT
     avg(CurrentMetric_InterserverConnection)                 AS avg_interserver_connections,
     sum(ProfileEvent_ZooKeeperTransactions)                  AS zk_transactions,
     sum(ProfileEvent_ZooKeeperHardwareExceptions)            AS zk_hw_exceptions,
+    -- Local-disk I/O, so "is the disk the bottleneck?" is answerable from the
+    -- bundle at all. A support case advised raising EBS throughput for slow
+    -- merges off a screenshot the customer happened to send, because nothing
+    -- here carried it. Read as: bytes / elapsed = throughput,
+    -- elapsed / operations = latency, and OSIOWait against the hour to see how
+    -- much thread time went to waiting rather than working. OSRead*/OSWrite*
+    -- are the block device with the page cache excluded, while the
+    -- ReadBuffer*/WriteBuffer* pair is what ClickHouse asked for, so the two
+    -- together show how much the cache absorbed.
+    --
+    -- Selected by regex rather than named: metric_log's column set moves
+    -- between versions and one absent name fails the whole collector with code
+    -- 47 — which is exactly how system.asynchronous_metrics broke on the 22.8
+    -- floor. COLUMNS() yields nothing for a counter this server lacks.
+    -- Measured cost on 226 663 rows (7 days): the collector reads 6.1 -> 13.0
+    -- MiB and the file grows 20.8 -> 28.8 KiB, with no measurable change in
+    -- wall time. No extra query and no extra round trip: the same scan, nine
+    -- more of ~1700 columns.
+    COLUMNS('^ProfileEvent_(ReadBufferFromFileDescriptorReadBytes|WriteBufferFromFileDescriptorWriteBytes|DiskReadElapsedMicroseconds|DiskWriteElapsedMicroseconds|OSRead(Bytes|Chars)|OSWrite(Bytes|Chars)|OSIOWaitMicroseconds)$') APPLY sum,
     avg(CurrentMetric_MemoryTracking)                        AS avg_memory_tracking_bytes
 FROM system.metric_log
 WHERE event_time > {from:7d} AND event_time <= {to:now}
