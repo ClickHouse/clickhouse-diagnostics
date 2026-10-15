@@ -141,8 +141,50 @@ def parse_dt(s):
         return None
 
 
-def safe_extract(archive: str, dest: str) -> None:
+# Bundles collected with the Windows build before the separator fix name their
+# entries `clickhouse_backup_…\\system.parts_….jsonl`: tar names are
+# slash-separated by definition, but the collector built them with
+# filepath.Join, which uses the host separator. Extracted anywhere else that is
+# ONE file whose name contains a backslash instead of a directory, so every
+# glob below misses and the bundle reads as empty. Such bundles are already
+# sitting in open cases, so the separator is normalised on the way in rather
+# than asking those customers to collect again.
+WINDOWS_SEPARATOR_NOTE = (
+    "bundle was packed by a Windows build that wrote backslash path separators into the "
+    "archive (fixed in the collector); the entry names were normalised on extraction"
+)
+
+
+def _normalise_separators(tar: "tarfile.TarFile") -> bool:
+    """Rewrite legacy Windows entry names to slashes. True when any was.
+
+    Only names without a single "/" are Windows-shaped: those builds joined
+    every component with a backslash. In a slash-separated name a backslash is
+    an ordinary filename character — configuration/ and logs/ copy the
+    server's files under their real names, so `a\\b.xml` next to `a/b.xml`
+    is two files, and rewriting it would merge them on extraction.
+    """
+    touched = False
+    for m in tar.getmembers():
+        if "\\" in m.name and "/" not in m.name:
+            m.name = m.name.replace("\\", "/")
+            touched = True
+    return touched
+
+
+def _extracted_windows_bundle(path: str) -> bool:
+    """A folder that plain tar extracted from a legacy Windows archive: flat
+    files named `clickhouse_backup_…\\system.version_….jsonl`. Only where "/"
+    is the separator — on Windows a backslash IS a directory."""
+    if os.sep != "/":
+        return False
+    return any("\\system.version_" in f for f in os.listdir(path))
+
+
+def safe_extract(archive: str, dest: str) -> bool:
+    """Extract the bundle. Returns True when Windows separators were repaired."""
     with tarfile.open(archive, "r:*") as tar:
+        repaired = _normalise_separators(tar)
         for m in tar.getmembers():
             name = m.name
             if name.startswith("/") or ".." in name.split("/") or m.issym() or m.islnk():
@@ -153,6 +195,7 @@ def safe_extract(archive: str, dest: str) -> None:
             tar.extractall(dest, filter="data")  # Python ≥ 3.12
         except TypeError:
             tar.extractall(dest)
+    return repaired
 
 
 def find_run_dir(path: str) -> str:
@@ -1804,15 +1847,26 @@ def main() -> None:
     if os.path.isfile(path):
         dest = args.extract_to or tempfile.mkdtemp(prefix="chdiag_")
         os.makedirs(dest, exist_ok=True)
-        safe_extract(path, dest)
+        repaired_separators = safe_extract(path, dest)
         base = find_run_dir(dest)
         extracted_to = dest
     else:
+        # Renaming the files would repair them — and modify the evidence. The
+        # original archive can be repaired while extracting into a new
+        # directory, so point there instead.
+        if _extracted_windows_bundle(path):
+            die(f"{path} was extracted from an archive packed by a Windows build of the collector: "
+                "its files are named like clickhouse_backup_<ts>\\system.version_<ts>.jsonl and cannot "
+                "be read in place without renaming the evidence. Run the pre-pass on the original "
+                "clickhouse_backup_*.tar.gz instead — it repairs the names while extracting into a new directory.")
+        repaired_separators = False
         base = find_run_dir(path)
         extracted_to = None
 
     require_jsonl(base)
     result = analyse(base)
+    if repaired_separators:
+        result["notes"].insert(0, WINDOWS_SEPARATOR_NOTE)
     result["path"] = base
     if extracted_to:
         result["extracted_to"] = extracted_to
