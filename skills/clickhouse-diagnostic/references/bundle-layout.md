@@ -12,14 +12,17 @@ that is one file whose *name contains a backslash* rather than a directory, so
 every glob here misses, `dashboard.html` will not open from the folder, and the
 bundle reports as unreadable. The pre-pass repairs this on extraction and says
 so in its coverage notes ("packed by a Windows build that wrote backslash path
-separators"). To repair one by hand:
+separators"). It refuses a folder already extracted that way: do not rename the
+files in place — that modifies the evidence, and flattening the names merges
+files that share one (`config.d\storage.xml`, `users.d\storage.xml`). Run it on
+the original archive into a fresh directory instead:
 
 ```bash
-cd <extracted bundle>
-for f in *\\*; do mv "$f" "$(basename "${f//\\//}")"; done
+python3 skills/clickhouse-diagnostic/scripts/inspect_bundle.py clickhouse_backup_<ts>.tar.gz --extract-to <new dir>
 ```
 
-Confirm with `tar tzf <bundle>.tar.gz | head -3`: entries must contain `/`.
+To tell the two apart, `tar tzf <bundle>.tar.gz | head -3`: a legacy Windows
+archive's entries contain no `/` at all.
 
 
 ```

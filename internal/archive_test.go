@@ -18,27 +18,40 @@ import (
 // plain `tar` all see an empty bundle. A customer bundle collected that way
 // cost a support case two round trips, so the transformation is pinned here
 // with the Windows-shaped input it has to survive.
-func TestArchiveEntryName_IsAlwaysSlashSeparated(t *testing.T) {
-	for _, c := range []struct{ base, rel, want string }{
+//
+// Only the collecting platform's separator is converted. On Unix a backslash
+// is an ordinary filename character, and configuration/ and logs/ copy the
+// server's own files under their real names: `a\b.xml` and `a/b.xml` are two
+// files and must stay two entries.
+func TestEntryName_ConvertsOnlyTheHostSeparator(t *testing.T) {
+	for _, c := range []struct {
+		sep             rune
+		base, rel, want string
+	}{
 		// What filepath.Rel returns on Windows:
-		{"clickhouse_backup_20261006_084257", `system.parts_20261006_084257.jsonl`, "clickhouse_backup_20261006_084257/system.parts_20261006_084257.jsonl"},
-		{"clickhouse_backup_20261006_084257", `configuration\config.xml`, "clickhouse_backup_20261006_084257/configuration/config.xml"},
-		{"clickhouse_backup_20261006_084257", `logs\clickhouse-server.err.log`, "clickhouse_backup_20261006_084257/logs/clickhouse-server.err.log"},
-		{"bundle", `a\b\c\deep.jsonl`, "bundle/a/b/c/deep.jsonl"},
-		// What it returns everywhere else — must be unchanged:
-		{"bundle", "configuration/config.xml", "bundle/configuration/config.xml"},
+		{'\\', "clickhouse_backup_20261006_084257", `system.parts_20261006_084257.jsonl`, "clickhouse_backup_20261006_084257/system.parts_20261006_084257.jsonl"},
+		{'\\', "clickhouse_backup_20261006_084257", `configuration\config.xml`, "clickhouse_backup_20261006_084257/configuration/config.xml"},
+		{'\\', "clickhouse_backup_20261006_084257", `logs\clickhouse-server.err.log`, "clickhouse_backup_20261006_084257/logs/clickhouse-server.err.log"},
+		{'\\', "bundle", `a\b\c\deep.jsonl`, "bundle/a/b/c/deep.jsonl"},
+		// What it returns everywhere else — unchanged, literal backslash kept:
+		{'/', "bundle", "configuration/config.xml", "bundle/configuration/config.xml"},
+		{'/', "bundle", `configuration/a\b.xml`, `bundle/configuration/a\b.xml`},
 		// The directory entry itself:
-		{"bundle", ".", "bundle"},
-		{"bundle", "", "bundle"},
+		{'\\', "bundle", ".", "bundle"},
+		{'/', "bundle", "", "bundle"},
 	} {
-		if got := archiveEntryName(c.base, c.rel); got != c.want {
-			t.Errorf("archiveEntryName(%q, %q) = %q, want %q", c.base, c.rel, got, c.want)
+		if got := entryName(c.base, c.rel, c.sep); got != c.want {
+			t.Errorf("entryName(%q, %q, %q) = %q, want %q", c.base, c.rel, c.sep, got, c.want)
 		}
+	}
+	// Production uses this platform's separator.
+	if got, want := archiveEntryName("bundle", "x.jsonl"), entryName("bundle", "x.jsonl", filepath.Separator); got != want {
+		t.Errorf("archiveEntryName = %q, want %q", got, want)
 	}
 }
 
-// End to end: whatever the host separator is, nothing with a backslash may
-// reach the archive, and the structure must survive a round trip.
+// End to end: the host separator never reaches the archive, a Unix filename
+// with a literal backslash keeps it, and the structure survives a round trip.
 func TestCreateArchive_NoBackslashInEntryNames(t *testing.T) {
 	root := t.TempDir()
 	src := filepath.Join(root, "clickhouse_backup_20260101_000000")
@@ -47,11 +60,21 @@ func TestCreateArchive_NoBackslashInEntryNames(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	for _, f := range []string{
+	files := []string{
 		"system.version_20260101_000000.jsonl",
 		filepath.Join("configuration", "config.xml"),
 		filepath.Join("logs", "clickhouse-server.log"),
-	} {
+	}
+	literal := ""
+	if filepath.Separator == '/' {
+		// Two distinct files on Unix: configuration/a\b.xml and configuration/a/b.xml.
+		if err := os.MkdirAll(filepath.Join(src, "configuration", "a"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		literal = "clickhouse_backup_20260101_000000/configuration/a\\b.xml"
+		files = append(files, filepath.Join("configuration", `a\b.xml`), filepath.Join("configuration", "a", "b.xml"))
+	}
+	for _, f := range files {
 		if err := os.WriteFile(filepath.Join(src, f), []byte("x\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -82,7 +105,7 @@ func TestCreateArchive_NoBackslashInEntryNames(t *testing.T) {
 			t.Fatal(err)
 		}
 		names = append(names, h.Name)
-		if strings.Contains(h.Name, `\`) {
+		if strings.Contains(h.Name, `\`) && h.Name != literal {
 			t.Errorf("entry %q contains a backslash — tar names must be slash-separated", h.Name)
 		}
 	}
@@ -94,6 +117,13 @@ func TestCreateArchive_NoBackslashInEntryNames(t *testing.T) {
 	} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("archive is missing %q; it holds:\n%s", want, joined)
+		}
+	}
+	if literal != "" {
+		for _, want := range []string{literal, "clickhouse_backup_20260101_000000/configuration/a/b.xml"} {
+			if !strings.Contains(joined+"\n", want+"\n") {
+				t.Errorf("a\\b.xml and a/b.xml must be two entries; missing %q in:\n%s", want, joined)
+			}
 		}
 	}
 }

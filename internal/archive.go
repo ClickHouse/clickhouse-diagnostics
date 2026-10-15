@@ -69,22 +69,26 @@ func filterExistingDirs(dirs []string) []string {
 }
 
 // archiveEntryName builds the slash-separated name a tar entry must carry,
-// from a base directory and a host-separated relative path. Kept separate from
-// the walk so the Windows case is testable on any platform: the input is
-// whatever filepath.Rel produced on the collecting machine.
-//
-// The separator is replaced unconditionally rather than with filepath.ToSlash,
-// which is a no-op off Windows. CI runs on Linux, so a ToSlash guard could
-// never fail there and the regression this function exists to stop would ride
-// straight through. The cost is that a Unix filename containing a literal
-// backslash — legal, but impossible for the names this tool generates
-// (system.<table>_<ts>.jsonl and the files it copies out of the server's
-// config and log directories) — would be rewritten as a separator.
+// from a base directory and the relative path filepath.Rel produced on the
+// collecting machine.
 func archiveEntryName(baseDir, relPath string) string {
+	return entryName(baseDir, relPath, filepath.Separator)
+}
+
+// entryName converts only sep, the collecting platform's separator — what
+// filepath.ToSlash does, with the platform passed in so the Windows case is
+// testable on the Linux CI, where ToSlash is a no-op. On Unix a backslash is
+// an ordinary filename character: configuration/ and logs/ copy the server's
+// files under their real names, so `a\b.xml` and `a/b.xml` are two files and
+// rewriting the backslash would merge them into one entry.
+func entryName(baseDir, relPath string, sep rune) string {
 	if relPath == "." || relPath == "" {
 		return baseDir
 	}
-	return path.Join(baseDir, strings.ReplaceAll(relPath, `\`, "/"))
+	if sep != '/' {
+		relPath = strings.ReplaceAll(relPath, string(sep), "/")
+	}
+	return path.Join(baseDir, relPath)
 }
 
 // addDirectoryToArchive adds a directory and its contents to the tar archive
