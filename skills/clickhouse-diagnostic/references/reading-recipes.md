@@ -13,9 +13,10 @@ Discipline (from the analysis rules): select only the columns you will comment o
 ## 0. Inventory and coverage
 
 ```bash
-tar -tzf clickhouse_backup_*.tar.gz | head -50          # what is inside, before extracting
-mkdir -p /tmp/chdiag && tar -xzf clickhouse_backup_*.tar.gz -C /tmp/chdiag
-B=$(ls -d /tmp/chdiag/clickhouse_backup_*)
+A=clickhouse_diagnostic_<ts>.tar.gz                      # this case's bundle (older releases: clickhouse_backup_<ts>.tar.gz)
+tar -tzf "$A" | head -50                                 # what is inside, before extracting
+D=$(mktemp -d /tmp/chdiag.XXXXXX) && tar -xzf "$A" -C "$D"   # a fresh directory per bundle: two cases never share one
+B=$(find "$D" -mindepth 1 -maxdepth 1 -type d)           # its single run folder — or the one inside the pre-pass's "extracted to" directory
 ls -la "$B"; wc -l "$B"/*.jsonl                          # 0-line files are meaningful (see bundle-layout §1)
 cat "$B"/system.version_*.jsonl
 head -c 400 "$B"/system.part_log_3_days_*.jsonl          # confirm column names on this bundle

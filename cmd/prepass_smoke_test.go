@@ -87,3 +87,61 @@ func TestInspectBundle_SmokeOnMinimalBundle(t *testing.T) {
 		}
 	}
 }
+
+// Bundles are being renamed from clickhouse_backup_<ts> to
+// clickhouse_diagnostic_<ts>. The pre-pass must read both: bundles under the
+// old name sit in open cases. With both in one results folder it must pick
+// the newest by its timestamp — sorted by name, every clickhouse_diagnostic_*
+// would win over every clickhouse_backup_*, whatever their dates.
+func TestInspectBundle_ReadsBothBundleNames(t *testing.T) {
+	writeRun := func(dir string) {
+		t.Helper()
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		for name, body := range minimalBundle {
+			if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	collected := func(out string) (path, at string) {
+		t.Helper()
+		var r struct {
+			Path        string `json:"path"`
+			CollectedAt string `json:"collected_at"`
+		}
+		if err := json.Unmarshal([]byte(out), &r); err != nil {
+			t.Fatalf("pre-pass did not emit JSON: %v\n%s", err, out)
+		}
+		return r.Path, r.CollectedAt
+	}
+
+	// A results folder holding one of each, the OLD name being the newer run.
+	parent := t.TempDir()
+	writeRun(filepath.Join(parent, "clickhouse_diagnostic_20260102_000000"))
+	writeRun(filepath.Join(parent, "clickhouse_backup_20260105_000000"))
+	out, errOut, code := runPrepass(t, "--json", parent)
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, errOut)
+	}
+	if path, at := collected(out); filepath.Base(path) != "clickhouse_backup_20260105_000000" || at != "2026-01-05 00:00:00" {
+		t.Errorf("picked %s collected %q; want the newest run, clickhouse_backup_20260105_000000", filepath.Base(path), at)
+	}
+
+	// An archive under the new name.
+	dir := t.TempDir()
+	var members [][2]string
+	for name, body := range minimalBundle {
+		members = append(members, [2]string{"clickhouse_diagnostic_20260103_101500/" + name, body})
+	}
+	archive := filepath.Join(dir, "clickhouse_diagnostic_20260103_101500.tar.gz")
+	writeTarGz(t, archive, members)
+	out, errOut, code = runPrepass(t, "--json", "--extract-to", filepath.Join(dir, "x"), archive)
+	if code != 0 {
+		t.Fatalf("new-name archive: exit %d: %s", code, errOut)
+	}
+	if _, at := collected(out); at != "2026-01-03 10:15:00" {
+		t.Errorf("new-name archive: collected_at = %q, want 2026-01-03 10:15:00", at)
+	}
+}

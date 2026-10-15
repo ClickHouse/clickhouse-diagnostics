@@ -1,4 +1,6 @@
-# Bundle layout — what is in a `clickhouse_backup_*` archive and how to read each file
+# Bundle layout — what is in a `clickhouse_diagnostic_*` archive and how to read each file
+
+Releases before the rename named the folder and the archive `clickhouse_backup_<ts>`; the layout is the same and the pre-pass reads both.
 
 Read this before opening any file in a bundle. It describes the archive produced by `clickhouse-diagnostic` (this repository). For *what each file is for, what to read first and what healthy looks like*, read the matching entry in `file-guide.md` before the column table below. The collector evolves: **always confirm column names against the first line of the file you are reading** — the tables below describe the current SQL in `queries.<mode>/`, and an older bundle may carry a slightly different column set (e.g. an early `part_log` file also had `part_name` and an unaliased `any(exception)` column).
 
@@ -26,7 +28,7 @@ archive's entries contain no `/` at all.
 
 
 ```
-clickhouse_backup_YYYYMMDD_HHMMSS/            # single top-level entry of the .tar.gz
+clickhouse_diagnostic_YYYYMMDD_HHMMSS/        # single top-level entry of the .tar.gz
 ├── system.<table>[_7_days|_3_days|_1_day]_<ts>.jsonl  # one file per collection query (JSONEachRow); the suffix is the window — bundles from older tool builds name part_log `_7_days`
 ├── text_log_<ts>.jsonl                        # only with --collect-text-log (UTC stamp, may differ by 1 s)
 ├── query_analysis/<name>_<ts>.jsonl           # only with --query-id / --normalized-query-hash (12 files)
@@ -38,7 +40,7 @@ clickhouse_backup_YYYYMMDD_HHMMSS/            # single top-level entry of the .t
 ├── schema_graph.html                          # the table-dependency graph, beside dashboard.html and opened from its Schema tab (same conditions)
 ├── execution_log.txt                          # every collector: outcome, wall time, bytes, rows; alerts; phases (read first)
 └── alerts_summary.json                        # only when alerts ran but dashboard.html is absent
-clickhouse_backup_<ts>_gov_name_mapping.csv    # NEXT TO the folder, never inside the archive (gov only)
+clickhouse_diagnostic_<ts>_gov_name_mapping.csv  # NEXT TO the folder, never inside the archive (gov only)
 ```
 
 - `<ts>` in the folder name is the run start in the **collector host's local time**; `text_log_<ts>` and `query_analysis/*_<ts>` are stamped in **UTC** at write time.
