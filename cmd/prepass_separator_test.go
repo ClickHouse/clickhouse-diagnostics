@@ -158,6 +158,11 @@ func TestPrepass_RefusesExtractedWindowsFolderWithoutTouchingIt(t *testing.T) {
 		t.Skip("on Windows these names are real paths")
 	}
 	dir := t.TempDir()
+	// Plain tar also creates the archive's top-level directory entry, empty:
+	// the input that used to be picked as the run directory and accepted.
+	if err := os.Mkdir(filepath.Join(dir, sepRun), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	var names []string
 	for name, body := range minimalBundle {
 		flat := sepRun + `\` + name // what plain tar leaves on Unix
