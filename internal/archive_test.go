@@ -194,8 +194,14 @@ func TestCreateArchive_SuccessLeavesOnlyTheArchive(t *testing.T) {
 	if extra := leftovers(t, root, "bundle.tar.gz"); len(extra) != 0 {
 		t.Errorf("left behind: %v", extra)
 	}
-	if fi, err := os.Stat(archive); err != nil || fi.Mode().Perm() != 0o600 {
-		t.Errorf("archive %v, %v; want it present and 0600", fi, err)
+	fi, err := os.Stat(archive)
+	if err != nil {
+		t.Fatalf("archive not created: %v", err)
+	}
+	// On Windows Chmod only sets the read-only attribute and Stat reports a
+	// writable file as 0666, so the exact mode is a POSIX check.
+	if runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600 {
+		t.Errorf("archive mode %v, want 0600", fi.Mode().Perm())
 	}
 }
 
