@@ -156,13 +156,29 @@ WINDOWS_SEPARATOR_NOTE = (
 
 
 def _normalise_separators(tar: "tarfile.TarFile") -> bool:
-    """Rewrite backslash entry names to slashes. True when any was rewritten."""
+    """Rewrite legacy Windows entry names to slashes. True when any was.
+
+    Only names without a single "/" are Windows-shaped: those builds joined
+    every component with a backslash. In a slash-separated name a backslash is
+    an ordinary filename character — configuration/ and logs/ copy the
+    server's files under their real names, so `a\\b.xml` next to `a/b.xml`
+    is two files, and rewriting it would merge them on extraction.
+    """
     touched = False
     for m in tar.getmembers():
-        if "\\" in m.name:
+        if "\\" in m.name and "/" not in m.name:
             m.name = m.name.replace("\\", "/")
             touched = True
     return touched
+
+
+def _extracted_windows_bundle(path: str) -> bool:
+    """A folder that plain tar extracted from a legacy Windows archive: flat
+    files named `clickhouse_backup_…\\system.version_….jsonl`. Only where "/"
+    is the separator — on Windows a backslash IS a directory."""
+    if os.sep != "/":
+        return False
+    return any("\\system.version_" in f for f in os.listdir(path))
 
 
 def safe_extract(archive: str, dest: str) -> bool:
@@ -1835,9 +1851,15 @@ def main() -> None:
         base = find_run_dir(dest)
         extracted_to = dest
     else:
-        # Already-extracted Windows bundles are a flat set of files whose names
-        # carry the separator; the run directory is then the parent itself.
-        repaired_separators = bool(glob.glob(os.path.join(path, "*\\system.version_*")))
+        # Renaming the files would repair them — and modify the evidence. The
+        # original archive can be repaired while extracting into a new
+        # directory, so point there instead.
+        if _extracted_windows_bundle(path):
+            die(f"{path} was extracted from an archive packed by a Windows build of the collector: "
+                "its files are named like clickhouse_backup_<ts>\\system.version_<ts>.jsonl and cannot "
+                "be read in place without renaming the evidence. Run the pre-pass on the original "
+                "clickhouse_backup_*.tar.gz instead — it repairs the names while extracting into a new directory.")
+        repaired_separators = False
         base = find_run_dir(path)
         extracted_to = None
 
