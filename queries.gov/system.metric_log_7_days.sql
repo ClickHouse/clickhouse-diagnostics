@@ -25,12 +25,15 @@ SELECT
     -- Local-disk I/O, so "is the disk the bottleneck?" is answerable from the
     -- bundle at all. A support case advised raising EBS throughput for slow
     -- merges off a screenshot the customer happened to send, because nothing
-    -- here carried it. Read as: bytes / elapsed = throughput,
-    -- elapsed / operations = latency, and OSIOWait against the hour to see how
-    -- much thread time went to waiting rather than working. OSRead*/OSWrite*
-    -- are the block device with the page cache excluded, while the
-    -- ReadBuffer*/WriteBuffer* pair is what ClickHouse asked for, so the two
-    -- together show how much the cache absorbed.
+    -- here carried it. Every counter is summed over threads, so these are
+    -- totals, not device measurements: OSRead*/OSWrite* Bytes are what the
+    -- block device served (page cache excluded) — divided by covered_s, the
+    -- hour's average traffic; the ReadBuffer*/WriteBuffer* pair is what
+    -- ClickHouse asked for, so the two show how much the cache absorbed;
+    -- Disk*ElapsedMicroseconds is thread time inside read/write calls, cache
+    -- hits included and overlapping calls added up, so never a throughput
+    -- denominator; OSIOWait is thread time blocked on storage, and
+    -- OSIOWait / (covered_s * 1e6) is the average number of threads waiting.
     --
     -- Selected by regex rather than named: metric_log's column set moves
     -- between versions and one absent name fails the whole collector with code
@@ -41,6 +44,13 @@ SELECT
     -- wall time. No extra query and no extra round trip: the same scan, nine
     -- more of ~1700 columns.
     COLUMNS('^ProfileEvent_(ReadBufferFromFileDescriptorReadBytes|WriteBufferFromFileDescriptorWriteBytes|DiskReadElapsedMicroseconds|DiskWriteElapsedMicroseconds|OSRead(Bytes|Chars)|OSWrite(Bytes|Chars)|OSIOWaitMicroseconds)$') APPLY sum,
+    -- How much of the hour the samples cover: the rate denominator above,
+    -- and restart evidence — an hour with fewer samples than its neighbours
+    -- had downtime, and the first sample after a start can carry a counter's
+    -- accumulated total (measured: 3.5e12 us of OSIOWait in one 1-second
+    -- sample), so that hour's sums are not rates.
+    count()                                                  AS metric_samples,
+    dateDiff('second', min(event_time), max(event_time)) + 1 AS covered_s,
     avg(CurrentMetric_MemoryTracking)                        AS avg_memory_tracking_bytes
 FROM system.metric_log
 WHERE event_time > {from:7d} AND event_time <= {to:now}

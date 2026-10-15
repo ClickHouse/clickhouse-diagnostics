@@ -198,40 +198,51 @@ SELECT name, type, free_pct, free_space, total_space FROM file('$B/system.disks_
 
 ## 4a. Is the disk the limit? (added when merges or inserts look slow)
 
-Device throughput and the share of thread time spent waiting on it, per hour.
-`cores` comes from `host_info.json` (`cpu.logical_cpus`); an hour is
-3 600 s × cores × 1e6 µs of thread time, so `io_wait_pct` is what fraction of
-the machine was blocked on storage rather than working:
+Device traffic and threads blocked on it, per hour. Every counter is summed
+over threads, so each is divided by the seconds the hour's samples cover
+(`covered_s`), not by a CPU count. Values are quoted in the file (UInt64), so
+cast before arithmetic:
 
 ```sql
 SELECT time,
-       round("sum(ProfileEvent_OSReadBytes)"  / 1048576 / 3600, 1)  AS read_mib_s,
-       round("sum(ProfileEvent_OSWriteBytes)" / 1048576 / 3600, 1)  AS write_mib_s,
-       round("sum(ProfileEvent_DiskReadElapsedMicroseconds)"  / 1e6, 1) AS read_wait_s,
-       round("sum(ProfileEvent_DiskWriteElapsedMicroseconds)" / 1e6, 1) AS write_wait_s,
-       round(100 * "sum(ProfileEvent_OSIOWaitMicroseconds)" / (3600 * 1e6 * <cores>), 1) AS io_wait_pct,
-       round("sum(ProfileEvent_OSReadBytes)" / nullIf("sum(ProfileEvent_ReadBufferFromFileDescriptorReadBytes)", 0), 2) AS os_vs_asked
+       toUInt64(metric_samples) AS samples, toUInt64(covered_s) AS secs,
+       round(toUInt64("sum(ProfileEvent_OSReadBytes)")  / 1048576 / secs, 1) AS read_mib_s,
+       round(toUInt64("sum(ProfileEvent_OSWriteBytes)") / 1048576 / secs, 1) AS write_mib_s,
+       round(toUInt64("sum(ProfileEvent_OSIOWaitMicroseconds)") / 1e6 / secs, 2) AS threads_blocked_on_io,
+       round(toUInt64("sum(ProfileEvent_DiskReadElapsedMicroseconds)")  / 1e6) AS read_call_thread_s,
+       round(toUInt64("sum(ProfileEvent_DiskWriteElapsedMicroseconds)") / 1e6) AS write_call_thread_s,
+       round(toUInt64("sum(ProfileEvent_OSReadBytes)") / nullIf(toUInt64("sum(ProfileEvent_ReadBufferFromFileDescriptorReadBytes)"), 0), 2) AS os_vs_asked,
+       toUInt64(max_merge_pool_tasks) AS merge_pool_max
 FROM file('$B/system.metric_log_7_days_*.jsonl', JSONEachRow)
 ORDER BY time
 ```
 
-`io_wait_pct` above 100 % is not a reading: the first metric_log sample after a
-server start carries that counter's accumulated total (measured: 3.5e12 µs in
-one 1-second sample on a replica that had just restarted), so the hour holding
-a restart is not a rate — the `uptime:` header says which one. On a service
-whose data is on object storage the counter is ~0 by design and
-`read_mib_s` / `write_mib_s` from `OSReadBytes` / `OSWriteBytes` are what to
-read instead.
+Saturation is **traffic at the volume's limit**: compare `read_mib_s +
+write_mib_s` with the provisioned throughput of the data volume (ask for it —
+the bundle does not carry it). Corroborate with `threads_blocked_on_io` rising
+above the bundle's own quiet hours while `merge_pool_max` sits at
+`background_pool_size`; then the **device** is the limit and a bigger pool only
+lengthens the queue — the levers are faster storage or fewer, larger parts
+(HC-4.6, P-01). Neither column settles it alone, and two readings do not rule
+it out:
 
-Read it with the merge columns beside it: `io_wait_pct` sustained above ~20 %
-while `max_merge_pool_tasks` sits at `background_pool_size` means the **device**
-is the limit and a bigger pool only lengthens the queue — the levers are faster
-storage or fewer, larger parts (HC-4.6, P-01). `os_vs_asked` well below 1 means
-the page cache is absorbing the reads, so throughput is not the constraint yet.
-On cloud the same columns are per replica in
-`system.metric_log_by_host_3_days_*.jsonl`; on a service whose data is on
-object storage they are near zero by design and the S3 counters in
-`metric_log_coordination_3_days` are the equivalent (HC-4.10).
+- `os_vs_asked` well below 1 means the page cache absorbs the reads. The
+  misses and the writes still reach the device and can fill it.
+- The bundle has no I/O-operation count, so an IOPS-limited volume can
+  saturate below its throughput limit.
+
+`read_call_thread_s` / `write_call_thread_s` are thread time inside the calls,
+cache hits included and overlapping calls added up: context, never a
+denominator for bytes. An hour with `samples` well below `secs` missed samples
+(downtime, a start), and the first sample after a start can carry a counter's
+accumulated total (measured: 3.5e12 µs of `OSIOWaitMicroseconds` in one
+1-second sample) — read that hour as unreliable on that evidence, never
+because a value is high. `threads_blocked_on_io` is 0 throughout where the
+kernel does not account it; 0 there is not "no waiting". On cloud the same
+columns are per replica in `system.metric_log_by_host_3_days_*.jsonl` (add
+`hostname`); on a service whose data is on object storage they are near zero
+by design and the S3 counters in `metric_log_coordination_3_days` are the
+equivalent (HC-4.10).
 
 ## 5. Memory and CPU
 
