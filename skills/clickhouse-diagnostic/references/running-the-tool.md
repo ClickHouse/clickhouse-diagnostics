@@ -30,17 +30,17 @@ Config, host facts and log collection read the **local filesystem** (`/etc/click
 
 ## 2a. Passing the password from an agent or a script (read this before running)
 
-The CLI takes the password from `-password <value>` **or** from an interactive prompt (`Enter Password:`, read from the TTY). There is no environment-variable option. Two things go wrong in non-interactive shells:
+The CLI takes the password from `-password <value>`, then from `CLICKHOUSE_PASSWORD` in the environment, then from an interactive prompt (`Enter Password:`, read from the TTY). Prefer the variable: it stays out of `ps`, and the run prints `Using the password from CLICKHOUSE_PASSWORD`. Two things go wrong in non-interactive shells:
 
 - **The prompt cannot be answered.** An agent's shell has no TTY, so the prompt reads an empty string and the run fails with `401 … Code: 194 … Authentication failed (REQUIRED_PASSWORD)`. If you see `Enter Password:` in the output, the flag never carried a value.
-- **Inline environment assignment does not work.** `CH_PASS='x' ./clickhouse-diagnostic … -password "$CH_PASS"` expands `$CH_PASS` *before* the assignment takes effect, so the tool receives `-password ""`. This is a shell rule, not a tool bug.
+- **Inline environment assignment does not work.** `CH_PASS='x' ./clickhouse-diagnostic … -password "$CH_PASS"` expands `$CH_PASS` *before* the assignment takes effect, so the tool receives `-password ""`. This is a shell rule, not a tool bug. `CLICKHOUSE_PASSWORD='x' ./clickhouse-diagnostic …` *without* `-password` does work: the tool reads the variable itself.
 
 Do this instead:
 
 ```bash
-# 1. export first, run second (two statements)
-export CH_PASS='<password>'
-./clickhouse-diagnostic -mode cloud -host <svc> -port 8443 -protocol https -user default -password "$CH_PASS" -skip-config
+# 1. the environment variable, no flag (the password stays out of ps)
+export CLICKHOUSE_PASSWORD='<password>'
+./clickhouse-diagnostic -mode cloud -host <svc> -port 8443 -protocol https -user default -skip-config
 
 # 2. or read it from a file outside the repository, mode 0600, deleted afterwards
 umask 077; printf '%s' '<password>' > ~/.chdiag_pass
@@ -123,7 +123,7 @@ Query analysis writes 12 files to `<backup>/query_analysis/` and adds a dashboar
 ```
 clickhouse_results/clickhouse_backup_YYYYMMDD_HHMMSS/   # the folder that is archived
 clickhouse_results/clickhouse_backup_YYYYMMDD_HHMMSS/execution_log.txt   # what ran, what failed, what it cost
-clickhouse_backup_YYYYMMDD_HHMMSS.tar.gz                # in the CWD — send this
+clickhouse_results/clickhouse_backup_YYYYMMDD_HHMMSS.tar.gz   # in -output-dir — send this
 clickhouse_results/clickhouse_backup_<ts>_gov_name_mapping.csv   # gov only — never send
 ```
 Before sharing: open `configuration/` and confirm nothing sensitive remains (sanitisation strips credentials, not hostnames/topology); in gov mode confirm the salt and CSV are not inside the archive.
@@ -145,6 +145,7 @@ Before sharing: open `configuration/` and confirm nothing sensitive remains (san
 | Keeper incident on a multi-replica / SharedMergeTree cluster | `-mode cloud` for all replicas' `metric_log_coordination`, `zookeeper_connection`, `metrics` (`MetadataFromKeeperCacheObjects` per replica), `part_log`; plus `keeper/<host>_<port>.txt` (`ruok`/`srvr`/`mntr` from the member each connection is on and every `<zookeeper><node>` in the server configuration — collected by default in onprem/gov when the tool runs on the server, `-keeper-mntr on` in cloud) and the Keeper logs, which the tool does not collect |
 | Replicas return different row counts for the same query (SharedMergeTree) | a bundle collected **on** a lagging replica **before** it is restarted, in `-mode onprem` (it switches to cloud collection itself) — the pre-pass reads background pool saturation per host and against the live size (HC-2.13/2.14/2.15), the lagging tables per host from `system.replicas` (HC-3.1), the SMT settings and empty-table share (HC-2.16) and the node's uptime from the header |
 | After raising the background pools (P-59): did the change land, is the cluster catching up? | re-run the same collection a few hours later and read `system.metric_log_by_host_3_days`: the live pool size increased on every host (the transition hour), fetch attempts surged then settled, `cpu_us` and the merge pool back near baseline; cloud `system.replicas` `inserts_in_queue` at 0 per host for the hot tables (recheck one count with `select_sequential_consistency = 1`) |
+| Self-managed (ReplicatedMergeTree) cluster and the bundle is one node of N — the fault may sit on a node nobody collected (one shard, one lagging replica) | `export CLICKHOUSE_PASSWORD=…` then `./clickhouse-diagnostic cluster -user <user>` on one node (see `cluster-collect/README.md`): discovers the hosts from `system.clusters` and collects one bundle per host — the node it runs on in full, the others system tables only (incl. `text_log`, `query_log`); `-collect-from each-node` prints the per-host commands that also collect log files and configs. Read the bundles side by side by the header's `node:` line |
 | `zookeeper_log_errors_1_day` / `blob_storage_log_7_days` missing | the tables are not enabled: `<zookeeper_log>` / `<blob_storage_log>` in the server config (both have a TTL knob); enable, wait for the next incident, or ask for `system.remote_data_paths` for one key |
 
 ## 9. What the bundle deliberately does not contain
