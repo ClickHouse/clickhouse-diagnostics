@@ -2,7 +2,8 @@
 """inspect_bundle.py — deterministic first pass over a clickhouse-diagnostic bundle.
 
 Usage:
-    python3 inspect_bundle.py <clickhouse_backup_*.tar.gz | extracted dir> [--json] [--extract-to DIR]
+    python3 inspect_bundle.py <clickhouse_diagnostic_*.tar.gz | extracted dir> [--json] [--extract-to DIR]
+    (bundles collected before the rename are clickhouse_backup_*.tar.gz; both are read)
 
 Standard library only. Reads the bundle from disk, never writes into it, never
 talks to the network. Prints a coverage statement, an inventory and the health
@@ -198,11 +199,20 @@ def safe_extract(archive: str, dest: str) -> bool:
     return repaired
 
 
+# Run folders and archives are named clickhouse_diagnostic_<ts>; bundles
+# collected before the rename are clickhouse_backup_<ts> and sit in open cases,
+# so both are read.
+RUN_NAME_RE = re.compile(r"clickhouse_(?:diagnostic|backup)_(\d{8}_\d{6})")
+
+
 def find_run_dir(path: str) -> str:
     if glob.glob(os.path.join(path, "system.version_*.*")):
         return path
-    kids = sorted(glob.glob(os.path.join(path, "clickhouse_backup_*")))
-    kids = [k for k in kids if os.path.isdir(k)]
+    kids = [os.path.join(path, k) for k in os.listdir(path)
+            if RUN_NAME_RE.fullmatch(k) and os.path.isdir(os.path.join(path, k))]
+    # Newest by the timestamp in the name: sorted by name, every
+    # clickhouse_diagnostic_* would sort after every clickhouse_backup_*.
+    kids.sort(key=lambda k: RUN_NAME_RE.fullmatch(os.path.basename(k)).group(1))
     if len(kids) == 1:
         return kids[0]
     if kids:
@@ -337,7 +347,7 @@ def analyse(base: str):
     out["files"] = files
     out["mode"] = detect_mode(base, files)
 
-    m = re.search(r"clickhouse_backup_(\d{8}_\d{6})", out["bundle"])
+    m = RUN_NAME_RE.search(out["bundle"])
     run_ts = datetime.strptime(m.group(1), "%Y%m%d_%H%M%S") if m else None
     out["collected_at"] = run_ts.isoformat(sep=" ") if run_ts else None
 
@@ -1836,7 +1846,7 @@ def render_md(o) -> str:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("path", help="clickhouse_backup_*.tar.gz or an extracted bundle directory")
+    ap.add_argument("path", help="clickhouse_diagnostic_*.tar.gz (or the older clickhouse_backup_*.tar.gz) or an extracted bundle directory")
     ap.add_argument("--json", action="store_true", help="emit JSON instead of markdown")
     ap.add_argument("--extract-to", help="directory to extract the archive into (default: a new temp dir)")
     args = ap.parse_args()
@@ -1858,7 +1868,7 @@ def main() -> None:
             die(f"{path} was extracted from an archive packed by a Windows build of the collector: "
                 "its files are named like clickhouse_backup_<ts>\\system.version_<ts>.jsonl and cannot "
                 "be read in place without renaming the evidence. Run the pre-pass on the original "
-                "clickhouse_backup_*.tar.gz instead — it repairs the names while extracting into a new directory.")
+                ".tar.gz instead — it repairs the names while extracting into a new directory.")
         repaired_separators = False
         base = find_run_dir(path)
         extracted_to = None

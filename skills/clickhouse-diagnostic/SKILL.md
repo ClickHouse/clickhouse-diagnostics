@@ -1,14 +1,14 @@
 ---
 name: clickhouse-diagnostic
 description: >-
-  Analyse a ClickHouse support-diagnostic bundle (clickhouse_backup_*.tar.gz or
+  Analyse a ClickHouse support-diagnostic bundle (clickhouse_diagnostic_*.tar.gz, or clickhouse_backup_*.tar.gz from older releases, or
   its extracted folder: system.* JSONL dumps, dashboard.html, host_info.json,
   logs/, configuration/) and produce an evidence-backed health summary — parts
   and merges, replication and Keeper, disk, memory/CPU, queries, inserts,
   mutations/TTL, host tunables — with recommended actions and follow-up prompts.
   Also explains how to run clickhouse-diagnostic (grants, modes, windows,
   query analysis, gov mode) and what to re-collect. Use when the user mentions a
-  diagnostic bundle, support bundle, clickhouse_backup, dashboard.html,
+  diagnostic bundle, support bundle, clickhouse_diagnostic, clickhouse_backup, dashboard.html,
   "run the diagnostic", "what does this file in the bundle mean", or asks why
   their ClickHouse server is slow, OOMing, has too many parts, is read-only or
   is losing inserts and has (or can collect) a bundle. Works offline; network
@@ -26,7 +26,7 @@ Every finding cites `file → column → value`. Never modify the bundle. Never 
 
 ## When to use / not use
 
-- **Use** for: a `clickhouse_backup_*.tar.gz` or extracted folder; questions about what a bundle file/column means; "how do I run the tool / which grants / which mode"; "what should I collect for this problem".
+- **Use** for: a `clickhouse_diagnostic_*.tar.gz` (older releases: `clickhouse_backup_*.tar.gz`) or extracted folder; questions about what a bundle file/column means; "how do I run the tool / which grants / which mode"; "what should I collect for this problem".
 - **Don't use** for: live troubleshooting of a running server (no bundle) — offer to explain how to collect one; problems outside ClickHouse (application code, Kafka brokers, cloud IAM) beyond what the bundle shows.
 
 ## Read-before-you-act table (lazy loading — read only what the step needs)
@@ -47,7 +47,7 @@ Every finding cites `file → column → value`. Never modify the bundle. Never 
 ## Workflow
 
 ### 0 — Intake and coverage (mandatory before any conclusion)
-1. Locate the input: a `.tar.gz`, or a folder containing `system.version_*.jsonl`, or a parent `clickhouse_results/` with one `clickhouse_backup_*` inside. Ask if there are several.
+1. Locate the input: a `.tar.gz`, or a folder containing `system.version_*.jsonl`, or a parent `clickhouse_results/` with one `clickhouse_diagnostic_*` (or older `clickhouse_backup_*`) inside. Ask if there are several.
 2. Run the deterministic pre-pass — it extracts safely (to a temp dir), inventories the files and computes the checks that need no SQL:
    ```bash
    python3 <skill-dir>/scripts/inspect_bundle.py <bundle.tar.gz|dir>          # markdown

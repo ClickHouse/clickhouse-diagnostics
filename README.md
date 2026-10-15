@@ -4,7 +4,7 @@
 
 When a ClickHouse server misbehaves — inserts rejected, queries running out of memory, a replica read-only, a disk filling up — the answers are already in its `system` tables, its logs and the host it runs on. Getting them out by hand means a dozen queries, a config copy, a log tail, and a round-trip with support for each thing you forgot.
 
-`clickhouse-diagnostic` collects that evidence **once, read-only, in one command**, and packs it into a single `clickhouse_backup_<timestamp>.tar.gz` you can keep, share with support, open in the bundled `dashboard.html`, or hand to an AI assistant that knows how to read it (see [Reading the bundle](#reading-the-bundle)). It never reads customer rows, strips credentials from configuration files, and can hash identifiers (`gov` mode) when the bundle must cross a trust boundary.
+`clickhouse-diagnostic` collects that evidence **once, read-only, in one command**, and packs it into a single `clickhouse_diagnostic_<timestamp>.tar.gz` you can keep, share with support, open in the bundled `dashboard.html`, or hand to an AI assistant that knows how to read it (see [Reading the bundle](#reading-the-bundle)). It never reads customer rows, strips credentials from configuration files, and can hash identifiers (`gov` mode) when the bundle must cross a trust boundary.
 
 Under the hood: per-environment query sets (`cloud` / `onprem` / `gov`) selected with `-mode`, version-aware query variants picked for the connected server, YAML-driven read-only alert rules, an optional query-analysis slice for one `query_id`/`normalized_query_hash`, a self-contained HTML dashboard, and a `tar.gz` archive of everything.
 
@@ -65,7 +65,7 @@ cd <directory containing queries.onprem/ queries.cloud/ queries.gov/ alerts/>   
 
 > **Passing the password non-interactively.** `export CLICKHOUSE_PASSWORD='…'` and omit `-password`: the tool reads the variable when the flag is absent, and it stays out of `ps` and shell history. `-password` still works and takes precedence. Rotate the password after a scripted run.
 
-Each run leaves `clickhouse_backup_<ts>.tar.gz` in the output directory (`-output-dir`, default `clickhouse_results/`), next to the unpacked results in `clickhouse_results/clickhouse_backup_<ts>/` (open `dashboard.html` there). Before the first run create the read-only user — see [Required grants](#required-grants). Useful next steps:
+Each run leaves `clickhouse_diagnostic_<ts>.tar.gz` in the output directory (`-output-dir`, default `clickhouse_results/`), next to the unpacked results in `clickhouse_results/clickhouse_diagnostic_<ts>/` (open `dashboard.html` there; older releases named both `clickhouse_backup_<ts>`). Before the first run create the read-only user — see [Required grants](#required-grants). Useful next steps:
 
 ```bash
 ./bin/clickhouse-diagnostic -mode onprem -host ch-01 -from 2026-08-14T09:00:00Z -to 2026-08-14T13:00:00Z   # just the incident window
@@ -80,7 +80,7 @@ Three options, in increasing depth:
 1. **`dashboard.html`** — open it from the results folder; alerts, storage, query activity, replication, disks, host tunables and (when requested) query analysis, all in one self-contained page. See [Dashboard](#dashboard).
 2. **`inspect_bundle.py`** — a standard-library Python pre-pass that prints coverage, inventory and the deterministic health checks in the terminal, from the archive or the folder:
    ```bash
-   python3 skills/clickhouse-diagnostic/scripts/inspect_bundle.py clickhouse_backup_<ts>.tar.gz
+   python3 skills/clickhouse-diagnostic/scripts/inspect_bundle.py clickhouse_diagnostic_<ts>.tar.gz
    ```
 3. **The AI skill** — `skills/clickhouse-diagnostic/` teaches Claude Code, Codex CLI or any assistant that reads `SKILL.md`/`AGENTS.md` how to read a bundle and how to run the tool: what each file answers, thresholds aligned with the alert rules, an anonymised catalogue of recurring ClickHouse failure patterns, a summary template with evidence (`file → column → value`), recommended actions and follow-up prompts, and the exact re-collection command when the bundle does not cover the question. In Claude Code the skill is auto-discovered when you open this repository (`.claude/skills/clickhouse-diagnostic`, a symlink) — run `/clickhouse-diagnostic <bundle>` or ask "analyse this bundle"; Codex is pointed at it by the root `AGENTS.md` (`.agents/skills/clickhouse-diagnostic`). To use it from another directory, copy or symlink `skills/clickhouse-diagnostic` into your assistant's skills folder. The skill never modifies or uploads the bundle; see `skills/clickhouse-diagnostic/references/privacy.md`.
 
@@ -545,10 +545,10 @@ In `gov` mode, every database and table name written to the support-bound output
 
 ```
 clickhouse_results/
-├── clickhouse_backup_YYYYMMDD_HHMMSS/                       # → goes into the archive
-├── clickhouse_backup_YYYYMMDD_HHMMSS.tar.gz                # → the archive, send this
+├── clickhouse_diagnostic_YYYYMMDD_HHMMSS/                   # → goes into the archive
 │   └── *.jsonl                                              # hashed names inside
-└── clickhouse_backup_YYYYMMDD_HHMMSS_gov_name_mapping.csv   # → stays LOCAL
+├── clickhouse_diagnostic_YYYYMMDD_HHMMSS.tar.gz            # → the archive, send this
+└── clickhouse_diagnostic_YYYYMMDD_HHMMSS_gov_name_mapping.csv   # → stays LOCAL
 ```
 
 The mapping CSV (real_name → hashed_name) is written **outside** the timestamped backup folder, so it is **never** picked up by `tar` when the archive is built. Keep it on your machine for your own correlation work — and confirm before sending the archive that the salt and the CSV did not accidentally land inside it.
@@ -557,8 +557,8 @@ The mapping CSV (real_name → hashed_name) is written **outside** the timestamp
 
 | File | Share with support? |
 |---|---|
-| `clickhouse_backup_*.tar.gz` | Yes |
-| `clickhouse_backup_*_gov_name_mapping.csv` | **No — keep local** |
+| `clickhouse_diagnostic_*.tar.gz` | Yes |
+| `clickhouse_diagnostic_*_gov_name_mapping.csv` | **No — keep local** |
 | The salt value itself | **No — keep local** |
 
 If you lose the salt, the hashes in past archives are no longer reversible (you can still run a new diagnostic with a fresh salt — but old and new hashes won't compare).
@@ -1012,7 +1012,7 @@ Why a second file: the graph needs every column of every user table embedded, an
 **Credentials.** `create_table_query`, `engine_full` and `system.dictionaries.source` carry engine arguments — an S3 secret key, a MySQL password, `kafka_sasl_password`. Servers from 23.x mask these as `'[HIDDEN]'` themselves; a 22.x server does not. Both the collected JSONL (`system.tables`, `system.dictionaries`) and the graph payload pass through a redactor (`internal/collection/sqlredact.go`) that masks the credential positions of every known engine and table function (S3-family, MySQL, PostgreSQL, MongoDB, `remote()`, Redis, Azure, …), plus the byte-shape heuristics the config sanitizer uses (URL basic-auth, AWS key ids, JWTs, `keyword = 'value'`), writing the server's own `[HIDDEN]` token so old and new bundles read alike. `execution_log.txt` notes how many values each collector replaced. This is field-level and JSONL-only: a `-output-format native|tsv` bundle carries the DDL unredacted and says so.
 ## Configuration Collection
 
-When `-skip-config` is not set, the tool reads files from `-config-dir` (default `/etc/clickhouse-server/config.d/`; in `cloud` mode collection is skipped unless `-config-dir` is given explicitly, and `gov` mode never collects) and writes sanitised copies into the run's `configuration/` directory (inside `clickhouse_backup_<timestamp>/`), mirroring the source tree — `config.d/storage.xml` and `users.d/storage.xml` stay distinct, and the directory a file came from (which determines ClickHouse's merge order) is preserved.
+When `-skip-config` is not set, the tool reads files from `-config-dir` (default `/etc/clickhouse-server/config.d/`; in `cloud` mode collection is skipped unless `-config-dir` is given explicitly, and `gov` mode never collects) and writes sanitised copies into the run's `configuration/` directory (inside `clickhouse_diagnostic_<timestamp>/`), mirroring the source tree — `config.d/storage.xml` and `users.d/storage.xml` stay distinct, and the directory a file came from (which determines ClickHouse's merge order) is preserved.
 
 Sanitisation runs in two layers — proper XML / YAML parsing first, then a heuristic byte-pattern pass over the result. If a file cannot be parsed, the tool **fails closed**: a warning is logged and the file is skipped rather than shipped un-sanitised.
 
@@ -1052,7 +1052,7 @@ A single run produces:
 
 ```
 clickhouse_results/
-├── clickhouse_backup_YYYYMMDD_HHMMSS/                       # → archived
+├── clickhouse_diagnostic_YYYYMMDD_HHMMSS/                   # → archived
 │   ├── system.parts_YYYYMMDD_HHMMSS.jsonl                   #   one file per query
 │   ├── system.mutations_YYYYMMDD_HHMMSS.jsonl
 │   ├── ...
@@ -1065,8 +1065,8 @@ clickhouse_results/
 │   ├── dashboard.html                                       #   unless -skip-dashboard or gov
 │   ├── execution_log.txt                                    #   every collector: outcome, wall time, size; alerts; phases
 │   └── alerts_summary.json                                  #   when alerts ran but dashboard.html is absent
-└── clickhouse_backup_YYYYMMDD_HHMMSS_gov_name_mapping.csv   # → LOCAL only (gov mode)
-clickhouse_backup_YYYYMMDD_HHMMSS.tar.gz                     # unless -skip-archive
+├── clickhouse_diagnostic_YYYYMMDD_HHMMSS.tar.gz             # → the archive, unless -skip-archive
+└── clickhouse_diagnostic_YYYYMMDD_HHMMSS_gov_name_mapping.csv   # → LOCAL only (gov mode)
 ```
 
 - **Query results**: one file per query, in the format chosen by [`-output-format`](#output-format) (default `jsonl`)

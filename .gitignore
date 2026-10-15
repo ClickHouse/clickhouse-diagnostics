@@ -56,6 +56,8 @@ package-lock.json
 clickhouse_results/
 clickhouse_backup_*/
 clickhouse_backup_*.tar.gz
+clickhouse_diagnostic_*/
+clickhouse_diagnostic_*.tar.gz
 *_gov_name_mapping.csv
 configuration/
 

@@ -121,10 +121,10 @@ Query analysis writes 12 files to `<backup>/query_analysis/` and adds a dashboar
 ## 7. Output
 
 ```
-clickhouse_results/clickhouse_backup_YYYYMMDD_HHMMSS/   # the folder that is archived
-clickhouse_results/clickhouse_backup_YYYYMMDD_HHMMSS/execution_log.txt   # what ran, what failed, what it cost
-clickhouse_results/clickhouse_backup_YYYYMMDD_HHMMSS.tar.gz   # in -output-dir — send this
-clickhouse_results/clickhouse_backup_<ts>_gov_name_mapping.csv   # gov only — never send
+clickhouse_results/clickhouse_diagnostic_YYYYMMDD_HHMMSS/   # the folder that is archived
+clickhouse_results/clickhouse_diagnostic_YYYYMMDD_HHMMSS/execution_log.txt   # what ran, what failed, what it cost
+clickhouse_results/clickhouse_diagnostic_YYYYMMDD_HHMMSS.tar.gz   # in -output-dir — send this
+clickhouse_results/clickhouse_diagnostic_<ts>_gov_name_mapping.csv   # gov only — never send
 ```
 Before sharing: open `configuration/` and confirm nothing sensitive remains (sanitisation strips credentials, not hostnames/topology); in gov mode confirm the salt and CSV are not inside the archive.
 

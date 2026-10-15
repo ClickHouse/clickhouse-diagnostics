@@ -1,13 +1,13 @@
 # AGENTS.md — guidance for coding agents (Codex, Claude Code, others)
 
-This repository is `clickhouse-diagnostic`: a Go CLI that collects ClickHouse `system.*` tables, alert results, host facts, sanitised configs and server logs into a `clickhouse_backup_<ts>.tar.gz` support bundle, plus a self-contained `dashboard.html`. `README.md` is the reference for the tool itself.
+This repository is `clickhouse-diagnostic`: a Go CLI that collects ClickHouse `system.*` tables, alert results, host facts, sanitised configs and server logs into a `clickhouse_diagnostic_<ts>.tar.gz` support bundle (`clickhouse_backup_<ts>.tar.gz` before the rename), plus a self-contained `dashboard.html`. `README.md` is the reference for the tool itself.
 
 ## Analysing a bundle or running the tool
 
 Read and follow `skills/clickhouse-diagnostic/SKILL.md` before touching a bundle. It defines the workflow (coverage → triage → health checks → patterns → summary → privacy gate), the reference files to load lazily (`skills/clickhouse-diagnostic/references/`), and a stdlib-only pre-pass script:
 
 ```bash
-python3 skills/clickhouse-diagnostic/scripts/inspect_bundle.py <clickhouse_backup_*.tar.gz | dir>
+python3 skills/clickhouse-diagnostic/scripts/inspect_bundle.py <clickhouse_diagnostic_*.tar.gz | clickhouse_backup_*.tar.gz | dir>
 ```
 
 The same skill is exposed to Claude Code via `.claude/skills/clickhouse-diagnostic` and to Codex via `.agents/skills/clickhouse-diagnostic` (both symlinks to `skills/clickhouse-diagnostic`).
