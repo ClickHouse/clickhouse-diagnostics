@@ -317,10 +317,11 @@ mode=ok
 case "$host" in
 ` + cases.String() + `esac
 [ "$mode" = down ] && { echo "dial tcp: no such host"; exit 0; }
-tmp=$(mktemp -d); mkdir "$tmp/clickhouse_backup_20260101_000000"
-head -c 20000 /dev/urandom > "$tmp/clickhouse_backup_20260101_000000/system.version_20260101_000000.jsonl"
-a="$out/clickhouse_backup_20260101_000000.tar.gz"
-tar czf "$a" -C "$tmp" clickhouse_backup_20260101_000000
+p=${FAKE_PREFIX:-clickhouse_backup_}; run="${p}20260101_000000"
+tmp=$(mktemp -d); mkdir "$tmp/$run"
+head -c 20000 /dev/urandom > "$tmp/$run/system.version_20260101_000000.jsonl"
+a="$out/$run.tar.gz"
+tar czf "$a" -C "$tmp" "$run"
 [ "$mode" = truncated ] && { head -c 200 "$a" > "$a.cut"; mv "$a.cut" "$a"; exit 0; }
 [ "$mode" = exit3 ] && exit 3
 exit 0
@@ -627,5 +628,24 @@ func TestMain_OutputDirWithGlobCharacters(t *testing.T) {
 	if code := Main([]string{"-host", host, "-port", port, "-user", "diag", "-yes", "-output-dir", "support[123]"},
 		strings.NewReader(""), &out, &errOut); code != 0 {
 		t.Errorf("exit = %d with -output-dir 'support[123]'\n%s", code, out.String())
+	}
+}
+
+// Bundles are renamed clickhouse_diagnostic_<ts>; releases before that wrote
+// clickhouse_backup_<ts>. A host is ok with either, whichever release of the
+// binary runs.
+func TestMain_AcceptsBothBundleNames(t *testing.T) {
+	host, port := fakeServer(t)
+	t.Setenv(PasswordEnvVar, "pw")
+	t.Setenv("FAKE_PREFIX", "clickhouse_diagnostic_")
+	chdirTemp(t)
+	prev := executable
+	bin := fakeBinary(t, "")
+	executable = func() (string, error) { return bin, nil }
+	t.Cleanup(func() { executable = prev })
+	var out, errOut bytes.Buffer
+	if code := Main([]string{"-host", host, "-port", port, "-user", "diag", "-yes", "-output-dir", "bundles"},
+		strings.NewReader(""), &out, &errOut); code != 0 {
+		t.Errorf("exit = %d with clickhouse_diagnostic_ archives\n%s", code, out.String())
 	}
 }

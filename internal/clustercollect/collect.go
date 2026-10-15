@@ -339,7 +339,24 @@ func Shown(binary string, args []string) string {
 	return strings.Join(parts, " ")
 }
 
-// archivesIn maps each clickhouse_backup_*.tar.gz in dir to its mtime.
+// bundlePrefixes are the archive names a run can leave:
+// clickhouse_diagnostic_<ts>.tar.gz, and clickhouse_backup_<ts>.tar.gz from
+// releases before the rename.
+var bundlePrefixes = []string{"clickhouse_diagnostic_", "clickhouse_backup_"}
+
+func isBundleArchive(name string) bool {
+	if !strings.HasSuffix(name, ".tar.gz") {
+		return false
+	}
+	for _, p := range bundlePrefixes {
+		if strings.HasPrefix(name, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// archivesIn maps each bundle archive in dir to its mtime.
 // The directory is listed literally rather than globbed: -output-dir may
 // hold pattern characters ('support[123]'), which filepath.Glob would read
 // as a pattern and so find nothing.
@@ -348,7 +365,7 @@ func archivesIn(dir string) map[string]time.Time {
 	entries, _ := os.ReadDir(dir)
 	for _, e := range entries {
 		name := e.Name()
-		if e.IsDir() || !strings.HasPrefix(name, "clickhouse_backup_") || !strings.HasSuffix(name, ".tar.gz") {
+		if e.IsDir() || !isBundleArchive(name) {
 			continue
 		}
 		if fi, err := e.Info(); err == nil {
@@ -578,7 +595,7 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	o := Options{Mode: *mode, Protocol: *protocol, Host: *host, Port: *port, User: *user, Extra: fs.Args()}
 	if *collectFrom == "each-node" {
 		fmt.Fprintf(stdout, "Run this ON each host (with %s set, or it asks for the password),\n"+
-			"then send back the clickhouse_backup_*.tar.gz from ./clickhouse_results/<folder>/:\n\n", PasswordEnvVar)
+			"then send back the .tar.gz archive from ./clickhouse_results/<folder>/:\n\n", PasswordEnvVar)
 		if *mode == "gov" {
 			fmt.Fprintln(stdout, "Each run asks for the salt: type the same one on every host, or the hashes\n"+
 				"will not match across the bundles.")
