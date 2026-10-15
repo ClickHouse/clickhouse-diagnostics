@@ -17,18 +17,22 @@ func TestResolvePassword(t *testing.T) {
 	}
 	cases := []struct {
 		name, flag string
+		flagSet    bool
 		lookup     func(string) (string, bool)
 		want       string
 		wantFound  bool
 	}{
-		{"flag wins over the environment", "from-flag", env("from-env", true), "from-flag", true},
-		{"environment when no flag", "", env("from-env", true), "from-env", true},
-		{"empty but set is an explicit empty password", "", env("", true), "", true},
-		{"neither: prompt", "", env("", false), "", false},
+		{"flag wins over the environment", "from-flag", true, env("from-env", true), "from-flag", true},
+		// An explicit -password "" prompted before CLICKHOUSE_PASSWORD existed,
+		// and must keep doing so even when another client's password is exported.
+		{"explicit empty flag still prompts", "", true, env("from-env", true), "", false},
+		{"environment when no flag", "", false, env("from-env", true), "from-env", true},
+		{"empty but set is an explicit empty password", "", false, env("", true), "", true},
+		{"neither: prompt", "", false, env("", false), "", false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got, found := resolvePassword(c.flag, c.lookup)
+			got, found := resolvePassword(c.flag, c.flagSet, c.lookup)
 			if got != c.want || found != c.wantFound {
 				t.Errorf("resolvePassword(%q) = %q, %v; want %q, %v", c.flag, got, found, c.want, c.wantFound)
 			}

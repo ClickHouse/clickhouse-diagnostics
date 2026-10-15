@@ -3,6 +3,7 @@ package clustercollect
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -284,13 +285,26 @@ func TestMain_EachNodePrintsOneCommandPerHost(t *testing.T) {
 }
 
 // fakeBinary stands in for clickhouse-diagnostic: it records its arguments
-// and whether the password arrived through the environment, then writes an
-// archive into -output-dir — except for one host, which fails like a node
-// that is down.
+// and whether the password arrived through the environment, then writes a
+// real archive into -output-dir — except for failHost, which fails like a
+// node that is down.
 func fakeBinary(t *testing.T, failHost string) string {
+	return fakeBinaryWith(t, map[string]string{failHost: "down"})
+}
+
+// fakeBinaryWith takes a behaviour per host: "down" writes nothing,
+// "truncated" leaves a cut-off archive and exits 0, "exit3" writes a valid
+// archive and exits 3.
+func fakeBinaryWith(t *testing.T, behaviour map[string]string) string {
 	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("shell-script stand-in")
+	}
+	var cases strings.Builder
+	for h, b := range behaviour {
+		if h != "" {
+			fmt.Fprintf(&cases, "  %s) mode=%s;;\n", h, b)
+		}
 	}
 	script := `#!/bin/sh
 out=""; host=""
@@ -298,9 +312,18 @@ while [ $# -gt 0 ]; do
   case "$1" in -output-dir) out="$2"; shift;; -host) host="$2"; shift;; esac; shift
 done
 mkdir -p "$out"
-echo "args: $ARGS_SEEN host=$host env=${CLICKHOUSE_PASSWORD:-unset}" > "$out/seen.txt"
-[ "$host" = "` + failHost + `" ] && { echo "dial tcp: no such host" ; exit 0; }
-echo archive > "$out/clickhouse_backup_20260101_000000.tar.gz"
+echo "host=$host env=${CLICKHOUSE_PASSWORD:-unset}" > "$out/seen.txt"
+mode=ok
+case "$host" in
+` + cases.String() + `esac
+[ "$mode" = down ] && { echo "dial tcp: no such host"; exit 0; }
+tmp=$(mktemp -d); mkdir "$tmp/clickhouse_backup_20260101_000000"
+head -c 20000 /dev/urandom > "$tmp/clickhouse_backup_20260101_000000/system.version_20260101_000000.jsonl"
+a="$out/clickhouse_backup_20260101_000000.tar.gz"
+tar czf "$a" -C "$tmp" clickhouse_backup_20260101_000000
+[ "$mode" = truncated ] && { head -c 200 "$a" > "$a.cut"; mv "$a.cut" "$a"; exit 0; }
+[ "$mode" = exit3 ] && exit 3
+exit 0
 `
 	p := filepath.Join(t.TempDir(), "clickhouse-diagnostic")
 	if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
@@ -508,5 +531,101 @@ func TestMain_RunLogIsOwnerOnly(t *testing.T) {
 		if fi.Mode().Perm()&0o077 != 0 {
 			t.Errorf("%s is %v — gov runs print raw database/table names into it", l, fi.Mode().Perm())
 		}
+	}
+}
+
+// ---- review round 2: salt, unusable archives, literal paths
+
+func TestShown_MasksSaltAndPasswordInEverySpelling(t *testing.T) {
+	got := Shown("./clickhouse-diagnostic", []string{"-salt", "abc12345", "--salt=def67890", "-password=pw1", "--password", "pw2"})
+	for _, secret := range []string{"abc12345", "def67890", "pw1", "pw2"} {
+		if strings.Contains(got, secret) {
+			t.Errorf("%q shown in %s", secret, got)
+		}
+	}
+}
+
+func TestEachNodeArgs_LeavesTheSaltOut(t *testing.T) {
+	o := opts()
+	o.Mode = "gov"
+	o.Extra = []string{"-from", "2026-10-01", "-salt", "abc12345", "--salt=def67890"}
+	args := EachNodeArgs(mustDiscover(t, labRows, "")[1], o)
+	joined := strings.Join(args, " ")
+	if strings.Contains(joined, "salt") || strings.Contains(joined, "abc12345") || strings.Contains(joined, "def67890") {
+		t.Errorf("salt in a command to run on a host: %s", joined)
+	}
+	if !strings.Contains(joined, "-from 2026-10-01") {
+		t.Errorf("other pass-through arguments lost: %s", joined)
+	}
+	// The run from this machine has no terminal to ask on, so it keeps it.
+	if !has(HereArgs(mustDiscover(t, labRows, "")[1], o), "abc12345") {
+		t.Error("the here-run needs the salt")
+	}
+}
+
+func TestMain_GovNeverPrintsTheSalt(t *testing.T) {
+	host, port := fakeServer(t)
+	t.Setenv(PasswordEnvVar, "pw")
+	chdirTemp(t)
+	if err := os.MkdirAll("queries.gov", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	prev := executable
+	bin := fakeBinary(t, "")
+	executable = func() (string, error) { return bin, nil }
+	t.Cleanup(func() { executable = prev })
+	for _, from := range []string{"each-node", "here"} {
+		var out, errOut bytes.Buffer
+		Main([]string{"-host", host, "-port", port, "-user", "diag", "-mode", "gov", "-yes", "-collect-from", from,
+			"-output-dir", "b-" + from, "--", "-salt", "abc12345"}, strings.NewReader(""), &out, &errOut)
+		if strings.Contains(out.String()+errOut.String(), "abc12345") {
+			t.Errorf("%s: the salt was printed:\n%s", from, out.String())
+		}
+		if strings.Contains(out.String(), "log files and configs") {
+			t.Errorf("%s: gov never collects log files or configs, but the output offers them", from)
+		}
+	}
+}
+
+func TestMain_UnusableArchivesAreNotOK(t *testing.T) {
+	host, port := fakeServer(t)
+	t.Setenv(PasswordEnvVar, "pw")
+	dir := chdirTemp(t)
+	prev := executable
+	bin := fakeBinaryWith(t, map[string]string{"ch-s1r2": "truncated", "ch-s2r1": "exit3"})
+	executable = func() (string, error) { return bin, nil }
+	t.Cleanup(func() { executable = prev })
+
+	var out, errOut bytes.Buffer
+	code := Main([]string{"-host", host, "-port", port, "-user", "diag", "-yes", "-output-dir", "bundles"},
+		strings.NewReader(""), &out, &errOut)
+	if code != 1 {
+		t.Errorf("exit = %d, want 1\n%s", code, out.String())
+	}
+	summary, _ := os.ReadFile(filepath.Join(dir, "bundles", "summary.txt"))
+	for _, h := range []string{"ch-s1r2", "ch-s2r1"} {
+		for _, line := range strings.Split(string(summary), "\n") {
+			if strings.HasPrefix(line, h+" ") && strings.Contains(line, " ok ") {
+				t.Errorf("%s reported ok: %q", h, line)
+			}
+		}
+	}
+	if strings.Count(string(summary), " ok ") != 2 {
+		t.Errorf("want the 2 good hosts ok:\n%s", summary)
+	}
+}
+
+func TestMain_OutputDirWithGlobCharacters(t *testing.T) {
+	host, port := fakeServer(t)
+	t.Setenv(PasswordEnvVar, "pw")
+	chdirTemp(t)
+	prev := executable
+	bin := fakeBinary(t, "")
+	executable = func() (string, error) { return bin, nil }
+	t.Cleanup(func() { executable = prev })
+	var out, errOut bytes.Buffer
+	if code := Main([]string{"-host", host, "-port", port, "-user", "diag", "-yes", "-output-dir", "support[123]"},
+		strings.NewReader(""), &out, &errOut); code != 0 {
+		t.Errorf("exit = %d with -output-dir 'support[123]'\n%s", code, out.String())
 	}
 }

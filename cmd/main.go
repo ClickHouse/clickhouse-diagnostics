@@ -89,10 +89,15 @@ func main() {
 	// chose onprem or simply said nothing. flag.Visit reports only the flags
 	// actually present on the command line, which is the distinction
 	// resolveMode needs to fail loudly on a typo while still defaulting.
-	modeExplicit := false
+	// -password is recorded the same way: an explicit -password "" prompted
+	// before CLICKHOUSE_PASSWORD was read, and still must.
+	modeExplicit, passwordExplicit := false, false
 	flag.Visit(func(f *flag.Flag) {
-		if f.Name == "mode" {
+		switch f.Name {
+		case "mode":
 			modeExplicit = true
+		case "password":
+			passwordExplicit = true
 		}
 	})
 
@@ -177,7 +182,7 @@ func main() {
 	}
 
 	// Get user input for missing parameters
-	if err := getUserInput(&protocol, &host, &port, &username, &password, &mode, &configDir, skipConfig, modeExplicit); err != nil {
+	if err := getUserInput(&protocol, &host, &port, &username, &password, &mode, &configDir, skipConfig, modeExplicit, passwordExplicit); err != nil {
 		// Exit NON-ZERO. A rejected mode that exits 0 is barely better than the
 		// silent onprem fallback it replaces: the scripted collections this
 		// protects check $?, not stdout. Nothing is deferred this early.
@@ -895,12 +900,14 @@ func main() {
 // line, where ps would show it.
 const passwordEnvVar = clustercollect.PasswordEnvVar
 
-// resolvePassword returns the -password value when set, else the
+// resolvePassword returns the -password value when it was given, else the
 // environment variable when it is set — even to the empty string, which is
-// an explicit empty password. found=false means: prompt.
-func resolvePassword(flagValue string, lookup func(string) (string, bool)) (string, bool) {
-	if flagValue != "" {
-		return flagValue, true
+// an explicit empty password. found=false means: prompt. A -password given
+// as "" prompts, as it did before the variable was read, rather than letting
+// another client's exported password stand in for it.
+func resolvePassword(flagValue string, flagSet bool, lookup func(string) (string, bool)) (string, bool) {
+	if flagSet {
+		return flagValue, flagValue != ""
 	}
 	return lookup(passwordEnvVar)
 }
@@ -908,7 +915,7 @@ func resolvePassword(flagValue string, lookup func(string) (string, bool)) (stri
 // modeExplicit reports whether -mode was actually passed. The flag defaults
 // to onprem, so the value alone cannot distinguish "not set" from
 // "deliberately onprem", and the two must behave differently.
-func getUserInput(protocol, host, port, username, password, mode, configDir *string, skipConfig, modeExplicit bool) error {
+func getUserInput(protocol, host, port, username, password, mode, configDir *string, skipConfig, modeExplicit, passwordExplicit bool) error {
 	reader := bufio.NewReader(os.Stdin)
 
 	// Get protocol if not provided
@@ -961,7 +968,7 @@ func getUserInput(protocol, host, port, username, password, mode, configDir *str
 	// Get password if not provided: -password, then CLICKHOUSE_PASSWORD,
 	// then the prompt.
 	if *password == "" && *username != "" {
-		if p, found := resolvePassword(*password, os.LookupEnv); found {
+		if p, found := resolvePassword(*password, passwordExplicit, os.LookupEnv); found {
 			*password = p
 			fmt.Printf("Using the password from %s\n", passwordEnvVar)
 		} else {

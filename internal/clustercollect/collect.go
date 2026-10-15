@@ -7,7 +7,9 @@
 package clustercollect
 
 import (
+	"archive/tar"
 	"bufio"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -277,18 +279,57 @@ func EachNodeArgs(n Node, o Options) []string {
 	}
 	args := []string{"-mode", o.Mode, "-protocol", o.Protocol, "-host", host, "-port", o.Port,
 		"-user", o.User, "-single-node", "-output-dir", "./clickhouse_results/" + Label(n)}
-	return append(args, o.Extra...)
+	return append(args, withoutSalt(o.Extra)...)
+}
+
+// withoutSalt drops -salt and its value: a command meant to be read, copied
+// and run on another host must not carry it. Run without -salt, the binary
+// asks for it there, without echo.
+func withoutSalt(extra []string) []string {
+	var out []string
+	for i := 0; i < len(extra); i++ {
+		if name, attached := flagName(extra[i]); name == "salt" {
+			if !attached {
+				i++ // its value
+			}
+			continue
+		}
+		out = append(out, extra[i])
+	}
+	return out
 }
 
 var shellSafe = regexp.MustCompile(`^[A-Za-z0-9_./:=@%+,-]+$`)
 
-// Shown renders a command for printing, shell-quoted, with any -password
-// value masked (one could arrive through the pass-through arguments).
+// flagName is the name in a -f, --f, -f=v or --f=v argument, with whether
+// the value is attached; "" for an argument that is not a flag.
+func flagName(a string) (name string, attached bool) {
+	if !strings.HasPrefix(a, "-") {
+		return "", false
+	}
+	name = strings.TrimLeft(a, "-")
+	if i := strings.IndexByte(name, '='); i >= 0 {
+		return name[:i], true
+	}
+	return name, false
+}
+
+// secret flags are masked wherever a command is printed. The salt is as
+// local as the password: the binary reads it without echo so it stays out of
+// scrollback, recordings and ticket attachments.
+var secret = map[string]bool{"password": true, "salt": true}
+
+// Shown renders a command for printing, shell-quoted, with every -password
+// and -salt value masked, in any spelling.
 func Shown(binary string, args []string) string {
 	parts := []string{binary}
 	for i, a := range args {
-		if i > 0 && args[i-1] == "-password" {
-			a = "****"
+		if name, attached := flagName(a); secret[name] && attached {
+			a = a[:strings.IndexByte(a, '=')+1] + "****"
+		} else if i > 0 {
+			if prev, attached := flagName(args[i-1]); secret[prev] && !attached {
+				a = "****"
+			}
 		}
 		if !shellSafe.MatchString(a) {
 			a = "'" + strings.ReplaceAll(a, "'", `'\''`) + "'"
@@ -299,15 +340,56 @@ func Shown(binary string, args []string) string {
 }
 
 // archivesIn maps each clickhouse_backup_*.tar.gz in dir to its mtime.
+// The directory is listed literally rather than globbed: -output-dir may
+// hold pattern characters ('support[123]'), which filepath.Glob would read
+// as a pattern and so find nothing.
 func archivesIn(dir string) map[string]time.Time {
 	seen := map[string]time.Time{}
-	matches, _ := filepath.Glob(filepath.Join(dir, "clickhouse_backup_*.tar.gz"))
-	for _, m := range matches {
-		if fi, err := os.Stat(m); err == nil {
-			seen[m] = fi.ModTime()
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasPrefix(name, "clickhouse_backup_") || !strings.HasSuffix(name, ".tar.gz") {
+			continue
+		}
+		if fi, err := e.Info(); err == nil {
+			seen[filepath.Join(dir, name)] = fi.ModTime()
 		}
 	}
 	return seen
+}
+
+// verifyArchive reads the archive to its end: a cut-off or corrupt file —
+// a full disk, a killed process — fails here instead of reaching the
+// summary as ok.
+func verifyArchive(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		return err
+	}
+	tr := tar.NewReader(gz)
+	entries := 0
+	for {
+		_, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		if _, err := io.Copy(io.Discard, tr); err != nil {
+			return err
+		}
+		entries++
+	}
+	if entries == 0 {
+		return errors.New("archive is empty")
+	}
+	return gz.Close()
 }
 
 // newArchive is the newest archive in dir that is not in before, or whose
@@ -497,6 +579,11 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if *collectFrom == "each-node" {
 		fmt.Fprintf(stdout, "Run this ON each host (with %s set, or it asks for the password),\n"+
 			"then send back the clickhouse_backup_*.tar.gz from ./clickhouse_results/<folder>/:\n\n", PasswordEnvVar)
+		if *mode == "gov" {
+			fmt.Fprintln(stdout, "Each run asks for the salt: type the same one on every host, or the hashes\n"+
+				"will not match across the bundles.")
+			fmt.Fprintln(stdout)
+		}
 		for _, n := range nodes {
 			fmt.Fprintf(stdout, "# %s\n%s\n\n", n.Host, Shown("./clickhouse-diagnostic", EachNodeArgs(n, o)))
 		}
@@ -527,8 +614,13 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	for _, n := range nodes {
 		fmt.Fprintf(stdout, "%s\n\n", Shown(bin, HereArgs(n, o)))
 	}
-	fmt.Fprintln(stdout, "Other hosts: system tables only (incl. text_log, query_log) — no server log\n"+
-		"files, configs or host facts. Use -collect-from each-node for those.")
+	if *mode == "gov" {
+		fmt.Fprintln(stdout, "gov mode collects system tables only, on every host: no log files, configs or\n"+
+			"host facts, wherever it runs.")
+	} else {
+		fmt.Fprintln(stdout, "Other hosts: system tables only (incl. text_log, query_log) — no server log\n"+
+			"files, configs or host facts. Use -collect-from each-node for those.")
+	}
 	fmt.Fprintln(stdout)
 	if !*yes {
 		fmt.Fprintf(stdout, "Run %d collection(s)? [y/N] ", len(nodes))
@@ -545,7 +637,7 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "%-22s %-10s %6s %9s  %s\n", "host", "status", "time", "size", "archive")
+	fmt.Fprintf(&sb, "%-22s %-11s %6s %9s  %s\n", "host", "status", "time", "size", "archive")
 	failed := 0
 	for _, r := range results {
 		size, where, note := "-", "see "+filepath.Join(Label(r.node), "run.log"), ""
@@ -559,18 +651,21 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		if r.status != "ok" {
 			failed++
 		}
-		fmt.Fprintf(&sb, "%-22s %-10s %5.0fs %9s  %s%s\n", r.node.Host, r.status, r.elapsed.Seconds(), size, where, note)
+		fmt.Fprintf(&sb, "%-22s %-11s %5.0fs %9s  %s%s\n", r.node.Host, r.status, r.elapsed.Seconds(), size, where, note)
 	}
 	if err := os.WriteFile(filepath.Join(o.OutputDir, "summary.txt"), []byte(sb.String()), 0o644); err != nil {
 		fmt.Fprintf(stderr, "Warning: summary.txt not written: %v\n", err)
 	}
 	fmt.Fprintf(stdout, "\n%s\nBundles in %s\n", sb.String(), o.OutputDir)
 
-	fmt.Fprintln(stdout, "\nServer log files and configs are only read on the host itself. To add them,\nrun this ON each host:")
-	fmt.Fprintln(stdout)
-	for _, n := range nodes {
-		if !(n.Local && o.LocalFiles) {
-			fmt.Fprintln(stdout, Shown("./clickhouse-diagnostic", EachNodeArgs(n, o)))
+	// gov never collects log files or configs, so there is nothing to add.
+	if *mode != "gov" {
+		fmt.Fprintln(stdout, "\nServer log files and configs are only read on the host itself. To add them,\nrun this ON each host:")
+		fmt.Fprintln(stdout)
+		for _, n := range nodes {
+			if !(n.Local && o.LocalFiles) {
+				fmt.Fprintln(stdout, Shown("./clickhouse-diagnostic", EachNodeArgs(n, o)))
+			}
 		}
 	}
 	if failed > 0 {
@@ -620,17 +715,25 @@ func runOne(bin string, n Node, o Options, timeout time.Duration, stdout io.Writ
 	logFile.Close()
 	r.elapsed = time.Since(start)
 
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+	// ok needs all three: the run exited 0, it left a new archive, and the
+	// archive reads to its end.
+	switch r.archive = newArchive(folder, before); {
+	case errors.Is(ctx.Err(), context.DeadlineExceeded):
 		r.status = "timed out"
-	} else if r.archive = newArchive(folder, before); r.archive == "" {
+	case runErr != nil:
+		r.status = "failed"
+	case r.archive == "":
 		r.status = "no archive"
-	} else if fi, err := os.Stat(r.archive); err == nil {
-		r.size = fi.Size()
+	case verifyArchive(r.archive) != nil:
+		r.status = "bad archive"
+	}
+	if r.archive != "" {
+		if fi, err := os.Stat(r.archive); err == nil {
+			r.size = fi.Size()
+		}
 	}
 	if r.status != "ok" {
-		if runErr != nil && r.status == "no archive" {
-			r.status = "failed"
-		}
+		r.archive = "" // not a bundle to send
 		fmt.Fprintf(stdout, "%s, %.0fs, see %s\n", r.status, r.elapsed.Seconds(), filepath.Join(Label(n), "run.log"))
 		return r
 	}
