@@ -87,12 +87,20 @@ func (e *Executor) WithSalt(salt string) *Executor {
 	return e
 }
 
+// RunFolderName is the name of a run's results folder — and, with .tar.gz,
+// of the archive built from it: clickhouse_diagnostic_<YYYYMMDD_HHMMSS>.
+// Releases before the rename wrote clickhouse_backup_<ts>; the pre-pass
+// reads both.
+func RunFolderName(t time.Time) string {
+	return "clickhouse_diagnostic_" + t.Format("20060102_150405")
+}
+
 // ExecuteQueries executes a map of selected queries and saves results
 // Returns the path to the specific folder where results were saved
 func (e *Executor) ExecuteQueries(queries map[string]internal.QueryFile, outputDir string) (string, error) {
-	timestamp := time.Now().Format("20060102_150405")
-	outputFolderName := fmt.Sprintf("clickhouse_backup_%s", timestamp)
-	finalOutputDir := filepath.Join(outputDir, outputFolderName)
+	now := time.Now()
+	timestamp := now.Format("20060102_150405")
+	finalOutputDir := filepath.Join(outputDir, RunFolderName(now))
 
 	// Create output directory
 	if err := os.MkdirAll(finalOutputDir, 0750); err != nil {
