@@ -39,8 +39,47 @@ const portalCapBytes = 200 << 20
 const DiscoveryQuery = "SELECT cluster, shard_num, replica_num, host_name, host_address, " +
 	"is_local, errors_count FROM system.clusters FORMAT JSONEachRow"
 
-// executable is os.Executable, replaceable in tests.
-var executable = os.Executable
+// executable, hostname and interfaceAddrs are the OS lookups, replaceable
+// in tests.
+var (
+	executable     = os.Executable
+	hostname       = os.Hostname
+	interfaceAddrs = net.InterfaceAddrs
+)
+
+// ownedFlags are set by the cluster command for every run, so they cannot be
+// passed through after --: each one carries a per-host safeguard (-host and
+// -output-dir keep the bundles apart, -single-node stops a SharedMergeTree
+// fan-out on every run, -host-info/-logs/-skip-config keep this machine's
+// files out of remote bundles), the password travels only in the
+// environment, and -skip-archive / -dry-run would leave no archive to find.
+var ownedFlags = map[string]bool{
+	"password": true, "host": true, "port": true, "protocol": true, "user": true, "mode": true,
+	"single-node": true, "output-dir": true, "host-info": true, "logs": true, "skip-config": true,
+	"skip-archive": true, "dry-run": true,
+}
+
+// validateExtra refuses pass-through arguments naming a flag the command
+// owns, in any of Go's spellings (-f, --f, -f=v, --f=v).
+func validateExtra(extra []string) error {
+	for _, a := range extra {
+		if !strings.HasPrefix(a, "-") {
+			continue
+		}
+		name := strings.TrimLeft(a, "-")
+		if i := strings.IndexByte(name, '='); i >= 0 {
+			name = name[:i]
+		}
+		if !ownedFlags[name] {
+			continue
+		}
+		if name == "password" {
+			return fmt.Errorf("-- -password cannot be passed through: set %s instead (the cluster command never puts the password on a command line)", PasswordEnvVar)
+		}
+		return fmt.Errorf("-- -%s cannot be passed through: the cluster command sets it for every host", name)
+	}
+	return nil
+}
 
 // Row is one system.clusters row.
 type Row struct {
@@ -225,8 +264,18 @@ func HereArgs(n Node, o Options) []string {
 // EachNodeArgs is the clickhouse-diagnostic run to execute ON the node
 // itself, which also collects its log files and configs. It carries no
 // password: the binary reads CLICKHOUSE_PASSWORD or asks for it there.
+//
+// Over https it connects by the node's name rather than localhost: the
+// server's certificate is normally issued for that name.
 func EachNodeArgs(n Node, o Options) []string {
-	args := []string{"-mode", o.Mode, "-protocol", o.Protocol, "-host", "localhost", "-port", o.Port,
+	host := "localhost"
+	if o.Protocol == "https" {
+		host = n.Host
+		if n.Local {
+			host = o.Host
+		}
+	}
+	args := []string{"-mode", o.Mode, "-protocol", o.Protocol, "-host", host, "-port", o.Port,
 		"-user", o.User, "-single-node", "-output-dir", "./clickhouse_results/" + Label(n)}
 	return append(args, o.Extra...)
 }
@@ -249,26 +298,67 @@ func Shown(binary string, args []string) string {
 	return strings.Join(parts, " ")
 }
 
-// FindArchive returns the newest clickhouse_backup_*.tar.gz in dir, or "".
-func FindArchive(dir string) string {
+// archivesIn maps each clickhouse_backup_*.tar.gz in dir to its mtime.
+func archivesIn(dir string) map[string]time.Time {
+	seen := map[string]time.Time{}
 	matches, _ := filepath.Glob(filepath.Join(dir, "clickhouse_backup_*.tar.gz"))
-	if len(matches) == 0 {
-		return ""
+	for _, m := range matches {
+		if fi, err := os.Stat(m); err == nil {
+			seen[m] = fi.ModTime()
+		}
 	}
-	sort.Strings(matches)
-	return matches[len(matches)-1]
+	return seen
 }
 
+// newArchive is the newest archive in dir that is not in before, or whose
+// mtime changed since; "" when the run produced none.
+func newArchive(dir string, before map[string]time.Time) string {
+	newest := ""
+	for path, mtime := range archivesIn(dir) {
+		if old, existed := before[path]; existed && old.Equal(mtime) {
+			continue
+		}
+		if newest == "" || path > newest {
+			newest = path
+		}
+	}
+	return newest
+}
+
+// isThisMachine says whether host — the discovery node as the operator named
+// it — is the machine running the command, so its files may be collected.
+// An address is compared with this machine's interfaces. Names follow
+// cmd/node_identity.go's sameMachine: two qualified names must be equal
+// outright ("ch-01.site-a" and "ch-01.site-b" are two machines); only when one
+// side is bare does the first label decide.
 func isThisMachine(host string) bool {
 	if isLoopback(host) {
 		return true
 	}
-	name, err := os.Hostname()
+	if ip := net.ParseIP(host); ip != nil {
+		addrs, err := interfaceAddrs()
+		if err != nil {
+			return false
+		}
+		for _, a := range addrs {
+			if n, ok := a.(*net.IPNet); ok && n.IP.Equal(ip) {
+				return true
+			}
+		}
+		return false
+	}
+	name, err := hostname()
 	if err != nil {
 		return false
 	}
-	h, n := strings.ToLower(host), strings.ToLower(name)
-	return h == n || strings.SplitN(h, ".", 2)[0] == strings.SplitN(n, ".", 2)[0]
+	h, n := strings.ToLower(strings.TrimSpace(host)), strings.ToLower(strings.TrimSpace(name))
+	if h == n {
+		return true
+	}
+	if strings.Contains(h, ".") && strings.Contains(n, ".") {
+		return false
+	}
+	return strings.SplitN(h, ".", 2)[0] == strings.SplitN(n, ".", 2)[0]
 }
 
 func human(n int64) string {
@@ -329,6 +419,10 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
 		}
+		return 2
+	}
+	if err := validateExtra(fs.Args()); err != nil {
+		fmt.Fprintln(stderr, err)
 		return 2
 	}
 	if *collectFrom != "here" && *collectFrom != "each-node" {
@@ -498,12 +592,26 @@ func runOne(bin string, n Node, o Options, timeout time.Duration, stdout io.Writ
 		fmt.Fprintf(stdout, "failed: %v\n", err)
 		return r
 	}
-	logFile, err := os.Create(filepath.Join(folder, "run.log"))
+	// Owner-only: in gov mode the run prints the real database and table
+	// names next to their hashes. Chmod as well, for a log left by an
+	// earlier run, which OpenFile does not re-permission.
+	logPath := filepath.Join(folder, "run.log")
+	logFile, err := os.OpenFile(logPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err == nil {
+		err = os.Chmod(logPath, 0o600)
+	}
 	if err != nil {
+		if logFile != nil {
+			logFile.Close()
+		}
 		r.status = "failed"
 		fmt.Fprintf(stdout, "failed: %v\n", err)
 		return r
 	}
+	// A reused -output-dir still holds earlier archives; only one this run
+	// created or replaced counts, or a host that is down now would report
+	// the previous run's bundle as ok.
+	before := archivesIn(folder)
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	cmd := exec.CommandContext(ctx, bin, HereArgs(n, o)...)
 	cmd.Stdout, cmd.Stderr = logFile, logFile // the environment, CLICKHOUSE_PASSWORD included, is inherited
@@ -514,7 +622,7 @@ func runOne(bin string, n Node, o Options, timeout time.Duration, stdout io.Writ
 
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		r.status = "timed out"
-	} else if r.archive = FindArchive(folder); r.archive == "" {
+	} else if r.archive = newArchive(folder, before); r.archive == "" {
 		r.status = "no archive"
 	} else if fi, err := os.Stat(r.archive); err == nil {
 		r.size = fi.Size()

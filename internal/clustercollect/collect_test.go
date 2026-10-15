@@ -373,3 +373,140 @@ func TestMain_AsksBeforeRunning(t *testing.T) {
 		t.Error("declined, but the output directory was created")
 	}
 }
+
+// ---- review round: flags the command owns, stale archives, TLS, locality, log permissions
+
+func TestMain_RejectsFlagsTheCommandOwns(t *testing.T) {
+	t.Setenv(PasswordEnvVar, "pw")
+	for _, extra := range [][]string{
+		{"-password", "s3cret"}, {"--password=s3cret"}, {"-password=s3cret"}, {"--password", "s3cret"},
+		{"-host", "localhost"}, {"-single-node=false"}, {"-logs", "on"}, {"-host-info=on"},
+		{"-skip-config=false"}, {"-output-dir", "/tmp/x"}, {"--user", "other"}, {"-mode", "cloud"},
+		{"-port", "9000"}, {"-protocol", "https"}, {"-skip-archive"}, {"-dry-run"},
+	} {
+		var out, errOut bytes.Buffer
+		code := Main(append([]string{"-user", "diag", "--"}, extra...), strings.NewReader(""), &out, &errOut)
+		if code != 2 || !strings.Contains(errOut.String(), "cannot be passed through") {
+			t.Errorf("-- %v: exit %d, stderr %q — want it refused before discovery", extra, code, errOut.String())
+		}
+		if strings.Contains(out.String()+errOut.String(), "s3cret") {
+			t.Errorf("-- %v: the password was printed", extra)
+		}
+		if strings.Contains(extra[0], "password") && !strings.Contains(errOut.String(), PasswordEnvVar) {
+			t.Errorf("-- %v: the refusal should point to %s: %s", extra, PasswordEnvVar, errOut.String())
+		}
+	}
+}
+
+func TestValidateExtra_AllowsCollectionOptions(t *testing.T) {
+	if err := validateExtra([]string{"-from", "2026-10-01", "-to", "2026-10-02", "-salt", "abc12345",
+		"--normalized-query-hash", "123", "-skip-dashboard", "-logs-max-mb=200", "-keeper-mntr", "off"}); err != nil {
+		t.Errorf("collection options rejected: %v", err)
+	}
+}
+
+func TestMain_RetryDoesNotReuseAPreviousArchive(t *testing.T) {
+	host, port := fakeServer(t)
+	t.Setenv(PasswordEnvVar, "pw")
+	dir := chdirTemp(t)
+	prev := executable
+	t.Cleanup(func() { executable = prev })
+	args := []string{"-host", host, "-port", port, "-user", "diag", "-yes", "-output-dir", "bundles"}
+
+	ok := fakeBinary(t, "")
+	executable = func() (string, error) { return ok, nil }
+	var out, errOut bytes.Buffer
+	if code := Main(args, strings.NewReader(""), &out, &errOut); code != 0 {
+		t.Fatalf("first run: exit %d\n%s%s", code, out.String(), errOut.String())
+	}
+
+	// Retry into the same directory with ch-s2r2 now down: its folder still
+	// holds the first run's archive, which must not count for this run.
+	down := fakeBinary(t, "ch-s2r2")
+	executable = func() (string, error) { return down, nil }
+	out.Reset()
+	if code := Main(args, strings.NewReader(""), &out, &errOut); code != 1 {
+		t.Errorf("retry: exit %d, want 1 — a stale archive was accepted\n%s", code, out.String())
+	}
+	summary, _ := os.ReadFile(filepath.Join(dir, "bundles", "summary.txt"))
+	for _, line := range strings.Split(string(summary), "\n") {
+		if strings.HasPrefix(line, "ch-s2r2 ") && !strings.Contains(line, "no archive") {
+			t.Errorf("ch-s2r2 reported as %q", line)
+		}
+	}
+}
+
+func TestEachNodeArgs_HTTPSConnectsByTheNodeName(t *testing.T) {
+	o := opts()
+	o.Protocol = "https"
+	nodes := byHost(mustDiscover(t, labRows, ""))
+	if got := argValue(EachNodeArgs(nodes["ch-s1r2"], o), "-host"); got != "ch-s1r2" {
+		t.Errorf("https -host = %q, want the node's name (its certificate does not cover localhost)", got)
+	}
+	if got := argValue(EachNodeArgs(nodes["ch-s1r1"], o), "-host"); got != o.Host {
+		t.Errorf("https -host for the discovery node = %q, want %q", got, o.Host)
+	}
+	if got := argValue(EachNodeArgs(nodes["ch-s1r2"], opts()), "-host"); got != "localhost" {
+		t.Errorf("http -host = %q, want localhost", got)
+	}
+}
+
+func TestIsThisMachine(t *testing.T) {
+	prevName, prevAddrs := hostname, interfaceAddrs
+	t.Cleanup(func() { hostname, interfaceAddrs = prevName, prevAddrs })
+	hostname = func() (string, error) { return "ch-01.site-a", nil }
+	interfaceAddrs = func() ([]net.Addr, error) {
+		_, n, _ := net.ParseCIDR("10.0.0.5/24")
+		n.IP = net.ParseIP("10.0.0.5")
+		return []net.Addr{n}, nil
+	}
+	for host, want := range map[string]bool{
+		"localhost": true, "127.0.0.1": true, "::1": true,
+		"10.0.0.5": true, // this machine's own address
+		"10.0.0.6": false,
+		"ch-01":    true, "CH-01.site-a": true,
+		"ch-01.site-b": false, // another site's ch-01: both qualified, so exact match only
+		"ch-02":        false,
+	} {
+		if got := isThisMachine(host); got != want {
+			t.Errorf("isThisMachine(%q) = %v, want %v", host, got, want)
+		}
+	}
+}
+
+func TestMain_RunLogIsOwnerOnly(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permissions")
+	}
+	host, port := fakeServer(t)
+	t.Setenv(PasswordEnvVar, "pw")
+	dir := chdirTemp(t)
+	prev := executable
+	bin := fakeBinary(t, "")
+	executable = func() (string, error) { return bin, nil }
+	t.Cleanup(func() { executable = prev })
+
+	// A run.log left world-readable by an earlier run must be tightened too.
+	stale := filepath.Join(dir, "bundles", "s1r2_ch-s1r2", "run.log")
+	if err := os.MkdirAll(filepath.Dir(stale), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stale, []byte("old\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out, errOut bytes.Buffer
+	Main([]string{"-host", host, "-port", port, "-user", "diag", "-yes", "-output-dir", "bundles"}, strings.NewReader(""), &out, &errOut)
+	logs, _ := filepath.Glob(filepath.Join(dir, "bundles", "*", "run.log"))
+	if len(logs) != 4 {
+		t.Fatalf("%d run.log files, want 4", len(logs))
+	}
+	for _, l := range logs {
+		fi, err := os.Stat(l)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fi.Mode().Perm()&0o077 != 0 {
+			t.Errorf("%s is %v — gov runs print raw database/table names into it", l, fi.Mode().Perm())
+		}
+	}
+}

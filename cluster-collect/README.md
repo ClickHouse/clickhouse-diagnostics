@@ -54,7 +54,7 @@ To get log files and configs from every host, print the per-host commands and ru
 | `-cluster NAME` | Only the hosts of this cluster. Default: every host `system.clusters` lists, each machine once. |
 | `-port`, `-protocol https` | HTTP port and protocol, the same on every host. |
 | `-mode gov` | Hashed identifiers. Pass the salt after `--`: `-- -salt <YourPrivateSalt>`. |
-| `-- <flags>` | Passed to every run, for example `-- -from 2026-10-01 -to 2026-10-02`. |
+| `-- <flags>` | Passed to every run, for example `-- -from 2026-10-01 -to 2026-10-02`. Flags the command sets itself (`-host`, `-password`, `-output-dir`, `-single-node`, …) are refused. |
 | `-yes`, `-timeout`, `-output-dir` | Skip the confirmation; time allowed per host (default 30m); where the bundles go. |
 
 ## Notes
