@@ -198,14 +198,20 @@ SELECT name, type, free_pct, free_space, total_space FROM file('$B/system.disks_
 
 ## 4a. Is the disk the limit? (added when merges or inserts look slow)
 
-Device traffic and threads blocked on it, per hour. Every counter is summed
-over threads, so each is divided by the seconds the hour's samples cover
-(`covered_s`), not by a CPU count. Values are quoted in the file (UInt64), so
-cast before arithmetic:
+Storage traffic and threads blocked on it, per hour. Every counter is summed
+over threads, so each is divided by the seconds the hour's samples cover — not
+by a CPU count. Those seconds are `samples × interval`, and the interval
+(`metric_log`'s `collect_interval_milliseconds`, 1 s by default,
+configurable, in no system table) is derived from the bundle: the tightest
+spacing of any hour with two or more samples, since gaps only widen it.
+Values are quoted in the file (UInt64), so cast before arithmetic:
 
 ```sql
 SELECT time,
-       toUInt64(metric_samples) AS samples, toUInt64(covered_s) AS secs,
+       toUInt64(metric_samples) AS samples,
+       minIf(toUInt64(span_s) / (samples - 1), samples >= 2) OVER () AS interval_s,
+       samples * interval_s AS secs,
+       greatest(0, round(toUInt64(span_s) / interval_s) + 1 - samples) AS missed_samples,
        round(toUInt64("sum(ProfileEvent_OSReadBytes)")  / 1048576 / secs, 1) AS read_mib_s,
        round(toUInt64("sum(ProfileEvent_OSWriteBytes)") / 1048576 / secs, 1) AS write_mib_s,
        round(toUInt64("sum(ProfileEvent_OSIOWaitMicroseconds)") / 1e6 / secs, 2) AS threads_blocked_on_io,
@@ -217,14 +223,25 @@ FROM file('$B/system.metric_log_7_days_*.jsonl', JSONEachRow)
 ORDER BY time
 ```
 
-Saturation is **traffic at the volume's limit**: compare `read_mib_s +
-write_mib_s` with the provisioned throughput of the data volume (ask for it —
-the bundle does not carry it). Corroborate with `threads_blocked_on_io` rising
-above the bundle's own quiet hours while `merge_pool_max` sits at
-`background_pool_size`; then the **device** is the limit and a bigger pool only
-lengthens the queue — the levers are faster storage or fewer, larger parts
-(HC-4.6, P-01). Neither column settles it alone, and two readings do not rule
-it out:
+On cloud read `system.metric_log_by_host_3_days_*.jsonl`, add `hostname`, and
+derive the interval per host: `OVER (PARTITION BY hostname)`. With no hour of
+two or more samples the interval is unknown and the rates come out NULL — say
+so rather than assume 1 s. The onprem `configuration/` copy may state
+`<metric_log><collect_interval_milliseconds>` and settles it.
+
+Saturation is **traffic at a volume's limit**, and the counters cannot say
+which volume: they add up ClickHouse's I/O on every local disk. Before
+calling one volume saturated — and recommending it be upgraded — the traffic
+must map to it: one local data disk in `system.disks` and the storage
+policies, or the volume's own telemetry (iostat `%util` and `await`, the cloud
+provider's per-volume throughput and queue length) against its provisioned
+limit, which the bundle does not carry either. With several local volumes,
+their combined traffic can sit at one volume's limit while neither is
+saturated. Then corroborate with `threads_blocked_on_io` rising above the
+bundle's own quiet hours while `merge_pool_max` sits at `background_pool_size`:
+the **device** is the limit and a bigger pool only lengthens the queue — the
+levers are faster storage or fewer, larger parts (HC-4.6, P-01). Neither column
+settles it alone, and two readings do not rule it out:
 
 - `os_vs_asked` well below 1 means the page cache absorbs the reads. The
   misses and the writes still reach the device and can fill it.
@@ -233,16 +250,18 @@ it out:
 
 `read_call_thread_s` / `write_call_thread_s` are thread time inside the calls,
 cache hits included and overlapping calls added up: context, never a
-denominator for bytes. An hour with `samples` well below `secs` missed samples
-(downtime, a start), and the first sample after a start can carry a counter's
-accumulated total (measured: 3.5e12 µs of `OSIOWaitMicroseconds` in one
-1-second sample) — read that hour as unreliable on that evidence, never
-because a value is high. `threads_blocked_on_io` is 0 throughout where the
-kernel does not account it; 0 there is not "no waiting". On cloud the same
-columns are per replica in `system.metric_log_by_host_3_days_*.jsonl` (add
-`hostname`); on a service whose data is on object storage they are near zero
-by design and the S3 counters in `metric_log_coordination_3_days` are the
-equivalent (HC-4.10).
+denominator for bytes. An hour with `missed_samples > 0` had downtime or a
+start, and the first sample after a start can carry a counter's accumulated
+total (measured: 3.5e12 µs of `OSIOWaitMicroseconds` in one 1-second sample) —
+read that hour as unreliable on that evidence, never because a value is high.
+`threads_blocked_on_io` is 0 throughout where the kernel does not account it;
+0 there is not "no waiting". On a non-Linux server the `OS*` counters are 0 and
+the bundle cannot measure the device: `ReadBufferFromFileDescriptor*` is
+logical I/O, cache-served included, and the elapsed counters are call time —
+a cache-resident workload drives both high with almost no device traffic. Ask
+for OS-level disk telemetry there. On a service whose data is on object
+storage the columns are near zero by design and the S3 counters in
+`metric_log_coordination_3_days` are the equivalent (HC-4.10).
 
 ## 5. Memory and CPU
 
