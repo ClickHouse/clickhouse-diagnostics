@@ -795,7 +795,15 @@ query: |
   ORDER BY hours_running DESC
 
 message: "Mutation {mutation_id} on {database}.{table} running {hours_running}h"
+
+# investigate:                       # optional: follow-ups for the customer to run on their own
+#   - title: "Mutations still running, per table"     # cluster when the rule fires — the
+#     query: |                       # "which one?" a finding raises. Shown, never run by the tool;
+#       SELECT database, table, count() FROM {sys.mutations}   # read-only SELECT, {sys.*} expanded
+#       WHERE parts_to_do > 0 GROUP BY database, table          # like query.
 ```
+
+In `dashboard.html`, every alert that fired, or whose query failed, carries a collapsed **queries to run on your cluster** line under its instances. Opening it shows the rule's `query` exactly as it ran — `{sys.*}` already expanded for the bundle's mode, so it pastes into `clickhouse-client` on the same cluster — and the rule's `investigate:` follow-ups, each with a copy button. Rules that found nothing carry no SQL, and `alerts_summary.json` never does (it is counts only). On a cloud bundle the queries keep their `clusterAllReplicas(…)` form, which needs the same `REMOTE` grant the collection did.
 
 ### `{sys.<table>}` placeholder
 

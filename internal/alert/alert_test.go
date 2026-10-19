@@ -616,6 +616,19 @@ func TestAlertYAML_FilesAreValid(t *testing.T) {
 			if err := query.ValidateQueryContent(expanded); err != nil {
 				t.Errorf("security validation failed: %v", err)
 			}
+			// Follow-up queries are shown to customers to run on their own
+			// cluster: each needs a title and must be a read-only SELECT in
+			// every mode's form.
+			for i, inv := range def.Investigate {
+				if strings.TrimSpace(inv.Title) == "" || strings.TrimSpace(inv.Query) == "" {
+					t.Errorf("investigate[%d] needs a title and a query", i)
+				}
+				for _, mode := range []string{"onprem", "cloud", "gov"} {
+					if err := query.ValidateQueryContent((&Evaluator{mode: mode}).expandQuery(inv.Query)); err != nil {
+						t.Errorf("investigate[%d] (%s): %v", i, mode, err)
+					}
+				}
+			}
 		})
 	}
 }
@@ -805,5 +818,100 @@ func TestShippedRules_ModesAreGated(t *testing.T) {
 		if !seen[n] {
 			t.Errorf("rule %s not found under alerts/", n)
 		}
+	}
+}
+
+// A displayed alert (fired, or whose query failed) carries the SQL the
+// customer can run on their own cluster: the rule's query exactly as it ran,
+// placeholders expanded for the mode, and the rule's follow-up queries. A
+// clean rule carries none, so the dashboard does not grow for rules that
+// found nothing.
+const evidenceRule = `
+name: pool_rule
+title: "Pool saturated"
+severity: warning
+query: |
+  SELECT hostName() AS hostname, avg(CurrentMetric_BackgroundFetchesPoolTask) AS avg_tasks
+  FROM {sys.metric_log} GROUP BY hostname
+investigate:
+  - title: "Every background pool now, per replica"
+    query: |
+      SELECT hostName() AS hostname, metric, value FROM {sys.metrics} WHERE metric LIKE 'Background%PoolTask'
+message: "{hostname}: {avg_tasks}"
+`
+
+func writeRule(t *testing.T, body string) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "rule.yaml")
+	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+const oneRow = `{"meta":[{"name":"hostname"},{"name":"avg_tasks"}],"data":[["node-1","16"]],"rows":1}`
+const noRows = `{"meta":[{"name":"hostname"},{"name":"avg_tasks"}],"data":[],"rows":0}`
+
+func TestEvalFile_FiredResultCarriesTheQueriesToRun(t *testing.T) {
+	var ran string
+	ev := &Evaluator{mode: "cloud", queryFn: func(sql string) (string, error) { ran = sql; return oneRow, nil }}
+	r := ev.evalFile(writeRule(t, evidenceRule))
+	if len(r.Rows) != 1 {
+		t.Fatalf("rule did not fire: %+v", r)
+	}
+	if r.Query == "" || r.Query != ran {
+		t.Errorf("Query = %q; want exactly what ran (%q)", r.Query, ran)
+	}
+	if !strings.Contains(r.Query, "clusterAllReplicas") || strings.Contains(r.Query, "{sys.") {
+		t.Errorf("Query must be expanded for the mode: %q", r.Query)
+	}
+	if len(r.Investigate) != 1 || r.Investigate[0].Title != "Every background pool now, per replica" ||
+		!strings.Contains(r.Investigate[0].Query, "clusterAllReplicas") || strings.Contains(r.Investigate[0].Query, "{sys.") {
+		t.Errorf("Investigate = %+v; want the follow-up, expanded", r.Investigate)
+	}
+}
+
+func TestEvalFile_CleanResultCarriesNoQuery(t *testing.T) {
+	ev := &Evaluator{mode: "onprem", queryFn: func(string) (string, error) { return noRows, nil }}
+	r := ev.evalFile(writeRule(t, evidenceRule))
+	if r.Query != "" || len(r.Investigate) != 0 {
+		t.Errorf("a clean rule must not carry SQL into the dashboard: %+v", r)
+	}
+}
+
+func TestEvalFile_FailedQueryIsShown(t *testing.T) {
+	ev := &Evaluator{mode: "onprem", queryFn: func(string) (string, error) {
+		return "", errString("Code: 47. DB::Exception: Missing columns: 'x' (UNKNOWN_IDENTIFIER)")
+	}}
+	r := ev.evalFile(writeRule(t, evidenceRule))
+	if r.Error == "" || !strings.Contains(r.Query, "system.metric_log") {
+		t.Errorf("a rule whose query failed is displayed, and its query is what is worth seeing: %+v", r)
+	}
+}
+
+func TestEvalFile_FollowUpQueriesMustBeReadOnly(t *testing.T) {
+	bad := strings.Replace(evidenceRule, "SELECT hostName() AS hostname, metric, value FROM {sys.metrics} WHERE metric LIKE 'Background%PoolTask'",
+		"ALTER TABLE system.metrics DELETE WHERE 1", 1)
+	ran := false
+	ev := &Evaluator{mode: "onprem", queryFn: func(string) (string, error) { ran = true; return oneRow, nil }}
+	r := ev.evalFile(writeRule(t, bad))
+	if !strings.Contains(r.Error, "security") || r.Query != "" || len(r.Investigate) != 0 {
+		t.Errorf("a non-SELECT follow-up must break the rule and show nothing: %+v", r)
+	}
+	if ran {
+		t.Error("the rule ran although its definition is unsafe")
+	}
+}
+
+func TestWriteSummaryJSON_CarriesNoSQL(t *testing.T) {
+	dir := t.TempDir()
+	res := []Result{{Name: "pool_rule", Title: "Pool", Severity: "warning", Rows: []map[string]interface{}{{"a": 1}},
+		Query: "SELECT 1 FROM system.metric_log", Investigate: []Investigation{{Title: "t", Query: "SELECT 2"}}}}
+	if err := WriteSummaryJSON(dir, res, "gov"); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(filepath.Join(dir, "alerts_summary.json"))
+	if strings.Contains(string(b), "SELECT") {
+		t.Errorf("alerts_summary.json is counts only:\n%s", b)
 	}
 }
