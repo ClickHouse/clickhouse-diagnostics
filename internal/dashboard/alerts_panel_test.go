@@ -161,6 +161,7 @@ func TestTemplate_KeeperMembersPanel(t *testing.T) {
 		"DATA.keeper_members", "DATA.keeper_leaderless",
 		"esc(m.member)", "esc(m.ensemble", "esc(m.state)", "esc(f.check+': '+f.text)",
 		"needs a full snapshot",
+		"members outside the bundle may still hold a quorum",
 	} {
 		if !strings.Contains(htmlTemplate, want) {
 			t.Errorf("template lost %q", want)

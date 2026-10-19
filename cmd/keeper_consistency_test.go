@@ -35,6 +35,15 @@ func TestKeeperVerdicts_DashboardAndPrepassAgree(t *testing.T) {
 			{"keeper-a", "rw", lgif(1000, 2000, 2000, 2000, 900), "Mode: follower", "zk_server_state\tfollower", "snapshot_transfer_chunk_size=1", "snapshot_dir_size: 0", ""},
 			{"keeper-b", "rw", lgif(1, 500, 500, 500, 0), "Mode: follower", "zk_server_state\tfollower", "snapshot_transfer_chunk_size=1", "snapshot_dir_size: 0", ""},
 		},
+		"zookeeper not serving": {
+			{"zk-a", "rw", "(empty reply)", "This ZooKeeper instance is not currently serving requests", "This ZooKeeper instance is not currently serving requests", "This ZooKeeper instance is not currently serving requests", "This ZooKeeper instance is not currently serving requests", ""},
+			{"zk-b", "rw", "(empty reply)", "This ZooKeeper instance is not currently serving requests", "This ZooKeeper instance is not currently serving requests", "This ZooKeeper instance is not currently serving requests", "This ZooKeeper instance is not currently serving requests", ""},
+		},
+		"two leaders mid-election": {
+			{"keeper-a", "rw", lgif(100, 1000, 1000, 1000, 50), "Mode: leader", "zk_server_state\tleader", "snapshot_transfer_chunk_size=1", "snapshot_dir_size: 0", ""},
+			{"keeper-b", "rw", lgif(200, 1000, 1000, 1000, 150), "Mode: leader", "zk_server_state\tleader", "snapshot_transfer_chunk_size=1", "snapshot_dir_size: 0", ""},
+			{"keeper-c", "rw", lgif(10, 150, 150, 150, 0), "Mode: follower", "zk_server_state\tfollower", "snapshot_transfer_chunk_size=1", "snapshot_dir_size: 0", ""},
+		},
 		"two ensembles": {
 			{"keeper-a", "rw", lgif(9000000000, 9002500000, 9002500000, 9002500000, 9002000000), "Mode: leader", "zk_server_state\tleader\nzk_latest_snapshot_size\t3000000000", "snapshot_transfer_chunk_size=100000000", "snapshot_dir_size: 0", ""},
 			{"zk-aux", "rw", lgif(10, 500, 500, 500, 0), "Mode: follower", "zk_server_state\tfollower\nzk_latest_snapshot_size\t1000", "snapshot_transfer_chunk_size=0", "snapshot_dir_size: 0", "aux_zk"},

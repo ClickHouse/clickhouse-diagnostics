@@ -215,3 +215,32 @@ func TestReadMembers_VersionWithoutBuildSuffix(t *testing.T) {
 		t.Errorf("Version = %q, want 26.7.17.7", ms[0].Version)
 	}
 }
+
+func TestReadMembers_ZooKeeperNotServing(t *testing.T) {
+	const zk = "This ZooKeeper instance is not currently serving requests"
+	ms := ReadMembers(writeMemberFiles(t, []fileSpec{
+		{name: "zk-a", isro: "rw", lgif: "(empty reply)", srvr: zk, mntr: zk, conf: zk, dirs: zk},
+		{name: "zk-b", isro: "rw", lgif: "(empty reply)", srvr: zk, mntr: zk, conf: zk, dirs: zk},
+	}))
+	for _, m := range ms {
+		if m.State != "not serving" {
+			t.Errorf("%s: state %q, want not serving for ZooKeeper's wording", m.Member, m.State)
+		}
+	}
+	if len(Leaderless(ms)) != 1 {
+		t.Errorf("two ZooKeeper members not serving and none serving: Leaderless = %v", Leaderless(ms))
+	}
+}
+
+func TestReadMembers_TwoLeadersNoSnapshotVerdict(t *testing.T) {
+	ms := ReadMembers(writeMemberFiles(t, []fileSpec{
+		{name: "keeper-a", isro: "rw", lgif: logInfo(100, 1000), srvr: "Mode: leader", mntr: "zk_server_state\tleader", conf: "snapshot_transfer_chunk_size=1", dirs: "snapshot_dir_size: 0"},
+		{name: "keeper-b", isro: "rw", lgif: logInfo(200, 1000), srvr: "Mode: leader", mntr: "zk_server_state\tleader", conf: "snapshot_transfer_chunk_size=1", dirs: "snapshot_dir_size: 0"},
+		{name: "keeper-c", isro: "rw", lgif: logInfo(10, 150), srvr: "Mode: follower", mntr: "zk_server_state\tfollower", conf: "snapshot_transfer_chunk_size=1", dirs: "snapshot_dir_size: 0"},
+	}))
+	for _, m := range ms {
+		if hasFlag(m, "HC-3.19", "critical") {
+			t.Errorf("two leaders: no member may be declared behind \"the leader\", got %s", m.Member)
+		}
+	}
+}

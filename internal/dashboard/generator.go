@@ -4065,7 +4065,7 @@ document.addEventListener('DOMContentLoaded',function(){
     if(ll.length){
       document.getElementById('keeper-leaderless').innerHTML='<div class="alert-err-msg">⛔ '
         +ll.map(e=>esc(e==='default'?'Keeper':'ensemble '+e)).join(', ')
-        +': no member in this bundle is serving — no leader, writes through it fail (HC-3.18)</div>';
+        +': no member in this bundle is serving — no leader among them; members outside the bundle may still hold a quorum (HC-3.18)</div>';
     }
     const N=v=>v==null?'—':esc(String(v));
     const B=v=>{if(v==null)return '—';let n=Number(v),u=['B','KiB','MiB','GiB','TiB'],i=0;while(n>=1024&&i<u.length-1){n/=1024;i++;}return esc((i?n.toFixed(2):String(n))+' '+u[i]);};

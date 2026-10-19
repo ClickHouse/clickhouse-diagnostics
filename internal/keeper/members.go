@@ -88,7 +88,7 @@ func parseMember(text, fallback string) Member {
 	// its numbers are incomplete, so such a section is not evidence.
 	answered := func(cmd string) bool {
 		b := sec[cmd]
-		if b == "" || b == notServingMsg || strings.HasPrefix(b, "skipped") || strings.HasPrefix(b, "(empty reply") {
+		if b == "" || IsNotServing(b) || strings.HasPrefix(b, "skipped") || strings.HasPrefix(b, "(empty reply") {
 			return false
 		}
 		for _, l := range strings.Split(b, "\n") {
@@ -111,7 +111,7 @@ func parseMember(text, fallback string) Member {
 	}
 	notServing, errLine := false, false
 	for _, b := range sec {
-		if b == notServingMsg {
+		if IsNotServing(b) {
 			notServing = true
 		}
 		for _, l := range strings.Split(b, "\n") {
@@ -180,14 +180,21 @@ func flagMembers(ms []Member) {
 		known := !strings.HasPrefix(key, "\x00")
 		var leader *Member
 		var snap int64
+		leaders := 0
 		for _, i := range idx {
 			m := &ms[i]
 			if m.Role == "leader" && m.State == "serving" {
 				leader = m
+				leaders++
 			}
 			if m.SnapshotSize != nil && *m.SnapshotSize > snap {
 				snap = *m.SnapshotSize
 			}
+		}
+		// Exactly one: mid-election two members can report leader, and then
+		// neither says what "the leader" retains.
+		if leaders != 1 {
+			leader = nil
 		}
 		for _, i := range idx {
 			m := &ms[i]
@@ -224,8 +231,10 @@ func flagMembers(ms []Member) {
 
 // Leaderless names the ensembles where two or more members answer "not
 // serving" themselves and none is serving — the pre-pass's HC-3.18
-// critical. Collector-side failures never count, and a member without the
-// ensemble line is never grouped.
+// critical. It is a statement about the members in the bundle, not proof of
+// an ensemble-wide outage: voters this server does not know may still hold a
+// quorum, and the panel's banner says so. Collector-side failures never
+// count, and a member without the ensemble line is never grouped.
 func Leaderless(ms []Member) []string {
 	type tally struct{ down, serving int }
 	byEns := map[string]*tally{}
