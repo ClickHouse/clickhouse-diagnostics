@@ -542,3 +542,65 @@ func TestCollect_WritesTheEnsemble(t *testing.T) {
 		t.Errorf("gov must hash an auxiliary ensemble's name:\n%s", b)
 	}
 }
+
+// ---- review round 2: gov identifiers, shared endpoints, auxiliary blocks
+
+func TestCollect_GovConfKeepsOnlyValuesThatIdentifyNothing(t *testing.T) {
+	keeperConf := "server_id=2\nsnapshot_distance=100000\nsnapshot_transfer_chunk_size=0\ncompress_snapshots_with_zstd_format=true\nraft_logs_level=information\n" +
+		"log_storage_path=/data/coordination/log\nlog_storage_disk=acme_keeper_disk\nsnapshot_storage_disk=s3_plain_acme\n"
+	zkConf := "clientPort=2181\nclientPortAddress=0.0.0.0/0.0.0.0:2181\ndataDir=/var/lib/acme-zk/data\ndataLogDir=/var/lib/acme-zk/log\n" +
+		"tickTime=2000\nmaxClientCnxns=60\nserver.1=zk1.acme.internal:2888:3888:participant\nserver.2=10.20.30.41:2888:3888:participant\nserver.3=acmezk3\nsecureClientPortAddress=zk-acme.internal:2281\n"
+	for name, conf := range map[string]string{"keeper": keeperConf, "zookeeper": zkConf} {
+		replies := map[string]string{"ruok": "imok", "srvr": okReplies["srvr"], "mntr": okReplies["mntr"], "conf": conf}
+		h, p, stop := fakeKeeper(t, replies, false)
+		out, _ := Collect(t.TempDir(), []Target{{Host: h, Port: p}}, Options{GovSalt: "PR3TESTSALT01"})
+		stop()
+		b, _ := os.ReadFile(out[0].File)
+		s := string(b)
+		for _, leak := range []string{"/data/", "acme", "zk1.", "10.20.30.41", "0.0.0.0"} {
+			if strings.Contains(s, leak) {
+				t.Errorf("%s: gov conf carries %q:\n%s", name, leak, s)
+			}
+		}
+		for _, keep := range []string{"snapshot_distance=100000", "snapshot_transfer_chunk_size=0", "compress_snapshots_with_zstd_format=true", "raft_logs_level=information", "tickTime=2000", "maxClientCnxns=60"} {
+			if strings.Contains(conf, keep) && !strings.Contains(s, keep) {
+				t.Errorf("%s: gov dropped the setting %q", name, keep)
+			}
+		}
+	}
+}
+
+func TestCollect_SharedEndpointAcrossEnsemblesGetsTwoFiles(t *testing.T) {
+	// Default and auxiliary connections to one host:port (different chroots).
+	h, p, stop := fakeKeeper(t, fullReplies, false)
+	defer stop()
+	out, _ := Collect(t.TempDir(), []Target{{Host: h, Port: p, Ensemble: "default"}, {Host: h, Port: p, Ensemble: "aux_zk"}}, Options{})
+	if out[0].File == out[1].File {
+		t.Fatalf("both ensembles wrote %s — one overwrites the other", out[0].File)
+	}
+	for i, ens := range []string{"default", "aux_zk"} {
+		if b, _ := os.ReadFile(out[i].File); !strings.Contains(string(b), "# ensemble: "+ens+"\n") {
+			t.Errorf("file %d lost its ensemble %q", i, ens)
+		}
+	}
+	if filepath.Base(out[0].File) != h+"_"+p+".txt" {
+		t.Errorf("a default member keeps the existing name, got %s", filepath.Base(out[0].File))
+	}
+}
+
+func TestTargetsFromConfig_AuxiliaryBlockNamedZookeeperIsNotDefault(t *testing.T) {
+	dir := t.TempDir()
+	cfg := `<clickhouse>
+  <zookeeper><node><host>keeper-main.example</host><port>9181</port></node></zookeeper>
+  <auxiliary_zookeepers>
+    <zookeeper><node><host>zk-aux.example</host><port>2181</port></node></zookeeper>
+  </auxiliary_zookeepers>
+</clickhouse>`
+	if err := os.WriteFile(filepath.Join(dir, "zk.xml"), []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := TargetsFromConfig(dir)
+	if len(got) != 1 || got[0].Host != "keeper-main.example" {
+		t.Errorf("TargetsFromConfig = %+v; the auxiliary block must not be read as the default ensemble", got)
+	}
+}

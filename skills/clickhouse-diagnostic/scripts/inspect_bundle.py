@@ -1235,18 +1235,19 @@ def analyse(base: str):
                         + f" ({len(serving)} serving in this bundle) — quorum is not judged from these files: they hold the members this server knows, and a probe the collector could not finish says nothing about the voters' own links",
                         "keeper/<member>.txt — 'not serving' is Keeper's answer, 'probe failed' the collector's timeout or refusal", "HC-3.18/P-57")
             if known:
+                # Only the leader's own first_log_idx says what it retains:
+                # followers compact independently, so without an observed
+                # leader no member can be declared behind it.
                 leader = next((k for k in grp if k["role"] == "leader" and k["state"] == "serving"), None)
-                firsts = [k["kv"].get(("lgif", "first_log_idx")) for k in ([leader] if leader else serving)]
-                firsts = [f for f in firsts if isinstance(f, (int, float))]
-                if firsts:
-                    ref = max(firsts)
+                ref = leader["kv"].get(("lgif", "first_log_idx")) if leader else None
+                if isinstance(ref, (int, float)):
                     for k in grp:
                         last = k["kv"].get(("lgif", "last_log_idx"))
                         if k is leader or not isinstance(last, (int, float)) or last >= ref:
                             continue
                         snap = max((x["kv"].get(("mntr", "zk_latest_snapshot_size")) or 0 for x in grp), default=0)
                         add("critical", "keeper",
-                            f"{label}: member {k['member']} is behind the {'leader' if leader else 'serving members'}' retained log (its last_log_idx {int(last)} < first_log_idx {int(ref)}, {int(ref - last)} entries) — it can rejoin only through a full snapshot"
+                            f"{label}: member {k['member']} is behind the leader's retained log (its last_log_idx {int(last)} < first_log_idx {int(ref)}, {int(ref - last)} entries) — it can rejoin only through a full snapshot"
                             + (f" ({human(snap)})" if snap else "") + "; keep it stopped until snapshot_transfer_chunk_size is set on the serving members",
                             "keeper/<member>.txt lgif", "HC-3.19/P-61")
             # The leader sends the snapshot, and any member can be leader:

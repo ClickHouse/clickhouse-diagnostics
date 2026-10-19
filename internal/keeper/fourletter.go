@@ -162,9 +162,12 @@ const DefaultPort = "2181"
 
 var (
 	reZKBlock = regexp.MustCompile(`(?is)<zookeeper\b[^>]*>(.*?)</zookeeper>`)
-	reZKNode  = regexp.MustCompile(`(?is)<node\b[^>]*>(.*?)</node>`)
-	reZKHost  = regexp.MustCompile(`(?is)<host>\s*([^<]*?)\s*</host>`)
-	reZKPort  = regexp.MustCompile(`(?is)<port>\s*([^<]*?)\s*</port>`)
+	// <auxiliary_zookeepers> holds other ensembles, one tag per name — and a
+	// name may itself be "zookeeper"; removed before the default block is read.
+	reAuxZK  = regexp.MustCompile(`(?is)<auxiliary_zookeepers\b[^>]*>.*?</auxiliary_zookeepers>`)
+	reZKNode = regexp.MustCompile(`(?is)<node\b[^>]*>(.*?)</node>`)
+	reZKHost = regexp.MustCompile(`(?is)<host>\s*([^<]*?)\s*</host>`)
+	reZKPort = regexp.MustCompile(`(?is)<port>\s*([^<]*?)\s*</port>`)
 )
 
 // TargetsFromConfig reads every <zookeeper><node> from the server
@@ -207,7 +210,8 @@ func TargetsFromConfig(configDir string) []Target {
 			// members on a one-member cluster and try to reach three hosts
 			// the operator never named. ClickHouse's own parser ignores
 			// comments; so must this.
-			for _, block := range reZKBlock.FindAllStringSubmatch(string(config.StripComments(blob)), -1) {
+			cfg := reAuxZK.ReplaceAllString(string(config.StripComments(blob)), "")
+			for _, block := range reZKBlock.FindAllStringSubmatch(cfg, -1) {
 				for _, node := range reZKNode.FindAllStringSubmatch(block[1], -1) {
 					h := reZKHost.FindStringSubmatch(node[1])
 					if h == nil || h[1] == "" || strings.Contains(h[1], "{") {
@@ -327,18 +331,42 @@ func govFilter(reply string) string {
 	return strings.Join(out, "\n")
 }
 
-// govConf removes the values of storage paths and anything URL-shaped from a
-// conf reply — they name the customer's infrastructure — and keeps every
-// setting, as the server_settings collector does.
+// govConf keeps, in a gov bundle, only conf values that cannot identify the
+// customer's infrastructure: numbers, booleans and plain words. Paths, URLs,
+// host names and addresses are removed whatever the key, and so are keys that
+// name a location or a customer-chosen object even when the value looks
+// plain — Keeper's *_path and *_disk, Apache ZooKeeper's dataDir, dataLogDir
+// and server.N (an ensemble member's host and ports). The same treatment as
+// the gov system.disks and server_settings collectors: the setting stays,
+// its value says REMOVED.
+var (
+	reConfPlain = regexp.MustCompile(`^(-?[0-9]+(\.[0-9]+)?|true|false|[A-Za-z_][A-Za-z0-9_,*]*)$`)
+	confIDKeys  = map[string]bool{"dataDir": true, "dataLogDir": true}
+	reConfLabel = regexp.MustCompile(`^[A-Za-z_ ]*:?\s*$`)
+)
+
 func govConf(reply string) string {
 	lines := strings.Split(reply, "\n")
-	for i, l := range lines {
+	out := lines[:0]
+	for _, l := range lines {
 		k, v, ok := strings.Cut(l, "=")
-		if ok && (strings.HasSuffix(k, "_path") || strings.Contains(v, "://")) {
-			lines[i] = k + "=REMOVED"
+		if !ok {
+			// ZooKeeper prints section labels ("membership: "); anything else
+			// without a key could be anything.
+			if reConfLabel.MatchString(l) {
+				out = append(out, l)
+			}
+			continue
 		}
+		k = strings.TrimSpace(k)
+		if confIDKeys[k] || strings.HasSuffix(k, "_path") || strings.HasSuffix(k, "_disk") ||
+			strings.HasPrefix(k, "server.") || !reConfPlain.MatchString(strings.TrimSpace(v)) {
+			out = append(out, k+"=REMOVED")
+			continue
+		}
+		out = append(out, l)
 	}
-	return strings.Join(lines, "\n")
+	return strings.Join(out, "\n")
 }
 
 // Label is the host as it appears in the bundle: the host itself, or in
@@ -504,7 +532,14 @@ func collectOne(dir string, t Target, opts Options) Outcome {
 			o.Err = o.Status
 		}
 	}
-	path := filepath.Join(dir, fileName(o.Label, t.Port))
+	// Default and auxiliary connections can share a host:port (different
+	// chroots): an auxiliary member's file name carries its ensemble, so the
+	// two never write the same file. A default member keeps the plain name.
+	name := fileName(o.Label, t.Port)
+	if ens != "default" {
+		name = fileName(ens+"__"+o.Label, t.Port)
+	}
+	path := filepath.Join(dir, name)
 	if err := os.WriteFile(path, []byte(b.String()), 0600); err != nil {
 		o.Status = "failed"
 		o.Err = fmt.Sprintf("write %s: %v", filepath.Base(path), err)

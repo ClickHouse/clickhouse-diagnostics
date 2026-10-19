@@ -183,7 +183,8 @@ One `keeper/<host>_<port>.txt` per Keeper member (bundles from v0.7+; absent on 
 ```
 # clickhouse-diagnostic — Keeper four-letter commands
 # target: <host or gov hash>:<port>
-# ensemble: default | <auxiliary ZooKeeper name, gov: hashed>   # absent in older bundles
+# ensemble: default | <auxiliary ZooKeeper name, gov: hashed>   # absent in older bundles;
+#   an auxiliary member's file is <ensemble>__<host>_<port>.txt, so a shared host:port never collides
 # collected_at: RFC3339 UTC
 # commands: ruok, isro, lgif, srvr, mntr, conf, dirs (stat/cons are never sent — they list client addresses)
 #   bundles before the Raft/settings commands carry ruok, srvr, mntr only
@@ -209,7 +210,8 @@ zk_ephemerals_count  zk_approximate_data_size  zk_key_arena_size  zk_latest_snap
 zk_open_file_descriptor_count  zk_max_file_descriptor_count  zk_followers  zk_synced_followers   # the last two on the leader only
 ## conf
 key=value per coordination setting: snapshot_distance  reserved_log_items  stale_log_gap
-snapshot_transfer_chunk_size  write_snapshot_version  …   (*_path values = REMOVED in gov)
+snapshot_transfer_chunk_size  write_snapshot_version  …   (gov: only numbers, booleans and plain words survive;
+#   paths, hosts, addresses, *_path, *_disk, dataDir, dataLogDir and server.N say REMOVED)
 ## dirs
 snapshot_dir_size: <bytes>
 log_dir_size: <bytes>

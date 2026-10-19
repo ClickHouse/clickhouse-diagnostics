@@ -235,3 +235,13 @@ func TestInspectBundle_KeeperNoEnsembleLineSkipsCrossMemberChecks(t *testing.T) 
 		t.Errorf("without ensemble identity two members' logs must not be compared: %v", fs)
 	}
 }
+
+// Followers compact their logs independently: without an observed leader no
+// member can be declared behind what the leader retains.
+func TestInspectBundle_KeeperNoLeaderNoSnapshotVerdict(t *testing.T) {
+	a := member{"keeper-a", "rw", lgif(1000, 2000, 2000, 2000, 900), "Mode: follower", "zk_server_state\tfollower", "snapshot_transfer_chunk_size=100000000", "snapshot_dir_size: 0", ""}
+	b := member{"keeper-b", "rw", lgif(1, 500, 500, 500, 0), "Mode: follower", "zk_server_state\tfollower", "snapshot_transfer_chunk_size=100000000", "snapshot_dir_size: 0", ""}
+	if fs := keeperFindings(t, writeKeeperBundle(t, []member{a, b})); find(fs, "HC-3.19", "critical", "") {
+		t.Errorf("no leader answered, yet a member was declared behind the leader's log: %v", fs)
+	}
+}
