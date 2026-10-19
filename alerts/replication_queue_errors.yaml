@@ -29,12 +29,17 @@ query: |
 # on their own cluster (never run by the tool; read-only, validated like query).
 investigate:
   - title: "Stuck entries grouped by table, type and error"
+    # The error key is the message's start with every number replaced by N:
+    # one cause stays one row although its text carries part names and
+    # counters, and two causes ("disk full", "connection refused") never share one.
     query: |
-      SELECT database, table, type, count() AS entries, max(num_tries) AS max_tries,
-             min(create_time) AS oldest, any(substring(last_exception, 1, 300)) AS example_error
+      SELECT database, table, type,
+             replaceRegexpAll(substring(last_exception, 1, 200), '[0-9]+', 'N') AS error,
+             count() AS entries, max(num_tries) AS max_tries, min(create_time) AS oldest,
+             any(substring(last_exception, 1, 300)) AS example_error
       FROM {sys.replication_queue}
       WHERE last_exception != ''
-      GROUP BY database, table, type
+      GROUP BY database, table, type, error
       ORDER BY entries DESC
       LIMIT 50
   - title: "Replica health for the tables with a queue"

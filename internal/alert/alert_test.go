@@ -705,6 +705,13 @@ func TestAlertYAML_OverridesMatchRoot(t *testing.T) {
 				if !reflect.DeepEqual(ov.Tags, rt.Tags) {
 					t.Errorf("tags drift: override %v vs root %v", ov.Tags, rt.Tags)
 				}
+				// The follow-ups too: an override is what runs on newer
+				// servers, so one without them hides the queries exactly where
+				// they matter. A follow-up that must differ per version is not
+				// supported; keep them version-neutral.
+				if !reflect.DeepEqual(ov.Investigate, rt.Investigate) {
+					t.Errorf("investigate drift: override has %d follow-up(s), root %d — copy the root's investigate: list", len(ov.Investigate), len(rt.Investigate))
+				}
 			})
 		}
 	}
@@ -913,5 +920,26 @@ func TestWriteSummaryJSON_CarriesNoSQL(t *testing.T) {
 	b, _ := os.ReadFile(filepath.Join(dir, "alerts_summary.json"))
 	if strings.Contains(string(b), "SELECT") {
 		t.Errorf("alerts_summary.json is counts only:\n%s", b)
+	}
+}
+
+// On 23.3+ RunAll picks the alerts/23.3.1.0/ overrides of the pool rules —
+// every current server, 26.7 included. The follow-ups must survive that
+// selection, or the "which pool?" queries never show where they matter.
+func TestRunAll_VersionSelectedRulesKeepTheirFollowUps(t *testing.T) {
+	ev := &Evaluator{mode: "onprem", queryFn: func(string) (string, error) { return oneRow, nil }}
+	results := ev.RunAll("../../alerts", internal.Version{Major: 26, Minor: 7, Patch: 1, Build: 0})
+	want := map[string]bool{"fetch_pool_saturated": true, "schedule_pool_saturated": true, "replication_queue_errors": true}
+	for _, r := range results {
+		if !want[r.Name] {
+			continue
+		}
+		delete(want, r.Name)
+		if len(r.Investigate) == 0 {
+			t.Errorf("%s (%s) fired on 26.7 without its follow-ups", r.Name, r.File)
+		}
+	}
+	for n := range want {
+		t.Errorf("%s did not fire in this test", n)
 	}
 }
