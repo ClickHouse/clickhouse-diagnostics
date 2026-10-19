@@ -63,9 +63,9 @@ cd <directory containing queries.onprem/ queries.cloud/ queries.gov/ alerts/>   
 ./bin/clickhouse-diagnostic -mode gov -host ch-01 -user sys_read_only -salt <YourPrivateSalt>
 ```
 
-> **Passing the password non-interactively.** `-password` is the only non-interactive option (there is no environment variable; the prompt needs a TTY). Export the variable in one statement and use it in the next — `export CH_PASS='…'` then `-password "$CH_PASS"`. The one-liner `CH_PASS='…' ./clickhouse-diagnostic … -password "$CH_PASS"` sends an **empty** password (the shell expands `$CH_PASS` before the assignment) and fails with `401 … Code: 194 (REQUIRED_PASSWORD)` after printing `Enter Password:`. Flags are visible in `ps` and shell history, so rotate the password after a scripted run.
+> **Passing the password non-interactively.** `export CLICKHOUSE_PASSWORD='…'` and omit `-password`: the tool reads the variable when the flag is absent, and it stays out of `ps` and shell history. `-password` still works and takes precedence. Rotate the password after a scripted run.
 
-Each run leaves `clickhouse_diagnostic_<ts>.tar.gz` in the current directory and the unpacked results under `clickhouse_results/clickhouse_diagnostic_<ts>/` (open `dashboard.html` there; older releases named both `clickhouse_backup_<ts>`). Before the first run create the read-only user — see [Required grants](#required-grants). Useful next steps:
+Each run leaves `clickhouse_diagnostic_<ts>.tar.gz` in the output directory (`-output-dir`, default `clickhouse_results/`), next to the unpacked results in `clickhouse_results/clickhouse_diagnostic_<ts>/` (open `dashboard.html` there; older releases named both `clickhouse_backup_<ts>`). Before the first run create the read-only user — see [Required grants](#required-grants). Useful next steps:
 
 ```bash
 ./bin/clickhouse-diagnostic -mode onprem -host ch-01 -from 2026-08-14T09:00:00Z -to 2026-08-14T13:00:00Z   # just the incident window
@@ -547,6 +547,7 @@ In `gov` mode, every database and table name written to the support-bound output
 clickhouse_results/
 ├── clickhouse_diagnostic_YYYYMMDD_HHMMSS/                   # → goes into the archive
 │   └── *.jsonl                                              # hashed names inside
+├── clickhouse_diagnostic_YYYYMMDD_HHMMSS.tar.gz            # → the archive, send this
 └── clickhouse_diagnostic_YYYYMMDD_HHMMSS_gov_name_mapping.csv   # → stays LOCAL
 ```
 
@@ -1070,8 +1071,8 @@ clickhouse_results/
 │   ├── dashboard.html                                       #   unless -skip-dashboard or gov
 │   ├── execution_log.txt                                    #   every collector: outcome, wall time, size; alerts; phases
 │   └── alerts_summary.json                                  #   when alerts ran but dashboard.html is absent
+├── clickhouse_diagnostic_YYYYMMDD_HHMMSS.tar.gz             # → the archive, unless -skip-archive
 └── clickhouse_diagnostic_YYYYMMDD_HHMMSS_gov_name_mapping.csv   # → LOCAL only (gov mode)
-clickhouse_diagnostic_YYYYMMDD_HHMMSS.tar.gz                 # unless -skip-archive
 ```
 
 - **Query results**: one file per query, in the format chosen by [`-output-format`](#output-format) (default `jsonl`)
