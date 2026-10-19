@@ -56,7 +56,7 @@ func TestCollect_NormalReply(t *testing.T) {
 	defer stop()
 	dir := t.TempDir()
 	fixed := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
-	out, err := Collect(dir, []Target{{h, p}}, Options{Now: func() time.Time { return fixed }})
+	out, err := Collect(dir, []Target{{Host: h, Port: p}}, Options{Now: func() time.Time { return fixed }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +88,7 @@ func TestCollect_Refused(t *testing.T) {
 	h, p, _ := net.SplitHostPort(ln.Addr().String())
 	ln.Close()
 	dir := t.TempDir()
-	out, err := Collect(dir, []Target{{h, p}}, Options{DialTimeout: time.Second, ReadTimeout: time.Second})
+	out, err := Collect(dir, []Target{{Host: h, Port: p}}, Options{DialTimeout: time.Second, ReadTimeout: time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +106,7 @@ func TestCollect_Timeout(t *testing.T) {
 	h, p, stop := fakeKeeper(t, nil, true)
 	defer stop()
 	start := time.Now()
-	out, err := Collect(t.TempDir(), []Target{{h, p}}, Options{DialTimeout: time.Second, ReadTimeout: 150 * time.Millisecond})
+	out, err := Collect(t.TempDir(), []Target{{Host: h, Port: p}}, Options{DialTimeout: time.Second, ReadTimeout: 150 * time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +122,7 @@ func TestCollect_PartialWhenCommandDisabled(t *testing.T) {
 	replies := map[string]string{"ruok": "imok", "srvr": okReplies["srvr"], "mntr": ""}
 	h, p, stop := fakeKeeper(t, replies, false)
 	defer stop()
-	out, _ := Collect(t.TempDir(), []Target{{h, p}}, Options{})
+	out, _ := Collect(t.TempDir(), []Target{{Host: h, Port: p}}, Options{})
 	if out[0].Status != "partial" {
 		t.Fatalf("status = %s, want partial", out[0].Status)
 	}
@@ -143,7 +143,7 @@ func TestCollect_GovHashesHostAndFiltersAddresses(t *testing.T) {
 	h, p, stop := fakeKeeper(t, replies, false)
 	defer stop()
 	dir := t.TempDir()
-	out, _ := Collect(dir, []Target{{h, p}}, Options{GovSalt: "PR3TESTSALT01"})
+	out, _ := Collect(dir, []Target{{Host: h, Port: p}}, Options{GovSalt: "PR3TESTSALT01"})
 	// Same form as hex(SHA256(concat(host, salt))) in ClickHouse: for
 	// '127.0.0.1' + 'PR3TESTSALT01' the server returns this value.
 	if h == "127.0.0.1" {
@@ -167,7 +167,7 @@ func TestCollect_GovHashesHostAndFiltersAddresses(t *testing.T) {
 
 func TestParseTargets(t *testing.T) {
 	got := ParseTargets("k1\t9181\nk2\t9181\nk1\t9181\n\nbroken line\n\t9181\n")
-	want := []Target{{"k1", "9181"}, {"k2", "9181"}}
+	want := []Target{{Host: "k1", Port: "9181", Ensemble: "default"}, {Host: "k2", Port: "9181", Ensemble: "default"}}
 	if len(got) != len(want) {
 		t.Fatalf("got %+v, want %+v", got, want)
 	}
@@ -235,7 +235,7 @@ func TestTargetsFromConfig(t *testing.T) {
 	must(filepath.Join(cd, "notes.txt"), `<zookeeper><node><host>ignored.example</host></node></zookeeper>`)
 
 	got := TargetsFromConfig(cd)
-	want := []Target{{"keeper-a.example", "9181"}, {"keeper-b.example", DefaultPort}, {"keeper-c.example", "2181"}}
+	want := []Target{{Host: "keeper-a.example", Port: "9181", Ensemble: "default"}, {Host: "keeper-b.example", Port: DefaultPort, Ensemble: "default"}, {Host: "keeper-c.example", Port: "2181", Ensemble: "default"}}
 	if len(got) != len(want) {
 		t.Fatalf("targets = %v, want %v", got, want)
 	}
@@ -251,11 +251,11 @@ func TestTargetsFromConfig(t *testing.T) {
 	if TargetsFromConfig("") != nil || TargetsFromConfig(filepath.Join(root, "missing")) != nil {
 		t.Error("empty or unreadable dir must yield nil")
 	}
-	merged := MergeTargets([]Target{{"keeper-b.example", DefaultPort}}, []Target{{"keeper-b.example", DefaultPort}})
+	merged := MergeTargets([]Target{{Host: "keeper-b.example", Port: DefaultPort, Ensemble: "default"}}, []Target{{Host: "keeper-b.example", Port: DefaultPort, Ensemble: "default"}})
 	if len(merged) != 1 {
 		t.Errorf("merge must dedupe: %v", merged)
 	}
-	merged = MergeTargets([]Target{{"keeper-b.example", DefaultPort}}, want)
+	merged = MergeTargets([]Target{{Host: "keeper-b.example", Port: DefaultPort, Ensemble: "default"}}, want)
 	if len(merged) != 3 || merged[0].Host != "keeper-b.example" {
 		t.Errorf("merge keeps connected first and adds the rest: %v", merged)
 	}
@@ -289,7 +289,7 @@ func TestCollect_PartialReplyThenStallIsTimeout(t *testing.T) {
 	host, port, _ := net.SplitHostPort(ln.Addr().String())
 
 	dir := t.TempDir()
-	out, err := Collect(dir, []Target{{host, port}}, Options{DialTimeout: time.Second, ReadTimeout: 300 * time.Millisecond})
+	out, err := Collect(dir, []Target{{Host: host, Port: port}}, Options{DialTimeout: time.Second, ReadTimeout: 300 * time.Millisecond})
 	if err != nil || len(out) != 1 {
 		t.Fatalf("collect: %v %v", out, err)
 	}
@@ -349,7 +349,7 @@ func TestTargetsFromConfig_IgnoresCommentedBlocks(t *testing.T) {
 	}
 
 	got := TargetsFromConfig(cd)
-	if len(got) != 1 || got[0] != (Target{"keeper-a", "9181"}) {
+	if len(got) != 1 || got[0] != (Target{Host: "keeper-a", Port: "9181", Ensemble: "default"}) {
 		t.Fatalf("targets = %v, want only the uncommented keeper-a:9181", got)
 	}
 	for _, tg := range got {
@@ -414,7 +414,7 @@ func TestCollect_SendsTheCommandsThatAnswerWhenNotServingFirst(t *testing.T) {
 	// so they go before anything that can hang or refuse.
 	h, p, seen, stop := recordingKeeper(t, fullReplies, "")
 	defer stop()
-	out, err := Collect(t.TempDir(), []Target{{h, p}}, Options{})
+	out, err := Collect(t.TempDir(), []Target{{Host: h, Port: p}}, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -437,7 +437,7 @@ func TestCollect_StopsAMemberAfterItsFirstTimeout(t *testing.T) {
 	h, p, seen, stop := recordingKeeper(t, fullReplies, "srvr")
 	defer stop()
 	start := time.Now()
-	out, _ := Collect(t.TempDir(), []Target{{h, p}}, Options{ReadTimeout: 300 * time.Millisecond})
+	out, _ := Collect(t.TempDir(), []Target{{Host: h, Port: p}}, Options{ReadTimeout: 300 * time.Millisecond})
 	if el := time.Since(start); el > 600*time.Millisecond {
 		t.Errorf("took %s: after one timeout the remaining commands must be skipped, not each waited out", el)
 	}
@@ -461,7 +461,7 @@ func TestCollect_MembersInParallel(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		h, p, stop := fakeKeeper(t, nil, true)
 		defer stop()
-		targets = append(targets, Target{h, p})
+		targets = append(targets, Target{Host: h, Port: p})
 	}
 	start := time.Now()
 	out, _ := Collect(t.TempDir(), targets, Options{ReadTimeout: 400 * time.Millisecond})
@@ -481,7 +481,7 @@ func TestCollect_NotServing(t *testing.T) {
 		"srvr": notActive, "mntr": notActive, "conf": notActive, "dirs": notActive}
 	h, p, stop := fakeKeeper(t, replies, false)
 	defer stop()
-	out, _ := Collect(t.TempDir(), []Target{{h, p}}, Options{})
+	out, _ := Collect(t.TempDir(), []Target{{Host: h, Port: p}}, Options{})
 	if out[0].Status != "not serving" {
 		t.Errorf("status = %s, want not serving — the member answers but has no quorum", out[0].Status)
 	}
@@ -491,7 +491,7 @@ func TestCollect_OlderKeeperWithoutTheNewCommands(t *testing.T) {
 	// okReplies answers only ruok/srvr/mntr: a 22.8 Keeper has no lgif.
 	h, p, stop := fakeKeeper(t, okReplies, false)
 	defer stop()
-	out, _ := Collect(t.TempDir(), []Target{{h, p}}, Options{})
+	out, _ := Collect(t.TempDir(), []Target{{Host: h, Port: p}}, Options{})
 	if out[0].Status != "ok" {
 		t.Errorf("status = %s; a member answering ruok/srvr/mntr is ok even without the newer commands", out[0].Status)
 	}
@@ -504,14 +504,41 @@ func TestCollect_OlderKeeperWithoutTheNewCommands(t *testing.T) {
 func TestCollect_GovRemovesConfPaths(t *testing.T) {
 	h, p, stop := fakeKeeper(t, fullReplies, false)
 	defer stop()
-	gov, _ := Collect(t.TempDir(), []Target{{h, p}}, Options{GovSalt: "PR3TESTSALT01"})
+	gov, _ := Collect(t.TempDir(), []Target{{Host: h, Port: p}}, Options{GovSalt: "PR3TESTSALT01"})
 	b, _ := os.ReadFile(gov[0].File)
 	s := string(b)
 	if strings.Contains(s, "/var/lib/clickhouse-keeper") || !strings.Contains(s, "log_storage_path=REMOVED") || !strings.Contains(s, "snapshot_transfer_chunk_size=0") {
 		t.Errorf("gov conf must drop path values and keep the settings:\n%s", s)
 	}
-	plain, _ := Collect(t.TempDir(), []Target{{h, p}}, Options{})
+	plain, _ := Collect(t.TempDir(), []Target{{Host: h, Port: p}}, Options{})
 	if b, _ := os.ReadFile(plain[0].File); !strings.Contains(string(b), "log_storage_path=/var/lib/clickhouse-keeper/log") {
 		t.Error("outside gov the path is kept")
+	}
+}
+
+// system.zookeeper_connection lists the default connection AND every
+// auxiliary one, each a different ensemble; the name keeps them apart so
+// the pre-pass never compares one ensemble's Raft log with another's.
+func TestParseTargets_KeepsTheEnsemble(t *testing.T) {
+	got := ParseTargets("default\tk1\t9181\naux_zk\tz1\t2181\n")
+	want := []Target{{Host: "k1", Port: "9181", Ensemble: "default"}, {Host: "z1", Port: "2181", Ensemble: "aux_zk"}}
+	if len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("ParseTargets = %+v, want %+v", got, want)
+	}
+	if !strings.Contains(TargetsQuery, "name") {
+		t.Error("TargetsQuery must select the connection name")
+	}
+}
+
+func TestCollect_WritesTheEnsemble(t *testing.T) {
+	h, p, stop := fakeKeeper(t, fullReplies, false)
+	defer stop()
+	out, _ := Collect(t.TempDir(), []Target{{Host: h, Port: p, Ensemble: "aux_zk"}}, Options{})
+	if b, _ := os.ReadFile(out[0].File); !strings.Contains(string(b), "# ensemble: aux_zk\n") {
+		t.Errorf("no ensemble line:\n%s", b)
+	}
+	gov, _ := Collect(t.TempDir(), []Target{{Host: h, Port: p, Ensemble: "aux_zk"}}, Options{GovSalt: "PR3TESTSALT01"})
+	if b, _ := os.ReadFile(gov[0].File); strings.Contains(string(b), "aux_zk") || !strings.Contains(string(b), "# ensemble: ") {
+		t.Errorf("gov must hash an auxiliary ensemble's name:\n%s", b)
 	}
 }

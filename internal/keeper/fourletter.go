@@ -83,9 +83,13 @@ var coreCommands = map[string]bool{"ruok": true, "srvr": true, "mntr": true}
 const notServingMsg = "This instance is not currently serving requests"
 
 // Target is one Keeper member as system.zookeeper_connection names it.
+// Ensemble is that connection's name — "default" for the <zookeeper> block,
+// the auxiliary ZooKeeper's name otherwise — so members of different
+// ensembles are never compared with each other.
 type Target struct {
-	Host string
-	Port string
+	Host     string
+	Port     string
+	Ensemble string
 }
 
 // Options controls one collection.
@@ -151,7 +155,7 @@ func Resolve(setting, mode string) (skip bool, warning string, err error) {
 // not the whole ensemble. The remaining members come from the server
 // configuration (TargetsFromConfig); without it only the connected member
 // is probed, which the docs say.
-const TargetsQuery = "SELECT DISTINCT host, toString(port) FROM system.zookeeper_connection WHERE host != '' ORDER BY host, port FORMAT TSV"
+const TargetsQuery = "SELECT DISTINCT name, host, toString(port) FROM system.zookeeper_connection WHERE host != '' ORDER BY name, host, port FORMAT TSV"
 
 // DefaultPort is the <zookeeper><node><port> default when a node omits it.
 const DefaultPort = "2181"
@@ -213,7 +217,8 @@ func TargetsFromConfig(configDir string) []Target {
 					if pm := reZKPort.FindStringSubmatch(node[1]); pm != nil && pm[1] != "" && !strings.Contains(pm[1], "{") {
 						port = pm[1]
 					}
-					t := Target{Host: h[1], Port: port}
+					// Only the <zookeeper> block is read here: the default ensemble.
+					t := Target{Host: h[1], Port: port, Ensemble: "default"}
 					if !seen[t] {
 						seen[t] = true
 						out = append(out, t)
@@ -248,10 +253,16 @@ func ParseTargets(tsv string) []Target {
 	seen := map[Target]bool{}
 	for _, line := range strings.Split(strings.TrimSpace(tsv), "\n") {
 		cols := strings.Split(strings.TrimSpace(line), "\t")
-		if len(cols) != 2 || cols[0] == "" || cols[1] == "" {
+		if len(cols) == 2 { // name, host, port since TargetsQuery selects the name
+			cols = append([]string{"default"}, cols...)
+		}
+		if len(cols) != 3 || cols[1] == "" || cols[2] == "" {
 			continue
 		}
-		t := Target{Host: cols[0], Port: cols[1]}
+		if cols[0] == "" {
+			cols[0] = "default"
+		}
+		t := Target{Host: cols[1], Port: cols[2], Ensemble: cols[0]}
 		if seen[t] {
 			continue
 		}
@@ -397,6 +408,16 @@ func collectOne(dir string, t Target, opts Options) Outcome {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# clickhouse-diagnostic — Keeper four-letter commands\n")
 	fmt.Fprintf(&b, "# target: %s:%s\n", o.Label, t.Port)
+	// Which ensemble this member belongs to; an auxiliary ZooKeeper's name is
+	// configuration chosen by the customer, so gov hashes it like a host.
+	ens := t.Ensemble
+	if ens == "" {
+		ens = "default"
+	}
+	if ens != "default" {
+		ens = Label(ens, opts.GovSalt)
+	}
+	fmt.Fprintf(&b, "# ensemble: %s\n", ens)
 	fmt.Fprintf(&b, "# collected_at: %s\n", opts.Now().UTC().Format(time.RFC3339))
 	fmt.Fprintf(&b, "# commands: %s (stat/cons are never sent — they list client addresses)\n", strings.Join(Commands, ", "))
 	coreOK, answered, refused, timedOut, notServing := 0, 0, 0, 0, 0

@@ -351,14 +351,22 @@ def read_keeper_members(base: str) -> list:
         except OSError:
             continue
         m = re.search(r"^# target: (\S+)", text, re.M)
+        em = re.search(r"^# ensemble: (\S+)", text, re.M)  # absent before the ensemble was recorded
         sec = {}
         for part in re.split(r"\n## ", "\n" + text)[1:]:
             name, _, body = part.partition("\n")
             sec[name.strip()] = body.strip()
 
         def answered(cmd):
+            # A reply cut short by the read deadline is kept in the file and
+            # followed by an "error: timeout … reply truncated" line: its
+            # counters are incomplete — a cut-off last_log_idx parses as a
+            # smaller number — so a section with any collector error line is
+            # not evidence.
             b = sec.get(cmd, "")
-            return bool(b) and b != KEEPER_NOT_SERVING and not b.startswith(("error:", "skipped", "(empty reply"))
+            if not b or b == KEEPER_NOT_SERVING or b.startswith(("skipped", "(empty reply")):
+                return False
+            return not any(line.startswith("error:") for line in b.splitlines())
 
         kv = {}
         for cmd, sep in (("lgif", "\t"), ("mntr", "\t"), ("conf", "="), ("dirs", ":")):
@@ -367,12 +375,15 @@ def read_keeper_members(base: str) -> list:
                     k, found, v = line.partition(sep)
                     if found:
                         kv[(cmd, k.strip())] = v.strip()
+        # "not serving" is Keeper's own answer; "probe failed" is the
+        # collector's — a timeout or a refused connection before srvr/mntr
+        # answered — and says nothing about the voters' links to each other.
         if any(b == KEEPER_NOT_SERVING for b in sec.values()):
             state = "not serving"
-        elif sec.get("ruok", "").startswith("error:"):
-            state = "unreachable"
         elif answered("srvr") or answered("mntr"):
             state = "serving"
+        elif any(line.startswith("error:") for b in sec.values() for line in b.splitlines()):
+            state = "probe failed"
         else:
             state = "unknown"
         role = kv.get(("mntr", "zk_server_state"))
@@ -382,6 +393,7 @@ def read_keeper_members(base: str) -> list:
         vm = re.search(r"v?(\d+)\.(\d+)", (kv.get(("mntr", "zk_version")) or "")
                        or (re.search(r"^ClickHouse Keeper version: (\S+)", sec.get("srvr", ""), re.M) or [None, ""])[1])
         members.append({"member": m.group(1) if m else os.path.basename(path), "state": state, "role": role,
+                        "ensemble": em.group(1) if em else None,
                         "version": (int(vm.group(1)), int(vm.group(2))) if vm else None,
                         "kv": {k: num(v) if num(v) is not None else v for k, v in kv.items()}})
     return members
@@ -1189,56 +1201,85 @@ def analyse(base: str):
         if failed:
             ex = next((r.get("example_error") for r in bsl if num(r.get("failed")) and r.get("example_error")), "")
             add("warning", "storage", f"{failed} failed object-storage operation(s) in blob_storage_log", str(ex)[:200], "HC-4.9/P-58")
-    # ---- Keeper's own view: quorum, a member behind the retained log, the
-    # snapshot transfer (HC-3.18-3.20, P-61). Only from what the members
-    # answered: a value Keeper did not report is never assumed.
+    # ---- Keeper's own view: availability, a member behind the retained log,
+    # the snapshot transfer (HC-3.18-3.20, P-61). Only from what the members
+    # answered — a value Keeper did not report is never assumed — and
+    # cross-member comparisons only within one ensemble: the files hold the
+    # default ensemble and every auxiliary ZooKeeper, and a bundle without the
+    # "# ensemble:" line cannot tell them apart.
     kms = read_keeper_members(base)
     if kms:
-        n = len(kms)
-        serving = [k for k in kms if k["state"] == "serving"]
-        down = [k for k in kms if k["state"] in ("not serving", "unreachable")]
-        quorum = n // 2 + 1
-        if down:
-            sev = "critical" if len(serving) < quorum else "warning"
+        groups = {}
+        for k in kms:
+            # unknown ensemble: each member on its own
+            groups.setdefault(k["ensemble"] or ("?", k["member"]), []).append(k)
+        for key, grp in groups.items():
+            known = not isinstance(key, tuple)
+            label = f"ensemble {key}" if known and key != "default" else "Keeper"
+            serving = [k for k in grp if k["state"] == "serving"]
+            self_down = [k for k in grp if k["state"] == "not serving"]
+            probe = [k for k in grp if k["state"] == "probe failed"]
+            if self_down or probe:
+                # The files hold the members THIS server knows, not proven
+                # voting membership, so a quorum loss is stated only when the
+                # members themselves say so: two or more answering "not
+                # serving" and none serving.
+                if known and len(self_down) >= 2 and not serving:
+                    add("critical", "keeper",
+                        f"{label}: no member in this bundle is serving — {len(self_down)} answered '{KEEPER_NOT_SERVING}' (Keeper's own reply): no leader, writes through it fail unless members outside the bundle hold a quorum: "
+                        + ", ".join(k["member"] for k in self_down),
+                        "keeper/<member>.txt srvr/mntr replies", "HC-3.18/P-57")
+                else:
+                    add("warning", "keeper",
+                        f"{label}: " + ", ".join(f"{k['member']} {k['state']}" for k in self_down + probe)
+                        + f" ({len(serving)} serving in this bundle) — quorum is not judged from these files: they hold the members this server knows, and a probe the collector could not finish says nothing about the voters' own links",
+                        "keeper/<member>.txt — 'not serving' is Keeper's answer, 'probe failed' the collector's timeout or refusal", "HC-3.18/P-57")
+            if known:
+                leader = next((k for k in grp if k["role"] == "leader" and k["state"] == "serving"), None)
+                firsts = [k["kv"].get(("lgif", "first_log_idx")) for k in ([leader] if leader else serving)]
+                firsts = [f for f in firsts if isinstance(f, (int, float))]
+                if firsts:
+                    ref = max(firsts)
+                    for k in grp:
+                        last = k["kv"].get(("lgif", "last_log_idx"))
+                        if k is leader or not isinstance(last, (int, float)) or last >= ref:
+                            continue
+                        snap = max((x["kv"].get(("mntr", "zk_latest_snapshot_size")) or 0 for x in grp), default=0)
+                        add("critical", "keeper",
+                            f"{label}: member {k['member']} is behind the {'leader' if leader else 'serving members'}' retained log (its last_log_idx {int(last)} < first_log_idx {int(ref)}, {int(ref - last)} entries) — it can rejoin only through a full snapshot"
+                            + (f" ({human(snap)})" if snap else "") + "; keep it stopped until snapshot_transfer_chunk_size is set on the serving members",
+                            "keeper/<member>.txt lgif", "HC-3.19/P-61")
+            # The leader sends the snapshot, and any member can be leader:
+            # the largest snapshot in the ensemble against each member's own
+            # chunk setting — never across ensembles.
+            snap = max((k["kv"].get(("mntr", "zk_latest_snapshot_size")) or 0 for k in grp), default=0)
+            chunk0 = [k["member"] for k in grp if k["kv"].get(("conf", "snapshot_transfer_chunk_size")) == 0]
+            if chunk0 and snap > 2**30:
+                add("critical" if snap > INT32_MAX else "warning", "keeper",
+                    f"{label}: snapshot is {human(snap)} and snapshot_transfer_chunk_size = 0 on {', '.join(chunk0)}: it is sent to a lagging member as ONE object, and above 2 GiB its size wraps a 32-bit sum and the transfer fails (std::bad_alloc) — every leader in turn, leaving the ensemble leaderless"
+                    + ("" if snap > INT32_MAX else " — not yet, but growing")
+                    + ". Set snapshot_transfer_chunk_size (e.g. 100000000) and nuraft_snapshot_sync_ctx_timeout_ms (e.g. 900000) on every member before a member falls behind",
+                    "keeper/<member>.txt mntr zk_latest_snapshot_size, conf snapshot_transfer_chunk_size", "HC-3.20/P-61")
+        # Snapshot format, per member against ITS version: V7 widened seq_num
+        # from int32 to int64; the default is 6 up to 26.7 and 8 from 26.8.
+        fmt_groups = {}  # (severity, why, format) -> members: one finding per verdict
+        for k in kms:
+            v = k["kv"].get(("conf", "write_snapshot_version"))
+            if not isinstance(v, (int, float)) or v >= 7:
+                continue
+            ver = k["version"]
+            if ver and ver >= (26, 8):
+                sev, why = "warning", f"pinned below the default of 8 on {ver[0]}.{ver[1]}"
+            elif ver:
+                sev, why = "info", f"the default on {ver[0]}.{ver[1]} (26.8 writes 8)"
+            else:
+                sev, why = "info", "Keeper version not reported, so whether it is the default is unknown"
+            fmt_groups.setdefault((sev, why, int(v)), []).append(k["member"])
+        for (sev, why, v), names in fmt_groups.items():
             add(sev, "keeper",
-                f"Keeper: {len(serving)} of {n} member(s) serving" + (" — no quorum, every write waits" if sev == "critical" else "")
-                + ": " + ", ".join(f"{k['member']} {k['state']}" for k in down),
-                f"keeper/<member>.txt — '{KEEPER_NOT_SERVING}' or no answer (members this server knows; the ensemble may have more)", "HC-3.18/P-57")
-        leader = next((k for k in kms if k["role"] == "leader"), None)
-        firsts = [k["kv"].get(("lgif", "first_log_idx")) for k in ([leader] if leader else serving)]
-        firsts = [f for f in firsts if isinstance(f, (int, float))]
-        if firsts:
-            ref = max(firsts)
-            for k in kms:
-                last = k["kv"].get(("lgif", "last_log_idx"))
-                if k is leader or not isinstance(last, (int, float)) or last >= ref:
-                    continue
-                snap = max((x["kv"].get(("mntr", "zk_latest_snapshot_size")) or 0 for x in kms), default=0)
-                add("critical", "keeper",
-                    f"Keeper member {k['member']} is behind the {'leader' if leader else 'serving members'}' retained log (its last_log_idx {int(last)} < first_log_idx {int(ref)}, {int(ref - last)} entries) — it can rejoin only through a full snapshot"
-                    + (f" ({human(snap)})" if snap else "") + "; keep it stopped until snapshot_transfer_chunk_size is set on the serving members",
-                    "keeper/<member>.txt lgif", "HC-3.19/P-61")
-        snap = max((k["kv"].get(("mntr", "zk_latest_snapshot_size")) or 0 for k in kms), default=0)
-        chunk0 = [k["member"] for k in kms if k["kv"].get(("conf", "snapshot_transfer_chunk_size")) == 0]
-        if chunk0 and snap > 2**30:
-            add("critical" if snap > INT32_MAX else "warning", "keeper",
-                f"Keeper snapshot is {human(snap)} and snapshot_transfer_chunk_size = 0 on {', '.join(chunk0)}: it is sent to a lagging member as ONE object, and above 2 GiB its size wraps a 32-bit sum and the transfer fails (std::bad_alloc) — every leader in turn, leaving the ensemble leaderless"
-                + ("" if snap > INT32_MAX else " — not yet, but growing")
-                + ". Set snapshot_transfer_chunk_size (e.g. 100000000) and nuraft_snapshot_sync_ctx_timeout_ms (e.g. 900000) on every member before a member falls behind",
-                "keeper/<member>.txt mntr zk_latest_snapshot_size, conf snapshot_transfer_chunk_size", "HC-3.20/P-61")
-        # V7 widened seq_num from int32 to int64; the default is 6 up to 26.7
-        # and 8 from 26.8, so below 26.8 a 6 is the default (info) and from
-        # 26.8 it was pinned on purpose (warning).
-        old_fmt = sorted({int(v) for k in kms if isinstance(v := k["kv"].get(("conf", "write_snapshot_version")), (int, float)) and v < 7})
-        if old_fmt:
-            vers = [k["version"] for k in kms if k["version"]]
-            pinned = bool(vers) and min(vers) >= (26, 8)
-            add("warning" if pinned else "info", "keeper",
-                f"Keeper writes snapshot format {', '.join(map(str, old_fmt))} (write_snapshot_version < 7): sequential-node counters are 32-bit in it, and a counter past 2^31 stops snapshot writing ('overflows int32, upgrade to snapshot version >= V7')"
-                + (" — pinned below the 26.8 default of 8" if pinned else " — the default before 26.8, which writes 8")
-                + "; raise it only once every member runs a version that reads the new format",
+                f"Keeper {'member' if len(names) == 1 else 'members'} {', '.join(names)} {'writes' if len(names) == 1 else 'write'} snapshot format {v} (write_snapshot_version < 7): sequential-node counters are 32-bit in it, and a counter past 2^31 stops snapshot writing ('overflows int32, upgrade to snapshot version >= V7') — {why}; raise it only once every member runs a version that reads the new format",
                 "keeper/<member>.txt conf write_snapshot_version, srvr version", "HC-3.20")
-        out["keeper_members"] = [{"member": k["member"], "state": k["state"], "role": k["role"]} for k in kms]
+        out["keeper_members"] = [{"member": k["member"], "ensemble": k["ensemble"], "state": k["state"], "role": k["role"]} for k in kms]
     zl = read_jsonl(first("system.zookeeper_log_errors_1_day_*.jsonl", base))
     if zl:
         errs = Counter()

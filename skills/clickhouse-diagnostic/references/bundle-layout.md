@@ -183,6 +183,7 @@ One `keeper/<host>_<port>.txt` per Keeper member (bundles from v0.7+; absent on 
 ```
 # clickhouse-diagnostic — Keeper four-letter commands
 # target: <host or gov hash>:<port>
+# ensemble: default | <auxiliary ZooKeeper name, gov: hashed>   # absent in older bundles
 # collected_at: RFC3339 UTC
 # commands: ruok, isro, lgif, srvr, mntr, conf, dirs (stat/cons are never sent — they list client addresses)
 #   bundles before the Raft/settings commands carry ruok, srvr, mntr only
