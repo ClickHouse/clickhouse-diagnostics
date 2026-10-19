@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -355,5 +356,162 @@ func TestTargetsFromConfig_IgnoresCommentedBlocks(t *testing.T) {
 		if strings.HasPrefix(tg.Host, "example") {
 			t.Errorf("a commented-out example host became a target: %v", tg)
 		}
+	}
+}
+
+// fullReplies is a 26.8 member answering every command the collector sends.
+var fullReplies = map[string]string{
+	"ruok": "imok",
+	"isro": "rw",
+	"lgif": "first_log_idx\t9000000000\nfirst_log_term\t18\nlast_log_idx\t9002500000\nlast_log_term\t19\nlast_committed_log_idx\t9002500000\nleader_committed_log_idx\t9002500000\ntarget_committed_log_idx\t9002500000\nlast_snapshot_idx\t9002000000\n",
+	"srvr": okReplies["srvr"],
+	"mntr": okReplies["mntr"] + "zk_latest_snapshot_size\t2400000000\n",
+	"conf": "server_id=2\nreserved_log_items=100000\nsnapshot_distance=1000000\nstale_log_gap=10000\nsnapshot_transfer_chunk_size=0\nwrite_snapshot_version=6\nlog_storage_path=/var/lib/clickhouse-keeper/log\nsnapshot_storage_path=/var/lib/clickhouse-keeper/snapshots\nlog_storage_disk=LocalLogDisk\n",
+	"dirs": "snapshot_dir_size: 7200000000\nlog_dir_size: 3372003\n",
+}
+
+// recordingKeeper is fakeKeeper that also records the order commands arrive in.
+func recordingKeeper(t *testing.T, replies map[string]string, hangOn string) (host, port string, seen func() []string, stop func()) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var got []string
+	done := make(chan struct{})
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				buf := make([]byte, 4)
+				if _, err := io.ReadFull(c, buf); err != nil {
+					return
+				}
+				mu.Lock()
+				got = append(got, string(buf))
+				mu.Unlock()
+				if string(buf) == hangOn || hangOn == "*" {
+					<-done
+					return
+				}
+				io.WriteString(c, replies[string(buf)])
+			}(c)
+		}
+	}()
+	h, p, _ := net.SplitHostPort(ln.Addr().String())
+	return h, p, func() []string { mu.Lock(); defer mu.Unlock(); return append([]string(nil), got...) },
+		func() { close(done); ln.Close() }
+}
+
+func TestCollect_SendsTheCommandsThatAnswerWhenNotServingFirst(t *testing.T) {
+	// isro and lgif answer even on a member that is not serving (Keeper's
+	// own code checks isServerActive() only for srvr, mntr, conf, dirs…),
+	// so they go before anything that can hang or refuse.
+	h, p, seen, stop := recordingKeeper(t, fullReplies, "")
+	defer stop()
+	out, err := Collect(t.TempDir(), []Target{{h, p}}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.Join(seen(), ","), "ruok,isro,lgif,srvr,mntr,conf,dirs"; got != want {
+		t.Errorf("commands sent %s, want %s", got, want)
+	}
+	if out[0].Status != "ok" {
+		t.Errorf("status = %s (%s)", out[0].Status, out[0].Err)
+	}
+	b, _ := os.ReadFile(out[0].File)
+	for _, must := range []string{"## lgif\nfirst_log_idx\t9000000000", "## conf\nserver_id=2", "snapshot_transfer_chunk_size=0", "## dirs\nsnapshot_dir_size: 7200000000", "## isro\nrw"} {
+		if !strings.Contains(string(b), must) {
+			t.Errorf("file lacks %q", must)
+		}
+	}
+}
+
+func TestCollect_StopsAMemberAfterItsFirstTimeout(t *testing.T) {
+	// A real quorum loss: the member accepted connections but never answered.
+	h, p, seen, stop := recordingKeeper(t, fullReplies, "srvr")
+	defer stop()
+	start := time.Now()
+	out, _ := Collect(t.TempDir(), []Target{{h, p}}, Options{ReadTimeout: 300 * time.Millisecond})
+	if el := time.Since(start); el > 600*time.Millisecond {
+		t.Errorf("took %s: after one timeout the remaining commands must be skipped, not each waited out", el)
+	}
+	if got := strings.Join(seen(), ","); got != "ruok,isro,lgif,srvr" {
+		t.Errorf("commands sent %s, want ruok,isro,lgif,srvr (then stop)", got)
+	}
+	b, _ := os.ReadFile(out[0].File)
+	if !strings.Contains(string(b), "## lgif\nfirst_log_idx") {
+		t.Error("lgif, answered before the hang, is missing")
+	}
+	if !strings.Contains(string(b), "## mntr\nskipped") {
+		t.Errorf("the commands after the timeout are not marked skipped:\n%s", b)
+	}
+	if out[0].Status != "partial" {
+		t.Errorf("status = %s, want partial", out[0].Status)
+	}
+}
+
+func TestCollect_MembersInParallel(t *testing.T) {
+	var targets []Target
+	for i := 0; i < 3; i++ {
+		h, p, stop := fakeKeeper(t, nil, true)
+		defer stop()
+		targets = append(targets, Target{h, p})
+	}
+	start := time.Now()
+	out, _ := Collect(t.TempDir(), targets, Options{ReadTimeout: 400 * time.Millisecond})
+	if el := time.Since(start); el > 900*time.Millisecond {
+		t.Errorf("three hung members took %s — they are asked one after another", el)
+	}
+	for i, o := range out {
+		if o.Target != targets[i] || o.Status != "timeout" {
+			t.Errorf("outcome %d = %+v; want target %v in order, status timeout", i, o, targets[i])
+		}
+	}
+}
+
+func TestCollect_NotServing(t *testing.T) {
+	const notActive = "This instance is not currently serving requests"
+	replies := map[string]string{"ruok": "imok", "isro": "rw", "lgif": fullReplies["lgif"],
+		"srvr": notActive, "mntr": notActive, "conf": notActive, "dirs": notActive}
+	h, p, stop := fakeKeeper(t, replies, false)
+	defer stop()
+	out, _ := Collect(t.TempDir(), []Target{{h, p}}, Options{})
+	if out[0].Status != "not serving" {
+		t.Errorf("status = %s, want not serving — the member answers but has no quorum", out[0].Status)
+	}
+}
+
+func TestCollect_OlderKeeperWithoutTheNewCommands(t *testing.T) {
+	// okReplies answers only ruok/srvr/mntr: a 22.8 Keeper has no lgif.
+	h, p, stop := fakeKeeper(t, okReplies, false)
+	defer stop()
+	out, _ := Collect(t.TempDir(), []Target{{h, p}}, Options{})
+	if out[0].Status != "ok" {
+		t.Errorf("status = %s; a member answering ruok/srvr/mntr is ok even without the newer commands", out[0].Status)
+	}
+	b, _ := os.ReadFile(out[0].File)
+	if !strings.Contains(string(b), "## lgif\n(empty reply") {
+		t.Errorf("an absent newer command is not recorded:\n%s", b)
+	}
+}
+
+func TestCollect_GovRemovesConfPaths(t *testing.T) {
+	h, p, stop := fakeKeeper(t, fullReplies, false)
+	defer stop()
+	gov, _ := Collect(t.TempDir(), []Target{{h, p}}, Options{GovSalt: "PR3TESTSALT01"})
+	b, _ := os.ReadFile(gov[0].File)
+	s := string(b)
+	if strings.Contains(s, "/var/lib/clickhouse-keeper") || !strings.Contains(s, "log_storage_path=REMOVED") || !strings.Contains(s, "snapshot_transfer_chunk_size=0") {
+		t.Errorf("gov conf must drop path values and keep the settings:\n%s", s)
+	}
+	plain, _ := Collect(t.TempDir(), []Target{{h, p}}, Options{})
+	if b, _ := os.ReadFile(plain[0].File); !strings.Contains(string(b), "log_storage_path=/var/lib/clickhouse-keeper/log") {
+		t.Error("outside gov the path is kept")
 	}
 }

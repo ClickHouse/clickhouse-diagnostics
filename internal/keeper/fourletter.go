@@ -7,19 +7,38 @@
 // and node count, and which version it runs — the facts a Keeper-latency
 // or session-loss finding is settled with.
 //
-// Three commands are sent, each on its own TCP connection because Keeper
-// answers one four-letter word and closes:
+// Seven commands are sent, each on its own TCP connection because Keeper
+// answers one four-letter word and closes. The first three answer even on a
+// member that is not serving (Keeper checks isServerActive() only for the
+// others), so during a quorum loss they are what still comes back:
 //
 //	ruok  liveness — "imok"
+//	isro  "ro" for a read-only member or observer, "rw" otherwise
+//	lgif  the member's Raft log: first/last index and term, committed vs
+//	      leader-committed, last snapshot index — a member whose last index
+//	      is below the leader's first can only rejoin through a full
+//	      snapshot
 //	srvr  version, latency min/avg/max, received/sent, connections,
 //	      outstanding requests, zxid, mode (leader/follower/standalone),
 //	      node count
 //	mntr  the same as machine-readable zk_* counters plus followers,
-//	      synced followers, znode / watch / ephemeral counts, memory
+//	      synced followers, znode / watch / ephemeral counts, memory,
+//	      latest snapshot size
+//	conf  the coordination settings in force: snapshot_distance,
+//	      reserved_log_items, snapshot_transfer_chunk_size,
+//	      write_snapshot_version … (storage paths removed in gov)
+//	dirs  bytes on disk in the snapshot and log directories
 //
-// stat and cons are deliberately NOT sent: both list client addresses
-// (ip:port per session), which the bundle must not carry. srvr and mntr
-// carry no client identifiers (verified on 26.7).
+// Every one of them is read-only and none goes through Raft or grows with
+// the data size: measured at ~0.3 ms each on 26.7, under 3 KB per reply.
+// Commands with side effects (csnp, rqld, ydld, rcvr, srst, crst, rclc,
+// clrs) are never sent, nor stat, cons, dump, wchc or wchp, which list
+// client addresses or sessions the bundle must not carry.
+//
+// The members are asked in parallel, and a member is asked nothing more
+// after its first network failure: a member that accepts connections but
+// never answers (seen in a real quorum loss) would otherwise cost the full
+// read timeout once per command.
 //
 // The targets are the (host, port) pairs of system.zookeeper_connection —
 // the members THIS server is configured with — so a three-member ensemble
@@ -39,6 +58,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"clickhouse-diagnostic/internal/config"
@@ -47,10 +67,20 @@ import (
 // DirName is the bundle subdirectory the files land in.
 const DirName = "keeper"
 
-// Commands sent, in order. ruok first so a member that is up but refuses
+// Commands sent, in order: ruok first, so a member that is up but refuses
 // four-letter words (four_letter_word_white_list) is told apart from one
-// that is down.
-var Commands = []string{"ruok", "srvr", "mntr"}
+// that is down; then the two that answer even when the member is not
+// serving; then the rest.
+var Commands = []string{"ruok", "isro", "lgif", "srvr", "mntr", "conf", "dirs"}
+
+// coreCommands decide a member's status. The others add facts but are
+// absent on older Keepers (lgif is not in 22.8) or may be left out of a
+// custom allow-list, and that alone does not make a member partial.
+var coreCommands = map[string]bool{"ruok": true, "srvr": true, "mntr": true}
+
+// notServingMsg is Keeper's reply to srvr, mntr, conf, dirs … on a member
+// that is up but not serving — no quorum, still loading its snapshot.
+const notServingMsg = "This instance is not currently serving requests"
 
 // Target is one Keeper member as system.zookeeper_connection names it.
 type Target struct {
@@ -78,8 +108,9 @@ type Outcome struct {
 	Label string
 	// File is the path written, "" when nothing could be collected.
 	File string
-	// Status: ok (all commands answered) | partial (some) | refused |
-	// timeout | failed (anything else, all commands).
+	// Status: ok (ruok, srvr and mntr answered) | not serving (up, but
+	// answers "not currently serving requests") | partial (some answered) |
+	// refused | timeout | failed (nothing answered for another reason).
 	Status   string
 	Duration time.Duration
 	Bytes    int64
@@ -285,6 +316,20 @@ func govFilter(reply string) string {
 	return strings.Join(out, "\n")
 }
 
+// govConf removes the values of storage paths and anything URL-shaped from a
+// conf reply — they name the customer's infrastructure — and keeps every
+// setting, as the server_settings collector does.
+func govConf(reply string) string {
+	lines := strings.Split(reply, "\n")
+	for i, l := range lines {
+		k, v, ok := strings.Cut(l, "=")
+		if ok && (strings.HasSuffix(k, "_path") || strings.Contains(v, "://")) {
+			lines[i] = k + "=REMOVED"
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
 // Label is the host as it appears in the bundle: the host itself, or in
 // gov its salted hash in the same form the SQL collectors produce.
 func Label(host, govSalt string) string {
@@ -323,102 +368,143 @@ func Collect(destDir string, targets []Target, opts Options) ([]Outcome, error) 
 	if opts.ReadTimeout <= 0 {
 		opts.ReadTimeout = 10 * time.Second
 	}
-	now := opts.Now
-	if now == nil {
-		now = time.Now
+	if opts.Now == nil {
+		opts.Now = time.Now
 	}
 	dir := filepath.Join(destDir, DirName)
 	if err := os.MkdirAll(dir, 0750); err != nil {
 		return nil, fmt.Errorf("create %s: %w", dir, err)
 	}
-	var outcomes []Outcome
-	for _, t := range targets {
-		start := time.Now()
-		o := Outcome{Target: t, Label: Label(t.Host, opts.GovSalt)}
-		var b strings.Builder
-		fmt.Fprintf(&b, "# clickhouse-diagnostic — Keeper four-letter commands\n")
-		fmt.Fprintf(&b, "# target: %s:%s\n", o.Label, t.Port)
-		fmt.Fprintf(&b, "# collected_at: %s\n", now().UTC().Format(time.RFC3339))
-		fmt.Fprintf(&b, "# commands: %s (stat/cons are never sent — they list client addresses)\n", strings.Join(Commands, ", "))
-		okCount, refused, timedOut := 0, 0, 0
-		var lastErr string
-		for _, cmd := range Commands {
-			reply, err := FourLetter(t.Host, t.Port, cmd, opts.DialTimeout, opts.ReadTimeout)
-			fmt.Fprintf(&b, "\n## %s\n", cmd)
-			if err != nil {
-				lastErr = err.Error()
-				// A timeout can carry a partial reply: keep it, but mark it
-				// truncated and count the command as timed out, never ok.
-				truncated := ""
-				if reply != "" {
-					if opts.GovSalt != "" {
-						reply = govFilter(reply)
-					}
-					if reply = strings.TrimRight(reply, "\n"); reply != "" {
-						fmt.Fprintf(&b, "%s\n", reply)
-						truncated = " — reply truncated"
-					}
-				}
-				var ne net.Error
-				switch {
-				case errors.As(err, &ne) && ne.Timeout():
-					timedOut++
-					fmt.Fprintf(&b, "error: timeout after %s%s\n", opts.ReadTimeout, truncated)
-				case strings.Contains(err.Error(), "connection refused"):
-					refused++
-					fmt.Fprintf(&b, "error: connection refused\n")
-				default:
-					if opts.GovSalt != "" {
-						fmt.Fprintf(&b, "error: (message withheld in gov mode)\n")
-					} else {
-						fmt.Fprintf(&b, "error: %s\n", err)
-					}
-				}
-				continue
-			}
-			if opts.GovSalt != "" {
-				reply = govFilter(reply)
-			}
-			reply = strings.TrimRight(reply, "\n")
-			if reply == "" {
-				// An empty reply is Keeper saying the command is not in
-				// four_letter_word_white_list; say so instead of leaving a blank.
-				fmt.Fprintf(&b, "(empty reply — command not enabled in four_letter_word_white_list?)\n")
-				continue
-			}
-			okCount++
-			fmt.Fprintf(&b, "%s\n", reply)
-		}
-		o.Duration = time.Since(start)
-		switch {
-		case okCount == len(Commands):
-			o.Status = "ok"
-		case okCount > 0:
-			o.Status = "partial"
-		case refused == len(Commands):
-			o.Status = "refused"
-		case timedOut == len(Commands):
-			o.Status = "timeout"
-		default:
-			o.Status = "failed"
-		}
-		if o.Status != "ok" {
-			o.Err = lastErr
-			if opts.GovSalt != "" && o.Err != "" {
-				o.Err = o.Status
-			}
-		}
-		path := filepath.Join(dir, fileName(o.Label, t.Port))
-		if err := os.WriteFile(path, []byte(b.String()), 0600); err != nil {
-			o.Status = "failed"
-			o.Err = fmt.Sprintf("write %s: %v", filepath.Base(path), err)
-		} else {
-			o.File = path
-			o.Bytes = int64(b.Len())
-		}
-		outcomes = append(outcomes, o)
+	// One goroutine per member, results kept in target order: the total is
+	// the slowest member's time, not the sum.
+	outcomes := make([]Outcome, len(targets))
+	var wg sync.WaitGroup
+	for i, t := range targets {
+		wg.Add(1)
+		go func(i int, t Target) {
+			defer wg.Done()
+			outcomes[i] = collectOne(dir, t, opts)
+		}(i, t)
 	}
+	wg.Wait()
 	return outcomes, nil
+}
+
+// collectOne asks one member every command and writes its file.
+func collectOne(dir string, t Target, opts Options) Outcome {
+	start := time.Now()
+	o := Outcome{Target: t, Label: Label(t.Host, opts.GovSalt)}
+	var b strings.Builder
+	fmt.Fprintf(&b, "# clickhouse-diagnostic — Keeper four-letter commands\n")
+	fmt.Fprintf(&b, "# target: %s:%s\n", o.Label, t.Port)
+	fmt.Fprintf(&b, "# collected_at: %s\n", opts.Now().UTC().Format(time.RFC3339))
+	fmt.Fprintf(&b, "# commands: %s (stat/cons are never sent — they list client addresses)\n", strings.Join(Commands, ", "))
+	coreOK, answered, refused, timedOut, notServing := 0, 0, 0, 0, 0
+	var lastErr, stoppedBy string
+	for _, cmd := range Commands {
+		fmt.Fprintf(&b, "\n## %s\n", cmd)
+		if stoppedBy != "" {
+			// One network failure means the member is down, unreachable or
+			// hung; asking the rest would only wait out the same timeout.
+			fmt.Fprintf(&b, "skipped — %s\n", stoppedBy)
+			continue
+		}
+		reply, err := FourLetter(t.Host, t.Port, cmd, opts.DialTimeout, opts.ReadTimeout)
+		if err != nil {
+			lastErr = err.Error()
+			// A timeout can carry a partial reply: keep it, but mark it
+			// truncated and count the command as timed out, never ok.
+			truncated := ""
+			if reply != "" {
+				reply = filtered(cmd, reply, opts.GovSalt)
+				if reply = strings.TrimRight(reply, "\n"); reply != "" {
+					fmt.Fprintf(&b, "%s\n", reply)
+					truncated = " — reply truncated"
+				}
+			}
+			var ne net.Error
+			switch {
+			case errors.As(err, &ne) && ne.Timeout():
+				timedOut++
+				fmt.Fprintf(&b, "error: timeout after %s%s\n", opts.ReadTimeout, truncated)
+				stoppedBy = cmd + " timed out"
+			case strings.Contains(err.Error(), "connection refused"):
+				refused++
+				fmt.Fprintf(&b, "error: connection refused\n")
+				stoppedBy = "connection refused"
+			default:
+				if opts.GovSalt != "" {
+					fmt.Fprintf(&b, "error: (message withheld in gov mode)\n")
+				} else {
+					fmt.Fprintf(&b, "error: %s\n", err)
+				}
+				stoppedBy = cmd + " failed"
+			}
+			continue
+		}
+		reply = strings.TrimRight(filtered(cmd, reply, opts.GovSalt), "\n")
+		if reply == "" {
+			// Not in four_letter_word_white_list, or a command this Keeper
+			// version does not have (lgif before 23.x).
+			fmt.Fprintf(&b, "(empty reply — command not enabled in four_letter_word_white_list, or not known to this Keeper version)\n")
+			continue
+		}
+		fmt.Fprintf(&b, "%s\n", reply)
+		if strings.TrimSpace(reply) == notServingMsg {
+			notServing++
+			continue
+		}
+		answered++
+		if coreCommands[cmd] {
+			coreOK++
+		}
+	}
+	o.Duration = time.Since(start)
+	switch {
+	case notServing > 0:
+		o.Status = "not serving"
+	case coreOK == len(coreCommands):
+		o.Status = "ok"
+	case answered > 0:
+		o.Status = "partial"
+	case refused > 0:
+		o.Status = "refused"
+	case timedOut > 0:
+		o.Status = "timeout"
+	default:
+		o.Status = "failed"
+	}
+	if o.Status != "ok" {
+		o.Err = lastErr
+		if o.Status == "not serving" {
+			o.Err = notServingMsg
+		}
+		if opts.GovSalt != "" && o.Err != "" {
+			o.Err = o.Status
+		}
+	}
+	path := filepath.Join(dir, fileName(o.Label, t.Port))
+	if err := os.WriteFile(path, []byte(b.String()), 0600); err != nil {
+		o.Status = "failed"
+		o.Err = fmt.Sprintf("write %s: %v", filepath.Base(path), err)
+	} else {
+		o.File = path
+		o.Bytes = int64(b.Len())
+	}
+	return o
+}
+
+// filtered applies the gov filters to one reply: client addresses out of
+// every reply, path values out of conf.
+func filtered(cmd, reply, govSalt string) string {
+	if govSalt == "" {
+		return reply
+	}
+	reply = govFilter(reply)
+	if cmd == "conf" {
+		reply = govConf(reply)
+	}
+	return reply
 }
 
 // Summary is the operator-facing line per outcome.
