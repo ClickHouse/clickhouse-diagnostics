@@ -80,7 +80,15 @@ var coreCommands = map[string]bool{"ruok": true, "srvr": true, "mntr": true}
 
 // notServingMsg is Keeper's reply to srvr, mntr, conf, dirs … on a member
 // that is up but not serving — no quorum, still loading its snapshot.
+// Apache ZooKeeper says "This ZooKeeper instance is not currently serving
+// requests"; IsNotServing recognises both.
 const notServingMsg = "This instance is not currently serving requests"
+
+var reNotServing = regexp.MustCompile(`^This (ZooKeeper )?instance is not currently serving requests$`)
+
+// IsNotServing reports whether a four-letter reply is the not-serving
+// answer of ClickHouse Keeper or Apache ZooKeeper.
+func IsNotServing(reply string) bool { return reNotServing.MatchString(strings.TrimSpace(reply)) }
 
 // Target is one Keeper member as system.zookeeper_connection names it.
 // Ensemble is that connection's name — "default" for the <zookeeper> block,
@@ -499,7 +507,7 @@ func collectOne(dir string, t Target, opts Options) Outcome {
 			continue
 		}
 		fmt.Fprintf(&b, "%s\n", reply)
-		if strings.TrimSpace(reply) == notServingMsg {
+		if IsNotServing(reply) {
 			notServing++
 			continue
 		}

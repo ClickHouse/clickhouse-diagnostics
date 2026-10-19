@@ -604,3 +604,16 @@ func TestTargetsFromConfig_AuxiliaryBlockNamedZookeeperIsNotDefault(t *testing.T
 		t.Errorf("TargetsFromConfig = %+v; the auxiliary block must not be read as the default ensemble", got)
 	}
 }
+
+// Apache ZooKeeper words it differently ("This ZooKeeper instance is not
+// currently serving requests"); a member answering that is not serving
+// either, and must not be reported ok.
+func TestCollect_ZooKeeperNotServing(t *testing.T) {
+	const zk = "This ZooKeeper instance is not currently serving requests"
+	h, p, stop := fakeKeeper(t, map[string]string{"ruok": "imok", "srvr": zk, "mntr": zk}, false)
+	defer stop()
+	out, _ := Collect(t.TempDir(), []Target{{Host: h, Port: p}}, Options{})
+	if out[0].Status != "not serving" {
+		t.Errorf("status = %s, want not serving for ZooKeeper's wording", out[0].Status)
+	}
+}
