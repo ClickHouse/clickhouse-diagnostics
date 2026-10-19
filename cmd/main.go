@@ -12,6 +12,7 @@ import (
 
 	"clickhouse-diagnostic/internal"
 	"clickhouse-diagnostic/internal/alert"
+	"clickhouse-diagnostic/internal/clustercollect"
 	"clickhouse-diagnostic/internal/config"
 	"clickhouse-diagnostic/internal/dashboard"
 	"clickhouse-diagnostic/internal/hostinfo"
@@ -26,6 +27,12 @@ import (
 )
 
 func main() {
+	// `clickhouse-diagnostic cluster …` runs this binary once per host of a
+	// self-managed cluster; it never reaches the flags below.
+	if len(os.Args) > 1 && os.Args[1] == "cluster" {
+		os.Exit(clustercollect.Main(os.Args[2:], os.Stdin, os.Stdout, os.Stderr))
+	}
+
 	// Define command line flags
 	hostFlag := flag.String("host", "", "ClickHouse Host")
 	portFlag := flag.String("port", "", "ClickHouse Port")
@@ -82,10 +89,15 @@ func main() {
 	// chose onprem or simply said nothing. flag.Visit reports only the flags
 	// actually present on the command line, which is the distinction
 	// resolveMode needs to fail loudly on a typo while still defaulting.
-	modeExplicit := false
+	// -password is recorded the same way: an explicit -password "" prompted
+	// before CLICKHOUSE_PASSWORD was read, and still must.
+	modeExplicit, passwordExplicit := false, false
 	flag.Visit(func(f *flag.Flag) {
-		if f.Name == "mode" {
+		switch f.Name {
+		case "mode":
 			modeExplicit = true
+		case "password":
+			passwordExplicit = true
 		}
 	})
 
@@ -170,7 +182,7 @@ func main() {
 	}
 
 	// Get user input for missing parameters
-	if err := getUserInput(&protocol, &host, &port, &username, &password, &mode, &configDir, skipConfig, modeExplicit); err != nil {
+	if err := getUserInput(&protocol, &host, &port, &username, &password, &mode, &configDir, skipConfig, modeExplicit, passwordExplicit); err != nil {
 		// Exit NON-ZERO. A rejected mode that exits 0 is barely better than the
 		// silent onprem fallback it replaces: the scripted collections this
 		// protects check $?, not stdout. Nothing is deferred this early.
@@ -886,10 +898,28 @@ func main() {
 	}
 }
 
+// passwordEnvVar is read when -password is not given, before prompting —
+// the name clickhouse-client uses. The cluster command depends on it: each
+// per-host run inherits the variable, so no password is put on a command
+// line, where ps would show it.
+const passwordEnvVar = clustercollect.PasswordEnvVar
+
+// resolvePassword returns the -password value when it was given, else the
+// environment variable when it is set — even to the empty string, which is
+// an explicit empty password. found=false means: prompt. A -password given
+// as "" prompts, as it did before the variable was read, rather than letting
+// another client's exported password stand in for it.
+func resolvePassword(flagValue string, flagSet bool, lookup func(string) (string, bool)) (string, bool) {
+	if flagSet {
+		return flagValue, flagValue != ""
+	}
+	return lookup(passwordEnvVar)
+}
+
 // modeExplicit reports whether -mode was actually passed. The flag defaults
 // to onprem, so the value alone cannot distinguish "not set" from
 // "deliberately onprem", and the two must behave differently.
-func getUserInput(protocol, host, port, username, password, mode, configDir *string, skipConfig, modeExplicit bool) error {
+func getUserInput(protocol, host, port, username, password, mode, configDir *string, skipConfig, modeExplicit, passwordExplicit bool) error {
 	reader := bufio.NewReader(os.Stdin)
 
 	// Get protocol if not provided
@@ -939,12 +969,18 @@ func getUserInput(protocol, host, port, username, password, mode, configDir *str
 		*username = strings.TrimSpace(input)
 	}
 
-	// Get password if not provided
+	// Get password if not provided: -password, then CLICKHOUSE_PASSWORD,
+	// then the prompt.
 	if *password == "" && *username != "" {
-		fmt.Print("Enter Password: ")
-		passwordBytes, _ := term.ReadPassword(int(syscall.Stdin))
-		*password = string(passwordBytes)
-		fmt.Println() // Add a newline after password input
+		if p, found := resolvePassword(*password, passwordExplicit, os.LookupEnv); found {
+			*password = p
+			fmt.Printf("Using the password from %s\n", passwordEnvVar)
+		} else {
+			fmt.Print("Enter Password: ")
+			passwordBytes, _ := term.ReadPassword(int(syscall.Stdin))
+			*password = string(passwordBytes)
+			fmt.Println() // Add a newline after password input
+		}
 	}
 
 	// Resolve the mode. An unparseable one is an error, never a quiet
@@ -1207,19 +1243,14 @@ func getQueriesDir(mode string) (string, error) {
 	return "", fmt.Errorf("unrecognised mode %q — cannot choose a queries directory", mode)
 }
 
-// createArchiveWithTimestamp creates an archive of the specific results directory
+// createArchiveWithTimestamp archives the run directory into
+// <output-dir>/<run-dir-name>.tar.gz, next to the directory it packs. It used
+// to write <run-dir-name>.tar.gz to the current directory: the run directory
+// is named by the second the run started, so two runs started in the same
+// second overwrote each other's archive even with different -output-dir
+// values, and the loss was silent.
 func createArchiveWithTimestamp(specificDir string) error {
-	// Extract timestamp from the directory name for archive naming
-	dirName := filepath.Base(specificDir)
-
-	// Generate archive name based on the directory name
-	archiveName := fmt.Sprintf("%s.tar.gz", dirName)
-
-	// Ensure archive name has .tar.gz extension
-	if !strings.HasSuffix(archiveName, ".tar.gz") {
-		archiveName += ".tar.gz"
-	}
-
+	archiveName := filepath.Clean(specificDir) + ".tar.gz"
 	// One directory: configuration/ now lives inside the run directory
 	// along with every other artefact, so there is nothing else to add.
 	return internal.CreateArchive(archiveName, specificDir)
