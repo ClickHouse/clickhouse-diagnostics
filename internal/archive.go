@@ -11,8 +11,17 @@ import (
 	"strings"
 )
 
-// CreateArchive creates a tar.gz archive of the specified directories
-func CreateArchive(archiveName string, dirs ...string) error {
+// CreateArchive creates a tar.gz archive of the specified directories.
+//
+// The archive is written to a hidden temporary file next to archiveName and
+// renamed into place only after every write and every close — tar, gzip,
+// file — succeeded. It used to be written straight to archiveName with the
+// Close errors discarded and a directory that failed mid-walk skipped, so a
+// full disk or an unreadable file left a truncated or half-written
+// clickhouse_backup_*.tar.gz that looked like a bundle, after "Archive
+// created successfully". On any error the temporary file is removed and an
+// archive already at archiveName is left as it was.
+func CreateArchive(archiveName string, dirs ...string) (err error) {
 	fmt.Printf("Creating archive %s...\n", archiveName)
 
 	// Check if any of the source directories exist
@@ -23,36 +32,67 @@ func CreateArchive(archiveName string, dirs ...string) error {
 		return nil
 	}
 
-	// Create the archive file
-	file, err := os.OpenFile(archiveName, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	// Same directory, so the rename is atomic; dot-prefixed and .partial, so
+	// nothing that looks for clickhouse_backup_*.tar.gz picks it up.
+	tmp, err := os.CreateTemp(filepath.Dir(archiveName), "."+filepath.Base(archiveName)+".*.partial")
 	if err != nil {
 		return fmt.Errorf("error creating archive file: %w", err)
 	}
-	defer file.Close()
-
-	// Create gzip writer
-	gzipWriter := gzip.NewWriter(file)
-	defer gzipWriter.Close()
-
-	// Create tar writer
-	tarWriter := tar.NewWriter(gzipWriter)
-	defer tarWriter.Close()
-
-	// Track the total number of files archived
-	totalFiles := 0
-
-	// Add each directory to the archive
-	for _, dir := range existingDirs {
-		filesAdded, err := addDirectoryToArchive(tarWriter, dir)
+	defer func() {
 		if err != nil {
-			fmt.Printf("Error archiving directory '%s': %v\n", dir, err)
-			continue
+			tmp.Close()
+			os.Remove(tmp.Name())
 		}
-		totalFiles += filesAdded
+	}()
+	if err = tmp.Chmod(0o600); err != nil {
+		return fmt.Errorf("error creating archive file: %w", err)
+	}
+
+	totalFiles, err := writeArchive(tmp, existingDirs)
+	if err != nil {
+		return fmt.Errorf("error writing archive: %w", err)
+	}
+	// Sync before Close: on a full disk or a network filesystem the error
+	// may only surface here.
+	if err = tmp.Sync(); err != nil {
+		return fmt.Errorf("error writing archive: %w", err)
+	}
+	if err = tmp.Close(); err != nil {
+		return fmt.Errorf("error writing archive: %w", err)
+	}
+	if err = os.Rename(tmp.Name(), archiveName); err != nil {
+		return fmt.Errorf("error publishing archive: %w", err)
 	}
 
 	fmt.Printf("Archive created successfully with %d files\n", totalFiles)
 	return nil
+}
+
+// writeArchive writes dirs as a tar.gz stream to w and returns the number of
+// files written. Every error is returned, including those from closing the
+// tar and gzip writers — gzip writes its footer on Close, so dropping that
+// error is how a truncated archive used to pass for a complete one. A
+// directory that fails stops the archive: its entry may be half-written, and
+// skipping it would publish a corrupt stream.
+func writeArchive(w io.Writer, dirs []string) (int, error) {
+	gzipWriter := gzip.NewWriter(w)
+	tarWriter := tar.NewWriter(gzipWriter)
+
+	totalFiles := 0
+	for _, dir := range dirs {
+		filesAdded, err := addDirectoryToArchive(tarWriter, dir)
+		if err != nil {
+			return totalFiles, fmt.Errorf("archiving directory %q: %w", dir, err)
+		}
+		totalFiles += filesAdded
+	}
+	if err := tarWriter.Close(); err != nil {
+		return totalFiles, err
+	}
+	if err := gzipWriter.Close(); err != nil {
+		return totalFiles, err
+	}
+	return totalFiles, nil
 }
 
 // filterExistingDirs filters out non-existent directories

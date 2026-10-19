@@ -876,8 +876,12 @@ func main() {
 	// Create archive if not skipped - use the specific folder that was created
 	if !skipArchive {
 		if err := createArchiveWithTimestamp(finalOutputDir); err != nil {
+			// Non-zero, so a script or the cluster command does not take a
+			// run without a bundle for a successful one. Nothing deferred is
+			// skipped: the only defer in main is dry-run's, which never
+			// reaches the archive.
 			fmt.Printf("Error creating archive: %v\n", err)
-			return
+			os.Exit(1)
 		}
 	}
 }
