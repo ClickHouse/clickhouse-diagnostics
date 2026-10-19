@@ -45,6 +45,7 @@ func main() {
 	skipConfigFlag := flag.Bool("skip-config", false, "Skip collecting configuration files")
 	skipArchiveFlag := flag.Bool("skip-archive", false, "Skip creating archive of results and configuration")
 	skipDashboardFlag := flag.Bool("skip-dashboard", false, "Skip generating HTML dashboard")
+	airgapFlag := flag.Bool("airgap", false, "Embed Chart.js in dashboard.html so it opens with no network access (see airgap/README.md)")
 	skipAlertsFlag := flag.Bool("skip-alerts", false, "Skip evaluating alert rules")
 	singleNodeFlag := flag.Bool("single-node", false, "On a SharedMergeTree cluster (cloud_mode = 1), keep -mode onprem collecting THIS node only instead of switching to cloud collection over clusterAllReplicas(default, ...)")
 	alertsDirFlag := flag.String("alerts-dir", "./alerts", "Directory containing alert YAML rule files")
@@ -844,7 +845,8 @@ func main() {
 			WithCollection(rec.Meta("node"), rec.Meta("uptime"), rec.Meta("collection")).
 			WithServerVersion(serverVersion).
 			WithAnalysis(analysisOpts, analysisDir).
-			WithHostInfo(hostReport)
+			WithHostInfo(hostReport).
+			WithAirgap(*airgapFlag)
 		// Write the execution log once now so the dashboard's Collected Files
 		// panel indexes it; the final write below refreshes it with the
 		// dashboard phase itself.
