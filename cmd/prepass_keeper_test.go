@@ -245,3 +245,24 @@ func TestInspectBundle_KeeperNoLeaderNoSnapshotVerdict(t *testing.T) {
 		t.Errorf("no leader answered, yet a member was declared behind the leader's log: %v", fs)
 	}
 }
+
+// Apache ZooKeeper's wording of "not serving" counts like Keeper's.
+func TestInspectBundle_ZooKeeperNotServing(t *testing.T) {
+	const zk = "This ZooKeeper instance is not currently serving requests"
+	m := func(name string) member { return member{name, "rw", "(empty reply — not known)", zk, zk, zk, zk, ""} }
+	fs := keeperFindings(t, writeKeeperBundle(t, []member{m("zk-a"), m("zk-b"), m("zk-c")}))
+	if !find(fs, "HC-3.18", "critical", "no member in this bundle is serving") {
+		t.Errorf("three ZooKeeper members not serving must read as no member serving: %v", fs)
+	}
+}
+
+// Mid-election a bundle can hold two members reporting leader. Neither then
+// says what "the leader" retains, so no member is declared behind it.
+func TestInspectBundle_KeeperTwoLeadersNoSnapshotVerdict(t *testing.T) {
+	a := member{"keeper-a", "rw", lgif(200, 1000, 1000, 1000, 150), "Mode: leader", "zk_server_state\tleader", "snapshot_transfer_chunk_size=1", "snapshot_dir_size: 0", ""}
+	b := member{"keeper-b", "rw", lgif(100, 1000, 1000, 1000, 50), "Mode: leader", "zk_server_state\tleader", "snapshot_transfer_chunk_size=1", "snapshot_dir_size: 0", ""}
+	c := member{"keeper-c", "rw", lgif(10, 150, 150, 150, 0), "Mode: follower", "zk_server_state\tfollower", "snapshot_transfer_chunk_size=1", "snapshot_dir_size: 0", ""}
+	if fs := keeperFindings(t, writeKeeperBundle(t, []member{a, b, c})); find(fs, "HC-3.19", "critical", "") {
+		t.Errorf("two leaders: no snapshot verdict, got %v", fs)
+	}
+}

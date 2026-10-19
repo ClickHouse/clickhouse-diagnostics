@@ -340,6 +340,12 @@ def load_dashboard_data(base: str):
 # lgif, conf and dirs since the collector learned them). One dict per member:
 # its state, and the numbers the HC-3.18-3.20 checks read.
 KEEPER_NOT_SERVING = "This instance is not currently serving requests"
+# Apache ZooKeeper words it "This ZooKeeper instance is not currently serving requests".
+KEEPER_NOT_SERVING_RE = re.compile(r"^This (ZooKeeper )?instance is not currently serving requests$")
+
+
+def keeper_not_serving(body: str) -> bool:
+    return bool(KEEPER_NOT_SERVING_RE.match((body or "").strip()))
 INT32_MAX = 2**31 - 1
 
 
@@ -364,7 +370,7 @@ def read_keeper_members(base: str) -> list:
             # smaller number — so a section with any collector error line is
             # not evidence.
             b = sec.get(cmd, "")
-            if not b or b == KEEPER_NOT_SERVING or b.startswith(("skipped", "(empty reply")):
+            if not b or keeper_not_serving(b) or b.startswith(("skipped", "(empty reply")):
                 return False
             return not any(line.startswith("error:") for line in b.splitlines())
 
@@ -378,7 +384,7 @@ def read_keeper_members(base: str) -> list:
         # "not serving" is Keeper's own answer; "probe failed" is the
         # collector's — a timeout or a refused connection before srvr/mntr
         # answered — and says nothing about the voters' links to each other.
-        if any(b == KEEPER_NOT_SERVING for b in sec.values()):
+        if any(keeper_not_serving(b) for b in sec.values()):
             state = "not serving"
         elif answered("srvr") or answered("mntr"):
             state = "serving"
@@ -1226,7 +1232,7 @@ def analyse(base: str):
                 # serving" and none serving.
                 if known and len(self_down) >= 2 and not serving:
                     add("critical", "keeper",
-                        f"{label}: no member in this bundle is serving — {len(self_down)} answered '{KEEPER_NOT_SERVING}' (Keeper's own reply): no leader, writes through it fail unless members outside the bundle hold a quorum: "
+                        f"{label}: no member in this bundle is serving — {len(self_down)} answered '… not currently serving requests' (Keeper's or ZooKeeper's own reply): no leader, writes through it fail unless members outside the bundle hold a quorum: "
                         + ", ".join(k["member"] for k in self_down),
                         "keeper/<member>.txt srvr/mntr replies", "HC-3.18/P-57")
                 else:
@@ -1238,7 +1244,10 @@ def analyse(base: str):
                 # Only the leader's own first_log_idx says what it retains:
                 # followers compact independently, so without an observed
                 # leader no member can be declared behind it.
-                leader = next((k for k in grp if k["role"] == "leader" and k["state"] == "serving"), None)
+                # Exactly one: mid-election two members can report leader,
+                # and then neither says what "the leader" retains.
+                leaders = [k for k in grp if k["role"] == "leader" and k["state"] == "serving"]
+                leader = leaders[0] if len(leaders) == 1 else None
                 ref = leader["kv"].get(("lgif", "first_log_idx")) if leader else None
                 if isinstance(ref, (int, float)):
                     for k in grp:
