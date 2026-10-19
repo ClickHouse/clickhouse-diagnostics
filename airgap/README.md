@@ -37,4 +37,4 @@ To check the result, open `dashboard.html` and look at the footer: it reads **"C
 - **Size:** `dashboard.html` grows by about 200 KB (about 70 KB in the `.tar.gz`).
 - **Gov mode** (`-mode gov`) produces no dashboard, so the flag has no effect there.
 - **`schema_graph.html`** needs no network in any mode.
-- **Licence:** Chart.js is MIT-licensed. Its copyright notice stays at the top of the embedded script, and the full licence is in [`internal/dashboard/assets/LICENSE.chartjs.md`](../internal/dashboard/assets/LICENSE.chartjs.md).
+- **Licence:** Chart.js is MIT-licensed. Its full licence text is embedded in `dashboard.html`, just above the library, so it travels with every copy.

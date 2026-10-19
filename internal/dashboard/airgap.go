@@ -5,13 +5,19 @@ import (
 	"strings"
 )
 
-// chartJS is Chart.js 4.4.3 (dist/chart.umd.js from the npm tarball, MIT
-// licence in assets/LICENSE.chartjs.md; its banner keeps the notice in every
-// page that inlines it). Only -airgap uses it: by default the dashboard still
-// loads the same release from the CDN. airgap_test.go pins its checksum.
+// chartJS is Chart.js 4.4.3 (dist/chart.umd.js from the npm tarball). Only
+// -airgap uses it: by default the dashboard still loads the same release from
+// the CDN. airgap_test.go pins its checksum.
 //
 //go:embed assets/chart.umd.js
 var chartJS string
+
+// chartJSLicense is Chart.js's MIT licence. It is inlined in a comment ahead
+// of the library because a dashboard.html travels on its own, and MIT asks
+// for the full permission notice in every copy.
+//
+//go:embed assets/LICENSE.chartjs.md
+var chartJSLicense string
 
 // chartJSCDNTag is the htmlTemplate line -airgap replaces.
 const chartJSCDNTag = `<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>`
@@ -31,6 +37,7 @@ func (g *Generator) WithAirgap(on bool) *Generator {
 
 // inlineChartJS swaps the CDN <script> tag for the embedded library.
 func inlineChartJS(html string) string {
-	html = strings.Replace(html, chartJSCDNTag, "<script>\n"+chartJS+"\n</script>", 1)
+	inline := "<script>\n/*!\n" + chartJSLicense + "\n*/\n" + chartJS + "\n</script>"
+	html = strings.Replace(html, chartJSCDNTag, inline, 1)
 	return strings.Replace(html, cdnFooter, airgapFooter, 1)
 }

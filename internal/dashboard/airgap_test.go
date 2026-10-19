@@ -27,8 +27,11 @@ func TestChartJSAsset_IsThePinnedRelease(t *testing.T) {
 	if v == nil || !strings.Contains(chartJS[:200], "Chart.js v"+v[1]+"\n") {
 		t.Fatalf("CDN tag %q and embedded banner %q name different releases", chartJSCDNTag, chartJS[:60])
 	}
-	if strings.Contains(strings.ToLower(chartJS), "</script") {
-		t.Fatal("embedded Chart.js contains </script and would end the inline <script> early")
+	if strings.Contains(strings.ToLower(chartJS+chartJSLicense), "</script") {
+		t.Fatal("embedded Chart.js or its licence contains </script and would end the inline <script> early")
+	}
+	if strings.Contains(chartJSLicense, "*/") {
+		t.Fatal("the Chart.js licence contains */ and would end its comment early")
 	}
 }
 
@@ -50,8 +53,14 @@ func TestRenderHTML_AirgapEmbedsChartJS(t *testing.T) {
 	if m := remoteAsset.FindString(html); m != "" {
 		t.Fatalf("air-gap dashboard still loads a remote asset: %s", m)
 	}
-	if !strings.Contains(html, "<script>\n"+chartJS) {
+	if !strings.Contains(html, "*/\n"+chartJS) {
 		t.Fatal("air-gap dashboard does not inline the vendored Chart.js")
+	}
+	// MIT requires the full permission notice in every copy, and a dashboard
+	// travels alone, so the licence text goes with the library itself.
+	notice := "The above copyright notice and this permission notice shall be included"
+	if i := strings.Index(html, notice); i < 0 || i > strings.Index(html, chartJS) {
+		t.Fatal("air-gap dashboard lacks the Chart.js MIT permission notice ahead of the library")
 	}
 	if strings.Contains(html, "requires Chart.js CDN") {
 		t.Fatal("air-gap footer still says the CDN is required")

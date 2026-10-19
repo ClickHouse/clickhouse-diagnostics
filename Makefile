@@ -11,7 +11,7 @@ DIST_DIR=./dist
 PLATFORMS=linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64
 # Runtime data the tool reads from the working directory. These must ship
 # alongside the binary, so each release archive bundles them.
-DATA_DIRS=queries.cloud queries.onprem queries.gov queries.query_analysis alerts skills cluster-collect
+DATA_DIRS=queries.cloud queries.onprem queries.gov queries.query_analysis alerts skills cluster-collect airgap
 
 # Default target
 .PHONY: all
