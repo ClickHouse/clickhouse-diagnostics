@@ -1804,6 +1804,14 @@ footer{text-align:center;color:var(--ink-muted);font-size:var(--click-font-size-
 .alert-more>summary:focus-visible{outline:2px solid var(--status-info);outline-offset:2px;border-radius:var(--click-radii-1)}
 .alert-full{background:var(--surface-sunken);border:var(--click-border-width-1) solid var(--stroke);border-radius:var(--click-radii-1);padding:var(--click-space-2);margin:var(--click-space-1) 0 var(--click-space-2);font-family:var(--click-font-mono);font-size:var(--click-font-size-0);line-height:var(--click-line-height-1);color:var(--ink-muted);white-space:pre-wrap;word-break:break-word;max-height:360px;overflow:auto}
 .alert-desc-rest{margin-top:var(--click-space-1)}
+/* The SQL to run on the customer's own cluster for a displayed alert —
+   collapsed under one summary line; .alert-full gives it the mono,
+   scrollable, height-capped box the stack traces use. */
+.alert-q{margin:var(--click-space-1) 0 0}
+.alert-q-title{font-size:var(--click-font-size-0);color:var(--ink-muted);display:flex;align-items:center;gap:var(--click-space-1)}
+.alert-copy{font-size:var(--click-font-size-0);padding:0 6px;border:var(--click-border-width-1) solid var(--stroke);border-radius:var(--click-radii-1);background:var(--surface-sunken);color:var(--ink-muted);cursor:pointer}
+.alert-copy:hover{color:var(--ink)}
+.alert-sql{white-space:pre;word-break:normal}
 .alert-tags{display:flex;gap:var(--click-space-1);flex-wrap:wrap;margin-top:var(--click-space-2)}
 .alert-tag{background:var(--surface-sunken);border:var(--click-border-width-1) solid var(--stroke);color:var(--ink-muted);border-radius:var(--click-radii-full);padding:1px var(--click-space-2);font-size:var(--click-font-size-0)}
 .alert-summary-bar{display:flex;gap:var(--click-space-2);flex-wrap:wrap;margin-bottom:var(--click-space-3)}
@@ -2710,6 +2718,37 @@ function alertDisclosure(parts){
 // row's values substituted. The template is ours, the values are customer
 // data (table names, partition ids, raw server text), so the whole line is
 // escaped.
+// The SQL a customer can run on their own cluster to see where a displayed
+// alert comes from: the rule's query exactly as it ran (placeholders already
+// expanded for this bundle's mode), then the rule's follow-up queries.
+// Collapsed: one summary line in the card until it is opened.
+function alertQueries(a){
+  const qs=[];
+  if(a.query) qs.push({title:'The query that raised this alert',query:a.query});
+  (a.investigate||[]).forEach(q=>qs.push(q));
+  if(!qs.length) return '';
+  return '<details class="alert-more alert-queries"><summary>queries to run on your cluster ('+qs.length+')</summary>'
+    +qs.map(q=>'<div class="alert-q"><div class="alert-q-title">'+esc(q.title)
+      +' <button type="button" class="alert-copy">copy</button></div>'
+      +'<pre class="alert-full alert-sql">'+esc(q.query)+'</pre></div>').join('')
+    +'</details>';
+}
+// Copy: the Clipboard API where the page is a secure context, otherwise
+// select the text and fall back to execCommand — a dashboard opened from
+// file:// is not a secure context in every browser.
+document.addEventListener('click',function(e){
+  const b=e.target&&e.target.closest?e.target.closest('.alert-copy'):null;
+  if(!b) return;
+  const pre=b.closest('.alert-q').querySelector('.alert-sql');
+  const done=function(){b.textContent='copied';setTimeout(function(){b.textContent='copy';},1500);};
+  const fallback=function(){
+    const r=document.createRange();r.selectNodeContents(pre);
+    const sel=window.getSelection();sel.removeAllRanges();sel.addRange(r);
+    try{document.execCommand('copy')?done():(b.textContent='selected — press Ctrl+C');}catch(_){b.textContent='selected — press Ctrl+C';}
+  };
+  if(navigator.clipboard&&window.isSecureContext){navigator.clipboard.writeText(pre.textContent).then(done,fallback);}
+  else fallback();
+});
 function alertRowLine(a,row){
   let msg=a.message;
   Object.entries(row).forEach(([k,v])=>{msg=msg.split('{'+k+'}').join(String(v==null?'':v));});
@@ -2820,6 +2859,7 @@ function renderAlerts(){
       }
     }
 
+    html+=alertQueries(a);
     html+='</div>'; // item
   });
   panel.innerHTML=html+skipNote;
