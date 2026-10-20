@@ -13,6 +13,7 @@ import (
 	"clickhouse-diagnostic/internal"
 	"clickhouse-diagnostic/internal/alert"
 	"clickhouse-diagnostic/internal/hostinfo"
+	"clickhouse-diagnostic/internal/keeper"
 	"clickhouse-diagnostic/internal/query"
 	"clickhouse-diagnostic/pkg"
 )
@@ -396,6 +397,9 @@ func (g *Generator) Generate(outputDir string, alertResults []alert.Result) erro
 	}
 	// Needs outputDir, so it happens here rather than in collect().
 	payload["bundle_files"] = collectBundleFiles(outputDir)
+	for k, v := range keeperPanelData(outputDir) {
+		payload[k] = v
+	}
 	if alertResults == nil {
 		alertResults = []alert.Result{}
 	}
@@ -407,6 +411,18 @@ func (g *Generator) Generate(outputDir string, alertResults []alert.Result) erro
 	}
 	fmt.Printf("Dashboard saved: %s\n", dst)
 	return nil
+}
+
+// keeperPanelData reads keeper/<member>.txt — written before the dashboard,
+// in the same run directory — for the Keeper members panel. Nothing when the
+// files are absent (older bundles, cloud by default, -keeper-mntr off), so
+// the panel is not rendered at all rather than shown empty.
+func keeperPanelData(runDir string) map[string]interface{} {
+	ms := keeper.ReadMembers(runDir)
+	if len(ms) == 0 {
+		return nil
+	}
+	return map[string]interface{}{"keeper_members": ms, "keeper_leaderless": keeper.Leaderless(ms)}
 }
 
 // tablesListSQL builds the all-tables query (with size). system.tables and
@@ -2198,6 +2214,7 @@ footer{text-align:center;color:var(--ink-muted);font-size:var(--click-font-size-
 <!-- ── KEEPER HEALTH ── -->
 <section id="sec-keeper" style="display:none">
   <h2>🔑 Keeper Health (last 7 days)</h2>
+  <div id="keeper-health-body" style="display:none">
   <p class="host-note">Two counters per hour decide the verdict: <b>transactions</b> (work Keeper completed for this server) and <b>hardware exceptions</b> (connection loss, session expiry, operation timeout). More than 1000 exceptions while traffic holds is a <b>blip</b> — a session lost and re-established. Exceptions while traffic drops below half of the 7-day median means Keeper was <b>unavailable</b> to this server: inserts fail with 999/319, merges are not scheduled, DDL stalls, and TOO_MANY_PARTS follows.</p>
   <div class="tbl-wrap"><div id="tbl-keeper-verdict"></div></div>
   <div class="charts-grid">
@@ -2220,8 +2237,17 @@ footer{text-align:center;color:var(--ink-muted);font-size:var(--click-font-size-
       <div class="chart-wrap h260"><canvas id="chart-keeper-errors"></canvas></div>
     </div>
   </div>
+  </div>
+  <div id="keeper-members-block" style="display:none">
+    <div class="sub-title">Keeper members — what each member reports about itself (keeper/&lt;member&gt;.txt)</div>
+    <p class="host-note">Role, Raft log position and snapshot settings from each member's four-letter replies. The ⛔ / ⚠ marks follow the analysis skill's checks (HC-3.18–3.20; hover for the reason): a member whose log ends before the leader's first retained entry can rejoin only through a full snapshot, and a snapshot over 2 GiB sent unchunked (<code>snapshot_transfer_chunk_size = 0</code>) fails — set it, and <code>nuraft_snapshot_sync_ctx_timeout_ms</code>, before a member falls behind (P-61).</p>
+    <div id="keeper-leaderless"></div>
+    <div class="tbl-wrap"><div id="tbl-keeper-members"></div></div>
+  </div>
+  <div id="keeper-connections-block" style="display:none">
   <div class="sub-title">Keeper connections (system.zookeeper_connection)</div>
   <div class="tbl-wrap"><div id="tbl-keeper-connection"></div></div>
+  </div>
 </section>
 
 <!-- ── DISK USAGE ── -->
@@ -3968,6 +3994,8 @@ document.addEventListener('DOMContentLoaded',function(){
     if(!rows.length)return;
     document.getElementById('sec-keeper').style.display='';
     document.getElementById('nav-keeper').style.display='';
+    document.getElementById('keeper-health-body').style.display='';
+    document.getElementById('keeper-connections-block').style.display='';
     const N=v=>Number(v||0);
     const labels=rows.map(r=>r.time);
     const tx=rows.map(r=>N(r.transactions)), hw=rows.map(r=>N(r.hw_exceptions));
@@ -4062,6 +4090,45 @@ document.addEventListener('DOMContentLoaded',function(){
     }else{
       document.getElementById('tbl-keeper-connection').innerHTML='<p class="no-data">system.zookeeper_connection is not available (ClickHouse &lt; 23.8)</p>';
     }
+  })();
+
+  // Keeper members: what each member reported about itself (keeper/*.txt),
+  // with the pre-pass's verdicts computed by the same rules in Go. Its own
+  // visibility: a bundle can carry the files without the hourly metrics.
+  (function(){
+    const ms=DATA.keeper_members||[];
+    if(!ms.length)return;
+    document.getElementById('sec-keeper').style.display='';
+    document.getElementById('nav-keeper').style.display='';
+    document.getElementById('keeper-members-block').style.display='';
+    const ll=DATA.keeper_leaderless||[];
+    if(ll.length){
+      document.getElementById('keeper-leaderless').innerHTML='<div class="alert-err-msg">⛔ '
+        +ll.map(e=>esc(e==='default'?'Keeper':'ensemble '+e)).join(', ')
+        +': no member in this bundle is serving — no leader among them; members outside the bundle may still hold a quorum (HC-3.18)</div>';
+    }
+    const N=v=>v==null?'—':esc(String(v));
+    const B=v=>{if(v==null)return '—';let n=Number(v),u=['B','KiB','MiB','GiB','TiB'],i=0;while(n>=1024&&i<u.length-1){n/=1024;i++;}return esc((i?n.toFixed(2):String(n))+' '+u[i]);};
+    const mark=f=>'<span class="'+({critical:'err-badge',warning:'warn-badge',info:'ok-badge'}[f.severity]||'warn-badge')
+      +'" title="'+esc(f.check+': '+f.text)+'">'+(f.severity==='critical'?'⛔':f.severity==='warning'?'⚠':'ℹ')+'</span>';
+    const pick=(m,fn)=>(m.flags||[]).filter(fn).map(mark).join(' ');
+    const rows=ms.map(m=>{
+      const behind=(m.flags||[]).some(f=>f.check.startsWith('HC-3.19'));
+      return {
+        member:esc(m.member), ensemble:esc(m.ensemble||'?'),
+        state:esc(m.state)+' '+pick(m,f=>f.check.startsWith('HC-3.18')),
+        role:esc(m.role||'—'), version:esc(m.version||'—'),
+        'Raft log first → last':(m.first_log_idx==null&&m.last_log_idx==null)?'—'
+          :N(m.first_log_idx)+' → '+N(m.last_log_idx)+(behind?' '+pick(m,f=>f.check.startsWith('HC-3.19'))+' <b>needs a full snapshot</b>':''),
+        'committed / leader':m.last_committed_log_idx==null?'—':N(m.last_committed_log_idx)+' / '+N(m.leader_committed_log_idx),
+        'latest snapshot':B(m.snapshot_size)+' '+pick(m,f=>f.check.startsWith('HC-3.20/')),
+        'chunk size':N(m.snapshot_transfer_chunk_size),
+        'snapshot format':N(m.write_snapshot_version)+' '+pick(m,f=>f.check==='HC-3.20'),
+        'on disk (snapshots / log)':m.snapshot_dir_size==null?'—':B(m.snapshot_dir_size)+' / '+B(m.log_dir_size)
+      };
+    });
+    const cols=['member','ensemble','state','role','version','Raft log first → last','committed / leader','latest snapshot','chunk size','snapshot format','on disk (snapshots / log)'];
+    renderTable('tbl-keeper-members',rows,cols,r=>r['Raft log first → last'].indexOf('needs a full snapshot')>=0?'error-row':'',cols);
   })();
 
   // ── Disk usage ────────────────────────────────────────────────────────────

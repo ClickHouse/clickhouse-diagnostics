@@ -2,6 +2,9 @@ package dashboard
 
 import (
 	"clickhouse-diagnostic/internal/alert"
+	"clickhouse-diagnostic/internal/keeper"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -145,6 +148,54 @@ func TestKeeperConnectionSQL_SelectsXidWhenPresent(t *testing.T) {
 	g := NewGenerator(nil, "onprem")
 	if !strings.Contains(g.keeperConnectionSQL(), "toString(xid) AS xid") {
 		t.Error("keeperConnectionSQL must select xid when the column exists")
+	}
+}
+
+// The Keeper members panel: what each member reports about itself, with
+// the pre-pass's verdicts. It has its own visibility — a bundle can carry
+// keeper/ files without the hourly Keeper metrics — and every value from the
+// files goes through esc().
+func TestTemplate_KeeperMembersPanel(t *testing.T) {
+	for _, want := range []string{
+		`id="keeper-members-block" style="display:none"`, `id="tbl-keeper-members"`, `id="keeper-leaderless"`,
+		`id="keeper-health-body"`, `id="keeper-connections-block"`,
+		"DATA.keeper_members", "DATA.keeper_leaderless",
+		"esc(m.member)", "esc(m.ensemble", "esc(m.state)", "esc(f.check+': '+f.text)",
+		"needs a full snapshot",
+		"members outside the bundle may still hold a quorum",
+	} {
+		if !strings.Contains(htmlTemplate, want) {
+			t.Errorf("template lost %q", want)
+		}
+	}
+	for _, banned := range []string{"'+m.member+'", "'+m.role+'", "'+f.text+'"} {
+		if strings.Contains(htmlTemplate, banned) {
+			t.Errorf("members panel interpolates unescaped: %q", banned)
+		}
+	}
+}
+
+func TestKeeperPanelData(t *testing.T) {
+	run := t.TempDir()
+	if p := keeperPanelData(run); len(p) != 0 {
+		t.Errorf("no keeper/ files must add nothing to the page: %v", p)
+	}
+	if err := os.MkdirAll(filepath.Join(run, "keeper"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ns := "This instance is not currently serving requests"
+	for _, n := range []string{"keeper-a", "keeper-b"} {
+		body := "# target: " + n + ":9181\n# ensemble: default\n\n## ruok\nimok\n\n## srvr\n" + ns + "\n\n## mntr\n" + ns + "\n"
+		if err := os.WriteFile(filepath.Join(run, "keeper", n+"_9181.txt"), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	p := keeperPanelData(run)
+	if ms, _ := p["keeper_members"].([]keeper.Member); len(ms) != 2 {
+		t.Errorf("keeper_members = %v", p["keeper_members"])
+	}
+	if ll, _ := p["keeper_leaderless"].([]string); len(ll) != 1 {
+		t.Errorf("keeper_leaderless = %v; two members not serving and none serving", p["keeper_leaderless"])
 	}
 }
 
