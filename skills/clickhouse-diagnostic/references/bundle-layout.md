@@ -35,7 +35,7 @@ clickhouse_diagnostic_YYYYMMDD_HHMMSS/        # single top-level entry of the .t
 ├── configuration/…                            # sanitised XML/YAML, source tree preserved (never in gov)
 ├── host_info.json                             # onprem by default (never in gov)
 ├── logs/*.log                                 # onprem by default (never in gov)
-├── keeper/<host>_<port>.txt                   # ruok / srvr / mntr per Keeper member (onprem and gov by default; gov hashes the host; off in cloud)
+├── keeper/<host>_<port>.txt                   # four-letter replies per Keeper member (onprem and gov by default; gov hashes the host; off in cloud)
 ├── dashboard.html                             # unless -skip-dashboard or gov
 ├── schema_graph.html                          # the table-dependency graph, beside dashboard.html and opened from its Schema tab (same conditions)
 ├── execution_log.txt                          # every collector: outcome, wall time, bytes, rows; alerts; phases (read first)
@@ -183,11 +183,19 @@ One `keeper/<host>_<port>.txt` per Keeper member (bundles from v0.7+; absent on 
 ```
 # clickhouse-diagnostic — Keeper four-letter commands
 # target: <host or gov hash>:<port>
+# ensemble: default | <auxiliary ZooKeeper name, gov: hashed>   # absent in older bundles;
+#   an auxiliary member's file is <ensemble>__<host>_<port>.txt, so a shared host:port never collides
 # collected_at: RFC3339 UTC
-# commands: ruok, srvr, mntr (stat/cons are never sent — they list client addresses)
+# commands: ruok, isro, lgif, srvr, mntr, conf, dirs (stat/cons are never sent — they list client addresses)
+#   bundles before the Raft/settings commands carry ruok, srvr, mntr only
 
 ## ruok
 imok
+## isro
+rw                                                  # ro = read-only member or observer
+## lgif                                             # answers even when the member is not serving
+first_log_idx  first_log_term  last_log_idx  last_log_term
+last_committed_log_idx  leader_committed_log_idx  target_committed_log_idx  last_snapshot_idx
 ## srvr
 ClickHouse Keeper version: v26.7.5.10-stable-…      # the Keeper VERSION — the server's own is in system.version
 Latency min/avg/max: 0/1/193                        # ms, since this member started
@@ -200,8 +208,15 @@ zk_version  zk_avg_latency  zk_max_latency  zk_min_latency  zk_packets_received 
 zk_num_alive_connections  zk_outstanding_requests  zk_server_state  zk_znode_count  zk_watch_count
 zk_ephemerals_count  zk_approximate_data_size  zk_key_arena_size  zk_latest_snapshot_size
 zk_open_file_descriptor_count  zk_max_file_descriptor_count  zk_followers  zk_synced_followers   # the last two on the leader only
+## conf
+key=value per coordination setting: snapshot_distance  reserved_log_items  stale_log_gap
+snapshot_transfer_chunk_size  write_snapshot_version  …   (gov: only numbers, booleans and plain words survive;
+#   paths, hosts, addresses, *_path, *_disk, dataDir, dataLogDir and server.N say REMOVED)
+## dirs
+snapshot_dir_size: <bytes>
+log_dir_size: <bytes>
 ```
-A command that failed is written as `error: connection refused` / `error: timeout after 10s` under its `##` header, and an empty reply as a note about `four_letter_word_white_list`. A reply cut short by the read deadline is kept and followed by `error: timeout after 10s — reply truncated`. The per-member status — `ok` (all three answered), `partial` (some did), `refused`, `timeout` (any command timed out, truncated replies included), `failed` (every command failed for another reason, or the file could not be written) — is also one `keeper` line per member in `execution_log.txt`. In gov the host in the name and header is `hex(SHA256(host ‖ salt))` — the same value as `host` in the gov `system.zookeeper_connection` file, so the two join — and any reply line carrying an `ip:port` was dropped. Only the members *this* server is configured with are probed: a member missing from the directory is not necessarily down, it may simply not be in this server's `<zookeeper>` block.
+A command that failed is written as `error: connection refused` / `error: timeout after 10s` under its `##` header, and an empty reply as a note about `four_letter_word_white_list`. A reply cut short by the read deadline is kept and followed by `error: timeout after 10s — reply truncated`. After a member's first network failure the remaining commands are written as `skipped — <command> timed out`. The per-member status — `ok` (`ruok`, `srvr` and `mntr` answered; a newer command absent on an older Keeper does not lower it), `not serving` (the member answered `This instance is not currently serving requests`), `partial` (some answered), `refused`, `timeout`, `failed` (every command failed for another reason, or the file could not be written) — is also one `keeper` line per member in `execution_log.txt`. In gov the host in the name and header is `hex(SHA256(host ‖ salt))` — the same value as `host` in the gov `system.zookeeper_connection` file, so the two join — and any reply line carrying an `ip:port` was dropped. Only the members *this* server is configured with are probed: a member missing from the directory is not necessarily down, it may simply not be in this server's `<zookeeper>` block.
 
 ## 7. `configuration/`
 

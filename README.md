@@ -40,7 +40,7 @@ Under the hood: per-environment query sets (`cloud` / `onprem` / `gov`) selected
 | `system.zookeeper_log_errors_1_day`, `system.blob_storage_log_7_days` (only when the tables are enabled) | Failed Keeper requests per hour, operation and error code (errors only — the table is far too large to aggregate whole); object-storage uploads, deletes and failures per hour | Direct evidence for "Keeper stopped answering" and "the blob was deleted / never written". |
 | `host_info.json` (onprem) | OS, CPU, RAM, disks, THP, overcommit, limits, cgroups | A large share of self-managed incidents are host settings ClickHouse itself warns about at startup. |
 | `logs/` (onprem) | Restarts, startup warnings, fatal stacks, the first error of an incident | System tables lose this on restart; the log files keep it. |
-| `keeper/<host>_<port>.txt` (onprem, gov with the host hashed) | What each Keeper member says about itself: leader or follower, outstanding requests, its own latency, znode count, version (`ruok` / `srvr` / `mntr`) | A Keeper-latency or session-loss finding is settled on the Keeper side; no `system.*` table carries these. |
+| `keeper/<host>_<port>.txt` (onprem, gov with the host hashed) | What each Keeper member says about itself: leader or follower, Raft log position, snapshot size and transfer settings, outstanding requests, its own latency, znode count, version | A Keeper-latency or session-loss finding is settled on the Keeper side; no `system.*` table carries these. |
 | `configuration/` | Which settings deviate from defaults | Memory limits, pools, Keeper, storage policies, log-table TTLs — with credentials removed. |
 | Alert results + `dashboard.html` | What is already over a threshold | Eleven read-only rules give the headline before anyone reads a file. |
 
@@ -93,7 +93,7 @@ Before sending an archive to anyone:
 - `-dry-run` prints every SELECT the tool would run, with `EXPLAIN ESTIMATE`, and collects nothing — use it for a security review first. See [Dry-run mode](#dry-run-mode).
 - `gov` mode hashes database/table/user/host names with your private salt and withholds the dashboard, query text, configs, host facts and logs. **The salt and the local `*_gov_name_mapping.csv` never leave your machine.**
 - `alerts_summary.json` (when written) contains rule names and counts only, never matched rows.
-- `keeper/` holds Keeper's own counters (`ruok`, `srvr`, `mntr`): version, latency, outstanding requests, zxid, node counts. The commands that list client addresses (`stat`, `cons`) are never sent; gov hashes the member's host. See [Keeper facts](#keeper--what-each-keeper-member-says-about-itself).
+- `keeper/` holds Keeper's own read-only four-letter replies (`ruok`, `isro`, `lgif`, `srvr`, `mntr`, `conf`, `dirs`): version, Raft log position, settings, latency, outstanding requests, node counts; in gov `conf` keeps only numbers, booleans and plain words — paths, hosts and customer-chosen names say REMOVED. The commands that list client addresses (`stat`, `cons`) are never sent; gov hashes the member's host. See [Keeper facts](#keeper--what-each-keeper-member-says-about-itself).
 
 ---
 
@@ -263,7 +263,7 @@ Run `./clickhouse-diagnostic -help` to see the full list. Current flags:
                        Larger files are tail-truncated.
 -logs-include-archives Also collect rotated logs (*.gz, *.zst). Off by default.
 -keeper-mntr string    Ask every Keeper member in system.zookeeper_connection
-                       for ruok / srvr / mntr and write keeper/<host>_<port>.txt:
+                       for its read-only four-letter replies and write keeper/<host>_<port>.txt:
                        auto|on|off (default "auto" — on for onprem and gov,
                        off for cloud). See "Keeper facts" below.
 -collect-text-log      Collect a time-bounded slice of system.text_log.
@@ -666,13 +666,19 @@ Both are also skipped under `--dry-run`, which promises to write nothing. The mo
 
 ### `keeper/` — what each Keeper member says about itself
 
-`-keeper-mntr auto|on|off` (default `auto`) sends three four-letter commands to the Keeper members and writes one `keeper/<host>_<port>.txt` per member. The member list is the union of two sources: `system.zookeeper_connection`, which names the member each configured connection is **on right now** (one row per connection — the default `<zookeeper>` block and every auxiliary one — not one per ensemble member), and every `<zookeeper><node>` in the server configuration (`-config-dir` and the adjacent `config.xml`) when the tool runs on the server. The second is what reaches the followers this server is *not* connected to — the member a Keeper incident is usually about. A run without access to the configuration (remote `-host`, cloud, gov without `-config-dir`) probes the connected member only, and says so in the execution log.
+`-keeper-mntr auto|on|off` (default `auto`) sends seven read-only four-letter commands to the Keeper members and writes one `keeper/<host>_<port>.txt` per member. The member list is the union of two sources: `system.zookeeper_connection`, which names the member each configured connection is **on right now** (one row per connection — the default `<zookeeper>` block and every auxiliary one — not one per ensemble member), and every `<zookeeper><node>` in the server configuration (`-config-dir` and the adjacent `config.xml`) when the tool runs on the server. The second is what reaches the followers this server is *not* connected to — the member a Keeper incident is usually about. A run without access to the configuration (remote `-host`, cloud, gov without `-config-dir`) probes the connected member only, and says so in the execution log.
 
 | Command | What it answers |
 |---|---|
 | `ruok` | liveness (`imok`) |
 | `srvr` | Keeper version, latency min/avg/max, received/sent, connections, **outstanding requests**, zxid, **mode** (leader / follower / standalone), node count |
-| `mntr` | the same as `zk_*` counters, plus followers and synced followers (on the leader), znode / watch / ephemeral counts, memory |
+| `mntr` | the same as `zk_*` counters, plus followers and synced followers (on the leader), znode / watch / ephemeral counts, memory, latest snapshot size |
+| `isro` | `ro` for a read-only member or observer, `rw` otherwise |
+| `lgif` | the member's Raft log: first / last index, committed vs leader-committed, last snapshot index (absent before 23.x) |
+| `conf` | the coordination settings in force — `snapshot_distance`, `reserved_log_items`, `snapshot_transfer_chunk_size`, `write_snapshot_version` … (in gov only numbers, booleans and plain words survive) |
+| `dirs` | bytes on disk in the snapshot and log directories |
+
+`ruok`, `isro` and `lgif` are sent first because they answer even on a member that is **not serving** (no quorum, still loading its snapshot); the others then reply `This instance is not currently serving requests`, which is recorded as the member's status. Every command is read-only, goes nowhere near Raft and does not grow with the data size: ~0.3 ms each on a healthy member. The members are asked **in parallel** and a member gets nothing more after its first network failure, so one or several hung members cost one read timeout (10 s) in total, not one per command. Commands with side effects (`csnp`, `rqld`, `ydld`, `rcvr`, `srst`, `crst`, `rclc`, `clrs`) are never sent. Each file names its ensemble (`# ensemble: default`, or the auxiliary ZooKeeper's name — hashed in gov), so members of different ensembles are never compared; an auxiliary member's file is `<ensemble>__<host>_<port>.txt`, so a default and an auxiliary connection to one host:port never overwrite each other.
 
 These are the server-side facts a Keeper finding is settled with: `metric_log` says how long *this server* waited for Keeper, `zookeeper_connection` says which member it talks to, and only Keeper itself says whether that member is the leader, how many requests it has queued and what it runs. Each command opens its own TCP connection (3 s dial, 10 s read) because Keeper closes after one reply; a member that is down or refuses four-letter words is recorded as such in its file and in `execution_log.txt`, never a failed run. `stat` and `cons` are **never sent**: they list client addresses.
 
@@ -1061,7 +1067,7 @@ clickhouse_results/
 │   │   ├── config.d/…
 │   │   └── users.d/…
 │   ├── query_analysis/                                      #   only with --query-id / --hash
-│   ├── keeper/<host>_<port>.txt                             #   ruok / srvr / mntr per Keeper member (-keeper-mntr; gov hashes the host; not in cloud by default)
+│   ├── keeper/<host>_<port>.txt                             #   four-letter replies per Keeper member (-keeper-mntr; gov hashes the host; not in cloud by default)
 │   ├── dashboard.html                                       #   unless -skip-dashboard or gov
 │   ├── execution_log.txt                                    #   every collector: outcome, wall time, size; alerts; phases
 │   └── alerts_summary.json                                  #   when alerts ran but dashboard.html is absent

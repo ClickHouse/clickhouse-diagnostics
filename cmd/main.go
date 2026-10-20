@@ -65,8 +65,8 @@ func main() {
 	logsDirFlag := flag.String("logs-dir", "", "Directory holding ClickHouse server logs. Default: discovered from the server configuration's <log>/<errorlog>, falling back to /var/log/clickhouse-server")
 	logsMaxMBFlag := flag.Int("logs-max-mb", 50, "Per-file size cap for collected logs, in MiB. Larger files are tail-truncated (the recent end is kept)")
 	logsArchivesFlag := flag.Bool("logs-include-archives", false, "Also collect rotated log archives (*.gz, *.zst). Off by default — they are often larger than the rest of the bundle combined")
-	keeperMntrFlag := flag.String("keeper-mntr", "auto", "Ask every Keeper member in system.zookeeper_connection for ruok / srvr / mntr "+
-		"(leader or follower, outstanding requests, latency, node count, version) and write keeper/<host>_<port>.txt: auto|on|off. "+
+	keeperMntrFlag := flag.String("keeper-mntr", "auto", "Ask every Keeper member in system.zookeeper_connection for ruok / isro / lgif / srvr / mntr / conf / dirs "+
+		"(leader or follower, Raft log position, snapshot size and settings, outstanding requests, latency, version) and write keeper/<host>_<port>.txt: auto|on|off. "+
 		"auto = on for onprem and gov (the tool runs beside the cluster; gov hashes the host), off for cloud (a managed service's Keeper is not reachable)")
 	collectTextLogFlag := flag.Bool("collect-text-log", false, "Collect a time-bounded slice of system.text_log. Requires --from and --to; not available in gov mode")
 	textLogLevelFlag := flag.String("text-log-level", "", "Minimum severity for --collect-text-log (Fatal|Critical|Error|Warning|Notice|Information|Debug|Trace). Default: all levels")
@@ -647,9 +647,10 @@ func main() {
 		rec.Phase("query analysis", time.Since(phaseStart), "")
 	}
 
-	// Keeper's own view: ruok / srvr / mntr from the Keeper members. Server-
-	// side facts no system table carries — leader or follower, outstanding
-	// requests, Keeper's own latency, node count, version — written as
+	// Keeper's own view: the four-letter replies of the Keeper members
+	// (keeper.Commands). Server-side facts no system table carries — leader
+	// or follower, Raft log position, snapshot size and transfer settings,
+	// outstanding requests, Keeper's own latency, version — written as
 	// keeper/<host>_<port>.txt. Two sources make the member list:
 	// system.zookeeper_connection names the member each configured
 	// connection is ON right now (one row per connection, not per ensemble
@@ -693,7 +694,7 @@ func main() {
 			if extra := len(targets) - len(connected); extra > 0 {
 				src += fmt.Sprintf(" + %d more from the server configuration", extra)
 			}
-			fmt.Printf("Collecting Keeper facts from %d member(s) (%s; ruok / srvr / mntr)...\n", len(targets), src)
+			fmt.Printf("Collecting Keeper facts from %d member(s) (%s; %s)...\n", len(targets), src, strings.Join(keeper.Commands, " / "))
 			outcomes, kerr := keeper.Collect(finalOutputDir, targets, keeper.Options{GovSalt: govSalt})
 			if kerr != nil {
 				fmt.Printf("Warning: Keeper facts could not be written: %v\n", kerr)
