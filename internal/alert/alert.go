@@ -108,6 +108,24 @@ type Definition struct {
 	// and is reported as skipped elsewhere, not errored — the alternative
 	// was a rule that fails with CLUSTER_DOESNT_EXIST on every onprem run.
 	Modes []string `yaml:"modes"`
+	// Investigate lists follow-up queries for the customer to run on their
+	// own cluster when the rule fires — the "which one?" a finding raises
+	// (which pool, which table). Shown in the dashboard, never run by the
+	// tool; each must be a read-only SELECT like the rule's query.
+	Investigate []InvestigateQuery `yaml:"investigate"`
+}
+
+// InvestigateQuery is one follow-up query in a rule file.
+type InvestigateQuery struct {
+	Title string `yaml:"title"`
+	Query string `yaml:"query"`
+}
+
+// Investigation is a follow-up query as the dashboard shows it: expanded
+// for the mode, ready to paste into clickhouse-client.
+type Investigation struct {
+	Title string `json:"title"`
+	Query string `json:"query"`
 }
 
 // Result holds the outcome of evaluating one alert rule.
@@ -133,6 +151,14 @@ type Result struct {
 	Reason  string `json:"skip_reason,omitempty"`
 	// DurationMs is the wall time of the rule's query, for execution_log.txt.
 	DurationMs int64 `json:"duration_ms,omitempty"`
+	// Query and Investigate are set only on a displayed result (fired, or
+	// its query failed): the rule's SQL exactly as it ran, and the follow-up
+	// queries, both expanded for the mode — what the customer can run on
+	// their own cluster to see the evidence. A clean rule carries neither,
+	// so the dashboard does not grow for rules that found nothing; the gov
+	// alerts_summary.json never carries them (it is counts only).
+	Query       string          `json:"query,omitempty"`
+	Investigate []Investigation `json:"investigate,omitempty"`
 }
 
 // Notable reports whether this result deserves the reader's attention —
@@ -514,14 +540,26 @@ func (ev *Evaluator) evalFile(path string) Result {
 
 	sql := ev.expandQuery(def.Query)
 
-	// Security: alert queries must be read-only SELECT.
+	// Security: alert queries must be read-only SELECT — and so must the
+	// follow-ups, which are handed to the customer to run. A rule with an
+	// unsafe follow-up is broken: it does not run, and shows no SQL.
 	if err := query.ValidateQueryContent(sql); err != nil {
 		r.Error = fmt.Sprintf("security: %v", err)
 		fmt.Printf("  [alert] BLOCKED %q: %v\n", def.Name, err)
 		return r
 	}
+	var followUps []Investigation
+	for i, inv := range def.Investigate {
+		q := ev.expandQuery(inv.Query)
+		if err := query.ValidateQueryContent(q); err != nil {
+			r.Error = fmt.Sprintf("security: investigate[%d]: %v", i, err)
+			fmt.Printf("  [alert] BLOCKED %q: investigate[%d]: %v\n", def.Name, i, err)
+			return r
+		}
+		followUps = append(followUps, Investigation{Title: inv.Title, Query: strings.TrimSpace(q)})
+	}
 
-	resp, err := ev.client.ExecuteQueryWithFormat(sql)
+	resp, err := ev.query(sql)
 	if err != nil {
 		// A missing table means the rule is not applicable on this server
 		// (e.g. system.crash_log only exists after a crash; system.text_log
@@ -543,6 +581,7 @@ func (ev *Evaluator) evalFile(path string) Result {
 			return r
 		}
 		r.Error = fmt.Sprintf("query: %v", err)
+		r.Query, r.Investigate = sql, followUps // displayed: show what failed
 		return r
 	}
 
@@ -555,6 +594,7 @@ func (ev *Evaluator) evalFile(path string) Result {
 	r.Rows = rows
 	if len(rows) > 0 {
 		fmt.Printf("  [alert] FIRED  %q — %d row(s)\n", def.Name, len(rows))
+		r.Query, r.Investigate = sql, followUps
 	}
 	return r
 }

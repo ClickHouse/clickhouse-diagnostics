@@ -72,4 +72,37 @@ query: |
   ORDER BY hours_saturated DESC, hostname
   LIMIT 100
 
+# Follow-ups the dashboard shows under a fired alert, for the customer to run
+# on their own cluster (never run by the tool; read-only, validated like query).
+investigate:
+  - title: "Every background pool right now, per replica: busy slots against its size"
+    query: |
+      SELECT t.hostname AS hostname, t.pool AS pool, t.busy AS busy, s.size AS size,
+             round(100 * t.busy / greatest(s.size, 1)) AS pct_busy
+      FROM
+      (
+        SELECT hostName() AS hostname, replaceRegexpOne(metric, '^Background(.+)PoolTask$', '\\1') AS pool, value AS busy
+        FROM {sys.metrics}
+        WHERE metric LIKE 'Background%PoolTask'
+      ) AS t
+      LEFT JOIN
+      (
+        SELECT hostName() AS hostname, replaceRegexpOne(metric, '^Background(.+)PoolSize$', '\\1') AS pool, value AS size
+        FROM {sys.metrics}
+        WHERE metric LIKE 'Background%PoolSize'
+      ) AS s USING (hostname, pool)
+      ORDER BY pct_busy DESC, hostname, pool
+      LIMIT 200
+  - title: "Each pool's hourly peak over the last 24 hours, per replica (busy slots, and the pool's size)"
+    query: |
+      SELECT
+        hostName() AS hostname,
+        toStartOfHour(event_time) AS hour,
+        COLUMNS('^CurrentMetric_Background(MergesAndMutations|Fetches|Common|Move|Schedule)Pool(Task|Size)$') APPLY max
+      FROM {sys.metric_log}
+      WHERE event_time > now() - INTERVAL 24 HOUR
+      GROUP BY hostname, hour
+      ORDER BY hostname, hour
+      LIMIT 1000
+
 message: "{hostname}: background schedule pool at {pct_of_size}% of its size ({avg_tasks_in_pool} of background_schedule_pool_size = {pool_size}) for {hours_saturated} of the last 24 hours"

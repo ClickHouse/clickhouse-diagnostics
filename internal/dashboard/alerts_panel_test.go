@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"clickhouse-diagnostic/internal/alert"
 	"clickhouse-diagnostic/internal/keeper"
 	"os"
 	"path/filepath"
@@ -195,5 +196,49 @@ func TestKeeperPanelData(t *testing.T) {
 	}
 	if ll, _ := p["keeper_leaderless"].([]string); len(ll) != 1 {
 		t.Errorf("keeper_leaderless = %v; two members not serving and none serving", p["keeper_leaderless"])
+	}
+}
+
+// A displayed alert offers the SQL the customer can run on their own cluster
+// to see the evidence: its query as it ran, then its follow-ups. Collapsed by
+// default — one summary line in the card until opened — and escaped like
+// every other value in the panel.
+func TestTemplate_AlertQueriesAreCollapsedAndEscaped(t *testing.T) {
+	for _, want := range []string{
+		"function alertQueries(a){",
+		`'<details class="alert-more alert-queries"><summary>queries to run on your cluster`,
+		"html+=alertQueries(a);",
+		"esc(q.title)", "esc(q.query)",
+		`class="alert-copy"`,
+	} {
+		if !strings.Contains(htmlTemplate, want) {
+			t.Errorf("template lost %q", want)
+		}
+	}
+	if strings.Contains(htmlTemplate, `alert-queries" open`) || strings.Contains(htmlTemplate, `alert-queries open`) {
+		t.Error("the queries block must be collapsed by default")
+	}
+	for _, banned := range []string{"'+q.query+'", "'+q.title+'"} {
+		if strings.Contains(htmlTemplate, banned) {
+			t.Errorf("query block interpolates unescaped: %q", banned)
+		}
+	}
+}
+
+func TestBuildHTML_OnlyDisplayedAlertsCarrySQL(t *testing.T) {
+	html := buildHTML(map[string]interface{}{
+		"generated_at": "2026-10-19 10:00:00 UTC", "mode": "onprem", "version": "26.7.5.10",
+		"alerts": []alert.Result{
+			{Name: "fetch_pool_saturated", Title: "Background fetch pool saturated", Severity: "warning",
+				Message: "{hostname}", Rows: []map[string]interface{}{{"hostname": "node-1"}},
+				Query:       "SELECT hostName() AS hostname FROM system.metric_log WHERE fired_marker = 1",
+				Investigate: []alert.Investigation{{Title: "Every background pool now", Query: "SELECT metric FROM system.metrics WHERE followup_marker = 1"}}},
+			{Name: "too_many_parts", Title: "Too many parts", Severity: "critical"}, // clean
+		},
+	})
+	for _, want := range []string{"fired_marker = 1", "followup_marker = 1", "Every background pool now"} {
+		if !strings.Contains(html, want) {
+			t.Errorf("payload lost %q", want)
+		}
 	}
 }
