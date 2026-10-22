@@ -1107,7 +1107,7 @@ An alert YAML has a non-read-only statement. Alert queries are restricted to `SE
 The `-salt` value (or interactive prompt input) contains spaces, punctuation, or is the wrong length. Pick a value that matches `[A-Za-z0-9]{8,64}` — see [Gov mode and hashed names](#gov-mode-and-hashed-names).
 
 **Dashboard charts blank**
-The generated `dashboard.html` loads Chart.js from a public CDN. Open it in an environment with internet access, or pre-fetch the script and inline it for offline use.
+The generated `dashboard.html` loads Chart.js from a public CDN. Open it in an environment with internet access, or see [`airgap/`](airgap/README.md) to build a dashboard that needs no network.
 
 **"Permission denied" on config files**
 You don't have read access to `-config-dir`. Either run with appropriate privileges or use `-skip-config`.

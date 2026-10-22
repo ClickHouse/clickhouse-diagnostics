@@ -30,6 +30,7 @@ type Generator struct {
 	node          string          // hostName() (FQDN()) of the server the system tables describe
 	nodeUptime    string          // how long that node had been up at collection
 	collection    string          // execution_log `collection:` note (SharedMergeTree onprem → cloud switch)
+	airgap        bool            // inline Chart.js instead of loading it from the CDN (-airgap)
 }
 
 // NewGenerator creates a new Generator.
@@ -404,7 +405,7 @@ func (g *Generator) Generate(outputDir string, alertResults []alert.Result) erro
 		alertResults = []alert.Result{}
 	}
 	payload["alerts"] = alertResults
-	html := buildHTML(payload)
+	html := renderHTML(payload, g.airgap)
 	dst := filepath.Join(outputDir, "dashboard.html")
 	if err := os.WriteFile(dst, []byte(html), 0640); err != nil {
 		return fmt.Errorf("write dashboard: %w", err)
@@ -1500,14 +1501,26 @@ func stripTrailingFormat(sql string) string {
 	return t
 }
 
-// buildHTML serialises the payload into the HTML template.
+// buildHTML serialises the payload into the HTML template, loading Chart.js
+// from the CDN.
 func buildHTML(data map[string]interface{}) string {
+	return renderHTML(data, false)
+}
+
+// renderHTML is buildHTML with the -airgap choice: when airgap is set,
+// Chart.js is inlined (see airgap.go) and the page needs no network.
+func renderHTML(data map[string]interface{}, airgap bool) string {
+	page := htmlTemplate
+	if airgap {
+		page = inlineChartJS(page)
+	}
 	b, _ := json.Marshal(data)
-	return strings.Replace(htmlTemplate, "/*DATA*/null", string(b), 1)
+	return strings.Replace(page, "/*DATA*/null", string(b), 1)
 }
 
 // htmlTemplate is the complete self-contained dashboard page.
-// Chart.js is loaded from CDN; all ClickHouse data is embedded inline.
+// Chart.js is loaded from CDN (inlined with -airgap); all ClickHouse data is
+// embedded inline.
 // themeTokensCSS is the Click UI token layer — palette primitives, the light and
 // dark semantic roles, type, spacing, radii and shadows — declared once and
 // shared by dashboard.html and schema_graph.html so the two pages can never
