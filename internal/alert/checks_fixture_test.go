@@ -312,6 +312,12 @@ func TestCheck_PoolSaturated(t *testing.T) {
 	if rows := runCheck(t, "fetch_pool_saturated", "cloud", b); len(rows) != 1 || rows[0]["pool_size"] != int64(32) {
 		t.Fatalf("cloud: %v", rows)
 	}
+	// The size missing from the first hour only: no server_settings needed.
+	cloud[0]["max(CurrentMetric_BackgroundFetchesPoolSize)"] = "0"
+	b = fixture(t, map[string][]row{"system.metric_log_by_host_3_days": cloud})
+	if rows := runCheck(t, "fetch_pool_saturated", "cloud", b); len(rows) != 1 || rows[0]["pool_size"] != int64(32) {
+		t.Fatalf("cloud, size missing in one hour: %v", rows)
+	}
 }
 
 func TestCheck_KeeperXid(t *testing.T) {

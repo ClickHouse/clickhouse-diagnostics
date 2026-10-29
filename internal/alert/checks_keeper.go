@@ -119,14 +119,19 @@ func maxf(a, b float64) float64 {
 // The source file missing is NotCollected, never a size of zero.
 func poolSizes(b *bundle.Bundle, mode string, hours []hostHour, setting, sizeCol string) (map[string]float64, error) {
 	sizes := map[string]float64{}
-	need := false
 	for _, h := range hours {
+		sizes[h.host] += 0
 		if mode == "cloud" {
 			if v := h.r.Float(sizeCol); v > sizes[h.host] {
 				sizes[h.host] = v
 			}
 		}
-		if sizes[h.host] == 0 {
+	}
+	// Only once every bucket is folded: a host whose first hour lacks the
+	// size but a later one has it needs no fallback.
+	need := false
+	for _, s := range sizes {
+		if s == 0 {
 			need = true
 		}
 	}
