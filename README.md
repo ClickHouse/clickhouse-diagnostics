@@ -19,6 +19,7 @@ Under the hood: per-environment query sets (`cloud` / `onprem` / `gov`) selected
 | `system.replicas`, `system.replication_queue` | Is every replica writable and caught up; if not, why? | Read-only state, Keeper session loss and the shape of the queue locate replication problems. |
 | `system.replicas_problem_tables`, `system.database_replicas` (≥ 25.9), `system.replicas_answered` (cloud) | For the tables and Replicated databases in trouble: are all replicas alive, how far behind the log, what Keeper refused; which replicas answered | The Keeper-backed columns are read only where they matter (up to 200 tables, problem tables first): asking `system.replicas` or `system.clusters` for them reads every table's or database's status from Keeper, which took minutes on servers with tens of thousands of tables. |
 | `system.query_log_details_7_days` (hourly aggregation of `system.query_log`) | What ran, how slow, how much memory, what failed, by whom? | Most incidents start with the workload; this is the aggregated view, with a 500-character sample per query pattern and no customer rows. |
+| `system.query_log_exceptions_1_day` (hourly, failed queries only) | How many queries failed with each code, each hour? | The exact count — `query_log_details_7_days` repeats a query once per table it touched — that the exception alerts read. No exception text in gov. |
 | `system.query_views_log_3_days` (3 days, hourly aggregation of `system.query_views_log`) | Did every materialized view fire, did any fail, and what does each cost? | An MV that "succeeds" while writing nothing is invisible in `query_log`. An MV that throws fails the parent INSERT by default (`query_log` shows `… while pushing to view X`), but with `materialized_views_ignore_errors = 1` the INSERT is clean and this is the only record. Either way the base part is already committed. |
 | `system.view_refreshes` (≥ 23.12) | Are the refreshable materialized views actually refreshing? | A `REFRESH EVERY` view never appears in `query_views_log`; this is the only place its schedule, last success and last error live. |
 | `system.data_skipping_indices` | Which tables carry data-skipping indices, on which expressions, at what granularity? | The evidence for "the index exists but the query does not use it"; also drawn on the schema graph. |
@@ -362,6 +363,7 @@ Most collection queries look back over a fixed period. Each declares its **own**
 | Query | Default look-back |
 |---|---|
 | `system.query_log_details_7_days` | 7 days |
+| `system.query_log_exceptions_1_day` | 1 day |
 | `system.part_log_3_days` | 3 days |
 | `system.query_views_log_3_days` | 3 days |
 | `system.metric_log_7_days` | 7 days |
@@ -769,7 +771,7 @@ Written as `text_log_<timestamp>.<ext>`, in the [configured output format](#outp
 
 Alert rules are plain YAML files in `alerts/` (override with `-alerts-dir`). Each rule names a **check** (`check: go:<name>`, a Go function in `internal/alert/checks_*.go`) that is evaluated over the files the collectors already wrote — the rules send **no query of their own**, so a run on a struggling server costs the collection and nothing more. If the check returns any rows, the alert fires and the rows are surfaced in the dashboard. The rule's `query:` is the same test written as a read-only SELECT: it is what the dashboard hands the customer to run live, and the check mirrors it (hourly log buckets instead of raw rows — a window's oldest hour may reach up to an hour further back). All alert SQL is validated: only `SELECT` / `WITH` is accepted, anything else (`INSERT`, `ALTER`, `DROP`, …) breaks the rule.
 
-A rule without `check:` still runs its `query:` against the server, as before — the way to try a new rule before writing its check.
+A rule without `check:` still runs its `query:` against the server, as before — the way to try a new rule before writing its check. So do all rules when `-output-format native` or `tsv` is used: the checks read the JSONEachRow files.
 
 ### Rule outcomes
 

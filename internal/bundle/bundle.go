@@ -97,6 +97,11 @@ func (b *Bundle) Rows(collector string) ([]Row, error) {
 	if rows, ok := b.cache[collector]; ok {
 		return rows, nil
 	}
+	// A failed collector's file, when there is one, may be a partial write
+	// (disk full): the failure is what counts.
+	if st, ok := b.status[collector]; ok && st.State == "failed" {
+		return nil, &NotCollected{Collector: collector, State: st.State, Reason: st.Reason}
+	}
 	p := b.path(collector)
 	if p == "" {
 		if st, ok := b.status[collector]; ok {

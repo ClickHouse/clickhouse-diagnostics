@@ -12,11 +12,25 @@ import (
 // Shared helpers for the Go checks: they recreate, over the collected
 // files, the few SQL functions the rules used.
 
-// serverClock returns the instant the rules' windows end — the server's
-// now() at collection (system.version collected_at), or the explicit -to
-// when that is earlier — and the server timezone every DateTime in the
-// files is written in.
+// serverClock returns the instant the log windows end — the server's now()
+// at collection, or the explicit -to when that is earlier: the log files
+// stop there — and the server timezone.
 func serverClock(b *bundle.Bundle) (time.Time, *time.Location, error) {
+	now, loc, err := collectedAt(b)
+	if err != nil {
+		return now, loc, err
+	}
+	if end := b.WindowEnd(); !end.IsZero() && end.Before(now) {
+		now = end.In(loc)
+	}
+	return now, loc, nil
+}
+
+// collectedAt is the server's now() when it was collected
+// (system.version collected_at), for ages read off live snapshots
+// (mutations, parts) — which -to does not move — and the server timezone
+// every DateTime in the files is written in.
+func collectedAt(b *bundle.Bundle) (time.Time, *time.Location, error) {
 	rows, err := b.Rows("system.version")
 	if err != nil {
 		return time.Time{}, nil, err
@@ -34,10 +48,6 @@ func serverClock(b *bundle.Bundle) (time.Time, *time.Location, error) {
 	if err != nil {
 		return time.Time{}, nil, fmt.Errorf("system.version collected_at: %w", err)
 	}
-	// With -to the files end there; the rules' look-back ends with them.
-	if end := b.WindowEnd(); !end.IsZero() && end.Before(now) {
-		now = end.In(loc)
-	}
 	return now, loc, nil
 }
 
@@ -47,6 +57,20 @@ func serverHost(b *bundle.Bundle) string {
 		return rows[0].Str("hostname")
 	}
 	return ""
+}
+
+// serverAtLeast reports whether system.version is at least major.minor
+// (false when unknown).
+func serverAtLeast(b *bundle.Bundle, major, minor int) bool {
+	rows, err := b.Rows("system.version")
+	if err != nil || len(rows) == 0 {
+		return false
+	}
+	var ma, mi int
+	if _, err := fmt.Sscanf(rows[0].Str("version"), "%d.%d", &ma, &mi); err != nil {
+		return false
+	}
+	return ma > major || (ma == major && mi >= minor)
 }
 
 // parseTime reads a DateTime string from a collected row in the server's

@@ -57,6 +57,10 @@ SELECT
     -- OSIOWait in one sample). One sample alone cannot establish the interval.
     count()                                                  AS metric_samples,
     dateDiff('second', min(event_time), max(event_time))     AS span_s,
+    -- first/last sample of the hour, so a window's span is last − first
+    -- across buckets, gaps included (the keeper_xid_renewal_due check).
+    toString(min(event_time))                                AS first_sample,
+    toString(max(event_time))                                AS last_sample,
     avg(CurrentMetric_MemoryTracking)                        AS avg_memory_tracking_bytes
 FROM system.metric_log
 WHERE event_time > {from:7d} AND event_time <= {to:now}

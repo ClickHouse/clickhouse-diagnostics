@@ -877,10 +877,14 @@ func main() {
 		fmt.Println("Evaluating alert rules...")
 		phaseStart = time.Now()
 		essentialRun, _ := watch.Tripped()
-		alertResults = alert.NewEvaluator(client, effectiveMode).WithEssential(essentialRun).
-			WithBundle(bundle.Open(finalOutputDir, collectorStatus(rec)).WithWindowEnd(collectTo)).
-			WithDetachedScope(detachedScope).WithKeeperDown(keeperDownReason).WithStop(watch.OverBudget).
-			RunAll(alertsDir, serverVersion)
+		ev := alert.NewEvaluator(client, effectiveMode).WithEssential(essentialRun).
+			WithDetachedScope(detachedScope).WithKeeperDown(keeperDownReason).WithStop(watch.OverBudget)
+		// The checks read JSONEachRow files; with -output-format native or
+		// tsv the rules run their queries live instead.
+		if outputFormat.Name == query.FormatJSONL.Name {
+			ev = ev.WithBundle(bundle.Open(finalOutputDir, collectorStatus(rec)).WithWindowEnd(collectTo))
+		}
+		alertResults = ev.RunAll(alertsDir, serverVersion)
 		rec.Phase("alerts", time.Since(phaseStart), "")
 		for _, r := range alertResults {
 			status := "clean"

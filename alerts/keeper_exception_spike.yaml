@@ -28,7 +28,7 @@ tags:
 # customer to run live; the check mirrors it.
 check: go:keeper_exception_spike
 source:
-  - system.query_log_details_7_days
+  - system.query_log_exceptions_1_day
   - system.version
 query: |
   SELECT

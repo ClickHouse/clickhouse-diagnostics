@@ -613,7 +613,7 @@ func (ev *Evaluator) evalFile(path string) Result {
 	// The three gates below protect the server from a live rule query. A Go
 	// check reads the collected files only: whether its source was collected
 	// (skipped in an essential run, without Keeper, past the budget) decides.
-	live := def.Check == ""
+	live := def.Check == "" || ev.bundle == nil
 	if live && ev.stop != nil && ev.stop() {
 		r.Skipped = true
 		r.Reason = "not run: the collection's time budget was spent"
@@ -654,7 +654,9 @@ func (ev *Evaluator) evalFile(path string) Result {
 		followUps = append(followUps, Investigation{Title: inv.Title, Query: strings.TrimSpace(q)})
 	}
 
-	if def.Check != "" {
+	// No bundle (a -output-format the checks cannot read): the rule's query
+	// runs live, as before checks existed.
+	if def.Check != "" && ev.bundle != nil {
 		return ev.evalCheck(def, r, sql, followUps)
 	}
 

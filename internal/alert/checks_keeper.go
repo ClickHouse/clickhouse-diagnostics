@@ -112,42 +112,49 @@ func maxf(a, b float64) float64 {
 }
 
 // poolSizes is each host's configured pool size. Cloud: the live limit in
-// the per-host metric file (max over the window), then server_settings.
-// Onprem/gov: server_settings (23.3+), else settings (older servers).
-func poolSizes(b *bundle.Bundle, mode string, hours []hostHour, setting, sizeCol string) map[string]float64 {
+// the per-host metric file (max over the window); a host without it falls
+// back to server_settings. Onprem/gov: server_settings from 23.3, where the
+// pool sizes moved — system.settings there still lists the names with the
+// old session defaults, the wrong size — and system.settings below 23.3.
+// The source file missing is NotCollected, never a size of zero.
+func poolSizes(b *bundle.Bundle, mode string, hours []hostHour, setting, sizeCol string) (map[string]float64, error) {
 	sizes := map[string]float64{}
-	if mode == "cloud" {
-		for _, h := range hours {
+	need := false
+	for _, h := range hours {
+		if mode == "cloud" {
 			if v := h.r.Float(sizeCol); v > sizes[h.host] {
 				sizes[h.host] = v
 			}
 		}
+		if sizes[h.host] == 0 {
+			need = true
+		}
 	}
-	fromSettings := 0.0
-	for _, c := range []string{"system.server_settings", "system.settings"} {
-		rows, err := b.Rows(c)
-		if err != nil {
-			continue
-		}
-		found := false
-		for _, r := range rows {
-			if r.Str("name") == setting {
-				found = true
-				if v := r.Float("value"); v > fromSettings {
-					fromSettings = v
-				}
+	if !need {
+		return sizes, nil
+	}
+	source := "system.server_settings"
+	if mode != "cloud" && !serverAtLeast(b, 23, 3) {
+		source = "system.settings"
+	}
+	rows, err := b.Rows(source)
+	if err != nil {
+		return nil, err
+	}
+	configured := 0.0
+	for _, r := range rows {
+		if r.Str("name") == setting {
+			if v := r.Float("value"); v > configured {
+				configured = v
 			}
-		}
-		if found {
-			break
 		}
 	}
 	for _, h := range hours {
 		if sizes[h.host] == 0 {
-			sizes[h.host] = fromSettings
+			sizes[h.host] = configured
 		}
 	}
-	return sizes
+	return sizes, nil
 }
 
 // fetch_pool_saturated / schedule_pool_saturated: hosts whose pool averaged
@@ -157,7 +164,10 @@ func checkPoolSaturated(b *bundle.Bundle, mode, taskCol, setting, sizeCol string
 	if err != nil {
 		return nil, err
 	}
-	sizes := poolSizes(b, mode, hours, setting, sizeCol)
+	sizes, err := poolSizes(b, mode, hours, setting, sizeCol)
+	if err != nil {
+		return nil, err
+	}
 	type agg struct {
 		n   int64
 		sum float64
@@ -201,7 +211,6 @@ const xidMax = 2147483647
 
 // keeper_xid_renewal_due: a single live Keeper session whose xid, at the
 // Keeper request rate of the last 24 hours, reaches 2^31 within a day.
-// The covered time is the sum of the hourly buckets' sample spans.
 func checkKeeperXid(b *bundle.Bundle, mode string) ([]row, error) {
 	conns, err := b.Rows("system.zookeeper_connection")
 	if err != nil {
@@ -236,7 +245,18 @@ func checkKeeperXid(b *bundle.Bundle, mode string) ([]row, error) {
 			c.xid = x
 		}
 	}
-	type rate struct{ tx, covered float64 }
+	// Covered time is the SQL's dateDiff(min(event_time), max(event_time)):
+	// the first sample of the earliest bucket to the last of the latest,
+	// gaps between buckets included.
+	_, loc, err := collectedAt(b)
+	if err != nil {
+		return nil, err
+	}
+	type rate struct {
+		tx          float64
+		first, last time.Time
+		covered     float64
+	}
 	rs := map[string]*rate{}
 	for _, h := range hours {
 		r := rs[h.host]
@@ -245,7 +265,17 @@ func checkKeeperXid(b *bundle.Bundle, mode string) ([]row, error) {
 			rs[h.host] = r
 		}
 		r.tx += h.r.Float("zk_transactions")
-		r.covered += h.r.Float("span_s")
+		if f, ok := parseTime(h.r.Str("first_sample"), loc); ok && (r.first.IsZero() || f.Before(r.first)) {
+			r.first = f
+		}
+		if l, ok := parseTime(h.r.Str("last_sample"), loc); ok && l.After(r.last) {
+			r.last = l
+		}
+	}
+	for _, r := range rs {
+		if !r.first.IsZero() && r.last.After(r.first) {
+			r.covered = r.last.Sub(r.first).Seconds()
+		}
 	}
 	var out []row
 	for h, c := range cs {
@@ -278,7 +308,7 @@ func checkPartsPropagationLag(b *bundle.Bundle, mode string) ([]row, error) {
 	if err != nil {
 		return nil, err
 	}
-	now, loc, err := serverClock(b)
+	now, loc, err := collectedAt(b) // a live parts snapshot: -to does not move it
 	if err != nil {
 		return nil, err
 	}

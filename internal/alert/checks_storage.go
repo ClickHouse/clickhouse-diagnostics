@@ -40,7 +40,9 @@ func checkDiskSpaceLow(b *bundle.Bundle, mode string) ([]row, error) {
 	if tables, err := b.Rows("system.tables"); err == nil {
 		policies := map[string]bool{}
 		for _, t := range tables {
-			if !systemDBs[t.Str("database")] && t.Str("storage_policy") != "" {
+			// gov hashes database names: is_system_db carries the fact
+			system := systemDBs[t.Str("database")] || t.Int("is_system_db") == 1
+			if !system && t.Str("storage_policy") != "" {
 				policies[t.Str("storage_policy")] = true
 			}
 		}
@@ -135,9 +137,20 @@ func checkDetachedParts(b *bundle.Bundle, mode string) ([]row, error) {
 	}
 	byTable := map[string]*agg{}
 	var order []string
+	// Cloud reads every replica: a part on shared storage is listed once
+	// per replica, with the same path. Count it once, as the rule's
+	// single-replica read does. Elsewhere one host lists each part once
+	// (and may hold two of one block range, the _tryN copies).
+	parts := map[string]bool{}
 	for _, r := range rows {
 		if systemDBs[r.Str("database")] {
 			continue
+		}
+		if p := r.Str("path"); mode == "cloud" && p != "" {
+			if parts[p] {
+				continue
+			}
+			parts[p] = true
 		}
 		k := r.Str("database") + "\x00" + r.Str("table")
 		a := byTable[k]
@@ -242,7 +255,7 @@ func checkMutationsTooLong(b *bundle.Bundle, mode string) ([]row, error) {
 	if err != nil {
 		return nil, err
 	}
-	now, loc, err := serverClock(b)
+	now, loc, err := collectedAt(b) // a live snapshot: -to does not age it
 	if err != nil {
 		return nil, err
 	}

@@ -193,19 +193,20 @@ func TestCheck_MergesStalledAndFailures(t *testing.T) {
 }
 
 func TestCheck_ExceptionRules(t *testing.T) {
-	q := func(hour, code, hash, table string, n int) row {
-		return row{"time": hour, "query_kind": "Select", "type": "ExceptionWhileProcessing", "user": "u", "interface": "HTTP",
-			"normalized_query_hash": hash, "exception_code": code, "table": table, "count": fmt.Sprint(n), "exception": "e" + code}
+	q := func(hour, typ, code string, n int) row {
+		return row{"time": hour, "type": typ, "exception_code": code, "count": fmt.Sprint(n), "exception": "e" + code}
 	}
-	b := fixture(t, map[string][]row{"system.query_log_details_7_days": {
-		// One query group touching two tables: counted once (51), not 102.
-		q(hoursBack(1), "60", "1", "a", 51), q(hoursBack(1), "60", "1", "b", 51),
-		q(hoursBack(2), "62", "2", "a", 50),
-		q(hoursBack(3), "999", "3", "a", 21),
-		q(hoursBack(4), "999", "4", "a", 20),
-		q(hoursBack(0), "202", "5", "a", 6), q(hoursBack(1), "202", "6", "a", 5),
+	const w = "ExceptionWhileProcessing"
+	b := fixture(t, map[string][]row{"system.query_log_exceptions_1_day": {
+		q(hoursBack(1), w, "60", 51),
+		q(hoursBack(1), "ExceptionBeforeStart", "60", 100), // not while processing
+		q(hoursBack(2), w, "62", 50),
+		q(hoursBack(26), w, "62", 500), // outside 24 h
+		q(hoursBack(3), w, "999", 21),
+		q(hoursBack(4), w, "999", 20),
+		q(hoursBack(0), "ExceptionBeforeStart", "202", 6), q(hoursBack(1), "ExceptionBeforeStart", "202", 5),
 	}})
-	if rows := runCheck(t, "high_exception_rate", "onprem", b); len(rows) != 1 || rows[0]["exception_code"] != int64(60) || rows[0]["error_count"] != int64(51) {
+	if rows := runCheck(t, "high_exception_rate", "onprem", b); len(rows) != 1 || rows[0]["exception_code"] != int64(60) || rows[0]["error_count"] != int64(51) || rows[0]["example_message"] != "e60" {
 		t.Fatalf("high_exception_rate: %v", rows)
 	}
 	if rows := runCheck(t, "keeper_exception_spike", "onprem", b); len(rows) != 1 || rows[0]["error_count"] != int64(21) {
@@ -214,7 +215,7 @@ func TestCheck_ExceptionRules(t *testing.T) {
 	if rows := runCheck(t, "too_many_simultaneous_queries", "onprem", b); len(rows) != 1 || rows[0]["error_count"] != int64(11) {
 		t.Fatalf("too_many_simultaneous_queries: %v", rows)
 	}
-	ten := fixture(t, map[string][]row{"system.query_log_details_7_days": {q(hoursBack(0), "202", "5", "a", 10)}})
+	ten := fixture(t, map[string][]row{"system.query_log_exceptions_1_day": {q(hoursBack(0), "ExceptionBeforeStart", "202", 10)}})
 	if rows := runCheck(t, "too_many_simultaneous_queries", "onprem", ten); len(rows) != 0 {
 		t.Fatalf("10 refusals is not more than 10: %v", rows)
 	}
@@ -285,9 +286,22 @@ func TestCheck_PoolSaturated(t *testing.T) {
 		t.Fatalf("schedule: %v", rows)
 	}
 	// Older server: the size is in system.settings.
-	b = fixture(t, map[string][]row{"system.metric_log_7_days": hours("avg_fetch_pool_tasks", "16", "16"), "system.settings": settings})
+	v228 := []row{{"version": "22.8.21.38", "hostname": "h1", "timezone": "UTC", "collected_at": fixtureNow}}
+	b = fixture(t, map[string][]row{"system.version": v228, "system.metric_log_7_days": hours("avg_fetch_pool_tasks", "16", "16", "16"), "system.settings": settings})
+	if rows := runCheck(t, "fetch_pool_saturated", "onprem", b); len(rows) != 1 {
+		t.Fatalf("22.8 reads system.settings: %v", rows)
+	}
+	b = fixture(t, map[string][]row{"system.version": v228, "system.metric_log_7_days": hours("avg_fetch_pool_tasks", "16", "16"), "system.settings": settings})
 	if rows := runCheck(t, "fetch_pool_saturated", "onprem", b); len(rows) != 0 {
 		t.Fatalf("two hours are not three: %v", rows)
+	}
+	// 23.3+ without server_settings: system.settings holds the obsolete
+	// session default (16 against a configured 32) — not applicable, never
+	// judged against it, never clean for want of a size.
+	b = fixture(t, map[string][]row{"system.metric_log_7_days": hours("avg_fetch_pool_tasks", "16", "16", "16"), "system.settings": settings})
+	c, _ := lookupCheck("go:fetch_pool_saturated")
+	if _, err := c(b, "onprem"); !isNotCollected(err) {
+		t.Fatalf("23.3+ without server_settings: want NotCollected, got %v", err)
 	}
 	// Cloud: the live per-host size wins over server_settings.
 	cloud := hours("avg_fetch_pool_tasks", "30", "30", "30")
@@ -302,10 +316,10 @@ func TestCheck_PoolSaturated(t *testing.T) {
 
 func TestCheck_KeeperXid(t *testing.T) {
 	// 100 tx/s over 3 covered hours; 2^31-1 − xid = 8 000 000 → 80 000 s left.
-	var hours []row
-	for i := 1; i <= 3; i++ {
-		hours = append(hours, row{"time": hoursBack(i), "zk_transactions": "360000", "span_s": "3600"})
+	bucket := func(i int) row {
+		return row{"time": hoursBack(i), "zk_transactions": "360000", "span_s": "3599", "first_sample": hoursBack(i), "last_sample": hoursBack(i - 1)}
 	}
+	hours := []row{bucket(3), bucket(2), bucket(1)}
 	conn := func(xid int64) map[string][]row {
 		return map[string][]row{"system.metric_log_7_days": hours, "system.zookeeper_connection": {{"name": "default", "host": "k1", "is_expired": 0, "xid": fmt.Sprint(xid)}}}
 	}
@@ -320,6 +334,13 @@ func TestCheck_KeeperXid(t *testing.T) {
 	two["system.zookeeper_connection"] = append(two["system.zookeeper_connection"], row{"name": "aux", "host": "k2", "is_expired": 0, "xid": "5"})
 	if rows := runCheck(t, "keeper_xid_renewal_due", "onprem", fixture(t, two)); len(rows) != 0 {
 		t.Fatalf("two live sessions: the rate cannot be attributed, does not fire: %v", rows)
+	}
+	// Two sampled hours 19 h apart: the span is ~20 h (10 tx/s, 222 h of
+	// headroom), not the 2 h the buckets' own spans add up to.
+	gap := conn(xidMax - 8_000_000)
+	gap["system.metric_log_7_days"] = []row{bucket(20), bucket(1)}
+	if rows := runCheck(t, "keeper_xid_renewal_due", "onprem", fixture(t, gap)); len(rows) != 0 {
+		t.Fatalf("gaps between buckets count as covered time: %v", rows)
 	}
 }
 
@@ -408,5 +429,68 @@ func TestCheck_WindowEndsAtExplicitTo(t *testing.T) {
 	b = fixture(t, map[string][]row{"system.part_log_3_days": rows}).WithWindowEnd(to)
 	if got := runCheck(t, "merges_stalled", "onprem", b); len(got) != 1 {
 		t.Fatalf("with -to 30 h back, 40 h back is inside its last 24 h: %v", got)
+	}
+}
+
+func isNotCollected(err error) bool {
+	_, ok := err.(*bundle.NotCollected)
+	return ok
+}
+
+// A failed collector's file may be a partial write: its rule is not
+// applicable, not judged on what reached the disk.
+func TestBundle_FailedCollectorFileIsNotRead(t *testing.T) {
+	dir := fixture(t, map[string][]row{"system.parts_by_partition": {{"database": "db", "table": "a", "partition_id": "p", "parts": "5"}}}).Dir()
+	b := bundle.Open(dir, map[string]bundle.Status{"system.parts_by_partition": {State: "failed", Reason: "write: no space left on device"}})
+	c, _ := lookupCheck("go:too_many_parts")
+	if _, err := c(b, "onprem"); !isNotCollected(err) || !strings.Contains(err.Error(), "no space left") {
+		t.Fatalf("want NotCollected naming the failure, got %v", err)
+	}
+}
+
+// Gov hashes database names: the system flag keeps system-table disks out.
+func TestCheck_DiskSpaceLow_GovSystemFlag(t *testing.T) {
+	b := fixture(t, map[string][]row{
+		"system.disks":            {{"name": "default", "free_bytes": "1", "total_bytes": "100"}, {"name": "cold", "free_bytes": "50", "total_bytes": "100"}},
+		"system.tables":           {{"database": "9F86D0", "name": "A1", "storage_policy": "tiered", "is_system_db": 0}, {"database": "3B867E", "name": "B2", "storage_policy": "default", "is_system_db": 1}},
+		"system.storage_policies": {{"policy_name": "tiered", "disks": []string{"cold"}}, {"policy_name": "default", "disks": []string{"default"}}},
+	})
+	if rows := runCheck(t, "disk_space_low", "gov", b); len(rows) != 0 {
+		t.Fatalf("a disk only system tables use is not user data: %v", rows)
+	}
+}
+
+// Cloud lists a shared detached part once per replica, with one path.
+func TestCheck_DetachedParts_CloudCountsSharedPartOnce(t *testing.T) {
+	var rows []row
+	for i := 0; i < 3; i++ {
+		rows = append(rows, row{"database": "db", "table": "a", "reason": "broken", "bytes_on_disk": "1024", "path": "/s3/store/u/detached/broken_all_1_1_0/"})
+	}
+	b := fixture(t, map[string][]row{"system.detached_parts": rows})
+	got := runCheck(t, "detached_parts_exist", "cloud", b)
+	if len(got) != 1 || got[0]["detached_count"] != int64(1) || got[0]["total_size"] != "1.00 KiB" {
+		t.Fatalf("rows: %v", got)
+	}
+	if got := runCheck(t, "detached_parts_exist", "onprem", b); got[0]["detached_count"] != int64(3) {
+		t.Fatalf("onprem lists each part once; keep every row: %v", got)
+	}
+}
+
+// -to moves the log windows, not the age of a live snapshot.
+func TestCheck_SnapshotAgesIgnoreTo(t *testing.T) {
+	to, _ := time.Parse("2006-01-02 15:04:05", hoursBack(30))
+	b := fixture(t, map[string][]row{"system.mutations": {{"database": "db", "table": "a", "mutation_id": "m1", "parts_to_do": "1", "create_time": hoursBack(10)}}}).WithWindowEnd(to)
+	if rows := runCheck(t, "mutation_running_too_long", "onprem", b); len(rows) != 1 || rows[0]["hours_running"] != int64(10) {
+		t.Fatalf("a mutation 10 h old at collection: %v", rows)
+	}
+}
+
+// Without a bundle (-output-format native/tsv) a check rule runs live.
+func TestEvalFile_NoBundleRunsTheQueryLive(t *testing.T) {
+	sent := 0
+	ev := &Evaluator{mode: "onprem", queryFn: func(string) (string, error) { sent++; return noRows, nil }}
+	r := ev.evalFile("../../alerts/too_many_parts.yaml")
+	if sent != 1 || r.Error != "" || r.Skipped {
+		t.Fatalf("sent=%d result=%+v", sent, r)
 	}
 }

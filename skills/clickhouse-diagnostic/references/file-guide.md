@@ -32,7 +32,7 @@ Windows: `*_7_days` files cover the last 7 days (or `-from/-to`); `system.text_l
 **Read first:** non-system tables by `engine`; `partition_key` and `sorting_key` of the tables that show up in parts/queries findings; count of `MaterializedView` per source (`dependencies_table`); `engine_full` for `SETTINGS` overrides (`parts_to_throw_insert`, `ttl_only_drop_parts`, `min_age_to_force_merge_seconds`, `storage_policy`); `total_rows` / `total_bytes` to tell the tables that hold data from the empty ones; on ≥ 26.6 `target_table` for what each MV writes to (the implicit `.inner_id.*` target included). For the shape of the whole pipeline open `schema_graph.html` from the dashboard's Schema tab rather than reading arrays.
 **Healthy looks like:** MergeTree-family tables with a sorting key that starts with low-cardinality filter columns, partition keys at day/month granularity, ≤ ~10 MVs per source, TTL declared on log-like tables.
 **Red flags:** `sorting_key = ''`/`tuple()` on large tables, high-cardinality partition keys (P-03, P-50); dozens of MVs on one source (P-34); `TTL` in DDL but no TTL activity in `part_log` (P-18); `Nullable` key columns; `Join`/`Buffer`/`Kafka` engines involved in a hang (P-21).
-**Traps:** in gov no DDL/keys survive (identifiers and the dependency arrays are hashed); `create_table_query` carries comments and defaults — never paste it verbatim outside the machine (`privacy.md`); engine credentials read `'[HIDDEN]'` (server-masked on ≥ 23.x, collector-redacted otherwise) — a bundle from a tool build before this redactor and a 22.x server may still carry them raw.
+**Traps:** in gov `database`/`name` are hashed — `is_system_db` (v0.9) says which rows are system tables; in gov no DDL/keys survive (identifiers and the dependency arrays are hashed); `create_table_query` carries comments and defaults — never paste it verbatim outside the machine (`privacy.md`); engine credentials read `'[HIDDEN]'` (server-masked on ≥ 23.x, collector-redacted otherwise) — a bundle from a tool build before this redactor and a 22.x server may still carry them raw.
 **Pairs with:** `system.parts` (explain counts), `system.columns` (types), `query_log_details` (which tables are hot).
 
 ### system.view_refreshes (≥ 23.12)
@@ -279,6 +279,15 @@ Windows: `*_7_days` files cover the last 7 days (or `-from/-to`); `system.text_l
 **Red flags:** 241 share (HC-5.3, P-10), 252 on inserts (P-01), 202 (P-20), 159/394 clusters (P-21), 999 (P-40); one hash with extreme `read_bytes/count` or `FINAL`/`SELECT *` in `query` (P-50/P-51); inserts in the thousands per hour with tiny `written_rows/count` (P-02); a monitoring user on top (P-55).
 **Traps:** **`LEFT ARRAY JOIN tables` duplicates each group once per table with all sums repeated — fix one `tables` value (or `tables = ''`) before summing, never re-sum across rows**; `type = 'QueryStart'` rows carry no resource data; every metric is a **sum over the hour bucket** — divide by `count`; `query` is a 500-char sample of one query; in gov there is no `query`/`exception` and identifiers are hashed.
 **Pairs with:** `query_analysis/` (drill into one hash), `system.tables` (schema of the hot tables), `metric_log` (memory in the same hours), `system.errors`.
+
+### system.query_log_exceptions_1_day (v0.9, essential)
+**Why we run it:** the exact number of failed queries per hour and code — the count `query_log_details_7_days` cannot give, since it repeats a query once per table; the exception alerts read it.
+**Question:** which error codes spiked, in which hour?
+**Read first:** `count` by `(time, exception_code)` for `type = 'ExceptionWhileProcessing'` (failed while running); `ExceptionBeforeStart` separately (refused: 202 too many queries, parse and access errors).
+**Healthy looks like:** a few client-side codes, flat across hours.
+**Red flags:** > 50 of one code in an hour (`high_exception_rate`), > 20 of 999 (`keeper_exception_spike`, P-40), > 10 of 202 in the last hour (`too_many_simultaneous_queries`, P-20), 241 (P-10), 252 (P-01).
+**Traps:** one day only (the alerts' look-back) — the 7-day trend is in `query_log_details_7_days`; `exception` is one sample per row and absent in gov; cloud sums every replica.
+**Pairs with:** `query_log_details_7_days` (which pattern, user, table), `system.errors`, `error_log_7_days`.
 
 ### system.part_log_3_days
 **Why we run it:** the history of background work — it shows whether merges keep up with inserts, how big inserts are, and which merges/mutations fail with which code; `system.merges` alone is a single instant.

@@ -7,7 +7,7 @@ import (
 	"clickhouse-diagnostic/internal/bundle"
 )
 
-// Checks over the hourly log files (part_log_3_days, query_log_details_7_days).
+// Checks over the hourly log files (part_log_3_days, query_log_exceptions_1_day).
 // The rules used raw rows over "the last N hours"; the files hold hourly
 // buckets, so a window is the buckets that END after now − N: the oldest one
 // may reach up to an hour further back (an accepted hour-bucket fidelity).
@@ -136,11 +136,11 @@ func checkBackgroundFailures(b *bundle.Bundle, mode string) ([]row, error) {
 }
 
 // exceptionsByHour counts failed queries per (hour, code) from
-// query_log_details_7_days. That file repeats a query once per table it
-// touched (LEFT ARRAY JOIN tables), so each query group is counted once:
-// the largest count among its per-table rows.
+// query_log_exceptions_1_day, which counts each query once (the per-table
+// rows of query_log_details_7_days cannot be told apart from separate
+// executions of one pattern on different tables).
 func exceptionsByHour(b *bundle.Bundle, window time.Duration, keep func(r bundle.Row) bool) (map[[2]string]*excAgg, error) {
-	rows, err := b.Rows("system.query_log_details_7_days")
+	rows, err := b.Rows("system.query_log_exceptions_1_day")
 	if err != nil {
 		return nil, err
 	}
@@ -148,9 +148,7 @@ func exceptionsByHour(b *bundle.Bundle, window time.Duration, keep func(r bundle
 	if err != nil {
 		return nil, err
 	}
-	type gkey struct{ hour, kind, typ, user, iface, hash, code string }
-	groups := map[gkey]int64{}
-	msgs := map[gkey]string{}
+	out := map[[2]string]*excAgg{}
 	for _, r := range rows {
 		if !keep(r) {
 			continue
@@ -159,25 +157,15 @@ func exceptionsByHour(b *bundle.Bundle, window time.Duration, keep func(r bundle
 		if !ok {
 			continue
 		}
-		k := gkey{fmtHour(t), r.Str("query_kind"), r.Str("type"), r.Str("user"), r.Str("interface"), r.Str("normalized_query_hash"), r.Str("exception_code")}
-		if c := r.Int("count"); c > groups[k] {
-			groups[k] = c
-		}
-		if msgs[k] == "" {
-			msgs[k] = r.Str("exception")
-		}
-	}
-	out := map[[2]string]*excAgg{}
-	for k, n := range groups {
-		ok := [2]string{k.hour, k.code}
-		a := out[ok]
+		k := [2]string{fmtHour(t), r.Str("exception_code")}
+		a := out[k]
 		if a == nil {
 			a = &excAgg{}
-			out[ok] = a
+			out[k] = a
 		}
-		a.n += n
+		a.n += r.Int("count")
 		if a.msg == "" {
-			a.msg = msgs[k]
+			a.msg = r.Str("exception")
 		}
 	}
 	return out, nil
