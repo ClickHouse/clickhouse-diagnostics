@@ -12,6 +12,7 @@ import (
 
 	"clickhouse-diagnostic/internal"
 	"clickhouse-diagnostic/internal/alert"
+	"clickhouse-diagnostic/internal/bundle"
 	"clickhouse-diagnostic/internal/clustercollect"
 	"clickhouse-diagnostic/internal/collectmode"
 	"clickhouse-diagnostic/internal/config"
@@ -876,9 +877,14 @@ func main() {
 		fmt.Println("Evaluating alert rules...")
 		phaseStart = time.Now()
 		essentialRun, _ := watch.Tripped()
-		alertResults = alert.NewEvaluator(client, effectiveMode).WithEssential(essentialRun).
-			WithDetachedScope(detachedScope).WithKeeperDown(keeperDownReason).WithStop(watch.OverBudget).
-			RunAll(alertsDir, serverVersion)
+		ev := alert.NewEvaluator(client, effectiveMode).WithEssential(essentialRun).
+			WithDetachedScope(detachedScope).WithKeeperDown(keeperDownReason).WithStop(watch.OverBudget)
+		// The checks read JSONEachRow files; with -output-format native or
+		// tsv the rules run their queries live instead.
+		if outputFormat.Name == query.FormatJSONL.Name {
+			ev = ev.WithBundle(bundle.Open(finalOutputDir, collectorStatus(rec)).WithWindowEnd(collectTo))
+		}
+		alertResults = ev.RunAll(alertsDir, serverVersion)
 		rec.Phase("alerts", time.Since(phaseStart), "")
 		for _, r := range alertResults {
 			status := "clean"
@@ -1489,4 +1495,21 @@ func isAccessDenied(err error) bool {
 	}
 	msg := err.Error()
 	return strings.Contains(msg, "Code: 497") || strings.Contains(msg, "ACCESS_DENIED")
+}
+
+// collectorStatus says, per collector without a file, why: the alert checks
+// report "not applicable: skipped (reason)" instead of a clean result.
+func collectorStatus(rec *runlog.Recorder) map[string]bundle.Status {
+	out := map[string]bundle.Status{}
+	for _, e := range rec.Entries() {
+		if e.Stage != "collector" || (e.Status != "skipped" && e.Status != "failed") {
+			continue
+		}
+		reason := e.Extra
+		if e.Status == "failed" && e.Error != "" {
+			reason = e.Error
+		}
+		out[strings.TrimSuffix(e.Name, ".sql")] = bundle.Status{State: e.Status, Reason: reason}
+	}
+	return out
 }

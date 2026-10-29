@@ -23,6 +23,13 @@ tags:
 # 24.1+ variant: excludes already-killed mutations via is_killed = 0,
 # which was added to system.mutations in 24.1. The root variant omits
 # this filter for older servers where the column does not exist.
+# Evaluated by the Go check over the files already collected (no second
+# query to the server). query: below is the same test in SQL, for the
+# customer to run live; the check mirrors it.
+check: go:mutation_running_too_long
+source:
+  - system.mutations
+  - system.version
 query: |
   SELECT
     database,

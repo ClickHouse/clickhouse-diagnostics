@@ -61,6 +61,16 @@
 //	Use {column_name} in the message string; the evaluator substitutes the
 //	column value from each result row.  One alert instance is created per row.
 //
+// Checks
+// ──────
+//
+//	check: go:<name> names a Go function (internal/alert/checks_*.go,
+//	RegisterCheck) evaluated over the files the collectors wrote — the rule
+//	sends no query. source: lists those files. query: stays the same test
+//	in SQL, shown to the customer to run live. A file that was not collected
+//	makes the rule not applicable, naming the collector and why. A rule
+//	without check: runs its query against the server.
+//
 // Security
 // ────────
 //
@@ -82,6 +92,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"clickhouse-diagnostic/internal"
+	"clickhouse-diagnostic/internal/bundle"
 	"clickhouse-diagnostic/internal/query"
 	"clickhouse-diagnostic/pkg"
 )
@@ -122,6 +133,12 @@ type Definition struct {
 	// (system.zookeeper_connection): skipped, with the reason, on a server
 	// that has none.
 	Needs string `yaml:"needs"`
+	// Source and Check: the rule is evaluated by a registered Go function
+	// over the collected files (go:<name>, see checks.go), not by running
+	// its query on the server. Query then is only what the customer is
+	// given to run on their own cluster to see the same thing.
+	Source []string `yaml:"source"`
+	Check  string   `yaml:"check"`
 }
 
 // InvestigateQuery is one follow-up query in a rule file.
@@ -212,6 +229,14 @@ type Evaluator struct {
 	// stop, when it returns true, skips every rule not yet run (the run's
 	// time budget is spent).
 	stop func() bool
+	// bundle is the run's collected data, read by Go-check rules.
+	bundle *bundle.Bundle
+}
+
+// WithBundle gives Go-check rules the collected data of this run.
+func (ev *Evaluator) WithBundle(b *bundle.Bundle) *Evaluator {
+	ev.bundle = b
+	return ev
 }
 
 // WithKeeperDown skips rules that need a live Keeper session.
@@ -585,19 +610,23 @@ func (ev *Evaluator) evalFile(path string) Result {
 		return r
 	}
 
-	if ev.stop != nil && ev.stop() {
+	// The three gates below protect the server from a live rule query. A Go
+	// check reads the collected files only: whether its source was collected
+	// (skipped in an essential run, without Keeper, past the budget) decides.
+	live := def.Check == "" || ev.bundle == nil
+	if live && ev.stop != nil && ev.stop() {
 		r.Skipped = true
 		r.Reason = "not run: the collection's time budget was spent"
 		fmt.Printf("  [alert] skipped %q (%s)\n", def.Name, r.Reason)
 		return r
 	}
-	if ev.keeperDown != "" && def.Needs == "keeper" {
+	if live && ev.keeperDown != "" && def.Needs == "keeper" {
 		r.Skipped = true
 		r.Reason = "not run: it needs a live Keeper session — " + ev.keeperDown
 		fmt.Printf("  [alert] skipped %q (%s)\n", def.Name, r.Reason)
 		return r
 	}
-	if ev.essential && def.Tier == "full" {
+	if live && ev.essential && def.Tier == "full" {
 		r.Skipped = true
 		r.Reason = "not run in an essential collection (it scans per-table data)"
 		fmt.Printf("  [alert] skipped %q (%s)\n", def.Name, r.Reason)
@@ -623,6 +652,12 @@ func (ev *Evaluator) evalFile(path string) Result {
 			return r
 		}
 		followUps = append(followUps, Investigation{Title: inv.Title, Query: strings.TrimSpace(q)})
+	}
+
+	// No bundle (a -output-format the checks cannot read): the rule's query
+	// runs live, as before checks existed.
+	if def.Check != "" && ev.bundle != nil {
+		return ev.evalCheck(def, r, sql, followUps)
 	}
 
 	resp, err := ev.query(sql)

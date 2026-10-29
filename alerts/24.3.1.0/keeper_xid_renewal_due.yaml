@@ -51,6 +51,15 @@ tags:
 # up; on one node both sides are that node.
 # Reads system.zookeeper_connection: needs a live Keeper session.
 needs: keeper
+# Evaluated by the Go check over the files already collected (no second
+# query to the server). query: below is the same test in SQL, for the
+# customer to run live; the check mirrors it.
+check: go:keeper_xid_renewal_due
+source:
+  - system.zookeeper_connection
+  - system.metric_log_7_days
+  - system.metric_log_by_host_3_days
+  - system.version
 query: |
   WITH
     conn AS

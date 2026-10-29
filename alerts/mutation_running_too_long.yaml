@@ -25,6 +25,13 @@ tags:
 # `is_killed = 0` filter (it would raise UNKNOWN_IDENTIFIER on older
 # servers). See 24.1.1.0/mutation_running_too_long.yaml for the variant
 # that excludes already-killed mutations.
+# Evaluated by the Go check over the files already collected (no second
+# query to the server). query: below is the same test in SQL, for the
+# customer to run live; the check mirrors it.
+check: go:mutation_running_too_long
+source:
+  - system.mutations
+  - system.version
 query: |
   SELECT
     database,

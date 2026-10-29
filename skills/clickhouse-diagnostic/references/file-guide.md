@@ -11,7 +11,7 @@ Windows: `*_7_days` files cover the last 7 days (or `-from/-to`); `system.text_l
 ### system.version
 **Why we run it:** every threshold, default and bug-fix statement is version-dependent; without it the rest of the bundle cannot be interpreted safely.
 **Question:** which exact server build produced this bundle?
-**Read first:** the single `version` value (`MAJOR.MINOR.PATCH.BUILD`).
+**Read first:** the single `version` value (`MAJOR.MINOR.PATCH.BUILD`); from v0.9 also `hostname` (hashed in gov), the server `timezone` and `collected_at` — the server's `now()` at collection, which every DateTime in the other files is relative to (the alert checks measure their windows from it).
 **Healthy looks like:** a recent patch of an LTS minor (`YY.3`, `YY.8`) or the current stable.
 **Red flags:** a `.1`/`.2` patch of a minor (contains none of that minor's bug fixes); a minor older than ~12 months (out of support); versions differing across nodes in `system.clusters`/logs banners (P-31, P-54).
 **Traps:** Cloud builds (`26.2.1.558`-style) may include changes not in the OSS tag.
@@ -32,7 +32,7 @@ Windows: `*_7_days` files cover the last 7 days (or `-from/-to`); `system.text_l
 **Read first:** non-system tables by `engine`; `partition_key` and `sorting_key` of the tables that show up in parts/queries findings; count of `MaterializedView` per source (`dependencies_table`); `engine_full` for `SETTINGS` overrides (`parts_to_throw_insert`, `ttl_only_drop_parts`, `min_age_to_force_merge_seconds`, `storage_policy`); `total_rows` / `total_bytes` to tell the tables that hold data from the empty ones; on ≥ 26.6 `target_table` for what each MV writes to (the implicit `.inner_id.*` target included). For the shape of the whole pipeline open `schema_graph.html` from the dashboard's Schema tab rather than reading arrays.
 **Healthy looks like:** MergeTree-family tables with a sorting key that starts with low-cardinality filter columns, partition keys at day/month granularity, ≤ ~10 MVs per source, TTL declared on log-like tables.
 **Red flags:** `sorting_key = ''`/`tuple()` on large tables, high-cardinality partition keys (P-03, P-50); dozens of MVs on one source (P-34); `TTL` in DDL but no TTL activity in `part_log` (P-18); `Nullable` key columns; `Join`/`Buffer`/`Kafka` engines involved in a hang (P-21).
-**Traps:** in gov no DDL/keys survive (identifiers and the dependency arrays are hashed); `create_table_query` carries comments and defaults — never paste it verbatim outside the machine (`privacy.md`); engine credentials read `'[HIDDEN]'` (server-masked on ≥ 23.x, collector-redacted otherwise) — a bundle from a tool build before this redactor and a 22.x server may still carry them raw.
+**Traps:** in gov `database`/`name` are hashed — `is_system_db` (v0.9) says which rows are system tables; in gov no DDL/keys survive (identifiers and the dependency arrays are hashed); `create_table_query` carries comments and defaults — never paste it verbatim outside the machine (`privacy.md`); engine credentials read `'[HIDDEN]'` (server-masked on ≥ 23.x, collector-redacted otherwise) — a bundle from a tool build before this redactor and a 22.x server may still carry them raw.
 **Pairs with:** `system.parts` (explain counts), `system.columns` (types), `query_log_details` (which tables are hot).
 
 ### system.view_refreshes (≥ 23.12)
@@ -70,6 +70,15 @@ Windows: `*_7_days` files cover the last 7 days (or `-from/-to`); `system.text_l
 **Red flags:** > 300 parts in one partition (HC-2.1, P-01), hundreds of level-0 parts (HC-2.2), avg rows < 10k (HC-2.3, P-02), a part > 150 GiB (HC-2.9), `system` among the largest databases (HC-4.4, P-17), `delete_ttl_info_*` = 1970 on tables with TTL (P-18), `is_frozen = 1` leftovers, `disk_name` pointing at a cold volume unexpectedly (P-45).
 **Traps:** current bundles hold **active parts only, largest first, capped at 50 000 rows** — exactly 50 000 rows means the smallest parts were cut off (the per-partition counts for small-part tables may be understated); bundles from before September 2026 also include inactive parts — filter `active = 1` regardless; `partition` (value) is hashed in gov while `partition_id` is not; single replica even in cloud mode.
 **Pairs with:** `system.tables` (keys explain counts), `part_log` (are merges happening), `system.merges` (are they stuck), `system.mutations` (what pins them).
+
+### system.parts_by_partition (v0.9, essential)
+**Why we run it:** the part count per partition without reading every part — the one number `TOO_MANY_PARTS` depends on, kept even in an essential collection, where `system.parts` is skipped.
+**Question:** which partitions are piling up parts?
+**Read first:** `parts` per `(database, table, partition_id)`; `min_level` (0 = unmerged inserts still present); `rows / parts`.
+**Healthy looks like:** an empty file — it keeps only partitions with more than 100 active parts.
+**Red flags:** `parts` > 300 (the `too_many_parts` alert, HC-2.1, P-01); `parts` near `parts_to_delay_insert` (1000) or `parts_to_throw_insert` (3000) = inserts already delayed or about to fail with 252.
+**Traps:** capped at 2000 partitions, largest first; user databases only; `database`/`table` hashed in gov; single replica in cloud.
+**Pairs with:** `system.parts` (when collected), `part_log_3_days` (insert rate against merges), `system.merges`.
 
 ### system.settings and system.server_settings (≥ 23.3 for server_settings on onprem/gov)
 **Why we run it:** "which settings deviate from defaults" used to require `configuration/`, which cloud bundles never have and gov never ships; these two tables answer it directly, with the ClickHouse default next to the value.
@@ -203,7 +212,7 @@ Windows: `*_7_days` files cover the last 7 days (or `-from/-to`); `system.text_l
 **Read first:** `event_time`, `signal` (11 SIGSEGV, 6 SIGABRT, 7 SIGBUS), `version`, `query_id`, first frames of `trace_full`.
 **Healthy looks like:** 0-byte file (the file exists, empty).
 **Red flags:** any row = critical (HC-1.1, P-30); identical top frames across rows = deterministic trigger; `query_id` set = a query caused it (find its hash in `query_log_details`).
-**Traps:** not collected in gov; OOM-kills by the OS leave **no** row here (look for restarts in `logs/` instead, P-13); on cloud the table exists only on the replica that crashed.
+**Traps:** gov collects it from v0.9 without `trace`/`trace_full` and with `query_id` hashed; OOM-kills by the OS leave **no** row here (look for restarts in `logs/` instead, P-13); on cloud the table exists only on the replica that crashed, so the fan-out fails when any replica never crashed — `system.crash_log_presence` (cloud, v0.9) lists the replicas that have the table: empty = nobody crashed; rows but no `crash_log` file = crashes that could not be read.
 **Pairs with:** `logs/` `<Fatal>` blocks (full symbolised stack), `system.version`, `query_log_details`.
 
 ### system.stack_trace
@@ -271,13 +280,22 @@ Windows: `*_7_days` files cover the last 7 days (or `-from/-to`); `system.text_l
 **Traps:** **`LEFT ARRAY JOIN tables` duplicates each group once per table with all sums repeated — fix one `tables` value (or `tables = ''`) before summing, never re-sum across rows**; `type = 'QueryStart'` rows carry no resource data; every metric is a **sum over the hour bucket** — divide by `count`; `query` is a 500-char sample of one query; in gov there is no `query`/`exception` and identifiers are hashed.
 **Pairs with:** `query_analysis/` (drill into one hash), `system.tables` (schema of the hot tables), `metric_log` (memory in the same hours), `system.errors`.
 
+### system.query_log_exceptions_1_day (v0.9, essential)
+**Why we run it:** the exact number of failed queries per hour and code — the count `query_log_details_7_days` cannot give, since it repeats a query once per table; the exception alerts read it.
+**Question:** which error codes spiked, in which hour?
+**Read first:** `count` by `(time, exception_code)` for `type = 'ExceptionWhileProcessing'` (failed while running); `ExceptionBeforeStart` separately (refused: 202 too many queries, parse and access errors).
+**Healthy looks like:** a few client-side codes, flat across hours.
+**Red flags:** > 50 of one code in an hour (`high_exception_rate`), > 20 of 999 (`keeper_exception_spike`, P-40), > 10 of 202 in the last hour (`too_many_simultaneous_queries`, P-20), 241 (P-10), 252 (P-01).
+**Traps:** one day only (the alerts' look-back) — the 7-day trend is in `query_log_details_7_days`; `exception` is one sample per row and absent in gov; cloud sums every replica.
+**Pairs with:** `query_log_details_7_days` (which pattern, user, table), `system.errors`, `error_log_7_days`.
+
 ### system.part_log_3_days
 **Why we run it:** the history of background work — it shows whether merges keep up with inserts, how big inserts are, and which merges/mutations fail with which code; `system.merges` alone is a single instant.
 **Question:** what did background work do over the window — parts created, merged, mutated, fetched, removed — and did any of it fail?
 **Read first:** `event_type × merge_reason` totals; `error != 0` rows with `exception`/`distinct_exceptions`; `NewPart` per hour per table vs `MergeParts` per hour; `size_in_bytes/count` for NewPart (insert size) and MergeParts (merge size); `peak_memory_usage` maxima per table.
 **Healthy looks like:** NewPart ≈ insert count, MergeParts a steady fraction, `error = 0` everywhere, TTL merges present on tables that declare TTL, merge results growing in size (levels climbing).
 **Red flags:** MergeParts `error = 241` repeating on one partition (P-11), `error IN (40, 226, 1001, 49)` (P-31/P-30), NewPart thousands/hour with KB-sized parts (P-02), `DownloadPart` errors (P-44), no `TTLDeleteMerge` on TTL tables (P-18), `MutatePart` errors 53/70/117 (P-15/P-32), `system.*` tables with the largest merge memory (P-17).
-**Traps:** sums are per **12-hour** bucket (1-hour with `hostname` on ≥ 23.11) — divide by `count`; `part_name` is deliberately absent; older bundles have the unaliased `any(exception)` column; gov drops exception columns and splits `table_name` into hashed `database`/`table`.
+**Traps:** sums are per **1-hour** bucket with `hostname` (hashed in gov) on every version from v0.9 — older bundles used 12-hour buckets below 23.11; divide by `count`; `part_name` is deliberately absent; older bundles have the unaliased `any(exception)` column; gov drops exception columns and splits `table_name` into hashed `database`/`table`.
 **Pairs with:** `system.parts`, `system.merges`, `system.mutations`, `asynchronous_insert_log`.
 
 ### system.metric_log_7_days
