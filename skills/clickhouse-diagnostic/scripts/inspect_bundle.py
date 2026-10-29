@@ -405,6 +405,131 @@ def read_keeper_members(base: str) -> list:
     return members
 
 
+# ---- system.aggregated_zookeeper_log (26.3+): who loads Keeper, when it got
+# slow, where znodes pile up (HC-3.21-3.23, P-62-P-68). The three files exist
+# only on servers >= 26.3; absent files say nothing about Keeper.
+AZL_MIN = "system.aggregated_zookeeper_log_by_minute_1_day"
+AZL_HOUR = "system.aggregated_zookeeper_log_by_hour_2_days"
+AZL_PATHS = "system.aggregated_zookeeper_log_paths_1_day"
+AZL_REMOVES = ("Remove", "TryRemove", "RemoveRecursive")
+AZL_DEDUP = ("/blocks", "/async_blocks", "/deduplication_hashes")
+
+
+def count_h(n) -> str:
+    n = num(n) or 0
+    for div, unit in ((1e9, "B"), (1e6, "M"), (1e3, "k")):
+        if abs(n) >= div:
+            return f"{n / div:.1f}{unit}"
+    return str(int(n))
+
+
+def _median(xs):
+    xs = sorted(xs)
+    if not xs:
+        return 0
+    m = len(xs) // 2
+    return xs[m] if len(xs) % 2 else (xs[m - 1] + xs[m]) / 2
+
+
+def aggregated_zk_checks(base: str, add) -> None:
+    mins = read_jsonl(first(AZL_MIN + "_*.jsonl", base))
+    if mins:
+        by_host = {}
+        for r in mins:
+            by_host.setdefault(r.get("hostname") or "", []).append(r)
+        where = lambda r: f" on {r['hostname']}" if r.get("hostname") else ""
+        slow = [r for r in mins if (num(r.get("ops")) or 0) > 0 and (num(r.get("avg_latency_us")) or 0) >= 100_000]
+        if slow:
+            w = max(slow, key=lambda r: num(r.get("avg_latency_us")) or 0)
+            add("warning", "keeper",
+                f"Keeper requests averaged ≥ 100 ms in {len(slow)} minute(s) of the last day (normal is about 10–20 ms) — worst {round((num(w.get('avg_latency_us')) or 0) / 1000)} ms at {w.get('time')}{where(w)}",
+                f"{AZL_MIN} avg_latency_us (weighted, standalone requests)", "HC-3.21/P-65")
+        loss = [r for r in mins if (num(r.get("loss_failures")) or 0) > 0]
+        if loss:
+            add("warning", "keeper",
+                f"Keeper connection loss / session expired / timeout answers in {len(loss)} minute(s): {count_h(sum(num(r.get('loss_failures')) or 0 for r in loss))} requests, first {loss[0].get('time')}{where(loss[0])}, last {loss[-1].get('time')}{where(loss[-1])}",
+                f"{AZL_MIN} loss_failures — the minutes to match with text_log_keeper_1_day", "HC-3.21/P-57")
+        if len(by_host) >= 2:
+            med = {h: _median([num(r.get("avg_latency_us")) or 0 for r in rs if (num(r.get("ops")) or 0) > 0]) for h, rs in by_host.items()}
+            for h, m in med.items():
+                others = _median([v for k, v in med.items() if k != h])
+                if m >= 50_000 and m >= 10 * max(others, 1):
+                    add("warning", "keeper",
+                        f"One replica's Keeper requests are slow: {h} median {round(m / 1000)} ms per minute against {round(others / 1000, 1)} ms on the other {len(med) - 1} replica(s) — that replica's session or the Keeper member it is on, not Keeper as a whole",
+                        f"{AZL_MIN} per hostname; zookeeper_connection.host names the member", "HC-3.21/P-65")
+        for h, rs in by_host.items():
+            ops = [num(r.get("ops")) or 0 for r in rs]
+            base_ops = _median(ops)
+            peak = max(rs, key=lambda r: num(r.get("ops")) or 0)
+            p = num(peak.get("ops")) or 0
+            if p >= 10_000 and p >= 10 * max(base_ops, 1):
+                add("info", "keeper",
+                    f"Keeper request burst: {count_h(p)} requests in the minute {peak.get('time')}{where(peak)} against a median of {count_h(base_ops)} a minute — a restart (every table re-reads its parts) or several replicas reloading at once",
+                    f"{AZL_MIN} ops; restarts in text_log_keeper_1_day / execution_log uptime", "HC-3.21/P-64")
+    hours = read_jsonl(first(AZL_HOUR + "_*.jsonl", base))
+    if hours:
+        comp = Counter()
+        comp_hour = {}
+        for r in hours:
+            n = (num(r.get("ops")) or 0) + (num(r.get("in_multi")) or 0)
+            c = r.get("component") or "(none)"
+            comp[c] += n
+            comp_hour.setdefault(c, Counter())[r.get("time")] += n
+        total = sum(comp.values())
+        if total:
+            add("info", "keeper",
+                "Keeper requests by ClickHouse component over two days: " + ", ".join(f"{c} {100 * n / total:.0f}%" for c, n in comp.most_common(5)) + f" of {count_h(total)}",
+                f"{AZL_HOUR} ops + in_multi per component", "HC-3.22")
+            top, n = comp.most_common(1)[0]
+            series = list(comp_hour[top].values())
+            peak, typical = max(series), _median(series)
+            if n >= 0.6 * total and peak >= 100_000 and peak >= 10 * max(typical, 1):
+                busy = Counter(r.get("busiest_replica") for r in hours if r.get("component") == top and r.get("busiest_replica"))
+                on = f", mostly from {busy.most_common(1)[0][0]}" if busy else ""
+                add("warning", "keeper",
+                    f"{top} sends {100 * n / total:.0f}% of all Keeper requests, peaking at {count_h(peak)} an hour against a typical {count_h(typical)}{on} — a background task looping on Keeper",
+                    f"{AZL_HOUR} component × operation per hour; {AZL_PATHS} for the path", "HC-3.22/P-68")
+        slow = sorted((r for r in hours if (num(r.get("ops")) or 0) >= 100 and (num(r.get("avg_latency_us")) or 0) >= 1_000_000),
+                      key=lambda r: -(num(r.get("avg_latency_us")) or 0))
+        if slow:
+            add("warning", "keeper",
+                "Keeper operations averaging ≥ 1 s in an hour: " + "; ".join(f"{r.get('operation')} from {r.get('component')} {round((num(r.get('avg_latency_us')) or 0) / 1e6, 1)} s at {r.get('time')}" for r in slow[:3]),
+                f"{AZL_HOUR} avg_latency_us (weighted, standalone requests)", "HC-3.22/P-66/P-67")
+        rem = sum(num(r.get("ops")) or 0 for r in hours if r.get("operation") in AZL_REMOVES)
+        rem_nonode = sum(num((r.get("errors") or {}).get("ZNONODE")) or 0 for r in hours if r.get("operation") in AZL_REMOVES)
+        if rem >= 1_000_000 and rem_nonode >= 0.5 * rem:
+            add("warning", "keeper",
+                f"{100 * rem_nonode / rem:.0f}% of {count_h(rem)} Keeper removes answered ZNONODE — replicas deleting the same records (dedup cleanup), each failed delete still costs Keeper a commit",
+                f"{AZL_HOUR} errors on Remove / TryRemove / RemoveRecursive", "HC-3.22/P-62")
+    paths = read_jsonl(first(AZL_PATHS + "_*.jsonl", base))
+    if paths:
+        label = lambda r: r.get("path") or r.get("shape") or "?"
+        total = sum(num(r.get("ops")) or 0 for r in paths)
+        for r in sorted(paths, key=lambda r: -(num(r.get("net_creates")) or 0)):
+            net, cr, rm = num(r.get("net_creates")) or 0, num(r.get("creates")) or 0, num(r.get("removes")) or 0
+            if net >= 1_000_000 and cr >= 10 * max(rm, 1):
+                add("critical" if net >= 10_000_000 else "warning", "keeper",
+                    f"Znodes piling up under {label(r)}: {count_h(cr)} created and {count_h(rm)} removed in a day (+{count_h(net)}) — Keeper's memory and snapshot grow with it",
+                    f"{AZL_PATHS} creates / removes; keeper/<member>.txt zk_znode_count, zk_approximate_data_size", "HC-3.23/P-63")
+                break
+        if total:
+            top = max(paths, key=lambda r: num(r.get("ops")) or 0)
+            t = num(top.get("ops")) or 0
+            if t >= 0.5 * total and t >= 1_000_000:
+                im = num(top.get("in_multi")) or 0
+                objects = "/_objects" in label(top)
+                add("warning", "keeper",
+                    f"{label(top)} takes {100 * t / total:.0f}% of the requests on the busiest Keeper paths ({count_h(t)} in a day, {100 * im / max(t, 1):.0f}% inside Multi)"
+                    + (" — parts with very many files being loaded from object-storage metadata" if objects else ""),
+                    f"{AZL_PATHS} ops / in_multi / raw_paths", "HC-3.23/P-64" if objects else "HC-3.23")
+        rm_all = sum(num(r.get("removes")) or 0 for r in paths)
+        rm_dedup = sum(num(r.get("removes")) or 0 for r in paths if label(r).endswith(AZL_DEDUP))
+        if rm_all >= 1_000_000 and rm_dedup >= 0.5 * rm_all:
+            add("warning", "keeper",
+                f"Insert-deduplication records take {100 * rm_dedup / rm_all:.0f}% of Keeper removes ({count_h(rm_dedup)} in a day) — many small inserts, each leaving a block hash that every replica then cleans up",
+                f"{AZL_PATHS} removes on …/blocks, …/async_blocks, …/deduplication_hashes", "HC-3.23/P-62")
+
+
 def analyse(base: str):
     out = {"bundle": os.path.basename(os.path.normpath(base)), "findings": [], "notes": []}
     findings = out["findings"]
@@ -1305,6 +1430,7 @@ def analyse(base: str):
         if bad:
             add("warning", "keeper", "zookeeper_log: failed Keeper requests with loss errors — " + ", ".join(f"{e}={n}" for e, n in bad.items()),
                 "hours: " + ", ".join(sorted(loss_hours)[:8]), "HC-3.10")
+    aggregated_zk_checks(base, add)
     th = read_jsonl(first("system.text_log_histogram_1_day_*.jsonl", base))
     if th:
         per_hour = Counter()
