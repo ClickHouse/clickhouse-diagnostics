@@ -27,6 +27,7 @@ Under the hood: per-environment query sets (`cloud` / `onprem` / `gov`) selected
 | `system.text_log_histogram_1_day` | Warning-and-worse log lines per hour, level and component, with one example each | Says *when* errors started and *which* component, independent of the 2000-row `text_log` cap. |
 | `system.error_log_7_days` (≥ 24.8) | Every error code raised anywhere in the server, per hour, background threads included | The history behind `system.errors`: puts 999 / 242 / 252 / 107 on a timeline even when no query failed. |
 | `system.text_log_keeper_1_day` | Keeper session markers per hour (expired, finalized, reconnecting, connected to which host) | The minute a Keeper session was lost and where the server reconnected — lines that are below Warning level and never reach `text_log`. |
+| `system.aggregated_zookeeper_log_by_hour_2_days`, `_by_minute_1_day`, `_paths_1_day` (≥ 26.3) | Which ClickHouse component sends which Keeper requests and how slowly (hourly); Keeper latency, volume and failures per minute (per replica in cloud); the Keeper paths with the most requests and the most net creates | Says **who** is loading Keeper, **when** it got slow and **where** znodes pile up — from a table that is on by default (since 25.9, kept 30 days), where `zookeeper_log` usually is not. |
 | `system.metric_log_7_days` (hourly aggregation of `system.metric_log`) | Memory and background-pool load over time | Tells "the server was overloaded" apart from "one query misbehaved". |
 | `system.disks`, `system.detached_parts` | Is disk running out; has data been set aside as broken? | A full disk explains many other symptoms; detached parts record corruption or replication leftovers. |
 | `system.tables`, `system.columns`, `system.dictionaries`, `system.clusters` | Schema, keys, materialized views, dictionaries, topology | Findings in parts and queries are *explained* by the schema and the cluster definition. |
@@ -377,6 +378,9 @@ Most collection queries look back over a fixed period. Each declares its **own**
 | `system.text_log_histogram_1_day` | 1 day |
 | `system.text_log_keeper_1_day` | 1 day |
 | `system.zookeeper_log_errors_1_day` | 1 day |
+| `system.aggregated_zookeeper_log_by_hour_2_days` | 2 days |
+| `system.aggregated_zookeeper_log_by_minute_1_day` | 1 day |
+| `system.aggregated_zookeeper_log_paths_1_day` | 1 day |
 
 > `system.text_log` and `system.zookeeper_log` stop at 1 day: they are by far the highest-volume tables here (a busy cluster writes millions of Keeper log rows an hour), and a 7-day slice is too large to be useful in a support bundle. Use `-from` when you need more.
 
@@ -665,6 +669,7 @@ The tool targets **ClickHouse 22.8 and newer** for on-prem servers. Root-level q
 | `system.tables.metadata_version` | 24.2 | `queries.*/24.2.1.0/` |
 | `system.error_log` table | 24.8 | `queries.*/24.8.1.0/` (no root file — skipped below 24.8 in every mode) |
 | `system.database_replicas` table | 25.9 | `queries.*/25.9.1.0/` (no root file — skipped below 25.9 in every mode) |
+| `system.aggregated_zookeeper_log` with `component` (26.2) and `is_subrequest` (26.3) | 26.3 | `queries.*/26.3.1.0/` (no root file — skipped below 26.3 in every mode: the table exists from 25.9, but before 26.3 sub-requests share buckets with standalone requests and carry the whole Multi's latency) |
 | `system.zookeeper_log.duration_microseconds` (replaces `duration_ms`) | 24.3 | `queries.*/24.3.1.0/` (roots use `duration_ms`; output stays in ms on every rung) |
 | `system.tables.parameterized_view_parameters` | 25.4 | `queries.{onprem,cloud}/25.4.1.0/` (gov: not collected) |
 | `system.tables.target_database`, `target_table` (an MV's write target, including the implicit `.inner_id.*` table) | 26.6 | `queries.*/26.6.1.0/` (gov hashes both) |

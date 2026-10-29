@@ -219,6 +219,19 @@ func TestFindVersionedFiles_RealRepoDirs(t *testing.T) {
 		"queries.onprem/system.database_replicas.sql": true,
 		"queries.gov/system.database_replicas.sql":    true,
 		"queries.cloud/system.database_replicas.sql":  true,
+		// system.aggregated_zookeeper_log arrived in 25.9, `component` in 26.2
+		// and `is_subrequest` in 26.3. Before 26.3 sub-requests share buckets
+		// with standalone requests and carry the whole Multi's latency, so the
+		// three collectors exist from 26.3 only and older servers skip them.
+		"queries.onprem/system.aggregated_zookeeper_log_by_hour_2_days.sql":  true,
+		"queries.gov/system.aggregated_zookeeper_log_by_hour_2_days.sql":     true,
+		"queries.cloud/system.aggregated_zookeeper_log_by_hour_2_days.sql":   true,
+		"queries.onprem/system.aggregated_zookeeper_log_by_minute_1_day.sql": true,
+		"queries.gov/system.aggregated_zookeeper_log_by_minute_1_day.sql":    true,
+		"queries.cloud/system.aggregated_zookeeper_log_by_minute_1_day.sql":  true,
+		"queries.onprem/system.aggregated_zookeeper_log_paths_1_day.sql":     true,
+		"queries.gov/system.aggregated_zookeeper_log_paths_1_day.sql":        true,
+		"queries.cloud/system.aggregated_zookeeper_log_paths_1_day.sql":      true,
 		// system.zookeeper_connection.xid arrived in 24.3; the rule reads it
 		// and has no root twin on purpose — on an older server the check is
 		// not applicable, not failed.

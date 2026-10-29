@@ -194,6 +194,116 @@ FROM file('$B/system.metrics_*.jsonl', JSONEachRow) GROUP BY hostname ORDER BY c
 ```
 Server uptime and the error rate it implies: `SELECT value FROM file('$B/system.asynchronous_metrics_*.jsonl', JSONEachRow) WHERE metric = 'Uptime'` → divide `system.errors.value` and `system.events.value` by it. Fetches still in flight: `system.replicated_fetches_*.jsonl` sorted by `elapsed`. Warning/Error volume per hour and component: `system.text_log_histogram_1_day_*.jsonl` (`time, level, logger_class, count, example`).
 
+## 3b. Keeper requests — `aggregated_zookeeper_log` (≥ 26.3)
+
+Three files from `system.aggregated_zookeeper_log`: **who** sends Keeper requests (`_by_hour_2_days`, component × operation), **when** they were slow (`_by_minute_1_day`, per replica in cloud) and **where** they go (`_paths_1_day`). Latency is in microseconds, weighted by request count, standalone requests only; `ops` counts standalone requests and `in_multi` the sub-requests inside Multi / MultiRead.
+
+Who loads Keeper — component share over the window, and the hourly shape of the top component:
+```sql
+SELECT component, sum(toUInt64(ops) + toUInt64(in_multi)) AS requests,
+       round(100 * requests / sum(requests) OVER (), 1) AS pct,
+       round(sum(toFloat64(avg_latency_us) * toUInt64(ops)) / nullIf(sum(toUInt64(ops)), 0) / 1000, 1) AS avg_ms
+FROM file('$B/system.aggregated_zookeeper_log_by_hour_2_days_*.jsonl', JSONEachRow)
+GROUP BY component ORDER BY requests DESC LIMIT 10;
+SELECT time, sum(toUInt64(ops) + toUInt64(in_multi)) AS requests
+FROM file('$B/system.aggregated_zookeeper_log_by_hour_2_days_*.jsonl', JSONEachRow)
+WHERE component = '<top component>' GROUP BY time ORDER BY time
+```
+Slow operations, and the ZNONODE share of removes (P-62):
+```sql
+SELECT time, component, operation, toUInt64(ops) AS ops, round(toFloat64(avg_latency_us) / 1e6, 2) AS avg_s
+FROM file('$B/system.aggregated_zookeeper_log_by_hour_2_days_*.jsonl', JSONEachRow)
+WHERE toUInt64(ops) >= 100 AND toFloat64(avg_latency_us) >= 1e6 ORDER BY avg_s DESC LIMIT 20;
+SELECT sum(ops + in_multi) AS removes, sum(errors['ZNONODE']) AS znonode, round(100 * znonode / nullIf(removes, 0), 1) AS pct
+FROM file('$B/system.aggregated_zookeeper_log_by_hour_2_days_*.jsonl', JSONEachRow,
+          'operation String, ops UInt64, in_multi UInt64, errors Map(String, UInt64)')  -- schema given: the map would be inferred as a tuple
+-- errors counts standalone requests AND sub-requests inside Multi, so the denominator does too
+WHERE operation IN ('Remove', 'TryRemove', 'RemoveRecursive')
+```
+When, and which replica (cloud: `hostname`; onprem/gov files have one server and no hostname column):
+```sql
+SELECT hostname, round(quantileExact(0.5)(toFloat64(avg_latency_us)) / 1000, 1) AS median_ms,
+       round(max(toFloat64(avg_latency_us)) / 1000, 1) AS worst_ms, sum(toUInt64(loss_failures)) AS loss
+FROM file('$B/system.aggregated_zookeeper_log_by_minute_1_day_*.jsonl', JSONEachRow)
+WHERE toUInt64(ops) > 0 GROUP BY hostname ORDER BY median_ms DESC
+```
+Where — growth and hot paths (gov files: `shape` instead of `path`):
+```sql
+SELECT path, toUInt64(creates) AS creates, toUInt64(removes) AS removes, toInt64(net_creates) AS net, toUInt64(raw_paths) AS raw_paths
+FROM file('$B/system.aggregated_zookeeper_log_paths_1_day_*.jsonl', JSONEachRow) ORDER BY net DESC LIMIT 10;
+SELECT path, toUInt64(ops) AS ops, round(100 * toUInt64(in_multi) / ops, 1) AS pct_in_multi, toUInt64(raw_paths) AS raw_paths
+FROM file('$B/system.aggregated_zookeeper_log_paths_1_day_*.jsonl', JSONEachRow) ORDER BY ops DESC LIMIT 10
+```
+
+### Live queries to give the customer (their server ≥ 25.9; `is_subrequest` needs ≥ 26.3)
+
+The bundle windows are fixed (2 days / 1 day / 1 day); for an older incident, or to confirm a fix, have the customer run these on their own cluster — the table keeps 30 days. Replace `<cluster>` (Cloud: `default`), `<t0>` / `<t1>` (the incident window) and `<b0>` / `<b1>` (a normal window of the same length, before the incident). Read-only, against one day of one system table; narrow the window to hours on very busy services. On 25.9–26.2 drop the `is_subrequest` conditions — counts then include sub-requests and Multi latency is repeated on them.
+
+1. Keeper latency and failures per minute and replica — which replica, which minute (P-65, HC-3.21):
+```sql
+SELECT toStartOfMinute(event_time) AS minute, hostname,
+       sumIf(count, is_subrequest = 0) AS ops,
+       round(sumIf(average_latency * count, is_subrequest = 0) / nullIf(ops, 0) / 1000, 1) AS avg_ms,
+       round(maxIf(average_latency, is_subrequest = 0) / 1000, 1) AS worst_group_ms,
+       sum(arraySum(mapValues(mapFilter((code, n) -> code != 'ZOK', errors)))) AS failed
+FROM clusterAllReplicas('<cluster>', system.aggregated_zookeeper_log)
+WHERE event_date >= toDate('<t0>') AND event_time >= '<t0>' AND event_time < '<t1>'
+GROUP BY minute, hostname ORDER BY minute, hostname
+```
+2. Sessions in the incident window against a baseline — the session that degraded:
+```sql
+SELECT hostname, session_id,
+       sumIf(count, event_time >= '<t0>' AND event_time < '<t1>' AND is_subrequest = 0) AS window_ops,
+       round(sumIf(average_latency * count, event_time >= '<t0>' AND event_time < '<t1>' AND is_subrequest = 0) / greatest(window_ops, 1) / 1000, 1) AS window_ms,
+       sumIf(count, event_time >= '<b0>' AND event_time < '<b1>' AND is_subrequest = 0) AS baseline_ops,
+       round(sumIf(average_latency * count, event_time >= '<b0>' AND event_time < '<b1>' AND is_subrequest = 0) / greatest(baseline_ops, 1) / 1000, 2) AS baseline_ms
+FROM clusterAllReplicas('<cluster>', system.aggregated_zookeeper_log)
+WHERE event_date >= toDate('<b0>') AND event_time >= '<b0>' AND event_time < '<t1>'
+GROUP BY hostname, session_id HAVING window_ops > 0 ORDER BY window_ms DESC LIMIT 30
+```
+3. Which component sends what (P-62, P-66–P-68) — needs **26.2+** (`component` arrived then; on 25.9–26.1 drop `component` from the SELECT and the GROUP BY for per-operation totals, and drop the `is_subrequest` conditions as above):
+```sql
+SELECT component, operation, sumIf(count, is_subrequest = 0) AS ops, sumIf(count, is_subrequest = 1) AS in_multi,
+       round(sumIf(average_latency * count, is_subrequest = 0) / nullIf(ops, 0) / 1000, 1) AS avg_ms,
+       sumMap(mapFilter((code, n) -> code != 'ZOK', errors)) AS failures
+FROM clusterAllReplicas('<cluster>', system.aggregated_zookeeper_log)
+WHERE event_date >= toDate('<t0>') AND event_time >= '<t0>' AND event_time < '<t1>'
+GROUP BY component, operation ORDER BY ops + in_multi DESC LIMIT 30
+```
+4. Paths with the most requests and the most growth (P-63, P-64):
+```sql
+-- two passes: one pass leaves the second of two adjacent numbers (/tables/01/123/ → /tables/N/123/)
+SELECT replaceRegexpAll(replaceRegexpAll(parent_path, '/[0-9]+(/|$)', '/N\\1'), '/[0-9]+(/|$)', '/N\\1') AS path, sum(count) AS ops, sumIf(count, is_subrequest = 1) AS in_multi,
+       -- successful requests only: a CreateIfNotExists answered ZNODEEXISTS, or a Remove answered ZNONODE, changes nothing
+       sumIf(greatest(toInt64(count) - toInt64(arraySum(mapValues(mapFilter((code, n) -> code != 'ZOK', errors)))), 0), operation IN ('Create', 'CreateIfNotExists')) AS creates,
+       sumIf(greatest(toInt64(count) - toInt64(arraySum(mapValues(mapFilter((code, n) -> code != 'ZOK', errors)))), 0), operation IN ('Remove', 'TryRemove', 'RemoveRecursive')) AS removes,
+       toInt64(creates) - toInt64(removes) AS net_creates  -- a request balance: one RemoveRecursive deletes a subtree
+FROM clusterAllReplicas('<cluster>', system.aggregated_zookeeper_log)
+WHERE event_date >= toDate('<t0>') AND event_time >= '<t0>' AND event_time < '<t1>' AND parent_path != ''
+GROUP BY path ORDER BY ops DESC LIMIT 20
+```
+5. Removes per path and how many found nothing to delete (P-62):
+```sql
+SELECT parent_path, sum(count) AS removes,
+       sum(arraySum(mapValues(mapFilter((code, n) -> code = 'ZNONODE', errors)))) AS znonode  -- the map's keys are an Enum: filter, don't index
+FROM clusterAllReplicas('<cluster>', system.aggregated_zookeeper_log)
+WHERE event_date >= toDate('<t0>') AND event_time >= '<t0>' AND event_time < '<t1>'
+  AND operation IN ('Remove', 'TryRemove', 'RemoveRecursive')
+GROUP BY parent_path ORDER BY removes DESC LIMIT 20
+```
+6. Creates against removes per minute on one subtree — growth and the moment cleanup stalled (P-63):
+```sql
+SELECT toStartOfMinute(event_time) AS minute,
+       sumIf(greatest(toInt64(count) - toInt64(arraySum(mapValues(mapFilter((code, n) -> code != 'ZOK', errors)))), 0), operation IN ('Create', 'CreateIfNotExists')) AS creates,
+       sumIf(greatest(toInt64(count) - toInt64(arraySum(mapValues(mapFilter((code, n) -> code != 'ZOK', errors)))), 0), operation IN ('Remove', 'TryRemove', 'RemoveRecursive')) AS removes
+FROM clusterAllReplicas('<cluster>', system.aggregated_zookeeper_log)
+WHERE event_date >= toDate('<t0>') AND event_time >= '<t0>' AND event_time < '<t1>'
+  AND parent_path LIKE '%/mergetree/_objects%'
+-- successful requests; confirm the growth itself with `echo mntr | nc <keeper> 9181` (zk_znode_count) over time
+GROUP BY minute ORDER BY minute
+```
+**Pitfalls the escalations hit:** totals without an `operation` / `is_subrequest` filter count every Multi twice (its envelope, whose `parent_path` is empty, and its sub-requests) — once 247M Gets sat inside 112k MultiReads; the `errors` map includes `ZOK`, so filter it before counting failures; average `average_latency` only weighted by `count`; each server records only its own sessions, so a ranking says nothing about other clients of the same Keeper; and always compare with a baseline window — a top-N without one cannot show a change. Collect the table before a rollback or a downgrade if the comparison matters.
+
 ## 4. Disk and storage
 
 ```sql
