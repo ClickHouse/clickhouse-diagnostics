@@ -1,3 +1,4 @@
+-- tier: essential
 SELECT
   create_time,
   -- database is hashed exactly as in system.replicas, so a queue entry can

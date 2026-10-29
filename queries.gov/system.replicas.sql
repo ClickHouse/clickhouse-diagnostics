@@ -1,3 +1,4 @@
+-- tier: essential
 SELECT
     hex(SHA256(concat(database, '%salt%'))) AS database,
     hex(SHA256(concat(table, '%salt%')))    AS table,

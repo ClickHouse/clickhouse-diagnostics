@@ -1,3 +1,4 @@
+-- tier: essential
 SELECT
     toStartOfInterval(event_time, toIntervalHour(1)) AS time,
     query_kind,

@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"clickhouse-diagnostic/internal"
+	"clickhouse-diagnostic/internal/collectmode"
 	"clickhouse-diagnostic/internal/runlog"
 	"clickhouse-diagnostic/pkg"
 )
@@ -18,6 +19,34 @@ type Manager struct {
 	to       time.Time
 	mode     string
 	rec      *runlog.Recorder
+	watch    *collectmode.Watchdog
+	lookback time.Duration
+	scope    [2]string
+	keeperDn string
+}
+
+// WithKeeperDown passes the no-Keeper-session reason to the executor.
+func (m *Manager) WithKeeperDown(reason string) *Manager {
+	m.keeperDn = reason
+	return m
+}
+
+// WithDetachedScope passes the detached-parts scope to the executor.
+func (m *Manager) WithDetachedScope(scope, qualified string) *Manager {
+	m.scope = [2]string{scope, qualified}
+	return m
+}
+
+// WithWatchdog passes the collection-mode watchdog to the executor.
+func (m *Manager) WithWatchdog(w *collectmode.Watchdog) *Manager {
+	m.watch = w
+	return m
+}
+
+// WithMaxLookback caps every query's default window (essential: 1 day).
+func (m *Manager) WithMaxLookback(d time.Duration) *Manager {
+	m.lookback = d
+	return m
 }
 
 // WithMode sets the topology mode used for {sys.<table>} expansion.
@@ -80,7 +109,8 @@ func (m *Manager) ExecuteQueries(client *pkg.ClickHouseClient, queriesDir string
 
 	// Execute the selected queries and get the specific output directory
 	executor := NewExecutor(client).WithSalt(salt).WithOutputFormat(m.format).
-		WithWindow(m.from, m.to).WithMode(m.mode).WithRecorder(m.rec)
+		WithWindow(m.from, m.to).WithMode(m.mode).WithRecorder(m.rec).
+		WithWatchdog(m.watch).WithMaxLookback(m.lookback).WithDetachedScope(m.scope[0], m.scope[1]).WithKeeperDown(m.keeperDn)
 	finalOutputDir, err := executor.ExecuteQueries(selectedQueries, outputDir)
 	if err != nil {
 		return "", fmt.Errorf("error executing queries: %w", err)

@@ -1,3 +1,4 @@
+-- tier: essential
 -- Point-in-time CurrentMetrics. The rows that matter in an incident:
 -- ZooKeeperSession (0 = no Keeper session), ZooKeeperWatch/Request,
 -- ReadonlyReplica, ReplicatedFetch/ReplicatedSend, S3Requests,

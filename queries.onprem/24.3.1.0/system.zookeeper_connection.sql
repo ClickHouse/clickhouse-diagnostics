@@ -1,3 +1,5 @@
+-- tier: essential
+-- needs: keeper
 -- 24.3 override of the 23.8 file: adds xid, last_zxid_seen and
 -- availability_zone. xid is the session's request counter (Int32); at 2^31
 -- the client renews the session, which shows up as a burst of hardware

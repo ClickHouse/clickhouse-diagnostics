@@ -1,3 +1,4 @@
+-- tier: essential
 -- Gov: additionally drops every per-object gauge (DiskUsed_<disk>,
 -- NetworkSendBytes_<iface>, BlockReadOps_<device>, …) — the suffix is an
 -- infrastructure name that cannot be hashed inside a metric name.

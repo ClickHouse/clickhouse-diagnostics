@@ -1,3 +1,5 @@
+-- tier: essential
+-- needs: keeper
 -- Which Keeper node this server is connected to and for how long. A
 -- session_uptime_elapsed_seconds far below server uptime means the session was
 -- re-established recently (expiry, Keeper leader change, network); is_expired = 1

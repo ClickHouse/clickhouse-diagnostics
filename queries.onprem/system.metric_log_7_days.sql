@@ -1,3 +1,4 @@
+-- tier: essential
 SELECT
     toStartOfHour(event_time)           AS time,
     avg(CurrentMetric_BackgroundMergesAndMutationsPoolTask) AS avg_merge_pool_tasks,

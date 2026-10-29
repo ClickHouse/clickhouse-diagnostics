@@ -1,3 +1,4 @@
+-- tier: essential
 -- Part fetches in flight on every replica.
 SELECT
     hostName() AS hostname,

@@ -49,6 +49,8 @@ tags:
 # Per connection, and only where the host's traffic can be attributed to one
 # session. In cloud both {sys.*} fan out and the join on hostName() lines them
 # up; on one node both sides are that node.
+# Reads system.zookeeper_connection: needs a live Keeper session.
+needs: keeper
 query: |
   WITH
     conn AS

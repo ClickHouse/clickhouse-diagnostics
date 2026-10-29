@@ -1,3 +1,4 @@
+-- tier: essential
 SELECT
     time,
     avg(h_avg_merge)     AS avg_merge_pool_tasks,

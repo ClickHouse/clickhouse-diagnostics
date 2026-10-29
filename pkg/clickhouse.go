@@ -36,6 +36,8 @@ type ClickHouseClient struct {
 	// means no server-side limit, in which case the HTTP client is also
 	// left unbounded so the two stay consistent.
 	queryTimeout time.Duration
+	// margin is how much longer the HTTP client waits than queryTimeout.
+	margin time.Duration
 
 	// Dry-run state. When dryRun is true, ExecuteQuery prints the SQL
 	// and the system tables it would touch to dryOut, then returns an
@@ -58,6 +60,16 @@ type ClickHouseClient struct {
 }
 
 type setting struct{ name, value string }
+
+// RemoveSetting drops a setting added with SetSetting (no-op if absent).
+func (c *ClickHouseClient) RemoveSetting(name string) {
+	for i := range c.settings {
+		if c.settings[i].name == name {
+			c.settings = append(c.settings[:i], c.settings[i+1:]...)
+			return
+		}
+	}
+}
 
 // SetSetting adds a query setting to every request from now on, or replaces
 // its value if it is already set. Like the pinned settings it is applied by
@@ -82,6 +94,7 @@ func NewClickHouseClient(protocol, host, port, username, password string) *Click
 		username:   username,
 		password:   password,
 		httpClient: &http.Client{Timeout: DefaultQueryTimeout + clientTimeoutMargin},
+		margin:     clientTimeoutMargin,
 
 		queryTimeout: DefaultQueryTimeout,
 	}
@@ -99,8 +112,21 @@ func (c *ClickHouseClient) SetQueryTimeout(d time.Duration) {
 		c.httpClient.Timeout = 0
 		return
 	}
-	c.httpClient.Timeout = d + clientTimeoutMargin
+	c.httpClient.Timeout = d + c.margin
 }
+
+// SetClientMargin changes how much longer the HTTP client waits than the
+// server-side limit (default 60 s) and applies it to the current timeout.
+// An essential collection uses a few seconds: a server stuck reaching Keeper
+// can ignore max_execution_time, and a minute of margin per request is then
+// a minute lost per request.
+func (c *ClickHouseClient) SetClientMargin(d time.Duration) {
+	c.margin = d
+	c.SetQueryTimeout(c.queryTimeout)
+}
+
+// QueryTimeout is the current server-side per-query limit (0 = none).
+func (c *ClickHouseClient) QueryTimeout() time.Duration { return c.queryTimeout }
 
 // SetDryRun enables dry-run mode. While enabled, ExecuteQuery does NOT
 // contact the server — every query is printed to out (with its

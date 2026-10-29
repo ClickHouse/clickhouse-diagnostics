@@ -1,3 +1,4 @@
+-- tier: essential
 SELECT
     -- Per replica. Every replica keeps its own system.replicas, and on
     -- SharedMergeTree the queue columns are per replica too: inserts_in_queue

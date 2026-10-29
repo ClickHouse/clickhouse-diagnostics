@@ -2,6 +2,7 @@ package alert
 
 import (
 	"encoding/json"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -941,5 +942,75 @@ func TestRunAll_VersionSelectedRulesKeepTheirFollowUps(t *testing.T) {
 	}
 	for n := range want {
 		t.Errorf("%s did not fire in this test", n)
+	}
+}
+
+// An essential collection does not run rules that scan per-table data
+// (tier: full); they are reported as not run, never as clean, and the
+// essential ones still run.
+func TestEvalFile_EssentialSkipsFullTierRules(t *testing.T) {
+	heavy := "name: heavy\ntitle: Heavy\nseverity: warning\ntier: full\nquery: |\n  SELECT 1 AS x FROM {sys.parts}\nmessage: \"x\"\n"
+	light := "name: light\ntitle: Light\nseverity: warning\nquery: |\n  SELECT 1 AS x FROM {sys.metrics}\nmessage: \"x\"\n"
+	ran := 0
+	ev := (&Evaluator{mode: "onprem", queryFn: func(string) (string, error) { ran++; return noRows, nil }}).WithEssential(true)
+	r := ev.evalFile(writeRule(t, heavy))
+	if !r.Skipped || !strings.Contains(r.Reason, "essential collection") || ran != 0 {
+		t.Fatalf("full-tier rule in an essential run: %+v (queries sent: %d)", r, ran)
+	}
+	r = ev.evalFile(writeRule(t, light))
+	if r.Skipped || r.Error != "" {
+		t.Fatalf("essential rule did not run: %+v", r)
+	}
+	if r := (&Evaluator{mode: "onprem", queryFn: func(string) (string, error) { return noRows, nil }}).evalFile(writeRule(t, heavy)); r.Skipped {
+		t.Fatalf("full-tier rule skipped in a full run: %+v", r)
+	}
+	bad := "name: bad\ntitle: Bad\nseverity: warning\ntier: fast\nquery: |\n  SELECT 1\nmessage: \"x\"\n"
+	if r := ev.evalFile(writeRule(t, bad)); r.Error == "" {
+		t.Fatal("an unknown tier was accepted")
+	}
+}
+
+// The rules that scan per-table data are full-tier, and a version override
+// keeps its root rule's tier (else the essential set would change with the
+// server version).
+func TestAlertYAML_Tiers(t *testing.T) {
+	want := map[string]string{"large_parts": "full", "detached_parts_exist": "full", "parts_propagation_lag": "full", "replica_readonly": ""}
+	err := filepath.WalkDir("../../alerts", func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.HasSuffix(p, ".yaml") {
+			return err
+		}
+		raw, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		var def Definition
+		if err := yaml.Unmarshal(raw, &def); err != nil {
+			return err
+		}
+		if w, ok := want[def.Name]; ok && def.Tier != w {
+			t.Errorf("%s: tier %q, want %q", p, def.Tier, w)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestEvalFile_KeeperDownAndBudgetSkip(t *testing.T) {
+	zk := "name: zk\ntitle: Zk\nseverity: warning\nneeds: keeper\nquery: |\n  SELECT 1 AS x FROM {sys.zookeeper_connection}\nmessage: \"x\"\n"
+	light := "name: light\ntitle: Light\nseverity: warning\nquery: |\n  SELECT 1 AS x FROM {sys.metrics}\nmessage: \"x\"\n"
+	ran := 0
+	fn := func(string) (string, error) { ran++; return noRows, nil }
+	ev := (&Evaluator{mode: "onprem", queryFn: fn}).WithKeeperDown("no Keeper session")
+	if r := ev.evalFile(writeRule(t, zk)); !r.Skipped || !strings.Contains(r.Reason, "live Keeper session") || ran != 0 {
+		t.Fatalf("needs-keeper rule with Keeper down: %+v", r)
+	}
+	if r := ev.evalFile(writeRule(t, light)); r.Skipped {
+		t.Fatalf("other rule skipped: %+v", r)
+	}
+	spent := (&Evaluator{mode: "onprem", queryFn: fn}).WithStop(func() bool { return true })
+	if r := spent.evalFile(writeRule(t, light)); !r.Skipped || !strings.Contains(r.Reason, "time budget") {
+		t.Fatalf("budget spent: %+v", r)
 	}
 }

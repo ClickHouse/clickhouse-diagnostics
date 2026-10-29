@@ -1,3 +1,4 @@
+-- tier: essential
 -- Cloud runs 23.5 and newer, so this root file can use `default`
 -- unconditionally (added to system.settings in 23.4) and needs no
 -- version rung. The onprem/gov trees keep a 22.8-compatible root plus a

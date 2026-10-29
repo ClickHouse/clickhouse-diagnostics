@@ -1,3 +1,4 @@
+-- tier: essential
 -- Which replicas of the service answered this collection. Every request runs
 -- with skip_unavailable_shards = 1, so a replica that is down no longer
 -- fails the per-replica (clusterAllReplicas) collectors — it is simply

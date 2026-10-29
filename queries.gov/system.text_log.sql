@@ -1,3 +1,4 @@
+-- tier: essential
 SELECT
     event_time,
     level,

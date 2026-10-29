@@ -1,3 +1,4 @@
+-- tier: essential
 -- Per-replica CurrentMetrics snapshot. Compare the same metric across
 -- hostnames: a replica whose MetadataFromKeeperCacheObjects, ZooKeeperSession
 -- or ReadonlyReplica differs from its peers is the one to look at.

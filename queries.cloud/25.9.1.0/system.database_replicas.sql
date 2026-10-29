@@ -1,3 +1,5 @@
+-- tier: essential
+-- needs: keeper
 -- Replicated-database replicas on every replica of the service (25.9+): is each one writable,
 -- does it have a Keeper session, and what did Keeper last refuse. This is
 -- the cheap replacement for system.clusters.is_active, which made the server

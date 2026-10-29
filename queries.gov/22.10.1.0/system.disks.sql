@@ -1,3 +1,4 @@
+-- tier: essential
 -- 22.10+ variant: includes unreserved_space (added to system.disks in
 -- 22.10). See the root file for the 22.8/22.9 baseline.
 SELECT

@@ -1,3 +1,4 @@
+-- needs: keeper
 -- ON CLUSTER / Replicated-database DDL as seen in Keeper: one row per (entry, host)
 -- with status, exception and duration. Stuck DDL (status not Finished for
 -- minutes), UUID collisions on replayed CREATE OR REPLACE (code 57) and
