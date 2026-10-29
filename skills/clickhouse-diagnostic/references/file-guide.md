@@ -110,10 +110,10 @@ Windows: `*_7_days` files cover the last 7 days (or `-from/-to`); `system.text_l
 ### system.replicas_answered (cloud)
 **Why we run it:** every request runs with `skip_unavailable_shards = 1`, so one replica that is down no longer fails every `clusterAllReplicas` collector — it is simply missing from them. This file names it.
 **Question:** did every replica of the service answer?
-**Read first:** `configured` against `answered` (the same on every row); then the rows with `name_matched = 0`.
-**Healthy looks like:** `answered = configured`.
-**Red flags:** `answered < configured` (HC-0 in the pre-pass) — that replica's rows are absent from part_log, query_log, metric_log, replicas and every other per-replica file, so "no problem seen" says nothing about it; it is often the very replica in trouble.
-**Traps:** the counts decide; names only identify which replica is missing — `name_matched` compares each configured host with the replies' `FQDN()`, `hostName()` and first DNS label, which aliases, IP endpoints or two hosts sharing a short name can defeat, so trust a name only when the number of unmatched rows equals the number missing (the pre-pass does exactly that).
+**Read first:** rows with `answered = 0` (sorted first).
+**Healthy looks like:** `answered = 1` on every row.
+**Red flags:** any `answered = 0` (HC-0 in the pre-pass) — that replica's rows are absent from part_log, query_log, metric_log, replicas and every other per-replica file, so "no problem seen" says nothing about it; it is often the very replica in trouble.
+**Traps:** none from names: a reply is matched to its configured host by position (`clusterAllReplicas` numbers every replica as its own shard in cluster order, and `_shard_num` is that number), so aliases, IP endpoints and replicas sharing a short name cannot mislead it.
 **Pairs with:** `system.clusters` (the `default` cluster), `execution_log.txt`.
 
 ### system.detached_parts

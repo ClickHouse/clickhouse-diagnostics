@@ -207,26 +207,20 @@ func TestInspectBundle_ReplicasThatDidNotAnswer(t *testing.T) {
 		}
 		return string(out)
 	}
-	// One missing, its name unmatched: named.
-	out := run(`{"host_name":"r1.svc","replica":"r1","name_matched":1,"configured":"2","answered":"1"}`,
-		`{"host_name":"r2.svc","replica":"r2","name_matched":0,"configured":"2","answered":"1"}`)
-	for _, want := range []string{"1 of 2 replica(s) did not answer", "r2.svc", "HC-0"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("output lacks %q\n%s", want, out)
-		}
+	// Two hosts sharing a short name, one of them down, plus a healthy IP
+	// alias: matched by cluster position, so exactly the stopped one is named.
+	out := run(`{"host_name":"ch-01.site-b","host_address":"10.0.0.2","pos":"2","answered":0}`,
+		`{"host_name":"ch-01.site-a","host_address":"10.0.0.1","pos":"1","answered":1}`,
+		`{"host_name":"10.0.0.3","host_address":"10.0.0.3","pos":"3","answered":1}`)
+	if !strings.Contains(out, "1 of 3 replica(s) did not answer this collection: ch-01.site-b") || !strings.Contains(out, "HC-0") {
+		t.Errorf("the stopped replica was not named:\n%s", out)
 	}
-	// Two hosts sharing a short name, one of them down: the short name
-	// matched both, but the counts still say one is missing.
-	out = run(`{"host_name":"ch-01.site-a","replica":"ch-01","name_matched":1,"configured":"2","answered":"1"}`,
-		`{"host_name":"ch-01.site-b","replica":"ch-01","name_matched":1,"configured":"2","answered":"1"}`)
-	if !strings.Contains(out, "1 of 2 replica(s) did not answer") || !strings.Contains(out, "could not be matched") {
-		t.Errorf("duplicate short names hid a missing replica:\n%s", out)
+	if strings.Contains(out, "ch-01.site-a —") || strings.Contains(out, "10.0.0.3 —") || strings.Contains(out, ", 10.0.0.3") {
+		t.Errorf("a replica that answered was named:\n%s", out)
 	}
-	// Alias / IP endpoints: no name matches, but every replica answered.
-	out = run(`{"host_name":"10.0.0.1","replica":"10","name_matched":0,"configured":"2","answered":"2"}`,
-		`{"host_name":"10.0.0.2","replica":"10","name_matched":0,"configured":"2","answered":"2"}`)
-	if strings.Contains(out, "did not answer") {
-		t.Errorf("unmatched names but every replica answered, yet warned:\n%s", out)
+	// Every replica answered: nothing to say.
+	if out := run(`{"host_name":"a","pos":"1","answered":1}`, `{"host_name":"b","pos":"2","answered":1}`); strings.Contains(out, "did not answer") {
+		t.Errorf("all answered, yet warned:\n%s", out)
 	}
 }
 

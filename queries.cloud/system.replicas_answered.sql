@@ -2,22 +2,22 @@
 -- Which replicas of the service answered this collection. Every request runs
 -- with skip_unavailable_shards = 1, so a replica that is down no longer
 -- fails the per-replica (clusterAllReplicas) collectors — it is simply
--- missing from them. This file says how many and, when it can, which.
---   configured  hosts the `default` cluster lists
---   answered    replies to a fan-out over it (one row per replica that
---               answered) — the COUNTS decide whether a replica is missing
---   name_matched  this host's name matched a reply's FQDN() or hostName()
---               (or its first DNS label did); used only to NAME the missing
---               replicas, because aliases, IP endpoints or two hosts sharing
---               a short name make names unreliable on their own
+-- missing from them. This file says which, exactly: clusterAllReplicas
+-- treats every replica as its own shard and numbers them in cluster order
+-- (shard_num, then replica_num), so a reply's _shard_num IS the position of
+-- the configured host that sent it. No host-name matching — aliases, IP
+-- endpoints and replicas sharing a short name cannot mislead it.
+--   pos       the host's position in the `default` cluster
+--   answered  1 when a reply came from that position
 SELECT
-    host_name,
-    splitByChar('.', host_name)[1] AS replica,
-    host_name IN (SELECT FQDN() FROM clusterAllReplicas(default, system.one))
-        OR host_name IN (SELECT hostName() FROM clusterAllReplicas(default, system.one))
-        OR replica IN (SELECT splitByChar('.', hostName())[1] FROM clusterAllReplicas(default, system.one)) AS name_matched,
-    (SELECT count() FROM system.clusters WHERE cluster = 'default') AS configured,
-    (SELECT count() FROM clusterAllReplicas(default, system.one)) AS answered
-FROM system.clusters
-WHERE cluster = 'default'
-ORDER BY name_matched, replica
+    c.host_name,
+    c.host_address,
+    c.pos,
+    c.pos IN (SELECT _shard_num FROM clusterAllReplicas(default, system.one)) AS answered
+FROM
+(
+    SELECT host_name, host_address, row_number() OVER (ORDER BY shard_num, replica_num) AS pos
+    FROM system.clusters
+    WHERE cluster = 'default'
+) AS c
+ORDER BY answered, pos

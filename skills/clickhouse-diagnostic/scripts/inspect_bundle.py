@@ -502,23 +502,18 @@ def analyse(base: str):
     # ---- replicas / replication queue
     # Cloud: every request runs with skip_unavailable_shards = 1, so a replica
     # that was down is silently absent from every per-replica file instead of
-    # failing them. system.replicas_answered says how many: the COUNTS
-    # (configured hosts against replies) decide; host names only name the
-    # missing ones when exactly that many did not match a reply — aliases, IP
-    # endpoints and shared short names make a name match unreliable alone.
+    # failing them. system.replicas_answered names it exactly: a reply's
+    # _shard_num is the position of the configured host that sent it, so no
+    # host-name matching is involved.
     answered = read_jsonl(first("system.replicas_answered_*.jsonl", base))
-    if answered:
-        configured = num(answered[0].get("configured")) or len(answered)
-        replied = num(answered[0].get("answered"))
-        missing_n = int(configured - replied) if replied is not None else 0
-        if missing_n > 0:
-            unmatched = [r.get("host_name") or r.get("replica") for r in answered if str(r.get("name_matched")) in ("0", "false", "False")]
-            names = (": " + ", ".join(unmatched[:8]) + (" …" if len(unmatched) > 8 else "")) if len(unmatched) == missing_n else \
-                " (which ones could not be matched to the replies — aliases, IP endpoints or shared short names)"
-            add("warning", "coverage",
-                f"{missing_n} of {int(configured)} replica(s) did not answer this collection{names}"
-                + " — their rows are missing from every per-replica file (part_log, query_log, metric_log, replicas, …); say so before reading any per-replica absence as health",
-                "system.replicas_answered (configured vs answered)", "HC-0")
+    missing = [r.get("host_name") or r.get("host_address") or f"position {r.get('pos')}" for r in answered
+               if str(r.get("answered")) in ("0", "false", "False")]
+    if missing:
+        add("warning", "coverage",
+            f"{len(missing)} of {len(answered)} replica(s) did not answer this collection: {', '.join(missing[:8])}"
+            + (" …" if len(missing) > 8 else "")
+            + " — their rows are missing from every per-replica file (part_log, query_log, metric_log, replicas, …); say so before reading any per-replica absence as health",
+            "system.replicas_answered (answered = 0, matched by cluster position)", "HC-0")
     reps = read_jsonl(first("system.replicas_*.jsonl", base))
     # Cloud collections from v0.7 carry hostName(): one row per table PER
     # REPLICA, problem rows first, at most 200 per host.
