@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	neturl "net/url"
 	"strings"
 	"time"
 )
@@ -50,6 +51,26 @@ type ClickHouseClient struct {
 	dryOut      io.Writer
 	dryEstimate bool
 	dryCounter  int
+
+	// settings are extra query settings sent on every request after the
+	// pinned ones (SetSetting), in the order they were first set.
+	settings []setting
+}
+
+type setting struct{ name, value string }
+
+// SetSetting adds a query setting to every request from now on, or replaces
+// its value if it is already set. Like the pinned settings it is applied by
+// the server together with readonly=1, so only settings a readonly profile
+// may change belong here.
+func (c *ClickHouseClient) SetSetting(name, value string) {
+	for i := range c.settings {
+		if c.settings[i].name == name {
+			c.settings[i].value = value
+			return
+		}
+	}
+	c.settings = append(c.settings, setting{name, value})
 }
 
 // NewClickHouseClient creates a new ClickHouse client
@@ -226,6 +247,9 @@ func (c *ClickHouseClient) executeWith(httpClient *http.Client, query string) (s
 	url := fmt.Sprintf("%s://%s:%s/?readonly=1&output_format_json_quote_64bit_integers=1"+
 		"&max_execution_time=%d&cancel_http_readonly_queries_on_client_close=1&enable_http_compression=1",
 		c.protocol, c.host, c.port, maxExecSeconds)
+	for _, st := range c.settings {
+		url += "&" + neturl.QueryEscape(st.name) + "=" + neturl.QueryEscape(st.value)
+	}
 
 	// Create the request
 	req, err := http.NewRequest("POST", url, bytes.NewBufferString(query))

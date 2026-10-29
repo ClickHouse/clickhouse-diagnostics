@@ -145,3 +145,71 @@ func TestInspectBundle_ReadsBothBundleNames(t *testing.T) {
 		t.Errorf("new-name archive: collected_at = %q, want 2026-01-03 10:15:00", at)
 	}
 }
+
+// A file is found by its collector name plus the run timestamp, never by
+// prefix alone: system.replicas_*.jsonl also matches
+// system.replicas_problem_tables_*.jsonl, so when the replicas collector
+// failed (no system.replicas file) the pre-pass read the problem-tables file
+// as system.replicas — the same trap as system.parts_* against
+// system.parts_max_block_recent_*.
+func TestInspectBundle_FileLookupIsExact(t *testing.T) {
+	py, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 not available")
+	}
+	script := filepath.Join("..", "skills", "clickhouse-diagnostic", "scripts", "inspect_bundle.py")
+	b := filepath.Join(t.TempDir(), "clickhouse_diagnostic_20261029_120000")
+	if err := os.MkdirAll(b, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	put := func(name, body string) {
+		if err := os.WriteFile(filepath.Join(b, name+"_20261029_120000.jsonl"), []byte(body+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	put("system.version", `{"version":"26.7.1.1"}`)
+	// No system.replicas file (the collector failed); only the problem-tables
+	// one, with a read-only row that must NOT be reported as HC-1.4 / HC-3.x
+	// from "system.replicas".
+	put("system.replicas_problem_tables", `{"database":"db","table":"t","is_readonly":1,"is_session_expired":1,"queue_size":"0","absolute_delay":"9999","log_max_index":"1","log_pointer":"1","total_replicas":3,"active_replicas":1,"zookeeper_exception":""}`)
+	out, err := exec.Command(py, "-I", "-B", script, b).CombinedOutput()
+	if err != nil {
+		t.Fatalf("pre-pass failed: %v\n%s", err, out)
+	}
+	if strings.Contains(string(out), "9999") {
+		t.Fatalf("system.replicas checks read system.replicas_problem_tables:\n%s", out)
+	}
+}
+
+// A replica that was down is absent from every per-replica file (requests
+// run with skip_unavailable_shards = 1); the pre-pass must say which.
+func TestInspectBundle_ReplicasThatDidNotAnswer(t *testing.T) {
+	py, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 not available")
+	}
+	script := filepath.Join("..", "skills", "clickhouse-diagnostic", "scripts", "inspect_bundle.py")
+	b := filepath.Join(t.TempDir(), "clickhouse_diagnostic_20261029_120000")
+	if err := os.MkdirAll(b, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	put := func(name, body string) {
+		if err := os.WriteFile(filepath.Join(b, name+"_20261029_120000.jsonl"), []byte(body+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	put("system.version", `{"version":"26.7.1.1"}`)
+	put("system.replicas_answered", `{"host_name":"r1.svc","replica":"r1","answered":1}`+"\n"+`{"host_name":"r2.svc","replica":"r2","answered":0}`)
+	out, err := exec.Command(py, "-I", "-B", script, b).CombinedOutput()
+	if err != nil {
+		t.Fatalf("pre-pass failed: %v\n%s", err, out)
+	}
+	for _, want := range []string{"1 of 2 replica(s) did not answer", "r2", "HC-0"} {
+		if !strings.Contains(string(out), want) {
+			t.Errorf("output lacks %q\n%s", want, out)
+		}
+	}
+	if strings.Contains(string(out), "did not answer this collection: r1") {
+		t.Errorf("a replica that answered was listed:\n%s", out)
+	}
+}

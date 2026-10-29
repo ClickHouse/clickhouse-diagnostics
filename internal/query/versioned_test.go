@@ -213,6 +213,12 @@ func TestFindVersionedFiles_RealRepoDirs(t *testing.T) {
 		"queries.onprem/system.view_refreshes.sql": true,
 		"queries.gov/system.view_refreshes.sql":    true,
 		"queries.cloud/system.view_refreshes.sql":  true,
+		// system.database_replicas arrived in 25.9; it replaces
+		// system.clusters.is_active, which made the server ask every
+		// Replicated-database replica for its status.
+		"queries.onprem/system.database_replicas.sql": true,
+		"queries.gov/system.database_replicas.sql":    true,
+		"queries.cloud/system.database_replicas.sql":  true,
 		// system.zookeeper_connection.xid arrived in 24.3; the rule reads it
 		// and has no root twin on purpose — on an older server the check is
 		// not applicable, not failed.

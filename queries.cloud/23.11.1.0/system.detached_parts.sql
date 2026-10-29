@@ -1,3 +1,8 @@
+-- The system databases are skipped: system.detached_parts lists the
+-- detached/ directory of every table, one listing per table (a remote call
+-- on object-storage disks whose metadata lives in Keeper), and the server
+-- applies a database filter BEFORE listing. Materialized-view targets
+-- (.inner*) are user data and stay in.
 SELECT
   database,
   table,
@@ -11,3 +16,4 @@ SELECT
   max_block_number,
   level
 FROM clusterAllReplicas(default, system.detached_parts)
+WHERE database NOT IN ('system', 'information_schema', 'INFORMATION_SCHEMA')

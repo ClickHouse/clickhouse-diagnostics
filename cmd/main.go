@@ -290,6 +290,12 @@ func main() {
 		return
 	}
 	client.SetQueryTimeout(*queryTimeoutFlag)
+	// One replica that is down must not fail every clusterAllReplicas query:
+	// without this the SharedMergeTree fan-out probe below fails and the run
+	// silently collects one node, and in cloud mode every per-replica
+	// collector errors. Queries that do not fan out are unaffected. Which
+	// replicas did not answer is recorded by system.replicas_answered.
+	client.SetSetting("skip_unavailable_shards", "1")
 	if *queryTimeoutFlag == 0 {
 		fmt.Println("Warning: -query-timeout=0 — queries run unbounded on the server and the client " +
 			"waits indefinitely. A slow query will stall the collection rather than fail.")

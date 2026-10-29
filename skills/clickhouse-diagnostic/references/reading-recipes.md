@@ -6,7 +6,7 @@ Pick the tool in this order:
 2. **Python 3 stdlib** (`json`, `collections`). Always available; safe with quoted 64-bit integers. `scripts/inspect_bundle.py` uses only this.
 3. **`jq`** — fine for filtering/grouping strings and small ints; **never** for arithmetic on quoted `UInt64` (`tonumber` rounds above 2^53).
 
-Conventions below: `B=<extracted bundle dir>`; files are matched with a glob because of the timestamp suffix. `clickhouse local` accepts globs directly: `file('$B/system.parts_*.jsonl', JSONEachRow)`. Quoted integers are auto-parsed when you give a schema or cast: `toUInt64(bytes_on_disk)`. Where a column is a human string (`system.disks.free_space`), use `free_pct` instead.
+Conventions below: `B=<extracted bundle dir>`; files are matched with a glob because of the timestamp suffix. `clickhouse local` accepts globs directly: `file('$B/system.parts_2*.jsonl', JSONEachRow)`. **Write the glob as `<collector>_2*.jsonl` (the timestamp starts with the year) whenever another collector's name begins with this one plus `_`** — `system.parts_*` also matches `system.parts_max_block_recent_*` / `_by_replica_*`, `system.replicas_*` also matches `system.replicas_problem_tables_*` / `system.replicas_answered_*`, `system.text_log_*` also matches `_histogram_1_day` / `_keeper_1_day`, and the rows of the wrong file get mixed in silently. Quoted integers are auto-parsed when you give a schema or cast: `toUInt64(bytes_on_disk)`. Where a column is a human string (`system.disks.free_space`), use `free_pct` instead.
 
 Discipline (from the analysis rules): select only the columns you will comment on; `LIMIT` every result (3–10 rows for raw, ≤ 30 aggregated); truncate query text to 150–300 chars; never paste whole tables into the summary.
 
@@ -51,14 +51,14 @@ Parts per partition (alert threshold 300, server throws at `parts_to_throw_inser
 ```sql
 SELECT database, table, partition_id, count() AS parts,
        formatReadableSize(sum(toUInt64(bytes_on_disk))) AS size, round(avg(toUInt64(rows))) AS avg_rows
-FROM file('$B/system.parts_*.jsonl', JSONEachRow)
+FROM file('$B/system.parts_2*.jsonl', JSONEachRow)
 WHERE active = 1 AND database NOT IN ('system','INFORMATION_SCHEMA','information_schema')
 GROUP BY 1,2,3 ORDER BY parts DESC LIMIT 10
 ```
 Unmerged level-0 parts (inserts outrunning merges):
 ```sql
 SELECT database, table, partition_id, countIf(level = 0) AS l0_parts, count() AS parts
-FROM file('$B/system.parts_*.jsonl', JSONEachRow) WHERE active = 1
+FROM file('$B/system.parts_2*.jsonl', JSONEachRow) WHERE active = 1
 GROUP BY 1,2,3 HAVING l0_parts > 50 ORDER BY l0_parts DESC LIMIT 10
 ```
 Tiny parts (batch size problem): `avg(toUInt64(rows)) < 10000` with `count() > 100` per table.
@@ -80,10 +80,14 @@ TTL work: `merge_reason IN ('TTLDeleteMerge','TTLRecompressMerge')` or `event_ty
 
 ```sql
 SELECT database, table, is_readonly, is_session_expired, absolute_delay, queue_size, inserts_in_queue,
-       merges_in_queue, parts_to_check, active_replicas, total_replicas,
-       zookeeper_exception, last_queue_update_exception
-FROM file('$B/system.replicas_*.jsonl', JSONEachRow)
-ORDER BY is_readonly DESC, absolute_delay DESC LIMIT 10
+       merges_in_queue, parts_to_check, last_queue_update_exception
+FROM file('$B/system.replicas_2*.jsonl', JSONEachRow)
+ORDER BY is_readonly DESC, absolute_delay DESC LIMIT 10;
+-- the Keeper-backed columns, for problem tables plus a healthy sample (≤ 200 tables)
+SELECT database, table, is_readonly, active_replicas, total_replicas,
+       toInt64(log_max_index) - toInt64(log_pointer) AS log_gap, zookeeper_exception
+FROM file('$B/system.replicas_problem_tables_*.jsonl', JSONEachRow)
+ORDER BY is_readonly DESC, total_replicas - active_replicas DESC, log_gap DESC LIMIT 20
 ```
 Queue shape (any single `type` > 60 entries is a replica falling behind):
 ```sql
@@ -120,10 +124,10 @@ Applies when the bundle is a cloud collection (or an onprem run that switched) a
 ```sql
 SELECT hostname, count() AS tables_behind, max(absolute_delay) AS max_delay_s, sum(toUInt64(inserts_in_queue)) AS parts_behind,
        argMax(concat(database, '.', table), absolute_delay) AS worst_table
-FROM file('$B/system.replicas_*.jsonl', JSONEachRow)
+FROM file('$B/system.replicas_2*.jsonl', JSONEachRow)
 WHERE absolute_delay > 60 GROUP BY hostname ORDER BY parts_behind DESC;
 -- the cap is judged on the UNFILTERED row count per host: exactly 200 = capped, that host's list is its worst 200, not all
-SELECT hostname, count() AS rows FROM file('$B/system.replicas_*.jsonl', JSONEachRow) GROUP BY hostname HAVING rows = 200
+SELECT hostname, count() AS rows FROM file('$B/system.replicas_2*.jsonl', JSONEachRow) GROUP BY hostname HAVING rows = 200
 ``` The same `oldest_part_to_get` on several hosts is one finding, not several.
 
 **2. Is it the pools, and on which hosts** — `system.metric_log_by_host_3_days`, each host against its **live** size:

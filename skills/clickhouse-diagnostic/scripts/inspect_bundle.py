@@ -241,8 +241,20 @@ def require_jsonl(base: str) -> None:
         f"(the collector default) and re-run.")
 
 
+_RUN_TS_SUFFIX = re.compile(r"\d{8}_\d{6}(\.\w+)?$")
+
+
 def first(pattern: str, base: str):
+    """The first file of one collector. A pattern ending in `_*.<ext>` means
+    "<collector>_<run timestamp>.<ext>": the * must be the timestamp, so
+    system.replicas_*.jsonl never returns system.replicas_problem_tables_* —
+    which it did whenever the replicas collector itself had failed."""
     hits = sorted(glob.glob(os.path.join(base, pattern)))
+    name = os.path.basename(pattern)
+    star = name.find("_*")
+    if star >= 0 and name.count("*") == 1:
+        prefix = name[:star + 1]
+        hits = [h for h in hits if _RUN_TS_SUFFIX.fullmatch(os.path.basename(h)[len(prefix):] or "")]
     return hits[0] if hits else None
 
 
@@ -488,6 +500,17 @@ def analyse(base: str):
     is_smt = cloud_mode or bool(shared_tables)
 
     # ---- replicas / replication queue
+    # Cloud: every request runs with skip_unavailable_shards = 1, so a replica
+    # that was down is silently absent from every per-replica file instead of
+    # failing them. system.replicas_answered names it.
+    answered = read_jsonl(first("system.replicas_answered_*.jsonl", base))
+    missing = [r.get("replica") or r.get("host_name") for r in answered if str(r.get("answered")) in ("0", "false", "False")]
+    if missing:
+        add("warning", "coverage",
+            f"{len(missing)} of {len(answered)} replica(s) did not answer this collection: {', '.join(missing[:8])}"
+            + (" …" if len(missing) > 8 else "")
+            + " — their rows are missing from every per-replica file (part_log, query_log, metric_log, replicas, …); say so before reading any per-replica absence as health",
+            "system.replicas_answered (answered = 0)", "HC-0")
     reps = read_jsonl(first("system.replicas_*.jsonl", base))
     # Cloud collections from v0.7 carry hostName(): one row per table PER
     # REPLICA, problem rows first, at most 200 per host.

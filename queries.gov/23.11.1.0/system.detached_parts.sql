@@ -1,3 +1,8 @@
+-- The system databases are skipped: system.detached_parts lists the
+-- detached/ directory of every table, one listing per table (a remote call
+-- on object-storage disks whose metadata lives in Keeper), and the server
+-- applies a database filter BEFORE listing. Materialized-view targets
+-- (.inner*) are user data and stay in.
 SELECT
   hex(SHA256(concat(database, '%salt%'))) AS database,
   hex(SHA256(concat(table, '%salt%'))) AS table,
@@ -8,4 +13,7 @@ SELECT
   min_block_number,
   max_block_number,
   level
-FROM system.detached_parts
+-- Gov: p.database is the column; an unqualified `database` here would be the
+-- hashed alias above, which matches every row.
+FROM system.detached_parts AS p
+WHERE p.database NOT IN ('system', 'information_schema', 'INFORMATION_SCHEMA')

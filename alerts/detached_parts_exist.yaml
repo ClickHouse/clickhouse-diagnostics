@@ -22,6 +22,8 @@ query: |
     count()                                  AS detached_count,
     groupArray(reason)                       AS reasons
   FROM {sys.detached_parts}
+  -- system databases skipped before the per-table listing (see the collector)
+  WHERE database NOT IN ('system', 'information_schema', 'INFORMATION_SCHEMA')
   GROUP BY database, table
   ORDER BY detached_count DESC
 

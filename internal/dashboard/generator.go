@@ -1134,17 +1134,20 @@ func (g *Generator) collect() map[string]interface{} {
 				%s,
 				arrayStringConcat(groupUniqArray(reason), ', ') AS reasons
 		 FROM %s
+		 WHERE database NOT IN ('system', 'information_schema', 'INFORMATION_SCHEMA')
 		 GROUP BY database, table
 		 ORDER BY %s DESC LIMIT 20`,
 		detachedSize, g.sysTable("detached_parts"), detachedOrder,
 	))
 
-	// cluster nodes (cloud only)
+	// cluster nodes (cloud only). No is_active: asking for it makes the server
+	// query every Replicated-database replica's status (see
+	// queries.*/23.5.1.0/system.clusters.sql).
 	if g.mode == "cloud" {
 		p["clusters"] = g.safeQuery("clusters",
 			`SELECT cluster, host_name,
 					toString(shard_num) AS shard, toString(replica_num) AS replica,
-					toString(is_active) AS is_active, toString(errors_count) AS errors_count
+					toString(errors_count) AS errors_count
 			 FROM system.clusters
 			 ORDER BY cluster, shard_num, replica_num`,
 		)
@@ -1160,13 +1163,30 @@ func (g *Generator) collect() map[string]interface{} {
 
 	// ── Replicas health ───────────────────────────────────────────────────────
 
+	// total_replicas / active_replicas are read from Keeper for every table
+	// they are asked for, so they come only for the up-to-200 tables that
+	// system.replicas_problem_tables picks (problem tables first); the other
+	// rows show them blank. system.replicas filters on database/table before
+	// reading statuses, which is what makes the IN cheap.
 	p["replicas"] = g.safeQuery("replicas", fmt.Sprintf(
-		`SELECT database, table, is_leader, is_readonly, is_session_expired,
+		`SELECT r.database AS database, r.table AS table, is_leader, is_readonly, is_session_expired,
 			 future_parts, parts_to_check, queue_size,
-			 inserts_in_queue, merges_in_queue,
-			 toString(queue_oldest_time) AS queue_oldest_time,
-			 absolute_delay, total_replicas, active_replicas
-		 FROM %s
+			 inserts_in_queue, merges_in_queue, queue_oldest_time,
+			 absolute_delay, z.total_replicas AS total_replicas, z.active_replicas AS active_replicas
+		 FROM (SELECT database, table, is_leader, is_readonly, is_session_expired,
+					  future_parts, parts_to_check, queue_size, inserts_in_queue, merges_in_queue,
+					  toString(queue_oldest_time) AS queue_oldest_time, absolute_delay
+			   FROM %[1]s) AS r
+		 LEFT JOIN (SELECT database, table, toString(total_replicas) AS total_replicas,
+						   toString(active_replicas) AS active_replicas
+					FROM %[1]s
+					WHERE (database, table) IN (
+						SELECT database, table FROM %[1]s
+						ORDER BY (is_readonly OR is_session_expired OR queue_size > 0 OR absolute_delay > 0
+								  OR future_parts > 0 OR parts_to_check > 0) DESC,
+								 absolute_delay DESC, database, table
+						LIMIT 200)) AS z
+		   ON r.database = z.database AND r.table = z.table
 		 ORDER BY absolute_delay DESC, is_readonly DESC`,
 		g.sysTable("replicas"),
 	))
@@ -3865,7 +3885,7 @@ document.addEventListener('DOMContentLoaded',function(){
     document.getElementById('sec-clusters').style.display='';
     document.getElementById('nav-clusters').style.display='';
     renderTable('tbl-clusters',DATA.clusters,
-      ['cluster','shard','replica','host_name','is_active','errors_count'],
+      ['cluster','shard','replica','host_name','errors_count'],
       r=>r.errors_count&&r.errors_count!=='0'?'alert-row':'');
   }
 

@@ -27,6 +27,10 @@ query: |
     active_replicas,
     total_replicas
   FROM {sys.replicas}
-  WHERE is_readonly = 1
+  -- active_replicas / total_replicas are read from Keeper; system.replicas
+  -- filters on database/table first, so naming the read-only tables keeps
+  -- that read to them instead of every replicated table on the server.
+  WHERE (database, table) IN (SELECT database, table FROM {sys.replicas} WHERE is_readonly = 1)
+    AND is_readonly = 1
 
 message: "{database}.{table} is in read-only mode (session_expired={is_session_expired}, delay={absolute_delay}s, active_replicas={active_replicas}/{total_replicas})"

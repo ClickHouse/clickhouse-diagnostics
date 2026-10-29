@@ -17,6 +17,7 @@ Under the hood: per-environment query sets (`cloud` / `onprem` / `gov`) selected
 | `system.part_log_3_days` (3 days, hourly aggregation of `system.part_log`) | Are merges keeping up with inserts; did any merge or mutation fail? | Shows insert size, merge throughput and failing background operations with their error codes. |
 | `system.merges`, `system.mutations` | What is merging or mutating right now; what is stuck? | A stuck merge or a mutation backlog is the usual reason parts pile up while the pool looks idle. |
 | `system.replicas`, `system.replication_queue` | Is every replica writable and caught up; if not, why? | Read-only state, Keeper session loss and the shape of the queue locate replication problems. |
+| `system.replicas_problem_tables`, `system.database_replicas` (≥ 25.9), `system.replicas_answered` (cloud) | For the tables and Replicated databases in trouble: are all replicas alive, how far behind the log, what Keeper refused; which replicas answered | The Keeper-backed columns are read only where they matter (up to 200 tables, problem tables first): asking `system.replicas` or `system.clusters` for them reads every table's or database's status from Keeper, which took minutes on servers with tens of thousands of tables. |
 | `system.query_log_details_7_days` (hourly aggregation of `system.query_log`) | What ran, how slow, how much memory, what failed, by whom? | Most incidents start with the workload; this is the aggregated view, with a 500-character sample per query pattern and no customer rows. |
 | `system.query_views_log_3_days` (3 days, hourly aggregation of `system.query_views_log`) | Did every materialized view fire, did any fail, and what does each cost? | An MV that "succeeds" while writing nothing is invisible in `query_log`. An MV that throws fails the parent INSERT by default (`query_log` shows `… while pushing to view X`), but with `materialized_views_ignore_errors = 1` the INSERT is clean and this is the only record. Either way the base part is already committed. |
 | `system.view_refreshes` (≥ 23.12) | Are the refreshable materialized views actually refreshing? | A `REFRESH EVERY` view never appears in `query_views_log`; this is the only place its schedule, last success and last error live. |
@@ -145,7 +146,7 @@ Neither grant exposes customer data: `SHOW` reveals object *names* and metadata 
 
 #### Cloud mode needs two more
 
-`cloud` mode wraps its queries in `clusterAllReplicas(...)` so results span every replica rather than only the node you connected to. Distributed execution needs two further grants:
+`cloud` mode wraps its queries in `clusterAllReplicas(...)` so results span every replica rather than only the node you connected to. Every request runs with `skip_unavailable_shards = 1`: a replica that is down is left out instead of failing every per-replica collector, and `system.replicas_answered` in the bundle says which replicas did not answer. Distributed execution needs two further grants:
 
 ```sql
 GRANT REMOTE                ON *.* TO sys_read_only;
@@ -625,7 +626,7 @@ The tool targets **ClickHouse 22.8 and newer** for on-prem servers. Root-level q
 | `system.server_settings` table | 23.3 | `queries.{onprem,gov}/23.3.1.0/` (no root file — skipped below 23.3; cloud carries it at root) |
 | `system.asynchronous_insert_log.rows` | 23.4 | `queries.{onprem,gov}/23.4.1.0/` (22.10–23.3 report `bytes`) |
 | `system.settings.default` | 23.4 | `queries.{onprem,gov}/23.4.1.0/` (`default` is the only column their roots omit; the cloud root has it) |
-| `system.clusters` replicated-db columns (`database_shard_name`, `database_replica_name`, `is_active`, `name`) | 23.5 | `queries.*/23.5.1.0/` |
+| `system.clusters` replicated-db columns (`database_shard_name`, `database_replica_name`, `name`; `is_active` deliberately not selected) | 23.5 | `queries.*/23.5.1.0/` |
 | `system.query_log.query_cache_usage` | 23.8 | `queries.query_analysis/23.8.1.0/` |
 | `system.zookeeper_connection` table | 23.8 | `queries.*/23.8.1.0/` (no root file — skipped below 23.8 in every mode) |
 | `system.zookeeper_connection.xid`, `last_zxid_seen`, `availability_zone` | 24.3 | `queries.*/24.3.1.0/`; `alerts/24.3.1.0/keeper_xid_renewal_due.yaml` (no root rule — not applicable below 24.3) |
@@ -638,6 +639,7 @@ The tool targets **ClickHouse 22.8 and newer** for on-prem servers. Root-level q
 | `background_*_pool_size` moved from `system.settings` to `system.server_settings` | 23.3 | `alerts/23.3.1.0/` (`fetch_pool_saturated`, `schedule_pool_saturated`; `system.settings` still lists the names on newer servers with the old session defaults, so the root rule would compare against the wrong size there) |
 | `system.tables.metadata_version` | 24.2 | `queries.*/24.2.1.0/` |
 | `system.error_log` table | 24.8 | `queries.*/24.8.1.0/` (no root file — skipped below 24.8 in every mode) |
+| `system.database_replicas` table | 25.9 | `queries.*/25.9.1.0/` (no root file — skipped below 25.9 in every mode) |
 | `system.zookeeper_log.duration_microseconds` (replaces `duration_ms`) | 24.3 | `queries.*/24.3.1.0/` (roots use `duration_ms`; output stays in ms on every rung) |
 | `system.tables.parameterized_view_parameters` | 25.4 | `queries.{onprem,cloud}/25.4.1.0/` (gov: not collected) |
 | `system.tables.target_database`, `target_table` (an MV's write target, including the implicit `.inner_id.*` table) | 26.6 | `queries.*/26.6.1.0/` (gov hashes both) |

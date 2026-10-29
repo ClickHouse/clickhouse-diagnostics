@@ -5,6 +5,12 @@ SELECT
     can_become_leader,
     is_readonly,
     is_session_expired,
+    -- log_max_index, log_pointer, total_replicas, active_replicas and
+    -- zookeeper_exception are not here: asking for any of them makes the
+    -- server read every table's status from Keeper (one round trip per
+    -- replicated table — minutes on a server with tens of thousands of
+    -- tables; StorageSystemReplicas' with_zk_fields). They are in
+    -- system.replicas_problem_tables, for the tables that need them.
     future_parts,
     parts_to_check,
     queue_size,
@@ -12,20 +18,10 @@ SELECT
     merges_in_queue,
     part_mutations_in_queue,
     toString(queue_oldest_time) AS queue_oldest_time,
-    log_max_index,
-    log_pointer,
     absolute_delay,
-    total_replicas,
-    active_replicas,
-    -- is_readonly = 1 says the replica stopped accepting writes; these two say
-    -- why. zookeeper_exception carries the Keeper-side error and
-    -- last_queue_update_exception the local queue-update failure, so a
-    -- read-only replica can be told apart from a lost Keeper session without a
-    -- second round trip to the customer. Both exist since 22.8 (the oldest
-    -- server this query set supports) and zookeeper_exception adds no cost
-    -- here: log_max_index, log_pointer, total_replicas and active_replicas
-    -- already put this query in StorageSystemReplicas' with_zk_fields path.
-    last_queue_update_exception,
-    zookeeper_exception
+    -- last_queue_update_exception is the local queue-update failure (cheap,
+    -- in memory); the Keeper-side zookeeper_exception that says why a replica
+    -- went read-only is in system.replicas_problem_tables.
+    last_queue_update_exception
 FROM system.replicas
 ORDER BY absolute_delay DESC, database, table
