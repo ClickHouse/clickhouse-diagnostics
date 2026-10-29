@@ -100,20 +100,20 @@ Windows: `*_7_days` files cover the last 7 days (or `-from/-to`); `system.text_l
 
 ### system.database_replicas (≥ 25.9)
 **Why we run it:** the cheap replacement for `system.clusters.is_active`: whether each Replicated-database replica on this server is writable and has a Keeper session, without asking every replica of every Replicated database.
-**Question:** is any Replicated database read-only on this server, and why?
-**Read first:** `is_readonly`, `is_session_expired`, `zookeeper_exception` (rows are sorted read-only first).
+**Question:** is any Replicated database read-only on this server?
+**Read first:** `is_readonly`, `is_session_expired` (rows are sorted read-only first); the reason is in `text_log` / `errors` (999, 242) and `distributed_ddl_queue`.
 **Healthy looks like:** `is_readonly = 0`, `is_session_expired = 0` everywhere.
 **Red flags:** a read-only or session-expired database — its DDL (`ON CLUSTER`, `CREATE`/`ALTER` through the Replicated database) stalls (HC-3.11, `distributed_ddl_queue`).
-**Traps:** absent below 25.9 — not evidence; `max_log_ptr` / `log_ptr` / `total_replicas` are deliberately not collected (they read every database's status from Keeper) — DDL lag is in `distributed_ddl_queue`; cloud: per replica (`hostname`).
+**Traps:** absent below 25.9 — not evidence; `max_log_ptr` / `log_ptr` / `total_replicas` / `zookeeper_exception` are deliberately not collected (each reads every database's status from Keeper) — DDL lag is in `distributed_ddl_queue`; cloud: per replica (`hostname`).
 **Pairs with:** `system.distributed_ddl_queue`, `system.databases` (Replicated count), `system.zookeeper_connection`.
 
 ### system.replicas_answered (cloud)
 **Why we run it:** every request runs with `skip_unavailable_shards = 1`, so one replica that is down no longer fails every `clusterAllReplicas` collector — it is simply missing from them. This file names it.
 **Question:** did every replica of the service answer?
-**Read first:** rows with `answered = 0`.
-**Healthy looks like:** `answered = 1` on every row.
-**Red flags:** any `answered = 0` (HC-0 in the pre-pass) — that replica's rows are absent from part_log, query_log, metric_log, replicas and every other per-replica file, so "no problem seen" says nothing about it; it is often the very replica in trouble.
-**Traps:** host names are compared on their first DNS label (`system.clusters` holds full names, `hostName()` the short one).
+**Read first:** `configured` against `answered` (the same on every row); then the rows with `name_matched = 0`.
+**Healthy looks like:** `answered = configured`.
+**Red flags:** `answered < configured` (HC-0 in the pre-pass) — that replica's rows are absent from part_log, query_log, metric_log, replicas and every other per-replica file, so "no problem seen" says nothing about it; it is often the very replica in trouble.
+**Traps:** the counts decide; names only identify which replica is missing — `name_matched` compares each configured host with the replies' `FQDN()`, `hostName()` and first DNS label, which aliases, IP endpoints or two hosts sharing a short name can defeat, so trust a name only when the number of unmatched rows equals the number missing (the pre-pass does exactly that).
 **Pairs with:** `system.clusters` (the `default` cluster), `execution_log.txt`.
 
 ### system.detached_parts
