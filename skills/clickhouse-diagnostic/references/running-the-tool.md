@@ -98,7 +98,7 @@ Default `auto`: a one-second load probe chooses **full**, or **essential** on a 
 
 ## 5. Time windows
 
-Collection windows are per query: 7 days for `query_log`, `metric_log` (fixed columns), `asynchronous_insert_log`, `blob_storage_log`, `error_log`, `distributed_ddl_queue`; **3 days** for `part_log`, `query_views_log` and `metric_log_coordination` (the wide or high-volume ones); **1 day** for `system.text_log` (capped at 2000 rows), the text_log histogram and Keeper markers, and `zookeeper_log` errors. `-from`/`-to` (RFC3339 or `YYYY-MM-DD`, UTC) override **every** window at once; alert rules keep their own windows by design.
+Collection windows are per query: 7 days for `query_log`, `metric_log` (fixed columns), `asynchronous_insert_log`, `blob_storage_log`, `error_log`, `distributed_ddl_queue`; **3 days** for `part_log`, `query_views_log` and `metric_log_coordination` (the wide or high-volume ones); **1 day** for `system.text_log` (capped at 2000 rows), the text_log histogram and Keeper markers, and `zookeeper_log` errors. `-from`/`-to` (RFC3339 or `YYYY-MM-DD`, UTC) override **every** window at once; alert rules keep their own look-back, measured over the collected files (from v0.9 they send no query), so with `-to` it ends at `-to`.
 
 ```bash
 # exactly the incident window (cheapest, most focused)

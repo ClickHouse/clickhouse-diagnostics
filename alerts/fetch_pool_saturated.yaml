@@ -29,6 +29,16 @@ tags:
 # the sizes differ. In cloud mode {sys.settings} fans out too, so the
 # join on hostname pairs each replica with its own size; on one node both
 # sides are that node.
+# Evaluated by the Go check over the files already collected (no second
+# query to the server). query: below is the same test in SQL, for the
+# customer to run live; the check mirrors it.
+check: go:fetch_pool_saturated
+source:
+  - system.metric_log_7_days
+  - system.metric_log_by_host_3_days
+  - system.server_settings
+  - system.settings
+  - system.version
 query: |
   WITH sizes AS
     (

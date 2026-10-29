@@ -928,7 +928,16 @@ func TestWriteSummaryJSON_CarriesNoSQL(t *testing.T) {
 // every current server, 26.7 included. The follow-ups must survive that
 // selection, or the "which pool?" queries never show where they matter.
 func TestRunAll_VersionSelectedRulesKeepTheirFollowUps(t *testing.T) {
-	ev := &Evaluator{mode: "onprem", queryFn: func(string) (string, error) { return oneRow, nil }}
+	var hours []row
+	for i := 1; i <= 3; i++ {
+		hours = append(hours, row{"time": hoursBack(i), "avg_fetch_pool_tasks": "16", "avg_schedule_pool_tasks": "512"})
+	}
+	b := fixture(t, map[string][]row{
+		"system.metric_log_7_days": hours,
+		"system.server_settings":   {{"name": "background_fetches_pool_size", "value": "16"}, {"name": "background_schedule_pool_size", "value": "512"}},
+		"system.replication_queue": {{"database": "db", "table": "t", "last_exception": "Code: 999"}},
+	})
+	ev := (&Evaluator{mode: "onprem", queryFn: func(string) (string, error) { return oneRow, nil }}).WithBundle(b)
 	results := ev.RunAll("../../alerts", internal.Version{Major: 26, Minor: 7, Patch: 1, Build: 0})
 	want := map[string]bool{"fetch_pool_saturated": true, "schedule_pool_saturated": true, "replication_queue_errors": true}
 	for _, r := range results {

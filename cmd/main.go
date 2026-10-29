@@ -12,6 +12,7 @@ import (
 
 	"clickhouse-diagnostic/internal"
 	"clickhouse-diagnostic/internal/alert"
+	"clickhouse-diagnostic/internal/bundle"
 	"clickhouse-diagnostic/internal/clustercollect"
 	"clickhouse-diagnostic/internal/collectmode"
 	"clickhouse-diagnostic/internal/config"
@@ -877,6 +878,7 @@ func main() {
 		phaseStart = time.Now()
 		essentialRun, _ := watch.Tripped()
 		alertResults = alert.NewEvaluator(client, effectiveMode).WithEssential(essentialRun).
+			WithBundle(bundle.Open(finalOutputDir, collectorStatus(rec)).WithWindowEnd(collectTo)).
 			WithDetachedScope(detachedScope).WithKeeperDown(keeperDownReason).WithStop(watch.OverBudget).
 			RunAll(alertsDir, serverVersion)
 		rec.Phase("alerts", time.Since(phaseStart), "")
@@ -1489,4 +1491,21 @@ func isAccessDenied(err error) bool {
 	}
 	msg := err.Error()
 	return strings.Contains(msg, "Code: 497") || strings.Contains(msg, "ACCESS_DENIED")
+}
+
+// collectorStatus says, per collector without a file, why: the alert checks
+// report "not applicable: skipped (reason)" instead of a clean result.
+func collectorStatus(rec *runlog.Recorder) map[string]bundle.Status {
+	out := map[string]bundle.Status{}
+	for _, e := range rec.Entries() {
+		if e.Stage != "collector" || (e.Status != "skipped" && e.Status != "failed") {
+			continue
+		}
+		reason := e.Extra
+		if e.Status == "failed" && e.Error != "" {
+			reason = e.Error
+		}
+		out[strings.TrimSuffix(e.Name, ".sql")] = bundle.Status{State: e.Status, Reason: reason}
+	}
+	return out
 }

@@ -36,6 +36,14 @@ tags:
 # Safe in gov: alert rows never leave the machine there — alerts_summary.json
 # records only counts (internal/alert/alert.go WriteSummaryJSON) and gov never
 # generates the dashboard, the only other consumer of matched rows.
+# Evaluated by the Go check over the files already collected (no second
+# query to the server). query: below is the same test in SQL, for the
+# customer to run live; the check mirrors it.
+check: go:keeper_connection_blips
+source:
+  - system.metric_log_7_days
+  - system.metric_log_by_host_3_days
+  - system.version
 query: |
   WITH per_hour AS
     (
