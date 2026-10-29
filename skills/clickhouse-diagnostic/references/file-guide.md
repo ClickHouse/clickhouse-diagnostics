@@ -361,6 +361,33 @@ Windows: `*_7_days` files cover the last 7 days (or `-from/-to`); `system.text_l
 **Traps:** absent file = `<zookeeper_log>` not configured, not health; successful volume and latency are deliberately **not** here — use `metric_log_coordination` (`ZooKeeperTransactions`, `ZooKeeperWaitMicroseconds / ZooKeeperTransactions` per hour) and `text_log_keeper_1_day` for session churn; even errors-only, the collector scans two 1-byte columns of the whole day, so on a huge cluster it can hit the collector timeout (159); durations are in ms on every version (converted from microseconds on ≥ 24.3).
 **Pairs with:** `metric_log_coordination` (same hours from ProfileEvents), `text_log_keeper_1_day`, `zookeeper_connection`, `configuration/zookeeper.xml`.
 
+### system.aggregated_zookeeper_log_by_hour_2_days (≥ 26.3)
+**Why we run it:** every other Keeper file says *that* Keeper was busy, slow or failing; this one says **who in the server** sent the requests. `system.aggregated_zookeeper_log` (on by default since 25.9, kept 30 days — unlike `zookeeper_log`, which is usually off) groups every request this server sends by session, parent path, operation and `component`, the ClickHouse code location that issued it. Read hourly per component × operation over two days.
+**Question:** which component sends which Keeper operations, how many, how slowly, and with which errors; in cloud, from which replica most of it comes?
+**Read first:** `ops + in_multi` summed per `component` (the top few usually carry almost everything); the same per hour for the top component (a hot loop is hours far above its usual level); `avg_latency_us` per `operation` per hour; the `errors` map on Remove / TryRemove / RemoveRecursive (the `ZNONODE` share).
+**Healthy looks like:** traffic spread over cleanup, restarting and queue-updating threads, `DDLWorker` and part commits, steady from hour to hour; weighted latency in the single-digit to low-tens of milliseconds; errors a small `ZNONODE` / `ZNODEEXISTS` share (normal control flow).
+**Red flags:** one component ≥ 60 % with a peak hour ≥ 10× its usual hour (HC-3.22, P-68); an operation averaging ≥ 1 s (P-66 / P-67); removes mostly answering `ZNONODE` (P-62); `ZCONNECTIONLOSS` / `ZSESSIONEXPIRED` in a component's errors (P-57 — match the hours with `metric_log_coordination`).
+**Traps:** absent below 26.3 — not evidence of anything (the table exists from 25.9, but before 26.3 sub-requests share buckets with standalone requests and carry the whole Multi's latency, so the tool skips it); `ops` counts standalone requests (a Multi once) and `in_multi` the sub-requests inside Multi / MultiRead — add them for "how much work", use `ops` alone for "how many round trips"; latency is in **microseconds**, weighted by count, from standalone requests only (a sub-request reports 0); each server records only **its own** sessions — other clients of the same Keeper are invisible, so the shares are this server's, not Keeper's; cloud rows are summed over replicas, with `replicas`, `busiest_replica` and `busiest_replica_ops` — per-replica detail is in the per-minute file; the window is 2 days (`-from` / `-to` move it; the table keeps 30).
+**Pairs with:** `…_by_minute_1_day` (when), `…_paths_1_day` (where), `metric_log_coordination_3_days` (Keeper wait per hour, client side), `text_log_keeper_1_day`, `replication_queue` (what a looping task is retrying), `keeper/<member>.txt`.
+
+### system.aggregated_zookeeper_log_by_minute_1_day (≥ 26.3)
+**Why we run it:** the minute resolution of the same table — **when** Keeper got slow, busy or started failing for this server (in cloud: for **each** replica), which hourly figures smooth away: a latency jump that lasted minutes, a restart burst, one replica's traffic collapsing.
+**Question:** in which minutes did requests slow down, spike or fail; is it one replica or all of them?
+**Read first:** weighted `avg_latency_us` per minute (per `hostname` in cloud) and its median per replica; `ops` per minute against the day's median; `loss_failures` (connection loss, session expired, operation timeout) minutes; `worst_group_latency_us` for the slowest single group.
+**Healthy looks like:** about 7–20 ms per request, flat; `failed` a small steady number; `loss_failures` 0.
+**Red flags:** minutes ≥ 100 ms (HC-3.21) — and a rise from ~15 to ~30 ms is already worth noting, it preceded one outage by 11 minutes; one replica at seconds while the others stay at ~10 ms (P-65); a minute with ≥ 10× the usual requests (P-64 restart burst); a replica's `ops` dropping to almost nothing while its siblings continue (P-65's wedged-replica variant); any `loss_failures` (P-57).
+**Traps:** absent below 26.3; window 1 day — an incident older than that needs `-from` / `-to`; the onprem/gov file has no hostname (one server per bundle); latency is standalone requests only.
+**Pairs with:** `text_log_keeper_1_day` (the session markers in the same minutes), `zookeeper_connection` (which member each session is on), `metric_log_by_host_3_days` (HC-3.17, the hourly per-host view), `execution_log` uptime (restarts).
+
+### system.aggregated_zookeeper_log_paths_1_day (≥ 26.3)
+**Why we run it:** **where** in Keeper the requests go and which subtrees grow — the question behind Keeper running out of memory (net znode growth) and behind read storms (one subtree taking everything). One row per path class: the 50 classes with the most requests plus the 50 with the most net creates over the day.
+**Question:** which Keeper paths take the load; which are growing (creates − removes); how much of it arrives inside Multi?
+**Read first:** the top rows by `ops` with their `in_multi` share and `raw_paths`; the top rows by `net_creates` with `creates` against `removes` (successful requests only — a `CreateIfNotExists` answered `ZNODEEXISTS` is not a create); the dedup classes (`…/blocks`, `…/async_blocks`, `…/deduplication_hashes`) in `removes`.
+**Healthy looks like:** per-table classes (`/clickhouse/tables/…/<table>`, `…/replicas/<r>`, `…/blocks`, `…/log`) sharing the load; creates and removes roughly balanced over a day; `_objects` classes present on object-storage disks but not dominant.
+**Red flags:** `net_creates` in the millions with creates ≥ 10× removes (HC-3.23, P-63 — a request balance, since one `RemoveRecursive` deletes a whole subtree: confirm with `zk_znode_count` in `keeper/<member>.txt`, ideally across two bundles); one class ≥ 50 % of requests, mostly `in_multi`, on `/…/mergetree/_objects` (P-64); dedup classes holding most removes (P-62).
+**Traps:** absent below 26.3; purely numeric path segments are replaced by `N`, so thousands of children (`…/_objects/15536/.dir`) form one class (`raw_paths` says how many) and shard numbers merge too (`/tables/01/` → `/tables/N/`), while table UUIDs and names stay; Multi / MultiRead envelopes carry no path and are not here; `ops` includes sub-requests (that is where read storms live), `avg_latency_us` does not; shares are over the collected classes, not all of Keeper; gov bundles carry `shape` (ClickHouse's own path words kept, everything else `*`) and `path_id` (salted hash) instead of `path`; window 1 day.
+**Pairs with:** `keeper/<member>.txt` (`zk_znode_count`, `zk_approximate_data_size` — the size the growth produces), `part_log` (parts created per insert), `system.parts` / `system.columns` (files per part), `…_by_hour_2_days` (the component behind a class).
+
 ### system.blob_storage_log_7_days (≥ 23.11, only when enabled)
 **Why we run it:** object-storage operations leave no trace in `part_log`; this is where a deleted or never-uploaded blob can be seen.
 **Question:** did uploads fail; when were blobs deleted; does a delete precede the reads that now fail?
@@ -485,6 +512,15 @@ Trigger: inserts slow or failing on a replicated setup, `TABLE_IS_READ_ONLY`/`KE
 | 4. What is the load made of? | — | `system.part_log_3_days` NewPart per hour and `size_in_bytes/count`; `query_log_details` Insert `count` and `written_rows/count` | thousands of tiny inserts per hour → the Keeper transaction rate and part count are self-inflicted (P-02); otherwise look at a merge/mutation blocking the pool (P-04, P-11). |
 
 Reading: step 1 tells you *which side* is behind, step 2 whether capacity is exhausted, step 3 whether coordination broke, step 4 what to change. Present all four numbers together — a high queue with an idle pool and no Keeper errors is a blocked merge, not an overloaded server.
+
+### Keeper slow, overloaded or growing — find who, when and where (≥ 26.3)
+
+1. `system.aggregated_zookeeper_log_by_minute_1_day` → the minutes: weighted latency, request bursts, `loss_failures`; in cloud, whether one replica stands out (HC-3.21 — P-65 if only one).
+2. `system.aggregated_zookeeper_log_by_hour_2_days` → who: the component share and its hourly shape (P-68 hot loop), slow operations (P-66, P-67), removes answering `ZNONODE` (P-62).
+3. `system.aggregated_zookeeper_log_paths_1_day` → where: the class with the requests (`in_multi` → P-64) and the class with the net creates (P-63).
+4. `keeper/<member>.txt` → `zk_znode_count`, `zk_approximate_data_size`, `zk_outstanding_requests`, snapshot size — what the growth or load does to the ensemble (HC-3.18–3.20, P-61).
+5. `part_log_3_days`, `system.parts` / `system.columns`, `asynchronous_insert_log_7_days`, `system.settings` (`compatibility`, dedup and async-insert settings) → the cause behind the path (parts per insert, files per part, flush sizes).
+6. Below 26.3 the three files are absent: fall back to `metric_log_coordination_3_days`, `metric_log_by_host_3_days`, `text_log_keeper_1_day` and `zookeeper_log_errors_1_day` (when enabled), and give the customer the live queries in `reading-recipes.md` §Keeper requests if their server is ≥ 25.9.
 
 ### Inserts rejected with TOO_MANY_PARTS (252)
 
