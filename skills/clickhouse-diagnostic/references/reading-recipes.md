@@ -210,9 +210,10 @@ Slow operations, and the ZNONODE share of removes (P-62):
 SELECT time, component, operation, toUInt64(ops) AS ops, round(toFloat64(avg_latency_us) / 1e6, 2) AS avg_s
 FROM file('$B/system.aggregated_zookeeper_log_by_hour_2_days_*.jsonl', JSONEachRow)
 WHERE toUInt64(ops) >= 100 AND toFloat64(avg_latency_us) >= 1e6 ORDER BY avg_s DESC LIMIT 20;
-SELECT sum(ops) AS removes, sum(errors['ZNONODE']) AS znonode, round(100 * znonode / removes, 1) AS pct
+SELECT sum(ops + in_multi) AS removes, sum(errors['ZNONODE']) AS znonode, round(100 * znonode / nullIf(removes, 0), 1) AS pct
 FROM file('$B/system.aggregated_zookeeper_log_by_hour_2_days_*.jsonl', JSONEachRow,
-          'operation String, ops UInt64, errors Map(String, UInt64)')  -- schema given: the map would be inferred as a tuple
+          'operation String, ops UInt64, in_multi UInt64, errors Map(String, UInt64)')  -- schema given: the map would be inferred as a tuple
+-- errors counts standalone requests AND sub-requests inside Multi, so the denominator does too
 WHERE operation IN ('Remove', 'TryRemove', 'RemoveRecursive')
 ```
 When, and which replica (cloud: `hostname`; onprem/gov files have one server and no hostname column):
@@ -268,9 +269,10 @@ GROUP BY component, operation ORDER BY ops + in_multi DESC LIMIT 30
 4. Paths with the most requests and the most growth (P-63, P-64):
 ```sql
 SELECT replaceRegexpAll(parent_path, '/[0-9]+(/|$)', '/N\\1') AS path, sum(count) AS ops, sumIf(count, is_subrequest = 1) AS in_multi,
-       sumIf(count, operation IN ('Create', 'CreateIfNotExists')) AS creates,
-       sumIf(count, operation IN ('Remove', 'TryRemove', 'RemoveRecursive')) AS removes,
-       toInt64(creates) - toInt64(removes) AS net_creates
+       -- successful requests only: a CreateIfNotExists answered ZNODEEXISTS, or a Remove answered ZNONODE, changes nothing
+       sumIf(greatest(toInt64(count) - toInt64(arraySum(mapValues(mapFilter((code, n) -> code != 'ZOK', errors)))), 0), operation IN ('Create', 'CreateIfNotExists')) AS creates,
+       sumIf(greatest(toInt64(count) - toInt64(arraySum(mapValues(mapFilter((code, n) -> code != 'ZOK', errors)))), 0), operation IN ('Remove', 'TryRemove', 'RemoveRecursive')) AS removes,
+       toInt64(creates) - toInt64(removes) AS net_creates  -- a request balance: one RemoveRecursive deletes a subtree
 FROM clusterAllReplicas('<cluster>', system.aggregated_zookeeper_log)
 WHERE event_date >= toDate('<t0>') AND event_time >= '<t0>' AND event_time < '<t1>' AND parent_path != ''
 GROUP BY path ORDER BY ops DESC LIMIT 20
@@ -287,11 +289,12 @@ GROUP BY parent_path ORDER BY removes DESC LIMIT 20
 6. Creates against removes per minute on one subtree — growth and the moment cleanup stalled (P-63):
 ```sql
 SELECT toStartOfMinute(event_time) AS minute,
-       sumIf(count, operation IN ('Create', 'CreateIfNotExists')) AS creates,
-       sumIf(count, operation IN ('Remove', 'TryRemove', 'RemoveRecursive')) AS removes
+       sumIf(greatest(toInt64(count) - toInt64(arraySum(mapValues(mapFilter((code, n) -> code != 'ZOK', errors)))), 0), operation IN ('Create', 'CreateIfNotExists')) AS creates,
+       sumIf(greatest(toInt64(count) - toInt64(arraySum(mapValues(mapFilter((code, n) -> code != 'ZOK', errors)))), 0), operation IN ('Remove', 'TryRemove', 'RemoveRecursive')) AS removes
 FROM clusterAllReplicas('<cluster>', system.aggregated_zookeeper_log)
 WHERE event_date >= toDate('<t0>') AND event_time >= '<t0>' AND event_time < '<t1>'
   AND parent_path LIKE '%/mergetree/_objects%'
+-- successful requests; confirm the growth itself with `echo mntr | nc <keeper> 9181` (zk_znode_count) over time
 GROUP BY minute ORDER BY minute
 ```
 **Pitfalls the escalations hit:** totals without an `operation` / `is_subrequest` filter count every Multi twice (its envelope, whose `parent_path` is empty, and its sub-requests) — once 247M Gets sat inside 112k MultiReads; the `errors` map includes `ZOK`, so filter it before counting failures; average `average_latency` only weighted by `count`; each server records only its own sessions, so a ranking says nothing about other clients of the same Keeper; and always compare with a baseline window — a top-N without one cannot show a change. Collect the table before a rollback or a downgrade if the comparison matters.

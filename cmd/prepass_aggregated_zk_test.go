@@ -142,10 +142,77 @@ func TestPrepassAZL_ObjectsGrowthAndReadStorm(t *testing.T) {
 		{"path": "/clickhouse/tables/t1/blocks", "ops": 2_000_000, "in_multi": 100_000, "creates": 1_000_000, "removes": 990_000, "net_creates": 10_000, "reads": 10_000, "avg_latency_us": 2_000, "raw_paths": 1},
 	}
 	out := runPrepassAZL(t, map[string][]map[string]any{"system.aggregated_zookeeper_log_paths_1_day": paths})
-	mustHave(t, out, "Znodes piling up under /disk-s3/mergetree/_objects/N", "HC-3.23/P-63",
+	mustHave(t, out, "Successful creates far above removes under /disk-s3/mergetree/_objects/N", "HC-3.23/P-63",
+		"a request balance", "confirm with zk_znode_count",
 		"takes 95% of the requests", "inside Multi", "HC-3.23/P-64")
-	if !strings.Contains(out, "critical") {
-		t.Errorf("+15M znodes in a day must be critical:\n%s", out)
+	if strings.Contains(out, "**critical**") {
+		t.Errorf("a request balance alone must not be critical:\n%s", out)
+	}
+}
+
+// With the Keeper files in the bundle, the growth finding cites the
+// independent evidence: each member's own znode count.
+func TestPrepassAZL_GrowthCitesZnodeCount(t *testing.T) {
+	py, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 not available")
+	}
+	script := filepath.Join("..", "skills", "clickhouse-diagnostic", "scripts", "inspect_bundle.py")
+	b := filepath.Join(t.TempDir(), "clickhouse_diagnostic_20261029_120000")
+	if err := os.MkdirAll(filepath.Join(b, "keeper"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.WriteFile(filepath.Join(b, "system.version_20261029_120000.jsonl"), []byte(`{"version":"26.7.1.1"}`+"\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(b, "system.aggregated_zookeeper_log_paths_1_day_20261029_120000.jsonl"),
+		[]byte(`{"path":"/d/mergetree/_objects/N","ops":"5000000","in_multi":"0","creates":"4000000","removes":"10","net_creates":"3999990","reads":"0","avg_latency_us":"0","raw_paths":"10"}`+"\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(b, "keeper", "keeper1_9181.txt"), []byte("# target: keeper1:9181\n\n## mntr\nzk_znode_count\t98000000\n"), 0o644)
+	out, err := exec.Command(py, "-I", "-B", script, b).CombinedOutput()
+	if err != nil {
+		t.Fatalf("pre-pass failed: %v\n%s", err, out)
+	}
+	mustHave(t, string(out), "zk_znode_count: keeper1_9181 98.0M")
+}
+
+// Cloud rows are summed over replicas: the finding names the replica of the
+// largest single-replica hour, not the one that won the most quiet hours.
+func TestPrepassAZL_BusiestReplicaIsTheLargestContribution(t *testing.T) {
+	var rows []map[string]any
+	for h := 0; h < 24; h++ {
+		r := map[string]any{"time": fmt.Sprintf("2026-10-28 %02d:00:00", h), "component": "ReplicatedMergeMutateTaskBase::executeStep",
+			"operation": "List", "ops": 2_000, "in_multi": 0, "avg_latency_us": 900, "errors": map[string]any{},
+			"replicas": 3, "busiest_replica": "replica-quiet", "busiest_replica_ops": 1_000}
+		if h == 20 {
+			r["ops"], r["busiest_replica"], r["busiest_replica_ops"] = 500_000, "replica-loud", 480_000
+		}
+		rows = append(rows, r)
+	}
+	out := runPrepassAZL(t, map[string][]map[string]any{"system.aggregated_zookeeper_log_by_hour_2_days": rows})
+	mustHave(t, out, "largest single-replica hour: 480.0k List requests from replica-loud")
+	if strings.Contains(out, "replica-quiet") {
+		t.Errorf("the replica that won the quiet hours was named:\n%s", out)
+	}
+}
+
+// The ZNONODE share is over the same requests the errors map covers —
+// sub-requests inside Multi included — so a batched storm is caught and the
+// share never exceeds 100 %.
+func TestPrepassAZL_DedupStormInsideMulti(t *testing.T) {
+	hours := []map[string]any{{"time": "2026-10-28 09:00:00", "component": "AsyncBlockIDsCache", "operation": "Remove",
+		"ops": 0, "in_multi": 2_000_000, "avg_latency_us": 0, "errors": map[string]any{"ZNONODE": 1_500_000}}}
+	out := runPrepassAZL(t, map[string][]map[string]any{"system.aggregated_zookeeper_log_by_hour_2_days": hours})
+	mustHave(t, out, "75% of 2.0M Keeper removes answered ZNONODE", "HC-3.22/P-62")
+}
+
+// An _objects class made of creates is a hot path, not a read storm.
+func TestPrepassAZL_ObjectsCreatesAreNotAReadStorm(t *testing.T) {
+	paths := []map[string]any{
+		{"path": "/disk-s3/mergetree/_objects/N", "ops": 4_000_000, "in_multi": 0, "creates": 400_000, "removes": 390_000, "net_creates": 10_000, "reads": 0, "avg_latency_us": 0, "raw_paths": 9000},
+		{"path": "/clickhouse/tables/t1/blocks", "ops": 1_000_000, "in_multi": 0, "creates": 1_000, "removes": 1_000, "net_creates": 0, "reads": 0, "avg_latency_us": 0, "raw_paths": 1},
+	}
+	out := runPrepassAZL(t, map[string][]map[string]any{"system.aggregated_zookeeper_log_paths_1_day": paths})
+	mustHave(t, out, "takes 80% of the requests")
+	if strings.Contains(out, "P-64") || strings.Contains(out, "loaded from object-storage metadata") {
+		t.Errorf("a create-heavy _objects class was labelled a read storm:\n%s", out)
 	}
 }
 
@@ -154,7 +221,7 @@ func TestPrepassAZL_GovShape(t *testing.T) {
 	paths := []map[string]any{{"shape": "/*/mergetree/_objects/N", "path_id": "AB", "ops": 5_000_000, "in_multi": 0,
 		"creates": 4_000_000, "removes": 100, "net_creates": 3_999_900, "reads": 0, "avg_latency_us": 0, "raw_paths": 9000}}
 	out := runPrepassAZL(t, map[string][]map[string]any{"system.aggregated_zookeeper_log_paths_1_day": paths})
-	mustHave(t, out, "Znodes piling up under /*/mergetree/_objects/N", "HC-3.23/P-63")
+	mustHave(t, out, "Successful creates far above removes under /*/mergetree/_objects/N", "HC-3.23/P-63")
 }
 
 // Below 26.3 none of the files exist; the pre-pass must say nothing about it.

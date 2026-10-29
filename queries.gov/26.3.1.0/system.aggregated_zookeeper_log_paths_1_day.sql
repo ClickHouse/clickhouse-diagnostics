@@ -9,7 +9,13 @@
 -- system.aggregated_zookeeper_log (on by default since 25.9).
 --   ops         every request on the class, sub-requests inside Multi
 --               included; in_multi the part that came inside Multi / MultiRead
---   creates / removes / net_creates   znode growth
+--   creates / removes / net_creates   SUCCESSFUL create and remove requests
+--               (a CreateIfNotExists answered ZNODEEXISTS or a Remove answered
+--               ZNONODE changes nothing and is not counted). net_creates is a
+--               request balance, not a znode count: one RemoveRecursive deletes
+--               a whole subtree. A class with creates far above removes is
+--               consistent with growth — confirm with zk_znode_count in
+--               keeper/<member>.txt
 --   avg_latency_us  weighted, standalone requests only
 --   raw_paths   how many distinct paths the class merges
 -- Multi / MultiRead envelopes carry no path and are left out.
@@ -55,8 +61,8 @@ FROM
                 parent_path,
                 sum(count)                                                              AS p_ops,
                 sumIf(count, is_subrequest = 1)                                         AS p_in_multi,
-                sumIf(count, toInt16(operation) IN (1, 502))                           AS p_creates,
-                sumIf(count, toInt16(operation) IN (2, 503, 505))                      AS p_removes,
+                sumIf(greatest(toInt64(count) - toInt64(arraySum(mapValues(mapFilter((code, n) -> code != 'ZOK', errors)))), 0), toInt16(operation) IN (1, 502))      AS p_creates,
+                sumIf(greatest(toInt64(count) - toInt64(arraySum(mapValues(mapFilter((code, n) -> code != 'ZOK', errors)))), 0), toInt16(operation) IN (2, 503, 505)) AS p_removes,
                 sumIf(count, toInt16(operation) IN (3, 4, 12, 500, 506, 507))          AS p_reads,
                 sumIf(average_latency * count, is_subrequest = 0)                       AS p_lat,
                 sumIf(count, is_subrequest = 0)                                         AS p_top_ops

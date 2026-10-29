@@ -431,6 +431,20 @@ def _median(xs):
     return xs[m] if len(xs) % 2 else (xs[m - 1] + xs[m]) / 2
 
 
+def znode_counts(base: str) -> list:
+    """zk_znode_count per Keeper member from keeper/<member>.txt mntr replies."""
+    out = []
+    for path in sorted(glob.glob(os.path.join(base, "keeper", "*.txt"))):
+        try:
+            text = open(path, encoding="utf-8", errors="replace").read()
+        except OSError:
+            continue
+        m = re.search(r"^zk_znode_count\s+(\d+)", text, re.M)
+        if m:
+            out.append({"member": os.path.basename(path)[:-4], "znodes": int(m.group(1))})
+    return out
+
+
 def aggregated_zk_checks(base: str, add) -> None:
     mins = read_jsonl(first(AZL_MIN + "_*.jsonl", base))
     if mins:
@@ -484,8 +498,12 @@ def aggregated_zk_checks(base: str, add) -> None:
             series = list(comp_hour[top].values())
             peak, typical = max(series), _median(series)
             if n >= 0.6 * total and peak >= 100_000 and peak >= 10 * max(typical, 1):
-                busy = Counter(r.get("busiest_replica") for r in hours if r.get("component") == top and r.get("busiest_replica"))
-                on = f", mostly from {busy.most_common(1)[0][0]}" if busy else ""
+                # The largest single-replica contribution (cloud rows are summed
+                # over replicas): names one replica-hour, not who sent the whole.
+                cand = [r for r in hours if r.get("component") == top and r.get("busiest_replica")]
+                big = max(cand, key=lambda r: num(r.get("busiest_replica_ops")) or 0) if cand else None
+                on = (f"; its largest single-replica hour: {count_h(big.get('busiest_replica_ops'))} {big.get('operation')} requests from "
+                      f"{big.get('busiest_replica')} at {big.get('time')}") if big else ""
                 add("warning", "keeper",
                     f"{top} sends {100 * n / total:.0f}% of all Keeper requests, peaking at {count_h(peak)} an hour against a typical {count_h(typical)}{on} — a background task looping on Keeper",
                     f"{AZL_HOUR} component × operation per hour; {AZL_PATHS} for the path", "HC-3.22/P-68")
@@ -495,7 +513,8 @@ def aggregated_zk_checks(base: str, add) -> None:
             add("warning", "keeper",
                 "Keeper operations averaging ≥ 1 s in an hour: " + "; ".join(f"{r.get('operation')} from {r.get('component')} {round((num(r.get('avg_latency_us')) or 0) / 1e6, 1)} s at {r.get('time')}" for r in slow[:3]),
                 f"{AZL_HOUR} avg_latency_us (weighted, standalone requests)", "HC-3.22/P-66/P-67")
-        rem = sum(num(r.get("ops")) or 0 for r in hours if r.get("operation") in AZL_REMOVES)
+        # the errors map covers standalone requests AND sub-requests inside Multi
+        rem = sum((num(r.get("ops")) or 0) + (num(r.get("in_multi")) or 0) for r in hours if r.get("operation") in AZL_REMOVES)
         rem_nonode = sum(num((r.get("errors") or {}).get("ZNONODE")) or 0 for r in hours if r.get("operation") in AZL_REMOVES)
         if rem >= 1_000_000 and rem_nonode >= 0.5 * rem:
             add("warning", "keeper",
@@ -508,16 +527,23 @@ def aggregated_zk_checks(base: str, add) -> None:
         for r in sorted(paths, key=lambda r: -(num(r.get("net_creates")) or 0)):
             net, cr, rm = num(r.get("net_creates")) or 0, num(r.get("creates")) or 0, num(r.get("removes")) or 0
             if net >= 1_000_000 and cr >= 10 * max(rm, 1):
-                add("critical" if net >= 10_000_000 else "warning", "keeper",
-                    f"Znodes piling up under {label(r)}: {count_h(cr)} created and {count_h(rm)} removed in a day (+{count_h(net)}) — Keeper's memory and snapshot grow with it",
-                    f"{AZL_PATHS} creates / removes; keeper/<member>.txt zk_znode_count, zk_approximate_data_size", "HC-3.23/P-63")
+                # Successful requests, but still a request balance: one
+                # RemoveRecursive deletes a subtree. The znode count is the
+                # independent evidence, when the Keeper files carry it.
+                znodes = [f"{k['member']} {count_h(k['znodes'])}" for k in znode_counts(base)]
+                ev = ("keeper/<member>.txt zk_znode_count: " + ", ".join(znodes[:4])) if znodes else "confirm with zk_znode_count in keeper/<member>.txt (not in this bundle)"
+                add("warning", "keeper",
+                    f"Successful creates far above removes under {label(r)}: {count_h(cr)} created, {count_h(rm)} removed in a day (+{count_h(net)} requests) — consistent with znodes piling up, which grows Keeper's memory and snapshot",
+                    f"{AZL_PATHS} creates / removes (a request balance: a RemoveRecursive deletes a subtree); {ev}", "HC-3.23/P-63")
                 break
         if total:
             top = max(paths, key=lambda r: num(r.get("ops")) or 0)
             t = num(top.get("ops")) or 0
             if t >= 0.5 * total and t >= 1_000_000:
                 im = num(top.get("in_multi")) or 0
-                objects = "/_objects" in label(top)
+                rd = num(top.get("reads")) or 0
+                # the read-storm reading needs reads or sub-requests, not just the name
+                objects = "/_objects" in label(top) and (im >= 0.5 * t or rd >= 0.5 * t)
                 add("warning", "keeper",
                     f"{label(top)} takes {100 * t / total:.0f}% of the requests on the busiest Keeper paths ({count_h(t)} in a day, {100 * im / max(t, 1):.0f}% inside Multi)"
                     + (" — parts with very many files being loaded from object-storage metadata" if objects else ""),

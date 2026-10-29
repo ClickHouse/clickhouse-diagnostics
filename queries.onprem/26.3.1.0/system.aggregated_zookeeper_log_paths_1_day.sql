@@ -11,8 +11,13 @@
 --   ops         every request on the class, sub-requests inside Multi
 --               included (a batched read storm lives there); in_multi the
 --               part that came inside Multi / MultiRead
---   creates / removes / net_creates   znode growth: a class with creates far
---               above removes is what fills Keeper's memory and snapshot
+--   creates / removes / net_creates   SUCCESSFUL create and remove requests
+--               (a CreateIfNotExists answered ZNODEEXISTS or a Remove answered
+--               ZNONODE changes nothing and is not counted). net_creates is a
+--               request balance, not a znode count: one RemoveRecursive deletes
+--               a whole subtree. A class with creates far above removes is
+--               consistent with growth — confirm with zk_znode_count in
+--               keeper/<member>.txt
 --   avg_latency_us  weighted, standalone requests only
 -- Cost: one scan of the day, grouped by raw path first (memory is per
 -- distinct path, not per row), normalised on the distinct paths only.
@@ -49,8 +54,8 @@ FROM
                 parent_path,
                 sum(count)                                                              AS p_ops,
                 sumIf(count, is_subrequest = 1)                                         AS p_in_multi,
-                sumIf(count, toInt16(operation) IN (1, 502))                           AS p_creates,
-                sumIf(count, toInt16(operation) IN (2, 503, 505))                      AS p_removes,
+                sumIf(greatest(toInt64(count) - toInt64(arraySum(mapValues(mapFilter((code, n) -> code != 'ZOK', errors)))), 0), toInt16(operation) IN (1, 502))      AS p_creates,
+                sumIf(greatest(toInt64(count) - toInt64(arraySum(mapValues(mapFilter((code, n) -> code != 'ZOK', errors)))), 0), toInt16(operation) IN (2, 503, 505)) AS p_removes,
                 sumIf(count, toInt16(operation) IN (3, 4, 12, 500, 506, 507))          AS p_reads,
                 sumIf(average_latency * count, is_subrequest = 0)                       AS p_lat,
                 sumIf(count, is_subrequest = 0)                                         AS p_top_ops
