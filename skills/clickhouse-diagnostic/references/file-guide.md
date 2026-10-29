@@ -289,6 +289,24 @@ Windows: `*_7_days` files cover the last 7 days (or `-from/-to`); `system.text_l
 **Traps:** one day only (the alerts' look-back) — the 7-day trend is in `query_log_details_7_days`; `exception` is one sample per row and absent in gov; cloud sums every replica.
 **Pairs with:** `query_log_details_7_days` (which pattern, user, table), `system.errors`, `error_log_7_days`.
 
+### system.query_log_by_hour_7_days / system.query_log_by_pattern_7_days (v0.9, onprem and cloud)
+**Why we run it:** exact query counts — once per query, no per-table repetition — for the traffic shape and for the slowest and heaviest patterns; the dashboard's query panels are built from them.
+**Question:** how much ran each hour and of which kind; which `normalized_query_hash` is slowest, reads the most, fails, and for which user?
+**Read first:** by hour: `count` by `(time, query_kind)` for `type = 'QueryFinish'`, and `exception_code != 0` rows; by pattern: `total_duration_ms / timed_count` (average of the timed QueryFinish rows), `max_duration_ms`, `total_read_bytes / count`, exception-type `count` per `hash`.
+**Healthy looks like:** a flat or diurnal rate; slow patterns explained by what they read.
+**Red flags:** as for `query_log_details_7_days` (P-50/P-51 heavy patterns, P-55 a monitoring user on top, P-10/P-20/P-40 failures).
+**Traps:** `hash` is text (a UInt64 JavaScript would round); `sample_query` is one 600-character execution; `type` splits each pattern into QueryFinish and exception rows — sum the right ones; not collected in gov (no dashboard there).
+**Pairs with:** `query_log_details_7_days` (which tables a pattern touched), `query_analysis/`.
+
+### system.parts_by_table (v0.9, onprem and cloud)
+**Why we run it:** per-table totals of every active part — `system.parts` keeps only the 50 000 largest, which understates tables made of many small parts.
+**Question:** which tables hold the data, in how many parts, how well compressed?
+**Read first:** `bytes_on_disk` (largest first), `parts`, `rows / parts`, `data_uncompressed_bytes / data_compressed_bytes`.
+**Healthy looks like:** sizes matching the customer's expectation; ratio > 3; parts in the tens or hundreds per table.
+**Red flags:** thousands of parts with few rows each (P-02); a `system`-sized surprise is not here (user databases only — see `system.parts`).
+**Traps:** active parts only; one row per table, no partition detail (`system.parts_by_partition`); full tier — absent in an essential run.
+**Pairs with:** `system.tables` (engine, keys), `system.parts_by_partition`, `part_log_3_days`.
+
 ### system.part_log_3_days
 **Why we run it:** the history of background work — it shows whether merges keep up with inserts, how big inserts are, and which merges/mutations fail with which code; `system.merges` alone is a single instant.
 **Question:** what did background work do over the window — parts created, merged, mutated, fetched, removed — and did any of it fail?

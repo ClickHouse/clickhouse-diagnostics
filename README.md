@@ -19,6 +19,8 @@ Under the hood: per-environment query sets (`cloud` / `onprem` / `gov`) selected
 | `system.replicas`, `system.replication_queue` | Is every replica writable and caught up; if not, why? | Read-only state, Keeper session loss and the shape of the queue locate replication problems. |
 | `system.replicas_problem_tables`, `system.database_replicas` (≥ 25.9), `system.replicas_answered` (cloud) | For the tables and Replicated databases in trouble: are all replicas alive, how far behind the log, what Keeper refused; which replicas answered | The Keeper-backed columns are read only where they matter (up to 200 tables, problem tables first): asking `system.replicas` or `system.clusters` for them reads every table's or database's status from Keeper, which took minutes on servers with tens of thousands of tables. |
 | `system.query_log_details_7_days` (hourly aggregation of `system.query_log`) | What ran, how slow, how much memory, what failed, by whom? | Most incidents start with the workload; this is the aggregated view, with a 500-character sample per query pattern and no customer rows. |
+| `system.query_log_by_hour_7_days` / `system.query_log_by_pattern_7_days` (onprem, cloud) | How many queries ran each hour, of which kind, how slow; which patterns are slowest, heaviest, and whose? | Counted once per query — `query_log_details_7_days` repeats a query per table — and what the dashboard's query panels read. The pattern file keeps the hash as text and one 600-character SQL sample. |
+| `system.parts_by_table` (onprem, cloud) | How many parts, rows and bytes does each user table hold? | One row per table with no cap — `system.parts` keeps only the 50 000 largest parts — for the dashboard's summary, storage, largest-tables and tables-explorer panels. |
 | `system.query_log_exceptions_1_day` (hourly, failed queries only) | How many queries failed with each code, each hour? | The exact count — `query_log_details_7_days` repeats a query once per table it touched — that the exception alerts read. No exception text in gov. |
 | `system.query_views_log_3_days` (3 days, hourly aggregation of `system.query_views_log`) | Did every materialized view fire, did any fail, and what does each cost? | An MV that "succeeds" while writing nothing is invisible in `query_log`. An MV that throws fails the parent INSERT by default (`query_log` shows `… while pushing to view X`), but with `materialized_views_ignore_errors = 1` the INSERT is clean and this is the only record. Either way the base part is already committed. |
 | `system.view_refreshes` (≥ 23.12) | Are the refreshable materialized views actually refreshing? | A `REFRESH EVERY` view never appears in `query_views_log`; this is the only place its schedule, last success and last error live. |
@@ -365,6 +367,8 @@ Most collection queries look back over a fixed period. Each declares its **own**
 |---|---|
 | `system.query_log_details_7_days` | 7 days |
 | `system.query_log_exceptions_1_day` | 1 day |
+| `system.query_log_by_hour_7_days` | 7 days |
+| `system.query_log_by_pattern_7_days` | 7 days |
 | `system.part_log_3_days` | 3 days |
 | `system.query_views_log_3_days` | 3 days |
 | `system.metric_log_7_days` | 7 days |
@@ -483,7 +487,7 @@ Security-conscious customers can pass `-dry-run` to see exactly which queries th
 
 What `-dry-run` does:
 
-- Lists every SELECT that would be sent (file-based, dashboard inline, query-analysis bundle, and any alert rule without a `check:` — the shipped rules read the collected files and send none)
+- Lists every SELECT that would be sent (file-based, query-analysis bundle, and any alert rule without a `check:`; the shipped alert rules and the dashboard read the collected files and send none)
 - Tags each query with the `system.*` tables it touches
 - Adds a read-only `EXPLAIN ESTIMATE` block under each SELECT — reports the rows/marks/parts the query **would** scan but reads no data parts. See [the EXPLAIN ESTIMATE docs](https://clickhouse.com/docs/sql-reference/statements/explain#explain-estimate).
 - Renders empty estimates as `this table is empty` (the planner's confirmation that nothing matches the predicate)
@@ -1016,6 +1020,8 @@ The section is hidden when neither analysis flag is set.
 
 When `-skip-dashboard` is not set, the tool generates a single self-contained `dashboard.html` inside the per-run results folder. The dashboard embeds all query results inline as JSON and loads only Chart.js from a CDN, so it can be opened from disk (`file://`) on any machine with internet access.
 
+Every panel is built from the files the collectors already wrote (`internal/dashboard/fromfiles.go`): **no query is sent to the server after collection**, so the dashboard costs a struggling server nothing and shows exactly the window that was collected — `-from`/`-to` and an essential run's 1-day cap included. A panel whose source collector was skipped or failed is listed in the banner with the collector's name; one whose table this server does not have is hidden, as before. With `-output-format native` or `tsv` the panels query the server instead, as they did before. Differences from the live panels: the Part Log panels cover the collector's **3 days**, not 7; a cloud bundle's Replicas Health shows the serving replica's 200 most-affected tables (the `system.replicas` collector keeps the worst 200 per replica); and the schema graph's `CREATE` statements are the server's original single-line text (only a live `formatQueryOrNull` can pretty-print them).
+
 ### Sections
 
 | # | Section | What it shows |
@@ -1027,7 +1033,7 @@ When `-skip-dashboard` is not set, the tool generates a single self-contained `d
 | 5 | 📊 **Query Activity** (last 7 days) | Queries per hour by kind (stacked bar), count by kind, average duration & memory by kind |
 | 6 | 🔍 **Query Deep Dive** (last 7 days) | Top 20 slowest query patterns (by avg duration), top 20 heaviest reads (avg MB/query), per-user executions & errors, slow-query details and per-user summary tables |
 | 7 | ⚠️ **Exceptions** (last 7 days) | Top exception codes by count, plus an exception-details table with the most recent message per code |
-| 8 | 🔧 **Part Log Events** (last 7 days) | Part events per day by event type (stacked bar) and event-type distribution |
+| 8 | 🔧 **Part Log Events** (last 3 days — the collector's window) | Part events per day by event type (stacked bar) and event-type distribution |
 | 9 | 📖 **Dictionaries** | Status distribution (LOADED / FAILED / LOADING), bytes allocated per dictionary, lifetime configuration (min/max), and a details table including `last_exception` (gov mode emits an empty value here) |
 | 10 | 💥 **Crash Log** | Recent entries from `system.crash_log` — section is hidden when the table is empty |
 | 11 | ⏳ **Pending Operations** | Pending mutations and detached-parts tables side by side |

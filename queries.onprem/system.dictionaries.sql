@@ -18,5 +18,13 @@ SELECT
   last_successful_update_time,
   loading_duration,
   last_exception,
-  comment
+  comment,
+  -- The dashboard's dictionaries panel: the key and attribute layout, and
+  -- error_count where the server has it (COLUMNS() yields nothing on a
+  -- version without it, never an error).
+  key.names,
+  key.types,
+  attribute.names,
+  attribute.types,
+  COLUMNS('^error_count$')
 FROM system.dictionaries
