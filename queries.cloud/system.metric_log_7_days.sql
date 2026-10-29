@@ -20,6 +20,10 @@ SELECT
     avg(h_avg_isc)       AS avg_interserver_connections,
     sum(h_zk_tx)         AS zk_transactions,
     sum(h_zk_hw)         AS zk_hw_exceptions,
+    sum(h_zk_user)       AS zk_user_exceptions,
+    sum(h_zk_wait)       AS zk_wait_us,
+    min(h_sess_min)      AS zk_sessions_min,
+    max(h_sess_max)      AS zk_sessions_max,
     avg(h_avg_mem)       AS avg_memory_tracking_bytes
 FROM
 (
@@ -41,6 +45,10 @@ FROM
         avg(CurrentMetric_InterserverConnection)                AS h_avg_isc,
         sum(ProfileEvent_ZooKeeperTransactions)                 AS h_zk_tx,
         sum(ProfileEvent_ZooKeeperHardwareExceptions)           AS h_zk_hw,
+        sum(ProfileEvent_ZooKeeperUserExceptions)               AS h_zk_user,
+        sum(ProfileEvent_ZooKeeperWaitMicroseconds)             AS h_zk_wait,
+        min(CurrentMetric_ZooKeeperSession)                     AS h_sess_min,
+        max(CurrentMetric_ZooKeeperSession)                     AS h_sess_max,
         avg(CurrentMetric_MemoryTracking)                       AS h_avg_mem
     FROM clusterAllReplicas(default, merge(system, '^metric_log'))
     WHERE event_time > {from:7d} AND event_time <= {to:now}

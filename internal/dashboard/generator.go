@@ -12,6 +12,7 @@ import (
 
 	"clickhouse-diagnostic/internal"
 	"clickhouse-diagnostic/internal/alert"
+	"clickhouse-diagnostic/internal/bundle"
 	"clickhouse-diagnostic/internal/hostinfo"
 	"clickhouse-diagnostic/internal/keeper"
 	"clickhouse-diagnostic/internal/query"
@@ -42,6 +43,7 @@ type Generator struct {
 	detachedScope string   // {detached_scope} for the detached panel (see query.DetachedScope)
 	keeperDown    bool     // no Keeper session: skip the panels that wait for one
 	stop          func() bool
+	bundle        *bundle.Bundle // the run directory: when set, panels read the collected files (fromfiles.go)
 }
 
 // keeperPanels wait on a live Keeper session.
@@ -449,9 +451,16 @@ func (g *Generator) Generate(outputDir string, alertResults []alert.Result) erro
 	// exists: a dashboard.html copied out of the bundle then shows a note where
 	// the tab would be, not a broken frame.
 	version, _ := payload["version"].(string)
-	if g.essential() {
+	var sg map[string]interface{}
+	switch {
+	case g.bundle != nil:
+		sg = g.schemaGraphFromFiles(version) // nil when system.tables was not collected
+	case g.essential():
 		g.skippedPanels = append(g.skippedPanels, "schema graph")
-	} else if sg := g.collectSchemaGraph(version); sg != nil {
+	default:
+		sg = g.collectSchemaGraph(version)
+	}
+	if sg != nil {
 		dst := filepath.Join(outputDir, schemaGraphFile)
 		if err := os.WriteFile(dst, []byte(buildSchemaGraphHTML(sg)), 0640); err != nil {
 			fmt.Printf("  [dashboard] schema graph not written: %v\n", err)
@@ -982,6 +991,9 @@ func (g *Generator) keeperConnectionSQL() string {
 }
 
 func (g *Generator) collect() map[string]interface{} {
+	if g.bundle != nil {
+		return g.collectFromFiles()
+	}
 	p := map[string]interface{}{
 		"generated_at":    time.Now().UTC().Format("2006-01-02 15:04:05 UTC"),
 		"mode":            g.mode,
@@ -1097,13 +1109,7 @@ func (g *Generator) collect() map[string]interface{} {
 	// round-tripped through JSON so the dashboard shows exactly the shape the
 	// file does rather than a second, drifting projection of it.
 	if g.hostInfo != nil {
-		if raw, err := json.Marshal(g.hostInfo); err == nil {
-			var hi map[string]interface{}
-			if err := json.Unmarshal(raw, &hi); err == nil {
-				p["host_info"] = hi
-			}
-		}
-		p["host_checks"] = hostChecks(g.hostInfo)
+		g.addHostInfo(p)
 	}
 
 	// Logs: bounded Warning+ rows only. text_log is opt-in (it is off by
@@ -1443,6 +1449,17 @@ func (g *Generator) collect() map[string]interface{} {
 	g.collectAnalysis(p)
 
 	return p
+}
+
+// addHostInfo embeds the host facts.
+func (g *Generator) addHostInfo(p map[string]interface{}) {
+	if raw, err := json.Marshal(g.hostInfo); err == nil {
+		var hi map[string]interface{}
+		if err := json.Unmarshal(raw, &hi); err == nil {
+			p["host_info"] = hi
+		}
+	}
+	p["host_checks"] = hostChecks(g.hostInfo)
 }
 
 // collectAnalysis runs the query-analysis SQL files (same set the

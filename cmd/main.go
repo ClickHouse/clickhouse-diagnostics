@@ -940,6 +940,11 @@ func main() {
 			WithDetachedScope(detachedScope).
 			WithKeeperDown(keeperDownReason != "").
 			WithStop(watch.OverBudget)
+		// The panels read the collected JSONEachRow files; with -output-format
+		// native or tsv they query the server, as before.
+		if outputFormat.Name == query.FormatJSONL.Name {
+			gen = gen.WithBundle(bundle.Open(finalOutputDir, collectorStatus(rec)))
+		}
 		// Write the execution log once now so the dashboard's Collected Files
 		// panel indexes it; the final write below refreshes it with the
 		// dashboard phase itself.
@@ -1503,6 +1508,12 @@ func collectorStatus(rec *runlog.Recorder) map[string]bundle.Status {
 	out := map[string]bundle.Status{}
 	for _, e := range rec.Entries() {
 		if e.Stage != "collector" || (e.Status != "skipped" && e.Status != "failed") {
+			continue
+		}
+		// A table this server does not have (text_log disabled, crash_log on
+		// a server that never crashed) is not a failure: "not collected",
+		// like a collector gated by version.
+		if e.Status == "failed" && strings.Contains(e.Error, "UNKNOWN_TABLE") {
 			continue
 		}
 		reason := e.Extra
