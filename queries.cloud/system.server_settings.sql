@@ -1,3 +1,4 @@
+-- tier: essential
 -- system.server_settings first appeared in 23.3. Cloud runs 23.5 and
 -- newer, so it needs no gate here and this is a plain root file — the
 -- same asymmetry system.asynchronous_insert_log_7_days already has.

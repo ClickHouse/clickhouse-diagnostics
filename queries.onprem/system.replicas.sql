@@ -1,3 +1,4 @@
+-- tier: essential
 SELECT
     database,
     table,

@@ -1,3 +1,4 @@
+-- tier: essential
 -- Root variant for the oldest supported servers (22.8/22.9):
 -- unreserved_space was added in 22.10 — see 22.10.1.0/system.disks.sql
 -- for the richer variant used on newer servers.

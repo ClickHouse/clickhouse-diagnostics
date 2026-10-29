@@ -1,3 +1,4 @@
+-- tier: essential
 -- Background pools, Keeper and SharedMergeTree part-fetch counters per hour
 -- PER HOST. metric_log_7_days folds the replicas into cluster-wide hourly
 -- totals (plus the worst replica's pool average); this file keeps the host,

@@ -229,3 +229,34 @@ func TestInspectBundle_ReplicasThatDidNotAnswer(t *testing.T) {
 		t.Errorf("unmatched names but every replica answered, yet warned:\n%s", out)
 	}
 }
+
+// An essential bundle says so first: its absent per-table files and 1-day
+// windows are by design, and the reason it was essential is a finding.
+func TestInspectBundle_EssentialCollectionIsReported(t *testing.T) {
+	py, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 not available")
+	}
+	script := filepath.Join("..", "skills", "clickhouse-diagnostic", "scripts", "inspect_bundle.py")
+	b := filepath.Join(t.TempDir(), "clickhouse_diagnostic_20261029_120000")
+	if err := os.MkdirAll(b, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(b, "system.version_20261029_120000.jsonl"), []byte(`{"version":"26.7.1.1"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	xl := "clickhouse-diagnostic execution log\n====\nstarted:  2026-10-29 12:00:00 +0000\nmode:     onprem\n" +
+		"collect:  essential collection, chosen automatically: memory at 94 % of the server limit — query timeout 30s\n\nSummary\n-------\n"
+	if err := os.WriteFile(filepath.Join(b, "execution_log.txt"), []byte(xl), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command(py, "-I", "-B", script, b).CombinedOutput()
+	if err != nil {
+		t.Fatalf("pre-pass failed: %v\n%s", err, out)
+	}
+	for _, want := range []string{"essential collection", "memory at 94 %", "-collect full"} {
+		if !strings.Contains(string(out), want) {
+			t.Errorf("output lacks %q\n%s", want, out)
+		}
+	}
+}

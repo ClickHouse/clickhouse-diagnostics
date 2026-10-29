@@ -1,3 +1,5 @@
+-- tier: essential
+-- needs: keeper
 -- Replicated-database replicas on this server (25.9+): is each one writable,
 -- and does it have a Keeper session. This is
 -- the cheap replacement for system.clusters.is_active, which made the server

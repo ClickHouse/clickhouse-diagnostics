@@ -1387,6 +1387,17 @@ def analyse(base: str):
                          if fanned else "parts, replicas, metrics, zookeeper_connection and the pools describe the post-restart node; part_log / metric_log / text_log before the restart are still in the window")
                 add("info", "coverage", f"{who} {run.get('uptime', up.group(1) + ' s')} before collection — {scope}",
                     "a restart clears a parts-propagation backlog only temporarily; a node captured after one looks healthier than the cluster is", "HC-0")
+            # How much was collected. An essential collection (a struggling
+            # server, or -collect essential) has 1-day windows and skipped the
+            # per-table collectors: their files are absent by design, and the
+            # reason it was essential is itself a finding about the server.
+            collect = run.get("collect", "")
+            if collect.startswith("essential") or "switched to essential" in collect:
+                add("warning", "coverage", f"essential collection — {collect}",
+                    "execution_log.txt header `collect:`; skipped collectors are listed with status skipped — their absent files say nothing about health, "
+                    "and windows are 1 day; ask for a `-collect full` run once the node is healthy for parts, tables, detached parts and the 3–7-day history", "HC-0")
+            elif collect:
+                out["notes"].append(f"collection: {collect}")
             if run.get("warnings"):
                 # The collector prefixes each line: "Warning:" for something
                 # that undermines the bundle, "Note:" for something expected

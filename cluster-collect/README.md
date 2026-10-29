@@ -60,5 +60,6 @@ To get log files and configs from every host, print the per-host commands and ru
 ## Notes
 
 - Every host needs the user and grants described in the main [README → Required grants](../README.md#required-grants).
+- Each host's run probes **its own** load and may collect only the essential tables on a struggling host (see the main README → *Essential or full collection*); each bundle's `execution_log.txt` and dashboard say which. `-- -collect full` forces a full collection on every host.
 - Hosts run one at a time, so one slow node does not compete with the others for the cluster's resources. A host that produces no archive is listed in `summary.txt`, with its `run.log` next to it, and the command exits with code 1.
 - Each bundle is uploaded on its own, and each must fit the support portal's 200 MB limit. The summary flags any that do not.

@@ -41,6 +41,8 @@ description: |
   the lasting fix is pool size, fewer and larger inserts, fewer tables. The
   full per-partition list is in the collected file
   system.parts_max_block_by_replica.
+# Scans per-table data: not run in an essential collection.
+tier: full
 tags:
   - replication
   - shared-merge-tree

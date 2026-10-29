@@ -1,3 +1,4 @@
+-- tier: essential
 -- system.error_log (24.8+): the history behind system.errors — every error code
 -- raised anywhere in the server (queries AND background merges, fetches,
 -- Keeper client, DDL workers), per minute, summed here per hour. This is the

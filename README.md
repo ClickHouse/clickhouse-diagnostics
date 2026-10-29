@@ -332,6 +332,29 @@ Fully non-interactive (CI / automation):
 
 > **Security:** prefer the interactive password prompt or an environment variable over `-password` — flags appear in `ps`/shell history.
 
+## Essential or full collection (`-collect`)
+
+A server in trouble is exactly when a diagnostic is needed, and exactly when a full collection costs the most. Before collecting, the tool runs a short load probe (about a second, in-memory tables only) and picks how much to collect:
+
+| `-collect` | What happens |
+|---|---|
+| `auto` (default) | **Full** collection, unless the probe sees a struggling server — `SELECT 1` slower than 1 s, `system.metrics` slower than 2 s, running queries at 80 % of `max_concurrent_queries`, memory at 90 % of the server limit, load average above 2× the cores, or read-only replicated tables. Then **essential**. A full run also switches to essential **mid-run** when a query times out or two in a row take more than 30 s. |
+| `essential` | Always essential. |
+| `full` | Always full — no switch, whatever the probe says. |
+
+An **essential** collection runs only the collectors marked `-- tier: essential` (version, metrics, processes, errors, replicas and replication queue, merges, mutations, Keeper session, disks, the last day of `query_log` / `part_log` / `metric_log` / `error_log` / `text_log`), with:
+
+- every 3- and 7-day window reduced to **1 day** (an explicit `-from` / `-to` still wins);
+- a **30 s** per-query timeout (unless `-query-timeout` was given) and a **3 min** budget for the whole run (`-time-budget` to change it) — what has not run by then is skipped and listed;
+- `max_threads = 2`, `max_memory_usage = 1 GiB` and the lowest `priority`, each checked first and left out if the user's settings profile refuses it;
+- alert rules that scan per-table data (`tier: full`) and the dashboard panels that read every table left out.
+
+When the probe sees **no Keeper session while replicated tables are read-only**, the queries that wait for a session (`system.zookeeper_connection`, `system.database_replicas`, `system.replicas_problem_tables`, the Keeper xid alert, the dashboard's Keeper panel) are skipped instead of waiting for their timeout, and the Keeper four-letter commands take their members from the server configuration.
+
+On a **large SharedMergeTree** server (10 000+ tables), an `auto` run lists detached parts only for non-shared tables and the shared tables named in broken-part log lines; `-collect full` lists every table.
+
+The decision and its reasons are the `collect:` line of `execution_log.txt`, a banner at the top of `dashboard.html`, and the first finding of the analysis skill's pre-pass. Every skipped collector is in the execution log with status `skipped` and why.
+
 ## Collection window
 
 Most collection queries look back over a fixed period. Each declares its **own** default, so a query whose scan is unusually expensive (or unusually cheap) can say so without changing the rest:

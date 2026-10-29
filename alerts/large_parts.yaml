@@ -7,6 +7,8 @@ description: |
   queries, and make backup/restore operations slower. Consider reviewing
   the partition key for the affected table so that parts are split more
   granularly.
+# Scans per-table data: not run in an essential collection.
+tier: full
 tags:
   - storage
   - parts

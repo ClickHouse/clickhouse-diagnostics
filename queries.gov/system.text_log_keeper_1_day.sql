@@ -1,3 +1,4 @@
+-- tier: essential
 -- Keeper session markers per hour, all levels, over the last day: when did the
 -- session expire, when was it finalized, when did the server reconnect and to
 -- which Keeper host (the example keeps the "Connected to ZooKeeper at host:port"

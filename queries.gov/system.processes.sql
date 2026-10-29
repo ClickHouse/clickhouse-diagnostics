@@ -1,3 +1,4 @@
+-- tier: essential
 SELECT 
   hex(SHA256(concat(user, '%salt%'))) AS user,
   hex(SHA256(concat(toString(address), '%salt%'))) AS address,

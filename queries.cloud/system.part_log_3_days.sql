@@ -1,3 +1,4 @@
+-- tier: essential
 -- Window: 3 days. part_log records every part event (NewPart, MergeParts, DownloadPart,
 -- RemovePart …) and reaches tens of GiB per week on a busy replica; three days keep a baseline around an incident at a fraction of the scan.
 SELECT

@@ -1,3 +1,4 @@
+-- tier: essential
 SELECT 
   create_time,
   -- database: without it a queue entry cannot be joined to the matching

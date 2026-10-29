@@ -1,3 +1,4 @@
+-- tier: essential
 -- Part fetches in flight right now: which replica this node is pulling from,
 -- how far along, how big. Many long-running fetches after a Keeper or network
 -- incident = the replica is catching up; a fetch stuck at the same progress

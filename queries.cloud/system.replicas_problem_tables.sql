@@ -1,3 +1,5 @@
+-- tier: essential
+-- needs: keeper
 -- The Keeper-backed columns of system.replicas, for the tables that need
 -- them. Asking system.replicas for log_max_index, log_pointer,
 -- total_replicas, active_replicas or zookeeper_exception makes the server

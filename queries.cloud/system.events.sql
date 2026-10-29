@@ -1,3 +1,4 @@
+-- tier: essential
 -- Per-replica cumulative ProfileEvents since each replica's start.
 SELECT
     hostName() AS hostname,

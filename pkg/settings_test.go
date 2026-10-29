@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Extra settings ride on every request next to readonly=1, escaped, and the
@@ -40,5 +41,32 @@ func TestSetSetting_SentOnEveryRequest(t *testing.T) {
 		if strings.Count(q, "skip_unavailable_shards=") != 1 {
 			t.Errorf("setting repeated in %q", q)
 		}
+	}
+}
+
+func TestRemoveSetting(t *testing.T) {
+	c := NewClickHouseClient("http", "h", "1", "", "")
+	c.SetSetting("max_threads", "2")
+	c.SetSetting("priority", "10")
+	c.RemoveSetting("max_threads")
+	c.RemoveSetting("absent")
+	if len(c.settings) != 1 || c.settings[0].name != "priority" {
+		t.Fatalf("settings after remove: %+v", c.settings)
+	}
+}
+
+func TestSetClientMargin(t *testing.T) {
+	c := NewClickHouseClient("http", "h", "1", "", "")
+	c.SetQueryTimeout(30 * time.Second)
+	if c.httpClient.Timeout != 90*time.Second {
+		t.Fatalf("default margin: %v", c.httpClient.Timeout)
+	}
+	c.SetClientMargin(5 * time.Second)
+	if c.httpClient.Timeout != 35*time.Second {
+		t.Fatalf("margin not applied: %v", c.httpClient.Timeout)
+	}
+	c.SetQueryTimeout(10 * time.Second)
+	if c.httpClient.Timeout != 15*time.Second {
+		t.Fatalf("margin not kept: %v", c.httpClient.Timeout)
 	}
 }

@@ -1,3 +1,4 @@
+-- tier: essential
 -- Gov: policy, volume and disk names are hashed (same salt as system.disks.name).
 SELECT
     hex(SHA256(concat(policy_name, '%salt%')))                    AS policy_name,

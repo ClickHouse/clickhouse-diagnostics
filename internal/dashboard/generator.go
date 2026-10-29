@@ -31,7 +31,57 @@ type Generator struct {
 	nodeUptime    string          // how long that node had been up at collection
 	collection    string          // execution_log `collection:` note (SharedMergeTree onprem → cloud switch)
 	airgap        bool            // inline Chart.js instead of loading it from the CDN (-airgap)
+	// collect is the run's collection mode, for the banner: kind is
+	// "essential" or "full", summary the execution log's `collect:` line,
+	// skipped the collectors that did not run.
+	collectMode struct {
+		kind, summary string
+		skipped       []string
+	}
+	skippedPanels []string // heavy panels not built in an essential run
+	detachedScope string   // {detached_scope} for the detached panel (see query.DetachedScope)
+	keeperDown    bool     // no Keeper session: skip the panels that wait for one
+	stop          func() bool
 }
+
+// keeperPanels wait on a live Keeper session.
+var keeperPanels = map[string]bool{"keeper_connection": true}
+
+// WithKeeperDown skips the panels that need a live Keeper session.
+func (g *Generator) WithKeeperDown(down bool) *Generator {
+	g.keeperDown = down
+	return g
+}
+
+// WithStop skips the remaining live queries once stop() returns true (the
+// run's time budget is spent).
+func (g *Generator) WithStop(stop func() bool) *Generator {
+	g.stop = stop
+	return g
+}
+
+// WithDetachedScope limits the detached-parts panel like the collector.
+func (g *Generator) WithDetachedScope(scope string) *Generator {
+	g.detachedScope = scope
+	return g
+}
+
+// heavyPanels read every table (system.parts / tables / detached_parts):
+// an essential run does not build them, the banner lists them.
+var heavyPanels = map[string]bool{
+	"storage_by_db": true, "engines_dist": true, "tables_list": true,
+	"top_tables": true, "detached": true, "high_part_count": true,
+}
+
+// WithCollectMode says whether this was an essential or a full collection,
+// why, and which collectors were skipped: the dashboard shows it as a
+// banner, and an essential run also skips the panels that read every table.
+func (g *Generator) WithCollectMode(kind, summary string, skipped []string) *Generator {
+	g.collectMode.kind, g.collectMode.summary, g.collectMode.skipped = kind, summary, skipped
+	return g
+}
+
+func (g *Generator) essential() bool { return g.collectMode.kind == "essential" }
 
 // NewGenerator creates a new Generator.
 func NewGenerator(client *pkg.ClickHouseClient, mode string) *Generator {
@@ -218,6 +268,18 @@ func (g *Generator) execJSON(sql string) (*chResult, error) {
 
 // safeQuery runs a query, prints a warning on failure, and always returns records.
 func (g *Generator) safeQuery(label, sql string) []map[string]interface{} {
+	if g.essential() && heavyPanels[label] {
+		g.skippedPanels = append(g.skippedPanels, label)
+		return []map[string]interface{}{}
+	}
+	if g.keeperDown && keeperPanels[label] {
+		g.skippedPanels = append(g.skippedPanels, label+" (no Keeper session)")
+		return []map[string]interface{}{}
+	}
+	if g.stop != nil && g.stop() {
+		g.skippedPanels = append(g.skippedPanels, label+" (time budget)")
+		return []map[string]interface{}{}
+	}
 	res, err := g.execJSON(sql)
 	if err != nil {
 		fmt.Printf("  [dashboard] %s: %v\n", label, err)
@@ -387,7 +449,9 @@ func (g *Generator) Generate(outputDir string, alertResults []alert.Result) erro
 	// exists: a dashboard.html copied out of the bundle then shows a note where
 	// the tab would be, not a broken frame.
 	version, _ := payload["version"].(string)
-	if sg := g.collectSchemaGraph(version); sg != nil {
+	if g.essential() {
+		g.skippedPanels = append(g.skippedPanels, "schema graph")
+	} else if sg := g.collectSchemaGraph(version); sg != nil {
 		dst := filepath.Join(outputDir, schemaGraphFile)
 		if err := os.WriteFile(dst, []byte(buildSchemaGraphHTML(sg)), 0640); err != nil {
 			fmt.Printf("  [dashboard] schema graph not written: %v\n", err)
@@ -398,6 +462,10 @@ func (g *Generator) Generate(outputDir string, alertResults []alert.Result) erro
 	}
 	// Needs outputDir, so it happens here rather than in collect().
 	payload["bundle_files"] = collectBundleFiles(outputDir)
+	payload["collect"] = map[string]interface{}{
+		"kind": g.collectMode.kind, "summary": g.collectMode.summary,
+		"skipped_collectors": nonNil(g.collectMode.skipped), "skipped_panels": nonNil(g.skippedPanels),
+	}
 	for k, v := range keeperPanelData(outputDir) {
 		payload[k] = v
 	}
@@ -944,8 +1012,10 @@ func (g *Generator) collect() map[string]interface{} {
 		}
 	}
 
-	// tables / databases summary
-	if r, err := g.execJSON(fmt.Sprintf(
+	// tables / databases summary (reads every table: not in an essential run)
+	if g.essential() {
+		g.skippedPanels = append(g.skippedPanels, "table and part counts")
+	} else if r, err := g.execJSON(fmt.Sprintf(
 		`SELECT uniq(database) AS dbs, count() AS tbls
 		 FROM %s
 		 WHERE database NOT IN ('system','information_schema','INFORMATION_SCHEMA')`,
@@ -955,8 +1025,10 @@ func (g *Generator) collect() map[string]interface{} {
 		p["total_tables"] = parseUInt64(r.Data[0][1])
 	}
 
-	// active parts summary
-	if r, err := g.execJSON(fmt.Sprintf(
+	// active parts summary (reads every part: not in an essential run)
+	if g.essential() {
+		// counted with the table summary above
+	} else if r, err := g.execJSON(fmt.Sprintf(
 		`SELECT count() AS parts, formatReadableSize(sum(bytes_on_disk)) AS sz
 		 FROM %s
 		 WHERE active = 1
@@ -1135,9 +1207,10 @@ func (g *Generator) collect() map[string]interface{} {
 				arrayStringConcat(groupUniqArray(reason), ', ') AS reasons
 		 FROM %s
 		 WHERE database NOT IN ('system', 'information_schema', 'INFORMATION_SCHEMA')
+		   AND %s
 		 GROUP BY database, table
 		 ORDER BY %s DESC LIMIT 20`,
-		detachedSize, g.sysTable("detached_parts"), detachedOrder,
+		detachedSize, g.sysTable("detached_parts"), query.Apply("{detached_scope}", query.Vars{DetachedScope: g.detachedScope}), detachedOrder,
 	))
 
 	// cluster nodes (cloud only). No is_active: asking for it makes the server
@@ -1839,6 +1912,10 @@ footer{text-align:center;color:var(--ink-muted);font-size:var(--click-font-size-
 .alert-desc{color:var(--ink-muted);font-size:var(--click-font-size-1);margin-bottom:var(--click-space-2);line-height:var(--click-line-height-2)}
 .alert-messages{padding-left:18px;margin:0}
 .alert-messages li{font-size:var(--click-font-size-1);color:var(--ink);margin:3px 0;font-family:var(--click-font-mono);word-break:break-word;white-space:pre-wrap}
+.collect-banner{margin:0 0 var(--click-space-3,12px);padding:10px 14px;border-radius:8px;border:1px solid var(--stroke);background:var(--surface-card);color:var(--ink);font-size:var(--click-font-size-1)}
+.collect-banner.essential{border-color:var(--status-warning-ink,#b58105);background:var(--status-warning-bg)}
+.collect-banner b{font-weight:600}
+.collect-banner .muted{color:var(--ink-muted)}
 .alert-err-msg{font-size:var(--click-font-size-1);color:var(--ink-muted);margin-top:var(--click-space-1);font-style:italic}
 /* Disclosures inside an alert. A ClickHouse exception carries its stack trace
    inline — a measured one was 1764 chars over 15 lines, of which 216 were the
@@ -1921,6 +1998,7 @@ footer{text-align:center;color:var(--ink-muted);font-size:var(--click-font-size-
 
 <!-- ── ALERTS ── -->
 <section id="sec-alerts">
+  <div id="collect-banner" class="collect-banner" style="display:none"></div>
   <h2>🚨 Alert Summary</h2>
   <div id="alerts-summary-bar"></div>
   <div id="alerts-panel"></div>
@@ -3358,6 +3436,28 @@ document.addEventListener('DOMContentLoaded',function(){
     +(DATA.node?'<br>Node: '+esc(DATA.node)+(DATA.uptime?' &middot; up '+esc(DATA.uptime)+' at collection':''):'')
     +(DATA.collection?'<br>Collection: '+esc(DATA.collection):'');
 
+  // What kind of diagnostic this is: an essential collection (a struggling
+  // server, or -collect essential) has 1-day windows and fewer files, and
+  // the reader has to know that before reading any absence as health.
+  (function(){
+    const c=DATA.collect||{}; const el=document.getElementById('collect-banner');
+    if(!el||!c.kind) return;
+    const sc=c.skipped_collectors||[], sp=c.skipped_panels||[];
+    let h;
+    if(c.kind==='essential'){
+      el.classList.add('essential');
+      h='<b>⚠ Essential diagnostic</b> — '+esc(c.summary||'')
+        +'<br><span class="muted">Only the cheap, decisive tables were collected, with 1-day windows. '
+        +(sc.length?esc(String(sc.length))+' collector(s) skipped ('+sc.slice(0,12).map(esc).join(', ')+(sc.length>12?', …':'')+'). ':'')
+        +(sp.length?'Panels not built: '+sp.map(esc).join(', ')+'. ':'')
+        +'Missing data here is not evidence of health. Re-run with <code>-collect full</code> once the node is healthy for the complete picture.</span>';
+    } else {
+      h='<b>Full diagnostic</b> — '+esc(c.summary||'')
+        +(sc.length?'<br><span class="muted">'+esc(String(sc.length))+' collector(s) skipped (time budget): '+sc.slice(0,12).map(esc).join(', ')+'.</span>':'');
+    }
+    el.innerHTML=h; el.style.display='';
+  })();
+
   // stats
   // esc() on both arguments: every caller currently passes a number, a
   // version string or a joined load average, so nothing renders differently
@@ -4417,3 +4517,11 @@ document.addEventListener('DOMContentLoaded',function(){
 </script>
 </body>
 </html>`
+
+// nonNil keeps an empty list a JSON [] instead of null for the template.
+func nonNil(xs []string) []string {
+	if xs == nil {
+		return []string{}
+	}
+	return xs
+}

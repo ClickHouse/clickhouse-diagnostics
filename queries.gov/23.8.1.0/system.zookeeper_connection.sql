@@ -1,3 +1,5 @@
+-- tier: essential
+-- needs: keeper
 -- Gov: connection name and Keeper host are hashed; index (position in the
 -- <zookeeper> node list) and session age stay readable.
 SELECT

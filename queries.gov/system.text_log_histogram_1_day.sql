@@ -1,3 +1,4 @@
+-- tier: essential
 -- Warning-and-worse log volume per hour, level and logger CLASS over the last
 -- day, with one example line. The logger name is normalised to its class
 -- ("db.t (uuid)(PartsUpdateElection)" → PartsUpdateElection, "DDLWorker(db)" →
