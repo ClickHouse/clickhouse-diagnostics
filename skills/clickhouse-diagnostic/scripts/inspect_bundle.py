@@ -27,7 +27,7 @@ import sys
 import tarfile
 import tempfile
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timedelta
 
 GIB = 1024 ** 3
 
@@ -464,13 +464,28 @@ def aggregated_zk_checks(base: str, add) -> None:
                 f"Keeper connection loss / session expired / timeout answers in {len(loss)} minute(s): {count_h(sum(num(r.get('loss_failures')) or 0 for r in loss))} requests, first {loss[0].get('time')}{where(loss[0])}, last {loss[-1].get('time')}{where(loss[-1])}",
                 f"{AZL_MIN} loss_failures — the minutes to match with text_log_keeper_1_day", "HC-3.21/P-57")
         if len(by_host) >= 2:
-            med = {h: _median([num(r.get("avg_latency_us")) or 0 for r in rs if (num(r.get("ops")) or 0) > 0]) for h, rs in by_host.items()}
-            for h, m in med.items():
-                others = _median([v for k, v in med.items() if k != h])
+            # Compare each replica with its peers IN THE SAME MINUTES: a
+            # replica that only existed during a slow spell is not "the slow
+            # one" if its peers were as slow then. Needs at least 5 shared
+            # minutes; otherwise no replica-specific attribution is made.
+            lat = {}  # minute -> {host: latency}
+            for h, rs in by_host.items():
+                for r in rs:
+                    if (num(r.get("ops")) or 0) > 0:
+                        lat.setdefault(r.get("time"), {})[h] = num(r.get("avg_latency_us")) or 0
+            for h in by_host:
+                mine, peers = [], []
+                for minute, per in lat.items():
+                    if h in per and len(per) >= 2:
+                        mine.append(per[h])
+                        peers.append(_median([v for k, v in per.items() if k != h]))
+                if len(mine) < 5:
+                    continue
+                m, others = _median(mine), _median(peers)
                 if m >= 50_000 and m >= 10 * max(others, 1):
                     add("warning", "keeper",
-                        f"One replica's Keeper requests are slow: {h} median {round(m / 1000)} ms per minute against {round(others / 1000, 1)} ms on the other {len(med) - 1} replica(s) — that replica's session or the Keeper member it is on, not Keeper as a whole",
-                        f"{AZL_MIN} per hostname; zookeeper_connection.host names the member", "HC-3.21/P-65")
+                        f"One replica's Keeper requests are slow: {h} median {round(m / 1000)} ms per minute against {round(others / 1000, 1)} ms on its peers in the same {len(mine)} minutes — that replica's session or the Keeper member it is on, not Keeper as a whole",
+                        f"{AZL_MIN} per hostname, matching minutes only; zookeeper_connection.host names the member", "HC-3.21/P-65")
         for h, rs in by_host.items():
             ops = [num(r.get("ops")) or 0 for r in rs]
             base_ops = _median(ops)
@@ -495,7 +510,16 @@ def aggregated_zk_checks(base: str, add) -> None:
                 "Keeper requests by ClickHouse component over two days: " + ", ".join(f"{c} {100 * n / total:.0f}%" for c, n in comp.most_common(5)) + f" of {count_h(total)}",
                 f"{AZL_HOUR} ops + in_multi per component", "HC-3.22")
             top, n = comp.most_common(1)[0]
-            series = list(comp_hour[top].values())
+            # Hours with no requests from this component have no row: count
+            # them as 0 across the file's range, or a component that only
+            # exists in the incident hour has typical == peak.
+            seen = sorted({d for d in (parse_dt(r.get("time")) for r in hours) if d})
+            if seen:
+                span = int((seen[-1] - seen[0]).total_seconds() // 3600) + 1
+                by_hour = {parse_dt(k): v for k, v in comp_hour[top].items() if parse_dt(k)}
+                series = [by_hour.get(seen[0] + timedelta(hours=i), 0) for i in range(span)]
+            else:
+                series = list(comp_hour[top].values())
             peak, typical = max(series), _median(series)
             if n >= 0.6 * total and peak >= 100_000 and peak >= 10 * max(typical, 1):
                 # The largest single-replica contribution (cloud rows are summed

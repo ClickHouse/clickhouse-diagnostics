@@ -257,7 +257,7 @@ FROM clusterAllReplicas('<cluster>', system.aggregated_zookeeper_log)
 WHERE event_date >= toDate('<b0>') AND event_time >= '<b0>' AND event_time < '<t1>'
 GROUP BY hostname, session_id HAVING window_ops > 0 ORDER BY window_ms DESC LIMIT 30
 ```
-3. Which component sends what (P-62, P-66–P-68):
+3. Which component sends what (P-62, P-66–P-68) — needs **26.2+** (`component` arrived then; on 25.9–26.1 drop `component` from the SELECT and the GROUP BY for per-operation totals, and drop the `is_subrequest` conditions as above):
 ```sql
 SELECT component, operation, sumIf(count, is_subrequest = 0) AS ops, sumIf(count, is_subrequest = 1) AS in_multi,
        round(sumIf(average_latency * count, is_subrequest = 0) / nullIf(ops, 0) / 1000, 1) AS avg_ms,
@@ -268,7 +268,8 @@ GROUP BY component, operation ORDER BY ops + in_multi DESC LIMIT 30
 ```
 4. Paths with the most requests and the most growth (P-63, P-64):
 ```sql
-SELECT replaceRegexpAll(parent_path, '/[0-9]+(/|$)', '/N\\1') AS path, sum(count) AS ops, sumIf(count, is_subrequest = 1) AS in_multi,
+-- two passes: one pass leaves the second of two adjacent numbers (/tables/01/123/ → /tables/N/123/)
+SELECT replaceRegexpAll(replaceRegexpAll(parent_path, '/[0-9]+(/|$)', '/N\\1'), '/[0-9]+(/|$)', '/N\\1') AS path, sum(count) AS ops, sumIf(count, is_subrequest = 1) AS in_multi,
        -- successful requests only: a CreateIfNotExists answered ZNODEEXISTS, or a Remove answered ZNONODE, changes nothing
        sumIf(greatest(toInt64(count) - toInt64(arraySum(mapValues(mapFilter((code, n) -> code != 'ZOK', errors)))), 0), operation IN ('Create', 'CreateIfNotExists')) AS creates,
        sumIf(greatest(toInt64(count) - toInt64(arraySum(mapValues(mapFilter((code, n) -> code != 'ZOK', errors)))), 0), operation IN ('Remove', 'TryRemove', 'RemoveRecursive')) AS removes,

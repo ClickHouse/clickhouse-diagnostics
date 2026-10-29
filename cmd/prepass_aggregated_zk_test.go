@@ -245,3 +245,43 @@ func TestPrepassAZL_HealthyIsQuiet(t *testing.T) {
 		}
 	}
 }
+
+// A replica present only during a slow spell is not "the slow replica" when
+// its peers were just as slow in the same minutes: compare matching minutes.
+func TestPrepassAZL_SlowReplicaComparesTheSameMinutes(t *testing.T) {
+	var rows []map[string]any
+	at := func(host string, minute int, latencyUs int) map[string]any {
+		return map[string]any{"time": fmt.Sprintf("2026-10-29 %02d:%02d:00", 10+minute/60, minute%60), "hostname": host, "ops": 500, "in_multi": 0,
+			"avg_latency_us": latencyUs, "worst_group_latency_us": latencyUs, "failed": 0, "loss_failures": 0, "sessions": 1}
+	}
+	// replica-a and replica-b: fast for 60 minutes, then everyone slow for 20.
+	for m := 0; m < 80; m++ {
+		lat := 12_000
+		if m >= 60 {
+			lat = 1_500_000
+		}
+		rows = append(rows, at("replica-a", m, lat), at("replica-b", m, lat))
+	}
+	// replica-new only exists during the slow 20 minutes, at the same latency.
+	for m := 60; m < 80; m++ {
+		rows = append(rows, at("replica-new", m, 1_500_000))
+	}
+	out := runPrepassAZL(t, map[string][]map[string]any{"system.aggregated_zookeeper_log_by_minute_1_day": rows})
+	if strings.Contains(out, "One replica's Keeper requests are slow") {
+		t.Errorf("a replica was blamed for minutes its peers were equally slow in:\n%s", out)
+	}
+}
+
+// A component that only exists in the incident hour still has quiet (zero)
+// hours: its typical hour is 0, not its peak.
+func TestPrepassAZL_HotComponentCountsItsZeroHours(t *testing.T) {
+	var rows []map[string]any
+	for h := 0; h < 24; h++ {
+		rows = append(rows, map[string]any{"time": fmt.Sprintf("2026-10-28 %02d:00:00", h), "component": "ReplicatedMergeTreeCleanupThread",
+			"operation": "Get", "ops": 300, "in_multi": 0, "avg_latency_us": 400, "errors": map[string]any{}})
+	}
+	rows = append(rows, map[string]any{"time": "2026-10-28 20:00:00", "component": "StorageReplicatedMergeTree::fetchPart",
+		"operation": "List", "ops": 500_000, "in_multi": 0, "avg_latency_us": 900, "errors": map[string]any{}})
+	out := runPrepassAZL(t, map[string][]map[string]any{"system.aggregated_zookeeper_log_by_hour_2_days": rows})
+	mustHave(t, out, "StorageReplicatedMergeTree::fetchPart sends", "HC-3.22/P-68")
+}
