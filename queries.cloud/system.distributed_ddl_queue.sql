@@ -1,3 +1,4 @@
+-- needs: keeper
 -- The DDL queue lives in Keeper and is the same from every replica; read it once.
 SELECT
     entry,

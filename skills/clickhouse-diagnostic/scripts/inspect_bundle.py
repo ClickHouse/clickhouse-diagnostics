@@ -241,8 +241,20 @@ def require_jsonl(base: str) -> None:
         f"(the collector default) and re-run.")
 
 
+_RUN_TS_SUFFIX = re.compile(r"\d{8}_\d{6}(\.\w+)?$")
+
+
 def first(pattern: str, base: str):
+    """The first file of one collector. A pattern ending in `_*.<ext>` means
+    "<collector>_<run timestamp>.<ext>": the * must be the timestamp, so
+    system.replicas_*.jsonl never returns system.replicas_problem_tables_* —
+    which it did whenever the replicas collector itself had failed."""
     hits = sorted(glob.glob(os.path.join(base, pattern)))
+    name = os.path.basename(pattern)
+    star = name.find("_*")
+    if star >= 0 and name.count("*") == 1:
+        prefix = name[:star + 1]
+        hits = [h for h in hits if _RUN_TS_SUFFIX.fullmatch(os.path.basename(h)[len(prefix):] or "")]
     return hits[0] if hits else None
 
 
@@ -663,6 +675,20 @@ def analyse(base: str):
     is_smt = cloud_mode or bool(shared_tables)
 
     # ---- replicas / replication queue
+    # Cloud: every request runs with skip_unavailable_shards = 1, so a replica
+    # that was down is silently absent from every per-replica file instead of
+    # failing them. system.replicas_answered names it exactly: a reply's
+    # _shard_num is the position of the configured host that sent it, so no
+    # host-name matching is involved.
+    answered = read_jsonl(first("system.replicas_answered_*.jsonl", base))
+    missing = [r.get("host_name") or r.get("host_address") or f"position {r.get('pos')}" for r in answered
+               if str(r.get("answered")) in ("0", "false", "False")]
+    if missing:
+        add("warning", "coverage",
+            f"{len(missing)} of {len(answered)} replica(s) did not answer this collection: {', '.join(missing[:8])}"
+            + (" …" if len(missing) > 8 else "")
+            + " — their rows are missing from every per-replica file (part_log, query_log, metric_log, replicas, …); say so before reading any per-replica absence as health",
+            "system.replicas_answered (answered = 0, matched by cluster position)", "HC-0")
     reps = read_jsonl(first("system.replicas_*.jsonl", base))
     # Cloud collections from v0.7 carry hostName(): one row per table PER
     # REPLICA, problem rows first, at most 200 per host.
@@ -1532,6 +1558,17 @@ def analyse(base: str):
                          if fanned else "parts, replicas, metrics, zookeeper_connection and the pools describe the post-restart node; part_log / metric_log / text_log before the restart are still in the window")
                 add("info", "coverage", f"{who} {run.get('uptime', up.group(1) + ' s')} before collection — {scope}",
                     "a restart clears a parts-propagation backlog only temporarily; a node captured after one looks healthier than the cluster is", "HC-0")
+            # How much was collected. An essential collection (a struggling
+            # server, or -collect essential) has 1-day windows and skipped the
+            # per-table collectors: their files are absent by design, and the
+            # reason it was essential is itself a finding about the server.
+            collect = run.get("collect", "")
+            if collect.startswith("essential") or "switched to essential" in collect:
+                add("warning", "coverage", f"essential collection — {collect}",
+                    "execution_log.txt header `collect:`; skipped collectors are listed with status skipped — their absent files say nothing about health, "
+                    "and windows are 1 day; ask for a `-collect full` run once the node is healthy for parts, tables, detached parts and the 3–7-day history", "HC-0")
+            elif collect:
+                out["notes"].append(f"collection: {collect}")
             if run.get("warnings"):
                 # The collector prefixes each line: "Warning:" for something
                 # that undermines the bundle, "Note:" for something expected

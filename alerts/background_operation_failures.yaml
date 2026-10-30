@@ -24,6 +24,13 @@ tags:
   - replication
   - reliability
 
+# Evaluated by the Go check over the files already collected (no second
+# query to the server). query: below is the same test in SQL, for the
+# customer to run live; the check mirrors it.
+check: go:background_operation_failures
+source:
+  - system.part_log_3_days
+  - system.version
 query: |
   SELECT
     toStartOfHour(event_time)   AS hour,

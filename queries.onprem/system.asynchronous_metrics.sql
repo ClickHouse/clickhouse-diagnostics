@@ -1,3 +1,4 @@
+-- tier: essential
 -- Slow-updating server gauges: Uptime (the denominator for system.errors and
 -- system.events), ReplicasMaxAbsoluteDelay, ReplicasSumQueueSize,
 -- NumberOfTables/NumberOfDatabases, MaxPartCountForPartition,

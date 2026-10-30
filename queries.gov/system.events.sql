@@ -1,3 +1,4 @@
+-- tier: essential
 -- Cumulative ProfileEvents since server start: ZooKeeper*Exceptions,
 -- S3*RequestsErrors, ReadBufferFromS3RequestsErrors, ReplicatedPartFailedFetches,
 -- FailedQuery/FailedInsertQuery, RejectedInserts, DelayedInserts …

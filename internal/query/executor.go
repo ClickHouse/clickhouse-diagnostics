@@ -4,11 +4,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
 	"clickhouse-diagnostic/internal"
 	"clickhouse-diagnostic/internal/collection"
+	"clickhouse-diagnostic/internal/collectmode"
 	"clickhouse-diagnostic/internal/runlog"
 	"clickhouse-diagnostic/pkg"
 )
@@ -35,6 +37,43 @@ type Executor struct {
 	// rec, when set, receives one entry per query (outcome, wall time,
 	// result size) for execution_log.txt. nil is a no-op.
 	rec *runlog.Recorder
+	// watch decides, collector by collector, whether the run is still full:
+	// once it has tripped (an essential collection chosen up front, a
+	// timeout, two slow queries in a row) full-tier collectors are skipped,
+	// and past the time budget everything left is. nil = always full.
+	watch *collectmode.Watchdog
+	// maxLookback caps every {from:<default>} window (essential: 1 day).
+	maxLookback time.Duration
+	// detachedScope / detachedScopeP fill {detached_scope(_p)}.
+	detachedScope, detachedScopeP string
+	// keeperDown: skip collectors that need a live Keeper session, with
+	// this reason.
+	keeperDown string
+}
+
+// WithKeeperDown makes the executor skip `-- needs: keeper` collectors
+// (reason non-empty: the server has no Keeper session).
+func (e *Executor) WithKeeperDown(reason string) *Executor {
+	e.keeperDown = reason
+	return e
+}
+
+// WithDetachedScope sets the detached-parts scope (see DetachedScope).
+func (e *Executor) WithDetachedScope(scope, qualified string) *Executor {
+	e.detachedScope, e.detachedScopeP = scope, qualified
+	return e
+}
+
+// WithWatchdog attaches the collection-mode watchdog.
+func (e *Executor) WithWatchdog(w *collectmode.Watchdog) *Executor {
+	e.watch = w
+	return e
+}
+
+// WithMaxLookback caps the default window of every query (0 = none).
+func (e *Executor) WithMaxLookback(d time.Duration) *Executor {
+	e.maxLookback = d
+	return e
 }
 
 // WithRecorder attaches the execution-log recorder.
@@ -115,15 +154,41 @@ func (e *Executor) ExecuteQueries(queries map[string]internal.QueryFile, outputD
 
 	successCount := 0
 	errorCount := 0
+	skippedCount := 0
 
-	// Execute the selected queries
-	for _, query := range queries {
-		if err := e.executeQuery(query, finalOutputDir, timestamp); err != nil {
+	// Essential collectors first, then the rest, each group by name: the
+	// cheap decisive tables are in the bundle even if the run is cut short,
+	// and the order no longer depends on map iteration.
+	ordered := orderByTier(queries)
+	for _, oq := range ordered {
+		query := oq.file
+		if e.watch.OverBudget() {
+			e.skip(query, fmt.Sprintf("time budget (%v) spent before it ran", e.watch.Budget()))
+			skippedCount++
+			continue
+		}
+		if e.keeperDown != "" && oq.needsKeeper {
+			e.skip(query, "needs a live Keeper session — "+e.keeperDown)
+			skippedCount++
+			continue
+		}
+		if tripped, why := e.watch.Tripped(); tripped && oq.tier != TierEssential {
+			e.skip(query, "essential collection: "+why)
+			skippedCount++
+			continue
+		}
+		started := time.Now()
+		err := e.executeQuery(query, finalOutputDir, timestamp)
+		e.watch.Observe(query.Name, time.Since(started), err)
+		if err != nil {
 			fmt.Printf("Error executing query '%s': %v\n", query.Name, err)
 			errorCount++
 		} else {
 			successCount++
 		}
+	}
+	if skippedCount > 0 {
+		fmt.Printf("\n%d collector(s) skipped (essential collection or time budget) — listed in execution_log.txt\n", skippedCount)
 	}
 
 	if e.client.IsDryRun() {
@@ -158,10 +223,13 @@ func (e *Executor) executeQuery(query internal.QueryFile, outputDir, timestamp s
 	// Salt format is validated upstream (alphanumeric only), so it cannot
 	// break out of the SQL string literal.
 	sqlText := Apply(string(queryContent), Vars{
-		Mode:    e.mode,
-		From:    e.from,
-		To:      e.to,
-		GovSalt: e.salt,
+		Mode:           e.mode,
+		From:           e.from,
+		To:             e.to,
+		GovSalt:        e.salt,
+		MaxLookback:    e.lookback(),
+		DetachedScope:  e.detachedScope,
+		DetachedScopeP: e.detachedScopeP,
 	})
 
 	// A placeholder left unbound would reach the server as a literal
@@ -284,4 +352,51 @@ func redactResult(queryName, ext, result string) (string, string) {
 		return out, ""
 	}
 	return out, fmt.Sprintf("%d credential(s) replaced with [HIDDEN]", n)
+}
+
+type tieredQuery struct {
+	file        internal.QueryFile
+	tier        string
+	needsKeeper bool
+}
+
+// orderByTier sorts collectors essential-first, then by name. A file whose
+// tier cannot be read counts as full; executeQuery reports the read error.
+func orderByTier(queries map[string]internal.QueryFile) []tieredQuery {
+	out := make([]tieredQuery, 0, len(queries))
+	for _, q := range queries {
+		tier, needs := TierFull, false
+		if b, err := os.ReadFile(q.FullPath); err == nil {
+			if t, err := ParseTier(string(b)); err == nil {
+				tier = t
+			}
+			needs = NeedsKeeper(string(b))
+		}
+		out = append(out, tieredQuery{q, tier, needs})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if (out[i].tier == TierEssential) != (out[j].tier == TierEssential) {
+			return out[i].tier == TierEssential
+		}
+		return out[i].file.Name < out[j].file.Name
+	})
+	return out
+}
+
+// skip records a collector that was not run, and why.
+func (e *Executor) skip(q internal.QueryFile, why string) {
+	fmt.Printf("Skipping '%s': %s\n", q.Name, why)
+	e.rec.Record(runlog.Entry{Stage: "collector", Name: q.Name, Source: q.DirName, Status: "skipped", Rows: -1, Extra: why})
+}
+
+// lookback is the window cap for the next query: the configured one, or 1
+// day once the run has become essential (chosen up front or mid-run).
+func (e *Executor) lookback() time.Duration {
+	if e.maxLookback > 0 {
+		return e.maxLookback
+	}
+	if tripped, _ := e.watch.Tripped(); tripped {
+		return collectmode.EssentialLookback
+	}
+	return 0
 }

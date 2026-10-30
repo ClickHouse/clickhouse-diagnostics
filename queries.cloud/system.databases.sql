@@ -1,3 +1,4 @@
+-- tier: essential
 -- Databases are identical on every replica; read them once.
 SELECT
     name,

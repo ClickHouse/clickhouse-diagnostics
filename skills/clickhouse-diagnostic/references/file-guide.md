@@ -11,7 +11,7 @@ Windows: `*_7_days` files cover the last 7 days (or `-from/-to`); `system.text_l
 ### system.version
 **Why we run it:** every threshold, default and bug-fix statement is version-dependent; without it the rest of the bundle cannot be interpreted safely.
 **Question:** which exact server build produced this bundle?
-**Read first:** the single `version` value (`MAJOR.MINOR.PATCH.BUILD`).
+**Read first:** the single `version` value (`MAJOR.MINOR.PATCH.BUILD`); from v0.9 also `hostname` (hashed in gov), the server `timezone` and `collected_at` — the server's `now()` at collection, which every DateTime in the other files is relative to (the alert checks measure their windows from it).
 **Healthy looks like:** a recent patch of an LTS minor (`YY.3`, `YY.8`) or the current stable.
 **Red flags:** a `.1`/`.2` patch of a minor (contains none of that minor's bug fixes); a minor older than ~12 months (out of support); versions differing across nodes in `system.clusters`/logs banners (P-31, P-54).
 **Traps:** Cloud builds (`26.2.1.558`-style) may include changes not in the OSS tag.
@@ -23,8 +23,8 @@ Windows: `*_7_days` files cover the last 7 days (or `-from/-to`); `system.text_l
 **Read first:** distinct `cluster` names; rows per cluster (`shard_num`, `replica_num`); `errors_count`, `slowdowns_count`, `estimated_recovery_time`; `is_local`.
 **Healthy looks like:** every cluster with the expected shards×replicas, `errors_count = 0`, exactly one `is_local = 1` row per cluster.
 **Red flags:** `errors_count > 0` (distributed queries recently failed to that host — HC-3.6, P-44); hosts that no longer exist (`ON CLUSTER` timeouts, P-21/P-42); a single-node cluster on a server that claims replication.
-**Traps:** in cloud mode the `default` cluster is the service's replica set; hashed `host_name` in gov; `is_active`/`database_replica_name` only on ≥ 23.5.
-**Pairs with:** `configuration/` `<remote_servers>`, `system.replicas`, `system.replication_queue`.
+**Traps:** in cloud mode the `default` cluster is the service's replica set; hashed `host_name` in gov; `database_replica_name` only on ≥ 23.5; **`is_active` is not collected** (asking for it makes the server query every Replicated-database replica — minutes on a server with thousands of them): Replicated-database replica health is in `system.database_replicas` (≥ 25.9).
+**Pairs with:** `configuration/` `<remote_servers>`, `system.replicas`, `system.replication_queue`, `system.database_replicas`, `system.replicas_answered` (cloud).
 
 ### system.tables
 **Why we run it:** nearly every parts/merge/insert finding is *explained* by the schema — the partition key, the sorting key, the engine, the MVs attached to a source and the per-table `SETTINGS` overrides.
@@ -32,7 +32,7 @@ Windows: `*_7_days` files cover the last 7 days (or `-from/-to`); `system.text_l
 **Read first:** non-system tables by `engine`; `partition_key` and `sorting_key` of the tables that show up in parts/queries findings; count of `MaterializedView` per source (`dependencies_table`); `engine_full` for `SETTINGS` overrides (`parts_to_throw_insert`, `ttl_only_drop_parts`, `min_age_to_force_merge_seconds`, `storage_policy`); `total_rows` / `total_bytes` to tell the tables that hold data from the empty ones; on ≥ 26.6 `target_table` for what each MV writes to (the implicit `.inner_id.*` target included). For the shape of the whole pipeline open `schema_graph.html` from the dashboard's Schema tab rather than reading arrays.
 **Healthy looks like:** MergeTree-family tables with a sorting key that starts with low-cardinality filter columns, partition keys at day/month granularity, ≤ ~10 MVs per source, TTL declared on log-like tables.
 **Red flags:** `sorting_key = ''`/`tuple()` on large tables, high-cardinality partition keys (P-03, P-50); dozens of MVs on one source (P-34); `TTL` in DDL but no TTL activity in `part_log` (P-18); `Nullable` key columns; `Join`/`Buffer`/`Kafka` engines involved in a hang (P-21).
-**Traps:** in gov no DDL/keys survive (identifiers and the dependency arrays are hashed); `create_table_query` carries comments and defaults — never paste it verbatim outside the machine (`privacy.md`); engine credentials read `'[HIDDEN]'` (server-masked on ≥ 23.x, collector-redacted otherwise) — a bundle from a tool build before this redactor and a 22.x server may still carry them raw.
+**Traps:** in gov `database`/`name` are hashed — `is_system_db` (v0.9) says which rows are system tables; in gov no DDL/keys survive (identifiers and the dependency arrays are hashed); `create_table_query` carries comments and defaults — never paste it verbatim outside the machine (`privacy.md`); engine credentials read `'[HIDDEN]'` (server-masked on ≥ 23.x, collector-redacted otherwise) — a bundle from a tool build before this redactor and a 22.x server may still carry them raw.
 **Pairs with:** `system.parts` (explain counts), `system.columns` (types), `query_log_details` (which tables are hot).
 
 ### system.view_refreshes (≥ 23.12)
@@ -71,6 +71,15 @@ Windows: `*_7_days` files cover the last 7 days (or `-from/-to`); `system.text_l
 **Traps:** current bundles hold **active parts only, largest first, capped at 50 000 rows** — exactly 50 000 rows means the smallest parts were cut off (the per-partition counts for small-part tables may be understated); bundles from before September 2026 also include inactive parts — filter `active = 1` regardless; `partition` (value) is hashed in gov while `partition_id` is not; single replica even in cloud mode.
 **Pairs with:** `system.tables` (keys explain counts), `part_log` (are merges happening), `system.merges` (are they stuck), `system.mutations` (what pins them).
 
+### system.parts_by_partition (v0.9, essential)
+**Why we run it:** the part count per partition without reading every part — the one number `TOO_MANY_PARTS` depends on, kept even in an essential collection, where `system.parts` is skipped.
+**Question:** which partitions are piling up parts?
+**Read first:** `parts` per `(database, table, partition_id)`; `min_level` (0 = unmerged inserts still present); `rows / parts`.
+**Healthy looks like:** an empty file — it keeps only partitions with more than 100 active parts.
+**Red flags:** `parts` > 300 (the `too_many_parts` alert, HC-2.1, P-01); `parts` near `parts_to_delay_insert` (1000) or `parts_to_throw_insert` (3000) = inserts already delayed or about to fail with 252.
+**Traps:** capped at 2000 partitions, largest first; user databases only; `database`/`table` hashed in gov; single replica in cloud.
+**Pairs with:** `system.parts` (when collected), `part_log_3_days` (insert rate against merges), `system.merges`.
+
 ### system.settings and system.server_settings (≥ 23.3 for server_settings on onprem/gov)
 **Why we run it:** "which settings deviate from defaults" used to require `configuration/`, which cloud bundles never have and gov never ships; these two tables answer it directly, with the ClickHouse default next to the value.
 **Question:** what has been tuned away from defaults — query/profile settings (`system.settings`) and server-level ones (`system.server_settings`)?
@@ -89,13 +98,40 @@ Windows: `*_7_days` files cover the last 7 days (or `-from/-to`); `system.text_l
 **Traps:** server-wide only — a table's own `SETTINGS` (`system.tables.engine_full`) wins; no `default` column (22.8 floor), so a default must come from docs/source at the version; read from one replica in cloud mode (the `<merge_tree>` block is deployed cluster-wide); in gov `storage_policy` / `disk` are hashed with the salt and path-, workload- and column-list values read `REMOVED`.
 **Pairs with:** `system.tables` (`engine`, `engine_full`, `total_rows`), `metric_log_by_host_3_days` (elections per hour, pools), `system.server_settings` (the pool sizes).
 
+### system.replicas_problem_tables
+**Why we run it:** five `system.replicas` columns — `log_max_index`, `log_pointer`, `total_replicas`, `active_replicas`, `zookeeper_exception` — are read from Keeper, and asking for any of them makes the server read **every** table's status from Keeper: one round trip per replicated table, minutes on a server with tens of thousands of tables. This file asks for them only for up to 200 tables, picked by the cheap columns: every read-only, session-expired, queued, delayed or part-checking table first, then a sample of healthy ones.
+**Question:** for the tables in trouble, are all replicas alive, is this replica behind the log, and what did Keeper refuse?
+**Read first:** `active_replicas` against `total_replicas`; `log_max_index − log_pointer` (entries this replica has not copied into its queue); `zookeeper_exception` on read-only rows.
+**Healthy looks like:** `active_replicas = total_replicas`, `log_pointer` at or one above `log_max_index`, empty `zookeeper_exception`.
+**Red flags:** `active_replicas < total_replicas` (HC-3.3); `total_replicas` above the servers that exist (P-43 — the healthy sample is there so a ghost replica shows even on tables that look fine); a large log gap; `zookeeper_exception` on a read-only table (HC-1.4, P-40).
+**Traps:** at most 200 tables — a table absent here may simply not have been picked (it is in `system.replicas` with the cheap columns); cloud: per replica (`hostname`), each replica picks its own 200; gov: names and the exception text are hashed.
+**Pairs with:** `system.replicas` (the cheap columns, every table), `system.replication_queue`, `system.zookeeper_connection`.
+
+### system.database_replicas (≥ 25.9)
+**Why we run it:** the cheap replacement for `system.clusters.is_active`: whether each Replicated-database replica on this server is writable and has a Keeper session, without asking every replica of every Replicated database.
+**Question:** is any Replicated database read-only on this server?
+**Read first:** `is_readonly`, `is_session_expired` (rows are sorted read-only first); the reason is in `text_log` / `errors` (999, 242) and `distributed_ddl_queue`.
+**Healthy looks like:** `is_readonly = 0`, `is_session_expired = 0` everywhere.
+**Red flags:** a read-only or session-expired database — its DDL (`ON CLUSTER`, `CREATE`/`ALTER` through the Replicated database) stalls (HC-3.11, `distributed_ddl_queue`).
+**Traps:** absent below 25.9 — not evidence; `max_log_ptr` / `log_ptr` / `total_replicas` / `zookeeper_exception` are deliberately not collected (each reads every database's status from Keeper) — DDL lag is in `distributed_ddl_queue`; cloud: per replica (`hostname`).
+**Pairs with:** `system.distributed_ddl_queue`, `system.databases` (Replicated count), `system.zookeeper_connection`.
+
+### system.replicas_answered (cloud)
+**Why we run it:** every request runs with `skip_unavailable_shards = 1`, so one replica that is down no longer fails every `clusterAllReplicas` collector — it is simply missing from them. This file names it.
+**Question:** did every replica of the service answer?
+**Read first:** rows with `answered = 0` (sorted first).
+**Healthy looks like:** `answered = 1` on every row.
+**Red flags:** any `answered = 0` (HC-0 in the pre-pass) — that replica's rows are absent from part_log, query_log, metric_log, replicas and every other per-replica file, so "no problem seen" says nothing about it; it is often the very replica in trouble.
+**Traps:** none from names: a reply is matched to its configured host by position (`clusterAllReplicas` numbers every replica as its own shard in cluster order, and `_shard_num` is that number), so aliases, IP endpoints and replicas sharing a short name cannot mislead it.
+**Pairs with:** `system.clusters` (the `default` cluster), `execution_log.txt`.
+
 ### system.detached_parts
 **Why we run it:** detached parts are the server's own record of data it could not trust or re-attach; their `reason` distinguishes corruption from replication bookkeeping, and they still occupy disk.
 **Question:** has anything been set aside as broken, unexpected or manually detached — and is it wasting disk?
 **Read first:** `count()` and `sum(bytes_on_disk)` by `database, table, reason`; `modification_time` (≥ 23.11) to date the event.
 **Healthy looks like:** empty file.
 **Red flags:** `reason IN ('broken', 'broken-on-start', 'covered-by-broken')` → corruption or version skew (HC-2.11, P-31); `unexpected`/`ignored`/`clone` in large numbers after a replication incident (P-41/P-43); many GiB detached on a full disk (HC-4.1).
-**Traps:** root variant on < 22.11 has no `bytes_on_disk`; gov drops `disk`/`path`; `reason = ''` = manual `DETACH`.
+**Traps:** root variant on < 22.11 has no `bytes_on_disk`; gov drops `disk`/`path`; `reason = ''` = manual `DETACH`; the `system`, `information_schema` and `INFORMATION_SCHEMA` databases are not listed (the server lists every table's `detached/` directory — a remote call per table on object-storage disks whose metadata lives in Keeper — and skips filtered databases before listing); materialized-view targets (`.inner*`) are listed — broken parts do land there; on SharedMergeTree, broken-on-start parts show first in logs and errors (`TOO_MANY_UNEXPECTED_DATA_PARTS`, the suspicious-broken-parts limit), so read `text_log` / `errors` even when this file is empty.
 **Pairs with:** `system.errors` 40/226/246, `logs/` around `modification_time`, `system.disks`.
 
 ### system.disks
@@ -137,11 +173,11 @@ Windows: `*_7_days` files cover the last 7 days (or `-from/-to`); `system.text_l
 ### system.replicas
 **Why we run it:** a replicated cluster under load degrades replica by replica: read-only state, expired Keeper sessions and `absolute_delay` show which replica is falling behind and whether writes are still accepted.
 **Question:** is replication healthy on every `Replicated*` table — connected to Keeper, writable, caught up?
-**Read first:** `is_readonly`, `is_session_expired`, `absolute_delay`, `queue_size` split into `inserts_in_queue`/`merges_in_queue`/`part_mutations_in_queue`, `parts_to_check`, `active_replicas`/`total_replicas`, `queue_oldest_time`, then `zookeeper_exception`/`last_queue_update_exception` for the reason behind a read-only or stalled replica. Cloud bundles from v0.7 add `hostname` (one row per table **per replica**), `oldest_part_to_get` and `inserts_oldest_time` — group by `hostname` first, then look at which tables lead `inserts_in_queue` on each.
-**Healthy looks like:** `is_readonly = 0`, `absolute_delay` a few seconds, `queue_size` small and draining, `active_replicas = total_replicas`.
-**Red flags:** `is_readonly = 1` (critical, HC-1.4, P-40), `absolute_delay > 60` (HC-3.1 — P-41 on ReplicatedMergeTree; on SharedMergeTree it is parts not yet fetched by that replica, P-59, and the same `oldest_part_to_get` on several hosts is one finding), `active_replicas < total_replicas` (HC-3.3 — a dead replica or a ghost in Keeper, P-43), `parts_to_check > 0` (suspicious parts), `queue_oldest_time` hours old, non-empty `zookeeper_exception` (Keeper-side failure — pairs with `system.errors` 999/242) or `last_queue_update_exception` (the replica cannot refresh its own queue).
+**Read first:** `is_readonly`, `is_session_expired`, `absolute_delay`, `queue_size` split into `inserts_in_queue`/`merges_in_queue`/`part_mutations_in_queue`, `parts_to_check`, `queue_oldest_time`, then `last_queue_update_exception`; for the Keeper-backed columns (`active_replicas`/`total_replicas`, `log_max_index`/`log_pointer`, `zookeeper_exception` — the reason behind a read-only replica) open `system.replicas_problem_tables`. Cloud bundles from v0.7 add `hostname` (one row per table **per replica**), `oldest_part_to_get` and `inserts_oldest_time` — group by `hostname` first, then look at which tables lead `inserts_in_queue` on each.
+**Healthy looks like:** `is_readonly = 0`, `absolute_delay` a few seconds, `queue_size` small and draining; in `replicas_problem_tables`, `active_replicas = total_replicas`.
+**Red flags:** `is_readonly = 1` (critical, HC-1.4, P-40), `absolute_delay > 60` (HC-3.1 — P-41 on ReplicatedMergeTree; on SharedMergeTree it is parts not yet fetched by that replica, P-59, and the same `oldest_part_to_get` on several hosts is one finding), `parts_to_check > 0` (suspicious parts), `queue_oldest_time` hours old, non-empty `last_queue_update_exception` (the replica cannot refresh its own queue); in `replicas_problem_tables`, `active_replicas < total_replicas` (HC-3.3 — a dead replica or a ghost in Keeper, P-43) and a non-empty `zookeeper_exception` (Keeper-side failure — pairs with `system.errors` 999/242).
 **Traps:** empty file = no replicated tables (normal on a single node); one row per table per replica; onprem/gov files are sorted by `absolute_delay DESC`, so the first row is the worst; the cloud file is sorted read-only → expired → delay → `inserts_in_queue` and **capped at 200 rows per host** — a host with exactly 200 rows is capped and its healthy tables are simply not listed (count tables in `system.tables`); on SharedMergeTree `inserts_in_queue` falls when a merge elsewhere covers the missing parts, so a falling number is not proof of catch-up (0 is); `log_max_index`/`log_pointer` are 0 and `queue_oldest_time` is 1970 on SMT — not an error; `zookeeper_exception` and `last_queue_update_exception` are hashed in gov (empty stays empty, so "is this replica erroring at all?" is still visible).
-**Pairs with:** `system.replication_queue` (why), `metric_log.zk_*` (Keeper health), `system.errors` 999/242.
+**Pairs with:** `system.replicas_problem_tables` (the Keeper-backed columns), `system.replication_queue` (why), `metric_log.zk_*` (Keeper health), `system.errors` 999/242.
 
 ### system.replication_queue
 **Why we run it:** when a replica falls behind, the queue says *why* — fetch-bound (`GET_PART`) vs merge-bound (`MERGE_PARTS`), the postpone reason and the last exception; any type above ~60 entries means a replica is becoming unavailable *(guideline)*.
@@ -176,7 +212,7 @@ Windows: `*_7_days` files cover the last 7 days (or `-from/-to`); `system.text_l
 **Read first:** `event_time`, `signal` (11 SIGSEGV, 6 SIGABRT, 7 SIGBUS), `version`, `query_id`, first frames of `trace_full`.
 **Healthy looks like:** 0-byte file (the file exists, empty).
 **Red flags:** any row = critical (HC-1.1, P-30); identical top frames across rows = deterministic trigger; `query_id` set = a query caused it (find its hash in `query_log_details`).
-**Traps:** not collected in gov; OOM-kills by the OS leave **no** row here (look for restarts in `logs/` instead, P-13); on cloud the table exists only on the replica that crashed.
+**Traps:** gov collects it from v0.9 without `trace`/`trace_full` and with `query_id` hashed; OOM-kills by the OS leave **no** row here (look for restarts in `logs/` instead, P-13); on cloud the table exists only on the replica that crashed, so the fan-out fails when any replica never crashed — `system.crash_log_presence` (cloud, v0.9) lists the replicas that have the table: empty = nobody crashed; rows but no `crash_log` file = crashes that could not be read.
 **Pairs with:** `logs/` `<Fatal>` blocks (full symbolised stack), `system.version`, `query_log_details`.
 
 ### system.stack_trace
@@ -244,13 +280,22 @@ Windows: `*_7_days` files cover the last 7 days (or `-from/-to`); `system.text_l
 **Traps:** **`LEFT ARRAY JOIN tables` duplicates each group once per table with all sums repeated — fix one `tables` value (or `tables = ''`) before summing, never re-sum across rows**; `type = 'QueryStart'` rows carry no resource data; every metric is a **sum over the hour bucket** — divide by `count`; `query` is a 500-char sample of one query; in gov there is no `query`/`exception` and identifiers are hashed.
 **Pairs with:** `query_analysis/` (drill into one hash), `system.tables` (schema of the hot tables), `metric_log` (memory in the same hours), `system.errors`.
 
+### system.query_log_exceptions_1_day (v0.9, essential)
+**Why we run it:** the exact number of failed queries per hour and code — the count `query_log_details_7_days` cannot give, since it repeats a query once per table; the exception alerts read it.
+**Question:** which error codes spiked, in which hour?
+**Read first:** `count` by `(time, exception_code)` for `type = 'ExceptionWhileProcessing'` (failed while running); `ExceptionBeforeStart` separately (refused: 202 too many queries, parse and access errors).
+**Healthy looks like:** a few client-side codes, flat across hours.
+**Red flags:** > 50 of one code in an hour (`high_exception_rate`), > 20 of 999 (`keeper_exception_spike`, P-40), > 10 of 202 in the last hour (`too_many_simultaneous_queries`, P-20), 241 (P-10), 252 (P-01).
+**Traps:** one day only (the alerts' look-back) — the 7-day trend is in `query_log_details_7_days`; `exception` is one sample per row and absent in gov; cloud sums every replica.
+**Pairs with:** `query_log_details_7_days` (which pattern, user, table), `system.errors`, `error_log_7_days`.
+
 ### system.part_log_3_days
 **Why we run it:** the history of background work — it shows whether merges keep up with inserts, how big inserts are, and which merges/mutations fail with which code; `system.merges` alone is a single instant.
 **Question:** what did background work do over the window — parts created, merged, mutated, fetched, removed — and did any of it fail?
 **Read first:** `event_type × merge_reason` totals; `error != 0` rows with `exception`/`distinct_exceptions`; `NewPart` per hour per table vs `MergeParts` per hour; `size_in_bytes/count` for NewPart (insert size) and MergeParts (merge size); `peak_memory_usage` maxima per table.
 **Healthy looks like:** NewPart ≈ insert count, MergeParts a steady fraction, `error = 0` everywhere, TTL merges present on tables that declare TTL, merge results growing in size (levels climbing).
 **Red flags:** MergeParts `error = 241` repeating on one partition (P-11), `error IN (40, 226, 1001, 49)` (P-31/P-30), NewPart thousands/hour with KB-sized parts (P-02), `DownloadPart` errors (P-44), no `TTLDeleteMerge` on TTL tables (P-18), `MutatePart` errors 53/70/117 (P-15/P-32), `system.*` tables with the largest merge memory (P-17).
-**Traps:** sums are per **12-hour** bucket (1-hour with `hostname` on ≥ 23.11) — divide by `count`; `part_name` is deliberately absent; older bundles have the unaliased `any(exception)` column; gov drops exception columns and splits `table_name` into hashed `database`/`table`.
+**Traps:** sums are per **1-hour** bucket with `hostname` (hashed in gov) on every version from v0.9 — older bundles used 12-hour buckets below 23.11; divide by `count`; `part_name` is deliberately absent; older bundles have the unaliased `any(exception)` column; gov drops exception columns and splits `table_name` into hashed `database`/`table`.
 **Pairs with:** `system.parts`, `system.merges`, `system.mutations`, `asynchronous_insert_log`.
 
 ### system.metric_log_7_days
@@ -481,7 +526,7 @@ Trigger: inserts slow or failing on a replicated setup, `TABLE_IS_READ_ONLY`/`KE
 |---|---|---|---|
 | 1. Is a replica falling behind, and how? | `SELECT type, count() FROM system.replication_queue GROUP BY type` | `system.replication_queue_*.jsonl` → `count()` by `type` | any single type **> 60** entries *(guideline)* → a replica is becoming unavailable; `GET_PART` dominant = fetch-bound (network/fetch pool), `MERGE_PARTS` dominant = merge-bound (CPU/merge pool). Read `postpone_reason` and `last_exception` for the specific blocker (P-41). |
 | 2. Is the server itself overloaded? | `SELECT metric, value FROM system.metrics WHERE metric LIKE '%Pool%'` | `system.metric_log_7_days_*.jsonl` → `max_merge_pool_tasks` (= `BackgroundMergesAndMutationsPoolTask`), `avg_/max_fetch_pool_tasks` (= `BackgroundFetchesPoolTask`), `avg_/max_schedule_pool_tasks` (= `BackgroundSchedulePoolTask`), `avg_/max_common_pool_tasks` per hour; sizes in `system.server_settings` / `system.settings` | any pool value **> 256**, or a pool pinned at its size for consecutive hours → system overloaded (HC-2.7, HC-2.13/2.14, P-01, P-59). Bundles before v0.7 carry only the merge pool max and the fetch pool avg — ask for `system.metrics` if needed. |
-| 3. Has Keeper let go of the replica? | `SELECT database, table, replica_name FROM clusterAllReplicas(default, system.replicas) WHERE is_readonly` | `system.replicas_*.jsonl` → `is_readonly`, `is_session_expired`; `system.errors` 999/242; `metric_log.zk_hw_exceptions` | any `is_readonly = 1` → writes to that table are refused until the session is re-established; `is_session_expired = 1` or `zk_hw_exceptions > 0` in the same hours → Keeper timeouts/session expiry are the cause (P-40), not the table. |
+| 3. Has Keeper let go of the replica? | `SELECT database, table, replica_name FROM clusterAllReplicas(default, system.replicas) WHERE is_readonly` | `system.replicas_2*.jsonl` → `is_readonly`, `is_session_expired`; `system.errors` 999/242; `metric_log.zk_hw_exceptions` | any `is_readonly = 1` → writes to that table are refused until the session is re-established; `is_session_expired = 1` or `zk_hw_exceptions > 0` in the same hours → Keeper timeouts/session expiry are the cause (P-40), not the table. |
 | 4. What is the load made of? | — | `system.part_log_3_days` NewPart per hour and `size_in_bytes/count`; `query_log_details` Insert `count` and `written_rows/count` | thousands of tiny inserts per hour → the Keeper transaction rate and part count are self-inflicted (P-02); otherwise look at a merge/mutation blocking the pool (P-04, P-11). |
 
 Reading: step 1 tells you *which side* is behind, step 2 whether capacity is exhausted, step 3 whether coordination broke, step 4 what to change. Present all four numbers together — a high queue with an idle pool and no Keeper errors is a blocked merge, not an overloaded server.

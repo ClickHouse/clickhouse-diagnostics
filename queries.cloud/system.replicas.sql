@@ -1,3 +1,4 @@
+-- tier: essential
 SELECT
     -- Per replica. Every replica keeps its own system.replicas, and on
     -- SharedMergeTree the queue columns are per replica too: inserts_in_queue
@@ -12,6 +13,12 @@ SELECT
     can_become_leader,
     is_readonly,
     is_session_expired,
+    -- log_max_index, log_pointer, total_replicas, active_replicas and
+    -- zookeeper_exception are not here: asking for any of them makes the
+    -- server read every table's status from Keeper (one round trip per
+    -- replicated table — minutes on a server with tens of thousands of
+    -- tables; StorageSystemReplicas' with_zk_fields). They are in
+    -- system.replicas_problem_tables, for the tables that need them.
     future_parts,
     parts_to_check,
     queue_size,
@@ -19,20 +26,15 @@ SELECT
     merges_in_queue,
     part_mutations_in_queue,
     toString(queue_oldest_time) AS queue_oldest_time,
-    log_max_index,
-    log_pointer,
     absolute_delay,
     -- The oldest part this replica is still missing and when it was
     -- written: absolute_delay sizes the lag, these two name it, so the same
     -- part showing up as "oldest missing" on several hosts is one finding.
     oldest_part_to_get,
     toString(inserts_oldest_time) AS inserts_oldest_time,
-    total_replicas,
-    active_replicas,
-    -- is_readonly = 1 says the replica stopped accepting writes; these two say
-    -- why. See queries.onprem/system.replicas.sql for the cost note.
-    last_queue_update_exception,
-    zookeeper_exception
+    -- The local queue-update failure; the Keeper-side zookeeper_exception is
+    -- in system.replicas_problem_tables (see the note above).
+    last_queue_update_exception
 FROM clusterAllReplicas(default, system.replicas)
 -- Problem rows first, then a bounded sample of healthy ones. The fan-out is
 -- tables × replicas: on a self-hosted SharedMergeTree cluster with tens of

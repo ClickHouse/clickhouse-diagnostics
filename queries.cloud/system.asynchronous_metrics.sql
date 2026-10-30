@@ -1,3 +1,4 @@
+-- tier: essential
 -- Per-replica server gauges (Uptime, replica delay/queue, part counts, cache
 -- bytes, memory). Per-core rows are dropped.
 SELECT

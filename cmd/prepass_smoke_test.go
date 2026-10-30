@@ -145,3 +145,112 @@ func TestInspectBundle_ReadsBothBundleNames(t *testing.T) {
 		t.Errorf("new-name archive: collected_at = %q, want 2026-01-03 10:15:00", at)
 	}
 }
+
+// A file is found by its collector name plus the run timestamp, never by
+// prefix alone: system.replicas_*.jsonl also matches
+// system.replicas_problem_tables_*.jsonl, so when the replicas collector
+// failed (no system.replicas file) the pre-pass read the problem-tables file
+// as system.replicas — the same trap as system.parts_* against
+// system.parts_max_block_recent_*.
+func TestInspectBundle_FileLookupIsExact(t *testing.T) {
+	py, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 not available")
+	}
+	script := filepath.Join("..", "skills", "clickhouse-diagnostic", "scripts", "inspect_bundle.py")
+	b := filepath.Join(t.TempDir(), "clickhouse_diagnostic_20261029_120000")
+	if err := os.MkdirAll(b, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	put := func(name, body string) {
+		if err := os.WriteFile(filepath.Join(b, name+"_20261029_120000.jsonl"), []byte(body+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	put("system.version", `{"version":"26.7.1.1"}`)
+	// No system.replicas file (the collector failed); only the problem-tables
+	// one, with a read-only row that must NOT be reported as HC-1.4 / HC-3.x
+	// from "system.replicas".
+	put("system.replicas_problem_tables", `{"database":"db","table":"t","is_readonly":1,"is_session_expired":1,"queue_size":"0","absolute_delay":"9999","log_max_index":"1","log_pointer":"1","total_replicas":3,"active_replicas":1,"zookeeper_exception":""}`)
+	out, err := exec.Command(py, "-I", "-B", script, b).CombinedOutput()
+	if err != nil {
+		t.Fatalf("pre-pass failed: %v\n%s", err, out)
+	}
+	if strings.Contains(string(out), "9999") {
+		t.Fatalf("system.replicas checks read system.replicas_problem_tables:\n%s", out)
+	}
+}
+
+// A replica that was down is absent from every per-replica file (requests
+// run with skip_unavailable_shards = 1); the pre-pass must say which.
+func TestInspectBundle_ReplicasThatDidNotAnswer(t *testing.T) {
+	py, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 not available")
+	}
+	script := filepath.Join("..", "skills", "clickhouse-diagnostic", "scripts", "inspect_bundle.py")
+	b := filepath.Join(t.TempDir(), "clickhouse_diagnostic_20261029_120000")
+	if err := os.MkdirAll(b, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	put := func(name, body string) {
+		if err := os.WriteFile(filepath.Join(b, name+"_20261029_120000.jsonl"), []byte(body+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	put("system.version", `{"version":"26.7.1.1"}`)
+	run := func(rows ...string) string {
+		put("system.replicas_answered", strings.Join(rows, "\n"))
+		out, err := exec.Command(py, "-I", "-B", script, b).CombinedOutput()
+		if err != nil {
+			t.Fatalf("pre-pass failed: %v\n%s", err, out)
+		}
+		return string(out)
+	}
+	// Two hosts sharing a short name, one of them down, plus a healthy IP
+	// alias: matched by cluster position, so exactly the stopped one is named.
+	out := run(`{"host_name":"ch-01.site-b","host_address":"10.0.0.2","pos":"2","answered":0}`,
+		`{"host_name":"ch-01.site-a","host_address":"10.0.0.1","pos":"1","answered":1}`,
+		`{"host_name":"10.0.0.3","host_address":"10.0.0.3","pos":"3","answered":1}`)
+	if !strings.Contains(out, "1 of 3 replica(s) did not answer this collection: ch-01.site-b") || !strings.Contains(out, "HC-0") {
+		t.Errorf("the stopped replica was not named:\n%s", out)
+	}
+	if strings.Contains(out, "ch-01.site-a —") || strings.Contains(out, "10.0.0.3 —") || strings.Contains(out, ", 10.0.0.3") {
+		t.Errorf("a replica that answered was named:\n%s", out)
+	}
+	// Every replica answered: nothing to say.
+	if out := run(`{"host_name":"a","pos":"1","answered":1}`, `{"host_name":"b","pos":"2","answered":1}`); strings.Contains(out, "did not answer") {
+		t.Errorf("all answered, yet warned:\n%s", out)
+	}
+}
+
+// An essential bundle says so first: its absent per-table files and 1-day
+// windows are by design, and the reason it was essential is a finding.
+func TestInspectBundle_EssentialCollectionIsReported(t *testing.T) {
+	py, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 not available")
+	}
+	script := filepath.Join("..", "skills", "clickhouse-diagnostic", "scripts", "inspect_bundle.py")
+	b := filepath.Join(t.TempDir(), "clickhouse_diagnostic_20261029_120000")
+	if err := os.MkdirAll(b, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(b, "system.version_20261029_120000.jsonl"), []byte(`{"version":"26.7.1.1"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	xl := "clickhouse-diagnostic execution log\n====\nstarted:  2026-10-29 12:00:00 +0000\nmode:     onprem\n" +
+		"collect:  essential collection, chosen automatically: memory at 94 % of the server limit — query timeout 30s\n\nSummary\n-------\n"
+	if err := os.WriteFile(filepath.Join(b, "execution_log.txt"), []byte(xl), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command(py, "-I", "-B", script, b).CombinedOutput()
+	if err != nil {
+		t.Fatalf("pre-pass failed: %v\n%s", err, out)
+	}
+	for _, want := range []string{"essential collection", "memory at 94 %", "-collect full"} {
+		if !strings.Contains(string(out), want) {
+			t.Errorf("output lacks %q\n%s", want, out)
+		}
+	}
+}

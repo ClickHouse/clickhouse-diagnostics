@@ -66,7 +66,7 @@ Where codes appear in the bundle: `system.errors` (`code`, cumulative `value` si
 | 244 / 308 | UNEXPECTED_ZOOKEEPER_ERROR / UNEXPECTED_NODE_IN_ZOOKEEPER | Keeper metadata inconsistent with local state (leftover znodes, restore onto an existing path). | `replication_queue.last_exception` | P-43 |
 | 253 | REPLICA_ALREADY_EXISTS | `CREATE TABLE` on a `Replicated*` path that already has this replica name — stale metadata in Keeper after DROP/re-create. | `logs/` DDL errors | P-43 |
 | 224 | REPLICA_IS_ALREADY_ACTIVE | Two servers claim the same replica name (config `<macros>` duplicated). | `configuration/` macros | P-42 |
-| 285 | TOO_FEW_LIVE_REPLICAS | Quorum insert (`insert_quorum`) cannot reach enough active replicas. | `system.replicas.active_replicas/total_replicas` | |
+| 285 | TOO_FEW_LIVE_REPLICAS | Quorum insert (`insert_quorum`) cannot reach enough active replicas. | `system.replicas_problem_tables` `active_replicas/total_replicas` | |
 | 286 / 319 | UNSATISFIED_QUORUM_FOR_PREVIOUS_WRITE / UNKNOWN_STATUS_OF_INSERT | Quorum insert edge cases; 319 = the client cannot know whether the insert landed (retry safely only with dedup). | | |
 | 389 | INSERT_WAS_DEDUPLICATED | Block hash already seen — the insert was silently skipped (normal after client retries; a problem when *every* insert dedups). | `text_log` "Deduplication path already exists"; `query_log_details` `written_rows = 0` | P-33 |
 | 741 | TABLE_UUID_MISMATCH | Table UUID resolved at analysis time changed before execution (EXCHANGE/refreshable MV swap race). Not Keeper. | `text_log`; refreshable MVs in `system.tables` | |

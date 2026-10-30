@@ -1,3 +1,4 @@
+-- tier: essential
 -- Gov: the database name is hashed with the same salt as system.tables.database
 -- so the two files join; uuid is not collected.
 SELECT

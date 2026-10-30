@@ -12,7 +12,9 @@ import (
 
 	"clickhouse-diagnostic/internal"
 	"clickhouse-diagnostic/internal/alert"
+	"clickhouse-diagnostic/internal/bundle"
 	"clickhouse-diagnostic/internal/clustercollect"
+	"clickhouse-diagnostic/internal/collectmode"
 	"clickhouse-diagnostic/internal/config"
 	"clickhouse-diagnostic/internal/dashboard"
 	"clickhouse-diagnostic/internal/hostinfo"
@@ -81,6 +83,8 @@ func main() {
 		"Server-side limit for each collected query (max_execution_time). The HTTP client waits 60s longer, "+
 			"so a slow query fails with a clean Code: 159 in the customer's query_log instead of a silent "+
 			"client disconnect that leaves the server still executing. 0 disables both limits.")
+	collectFlag := flag.String("collect", "auto", "How much to collect: auto (default) probes the server's load first and collects only the essential, cheap tables — with 1-day windows, a 30 s per-query timeout and gentle query settings — when it is struggling (slow to answer, near max_concurrent_queries or its memory limit, high load, read-only replicas), and switches to essential mid-run if queries start timing out; essential forces that; full always collects everything")
+	timeBudgetFlag := flag.Duration("time-budget", 0, "Overall limit for the collectors; whatever has not run by then is skipped and listed in execution_log.txt. Default: none for a full collection, 3m for an essential one")
 	dryRunFlag := flag.Bool("dry-run", false, "List every query the tool would execute (with the system tables each touches and an EXPLAIN ESTIMATE per SELECT) and exit. Does NOT write results or create an archive. EXPLAIN ESTIMATE is a read-only metadata query — it reports the rows/marks/parts the SELECT WOULD scan without reading any data.")
 
 	// Parse command line flags
@@ -92,15 +96,26 @@ func main() {
 	// resolveMode needs to fail loudly on a typo while still defaulting.
 	// -password is recorded the same way: an explicit -password "" prompted
 	// before CLICKHOUSE_PASSWORD was read, and still must.
-	modeExplicit, passwordExplicit := false, false
+	modeExplicit, passwordExplicit, timeoutExplicit := false, false, false
 	flag.Visit(func(f *flag.Flag) {
 		switch f.Name {
 		case "mode":
 			modeExplicit = true
 		case "password":
 			passwordExplicit = true
+		case "query-timeout":
+			timeoutExplicit = true
 		}
 	})
+	collectRequested, err := collectmode.Parse(*collectFlag)
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		os.Exit(1)
+	}
+	if *timeBudgetFlag < 0 {
+		fmt.Println("Error: -time-budget cannot be negative")
+		os.Exit(1)
+	}
 
 	// Initialize variables with defaults
 	var (
@@ -290,6 +305,12 @@ func main() {
 		return
 	}
 	client.SetQueryTimeout(*queryTimeoutFlag)
+	// One replica that is down must not fail every clusterAllReplicas query:
+	// without this the SharedMergeTree fan-out probe below fails and the run
+	// silently collects one node, and in cloud mode every per-replica
+	// collector errors. Queries that do not fan out are unaffected. Which
+	// replicas did not answer is recorded by system.replicas_answered.
+	client.SetSetting("skip_unavailable_shards", "1")
 	if *queryTimeoutFlag == 0 {
 		fmt.Println("Warning: -query-timeout=0 — queries run unbounded on the server and the client " +
 			"waits indefinitely. A slow query will stall the collection rather than fail.")
@@ -384,8 +405,10 @@ func main() {
 	// EXPLAIN metadata queries to reach the server, and the probes are neither.
 	effectiveMode := mode
 	collectionNote := ""
+	serverIsSMT := mode == "cloud"
 	if mode == "onprem" && !dryRun {
 		if cloudMode, err := client.ExecuteQuery("SELECT value FROM system.settings WHERE name = 'cloud_mode'"); err == nil && isSharedMergeTree(cloudMode) {
+			serverIsSMT = true
 			var fanoutErr error
 			if !singleNode {
 				_, fanoutErr = client.ExecuteQuery("SELECT count() FROM clusterAllReplicas(default, system.one)")
@@ -457,7 +480,52 @@ func main() {
 	} else {
 		rec.SetMeta("window", describeWindow(collectFrom, collectTo))
 	}
-	rec.SetMeta("timeout", fmt.Sprintf("%v per query (-query-timeout; 0 = unbounded)", *queryTimeoutFlag))
+	// How much to collect: the load probe decides the starting mode (auto),
+	// and the watchdog can still switch a full run to essential when the
+	// server starts timing out.
+	decision, watch := setupCollection(client, collectRequested, *timeBudgetFlag, dryRun)
+	collectLine := decision.Summary()
+	if decision.Mode == collectmode.Essential {
+		notes := applyEssential(client, timeoutExplicit)
+		why := strings.Join(decision.Reasons, "; ")
+		if why == "" {
+			why = "requested with -collect essential"
+		}
+		watch.Trip(why)
+		collectLine += " — " + strings.Join(append(notes, "1-day windows", "full-tier collectors skipped"), "; ")
+	}
+	watch.OnTrip(func(reason string) {
+		notes := applyEssential(client, timeoutExplicit)
+		fmt.Printf("\nSwitching to an essential collection: %s (%s)\n", reason, strings.Join(notes, "; "))
+		rec.SetMeta("collect", "started full, switched to essential: "+reason+" — "+strings.Join(append(notes, "1-day windows", "remaining full-tier collectors skipped"), "; "))
+	})
+	// No Keeper session while replicated tables are read-only: the queries
+	// that wait for a session are skipped, with this reason, everywhere.
+	keeperDownReason := ""
+	if decision.KeeperDown {
+		keeperDownReason = fmt.Sprintf("the load probe saw no Keeper session while %d replicated table(s) are read-only", decision.Signals.ReadonlyReplicas)
+		collectLine += " — Keeper queries skipped (no Keeper session)"
+	}
+
+	// Detached parts on a large SharedMergeTree server: list every non-shared
+	// table plus the shared ones broken-part log lines name, instead of every
+	// table's directory (query.DetachedScope). -collect full lists all.
+	detachedScope, detachedScopeP := "", ""
+	if decision.Large && serverIsSMT && collectRequested != collectmode.Full && !dryRun {
+		raw, _ := client.ExecuteQueryReal(query.SignalTablesQuery(effectiveMode))
+		signal := query.ParseSignalTables(raw)
+		detachedScope = query.DetachedScope(true, signal, "")
+		detachedScopeP = query.DetachedScope(true, signal, "p.")
+		note := fmt.Sprintf("detached parts listed for non-shared tables and %d shared table(s) named in broken-part log lines (%d tables on a SharedMergeTree server; -collect full lists every table)", len(signal), decision.Signals.Tables)
+		collectLine += " — " + note
+		fmt.Println("Note: " + note)
+	}
+	fmt.Printf("Collection: %s\n", collectLine)
+	rec.SetMeta("collect", collectLine)
+	if b := watch.Budget(); b > 0 {
+		rec.SetMeta("budget", fmt.Sprintf("%v for the collectors (-time-budget)", b))
+	}
+	rec.SetMeta("timeout", fmt.Sprintf("%v per query (-query-timeout; 0 = unbounded)", client.QueryTimeout()))
 	rec.SetMeta("format", outputFormat.Name)
 	if dryRun {
 		rec.SetMeta("dry-run", "yes — no query was sent to the server, durations are not meaningful")
@@ -593,7 +661,9 @@ func main() {
 
 	// Find and execute queries - get the specific folder path
 	queryManager := query.NewManager().WithOutputFormat(outputFormat).
-		WithWindow(collectFrom, collectTo).WithMode(effectiveMode).WithRecorder(rec)
+		WithWindow(collectFrom, collectTo).WithMode(effectiveMode).WithRecorder(rec).WithWatchdog(watch).
+		WithDetachedScope(detachedScope, detachedScopeP).WithKeeperDown(keeperDownReason)
+	watch.Start()
 	phaseStart := time.Now()
 	finalOutputDir, err := queryManager.ExecuteQueries(client, queriesDir, serverVersion, outputDir, govSalt)
 	rec.Phase("collectors", time.Since(phaseStart), "")
@@ -669,7 +739,17 @@ func main() {
 		if dryRun {
 			fmt.Printf("\n-- pre-flight (executed, metadata only): %s\n", keeper.TargetsQuery)
 		}
-		raw, qerr := client.ExecuteQueryReal(keeper.TargetsQuery)
+		// With no Keeper session, system.zookeeper_connection waits for its
+		// timeout instead of answering; the members then come from the
+		// server configuration only — which is where a failed ensemble is
+		// declared anyway.
+		var raw string
+		var qerr error
+		if keeperDownReason == "" {
+			raw, qerr = client.ExecuteQueryReal(keeper.TargetsQuery)
+		} else {
+			qerr = fmt.Errorf("not read: %s", keeperDownReason)
+		}
 		connected := keeper.ParseTargets(raw)
 		configured := keeper.TargetsFromConfig(configDir)
 		targets := keeper.MergeTargets(connected, configured)
@@ -796,7 +876,15 @@ func main() {
 	if !skipAlerts {
 		fmt.Println("Evaluating alert rules...")
 		phaseStart = time.Now()
-		alertResults = alert.NewEvaluator(client, effectiveMode).RunAll(alertsDir, serverVersion)
+		essentialRun, _ := watch.Tripped()
+		ev := alert.NewEvaluator(client, effectiveMode).WithEssential(essentialRun).
+			WithDetachedScope(detachedScope).WithKeeperDown(keeperDownReason).WithStop(watch.OverBudget)
+		// The checks read JSONEachRow files; with -output-format native or
+		// tsv the rules run their queries live instead.
+		if outputFormat.Name == query.FormatJSONL.Name {
+			ev = ev.WithBundle(bundle.Open(finalOutputDir, collectorStatus(rec)).WithWindowEnd(collectTo))
+		}
+		alertResults = ev.RunAll(alertsDir, serverVersion)
 		rec.Phase("alerts", time.Since(phaseStart), "")
 		for _, r := range alertResults {
 			status := "clean"
@@ -847,7 +935,11 @@ func main() {
 			WithServerVersion(serverVersion).
 			WithAnalysis(analysisOpts, analysisDir).
 			WithHostInfo(hostReport).
-			WithAirgap(*airgapFlag)
+			WithAirgap(*airgapFlag).
+			WithCollectMode(collectKind(watch), rec.Meta("collect"), skippedCollectors(rec)).
+			WithDetachedScope(detachedScope).
+			WithKeeperDown(keeperDownReason != "").
+			WithStop(watch.OverBudget)
 		// Write the execution log once now so the dashboard's Collected Files
 		// panel indexes it; the final write below refreshes it with the
 		// dashboard phase itself.
@@ -1403,4 +1495,21 @@ func isAccessDenied(err error) bool {
 	}
 	msg := err.Error()
 	return strings.Contains(msg, "Code: 497") || strings.Contains(msg, "ACCESS_DENIED")
+}
+
+// collectorStatus says, per collector without a file, why: the alert checks
+// report "not applicable: skipped (reason)" instead of a clean result.
+func collectorStatus(rec *runlog.Recorder) map[string]bundle.Status {
+	out := map[string]bundle.Status{}
+	for _, e := range rec.Entries() {
+		if e.Stage != "collector" || (e.Status != "skipped" && e.Status != "failed") {
+			continue
+		}
+		reason := e.Extra
+		if e.Status == "failed" && e.Error != "" {
+			reason = e.Error
+		}
+		out[strings.TrimSuffix(e.Name, ".sql")] = bundle.Status{State: e.Status, Reason: reason}
+	}
+	return out
 }

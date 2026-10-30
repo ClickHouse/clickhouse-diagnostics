@@ -1,3 +1,4 @@
+-- needs: keeper
 -- Gov: hosts, cluster, query text and exception text are hashed; status,
 -- exception_code and timings stay readable.
 SELECT

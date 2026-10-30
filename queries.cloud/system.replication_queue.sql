@@ -1,3 +1,4 @@
+-- tier: essential
 SELECT 
   create_time,
   database,

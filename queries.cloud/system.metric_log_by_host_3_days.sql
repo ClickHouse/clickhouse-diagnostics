@@ -1,3 +1,4 @@
+-- tier: essential
 -- Background pools, Keeper and SharedMergeTree part-fetch counters per hour
 -- PER HOST. metric_log_7_days folds the replicas into cluster-wide hourly
 -- totals (plus the worst replica's pool average); this file keeps the host,
@@ -93,6 +94,10 @@ SELECT
     -- OSIOWait in one sample). One sample alone cannot establish the interval.
     count()                                                  AS metric_samples,
     dateDiff('second', min(event_time), max(event_time))     AS span_s,
+    -- first/last sample of the hour, so a window's span is last − first
+    -- across buckets, gaps included (the keeper_xid_renewal_due check).
+    toString(min(event_time))                                AS first_sample,
+    toString(max(event_time))                                AS last_sample,
     COLUMNS('^CurrentMetric_Background(Fetches|Schedule|MergesAndMutations)PoolSize$') APPLY max,
     COLUMNS('^ProfileEvent_SharedMergeTree(DataPartsFetchAttempt|DataPartsFetchFromS3|DataPartsFetchFromPeer|SelectPartsForRendezvousFetchParts|SelectPartsForCoordinatedFetchParts|HandleFetchPartsMicroseconds|VirtualPartsUpdatesLeaderSuccessfulElection|VirtualPartsUpdatesLeaderFailedElection|ScheduleDataProcessingJob)$') APPLY sum
 FROM clusterAllReplicas(default, merge(system, '^metric_log'))

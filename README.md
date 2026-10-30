@@ -17,7 +17,9 @@ Under the hood: per-environment query sets (`cloud` / `onprem` / `gov`) selected
 | `system.part_log_3_days` (3 days, hourly aggregation of `system.part_log`) | Are merges keeping up with inserts; did any merge or mutation fail? | Shows insert size, merge throughput and failing background operations with their error codes. |
 | `system.merges`, `system.mutations` | What is merging or mutating right now; what is stuck? | A stuck merge or a mutation backlog is the usual reason parts pile up while the pool looks idle. |
 | `system.replicas`, `system.replication_queue` | Is every replica writable and caught up; if not, why? | Read-only state, Keeper session loss and the shape of the queue locate replication problems. |
+| `system.replicas_problem_tables`, `system.database_replicas` (≥ 25.9), `system.replicas_answered` (cloud) | For the tables and Replicated databases in trouble: are all replicas alive, how far behind the log, what Keeper refused; which replicas answered | The Keeper-backed columns are read only where they matter (up to 200 tables, problem tables first): asking `system.replicas` or `system.clusters` for them reads every table's or database's status from Keeper, which took minutes on servers with tens of thousands of tables. |
 | `system.query_log_details_7_days` (hourly aggregation of `system.query_log`) | What ran, how slow, how much memory, what failed, by whom? | Most incidents start with the workload; this is the aggregated view, with a 500-character sample per query pattern and no customer rows. |
+| `system.query_log_exceptions_1_day` (hourly, failed queries only) | How many queries failed with each code, each hour? | The exact count — `query_log_details_7_days` repeats a query once per table it touched — that the exception alerts read. No exception text in gov. |
 | `system.query_views_log_3_days` (3 days, hourly aggregation of `system.query_views_log`) | Did every materialized view fire, did any fail, and what does each cost? | An MV that "succeeds" while writing nothing is invisible in `query_log`. An MV that throws fails the parent INSERT by default (`query_log` shows `… while pushing to view X`), but with `materialized_views_ignore_errors = 1` the INSERT is clean and this is the only record. Either way the base part is already committed. |
 | `system.view_refreshes` (≥ 23.12) | Are the refreshable materialized views actually refreshing? | A `REFRESH EVERY` view never appears in `query_views_log`; this is the only place its schedule, last success and last error live. |
 | `system.data_skipping_indices` | Which tables carry data-skipping indices, on which expressions, at what granularity? | The evidence for "the index exists but the query does not use it"; also drawn on the schema graph. |
@@ -146,7 +148,7 @@ Neither grant exposes customer data: `SHOW` reveals object *names* and metadata 
 
 #### Cloud mode needs two more
 
-`cloud` mode wraps its queries in `clusterAllReplicas(...)` so results span every replica rather than only the node you connected to. Distributed execution needs two further grants:
+`cloud` mode wraps its queries in `clusterAllReplicas(...)` so results span every replica rather than only the node you connected to. Every request runs with `skip_unavailable_shards = 1`: a replica that is down is left out instead of failing every per-replica collector, and `system.replicas_answered` in the bundle says which replicas did not answer. Distributed execution needs two further grants:
 
 ```sql
 GRANT REMOTE                ON *.* TO sys_read_only;
@@ -332,6 +334,29 @@ Fully non-interactive (CI / automation):
 
 > **Security:** prefer the interactive password prompt or an environment variable over `-password` — flags appear in `ps`/shell history.
 
+## Essential or full collection (`-collect`)
+
+A server in trouble is exactly when a diagnostic is needed, and exactly when a full collection costs the most. Before collecting, the tool runs a short load probe (about a second, in-memory tables only) and picks how much to collect:
+
+| `-collect` | What happens |
+|---|---|
+| `auto` (default) | **Full** collection, unless the probe sees a struggling server — `SELECT 1` slower than 1 s, `system.metrics` slower than 2 s, running queries at 80 % of `max_concurrent_queries`, memory at 90 % of the server limit, load average above 2× the cores, or read-only replicated tables. Then **essential**. A full run also switches to essential **mid-run** when a query times out or two in a row take more than 30 s. |
+| `essential` | Always essential. |
+| `full` | Always full — no switch, whatever the probe says. |
+
+An **essential** collection runs only the collectors marked `-- tier: essential` (version, metrics, processes, errors, replicas and replication queue, merges, mutations, Keeper session, disks, the last day of `query_log` / `part_log` / `metric_log` / `error_log` / `text_log`), with:
+
+- every 3- and 7-day window reduced to **1 day** (an explicit `-from` / `-to` still wins);
+- a **30 s** per-query timeout (unless `-query-timeout` was given) and a **3 min** budget for the whole run (`-time-budget` to change it) — what has not run by then is skipped and listed;
+- `max_threads = 2`, `max_memory_usage = 1 GiB` and the lowest `priority`, each checked first and left out if the user's settings profile refuses it;
+- the dashboard panels that read every table left out; an alert rule whose source file was not collected is reported as *not applicable*, naming the skipped collector.
+
+When the probe sees **no Keeper session while replicated tables are read-only**, the queries that wait for a session (`system.zookeeper_connection`, `system.database_replicas`, `system.replicas_problem_tables`, the dashboard's Keeper panel — and with them the alerts that read those files) are skipped instead of waiting for their timeout, and the Keeper four-letter commands take their members from the server configuration.
+
+On a **large SharedMergeTree** server (10 000+ tables), an `auto` run lists detached parts only for non-shared tables and the shared tables named in broken-part log lines; `-collect full` lists every table.
+
+The decision and its reasons are the `collect:` line of `execution_log.txt`, a banner at the top of `dashboard.html`, and the first finding of the analysis skill's pre-pass. Every skipped collector is in the execution log with status `skipped` and why.
+
 ## Collection window
 
 Most collection queries look back over a fixed period. Each declares its **own** default, so a query whose scan is unusually expensive (or unusually cheap) can say so without changing the rest:
@@ -339,6 +364,7 @@ Most collection queries look back over a fixed period. Each declares its **own**
 | Query | Default look-back |
 |---|---|
 | `system.query_log_details_7_days` | 7 days |
+| `system.query_log_exceptions_1_day` | 1 day |
 | `system.part_log_3_days` | 3 days |
 | `system.query_views_log_3_days` | 3 days |
 | `system.metric_log_7_days` | 7 days |
@@ -373,7 +399,7 @@ Either end may be given alone: `-from` with no `-to` runs to now, and `-to` with
 
 The same flags also drive [query analysis](#query-analysis-mode) when `-query-id` / `-normalized-query-hash` is set.
 
-[Alert rules](#alerts) deliberately keep their own windows (e.g. *"exception spike in the last hour"*) — an alert's look-back is part of what the rule means, so `-from`/`-to` do not rewrite it.
+[Alert rules](#alerts) keep their own look-back (e.g. *"exception spike in the last hour"*) — it is part of what the rule means. They read the collected files, so with `-to` that look-back ends at `-to`, where the files end; a `-from` narrower than a rule's look-back gives it only the hours collected.
 
 > **A narrower window is the first thing to try on a slow or heavy collection.** The defaults are tuned for a general health check; on a busy cluster `-from` with a few hours is dramatically cheaper.
 
@@ -457,7 +483,7 @@ Security-conscious customers can pass `-dry-run` to see exactly which queries th
 
 What `-dry-run` does:
 
-- Lists every SELECT that would be sent (file-based, alert rules, dashboard inline, query-analysis bundle)
+- Lists every SELECT that would be sent (file-based, dashboard inline, query-analysis bundle, and any alert rule without a `check:` — the shipped rules read the collected files and send none)
 - Tags each query with the `system.*` tables it touches
 - Adds a read-only `EXPLAIN ESTIMATE` block under each SELECT — reports the rows/marks/parts the query **would** scan but reads no data parts. See [the EXPLAIN ESTIMATE docs](https://clickhouse.com/docs/sql-reference/statements/explain#explain-estimate).
 - Renders empty estimates as `this table is empty` (the planner's confirmation that nothing matches the predicate)
@@ -629,7 +655,7 @@ The tool targets **ClickHouse 22.8 and newer** for on-prem servers. Root-level q
 | `system.server_settings` table | 23.3 | `queries.{onprem,gov}/23.3.1.0/` (no root file — skipped below 23.3; cloud carries it at root) |
 | `system.asynchronous_insert_log.rows` | 23.4 | `queries.{onprem,gov}/23.4.1.0/` (22.10–23.3 report `bytes`) |
 | `system.settings.default` | 23.4 | `queries.{onprem,gov}/23.4.1.0/` (`default` is the only column their roots omit; the cloud root has it) |
-| `system.clusters` replicated-db columns (`database_shard_name`, `database_replica_name`, `is_active`, `name`) | 23.5 | `queries.*/23.5.1.0/` |
+| `system.clusters` replicated-db columns (`database_shard_name`, `database_replica_name`, `name`; `is_active` deliberately not selected) | 23.5 | `queries.*/23.5.1.0/` |
 | `system.query_log.query_cache_usage` | 23.8 | `queries.query_analysis/23.8.1.0/` |
 | `system.zookeeper_connection` table | 23.8 | `queries.*/23.8.1.0/` (no root file — skipped below 23.8 in every mode) |
 | `system.zookeeper_connection.xid`, `last_zxid_seen`, `availability_zone` | 24.3 | `queries.*/24.3.1.0/`; `alerts/24.3.1.0/keeper_xid_renewal_due.yaml` (no root rule — not applicable below 24.3) |
@@ -642,6 +668,7 @@ The tool targets **ClickHouse 22.8 and newer** for on-prem servers. Root-level q
 | `background_*_pool_size` moved from `system.settings` to `system.server_settings` | 23.3 | `alerts/23.3.1.0/` (`fetch_pool_saturated`, `schedule_pool_saturated`; `system.settings` still lists the names on newer servers with the old session defaults, so the root rule would compare against the wrong size there) |
 | `system.tables.metadata_version` | 24.2 | `queries.*/24.2.1.0/` |
 | `system.error_log` table | 24.8 | `queries.*/24.8.1.0/` (no root file — skipped below 24.8 in every mode) |
+| `system.database_replicas` table | 25.9 | `queries.*/25.9.1.0/` (no root file — skipped below 25.9 in every mode) |
 | `system.aggregated_zookeeper_log` with `component` (26.2) and `is_subrequest` (26.3) | 26.3 | `queries.*/26.3.1.0/` (no root file — skipped below 26.3 in every mode: the table exists from 25.9, but before 26.3 sub-requests share buckets with standalone requests and carry the whole Multi's latency) |
 | `system.zookeeper_log.duration_microseconds` (replaces `duration_ms`) | 24.3 | `queries.*/24.3.1.0/` (roots use `duration_ms`; output stays in ms on every rung) |
 | `system.tables.parameterized_view_parameters` | 25.4 | `queries.{onprem,cloud}/25.4.1.0/` (gov: not collected) |
@@ -747,7 +774,9 @@ Written as `text_log_<timestamp>.<ext>`, in the [configured output format](#outp
 
 ## Alerts
 
-Alert rules are plain YAML files in `alerts/` (override with `-alerts-dir`). Each file defines one read-only SELECT query — if it returns any rows, the alert fires and the rows are surfaced in the dashboard. All alert SQL is validated before execution: only `SELECT` / `WITH` is accepted, anything else (`INSERT`, `ALTER`, `DROP`, …) is rejected and the rule is skipped.
+Alert rules are plain YAML files in `alerts/` (override with `-alerts-dir`). Each rule names a **check** (`check: go:<name>`, a Go function in `internal/alert/checks_*.go`) that is evaluated over the files the collectors already wrote — the rules send **no query of their own**, so a run on a struggling server costs the collection and nothing more. If the check returns any rows, the alert fires and the rows are surfaced in the dashboard. The rule's `query:` is the same test written as a read-only SELECT: it is what the dashboard hands the customer to run live, and the check mirrors it (hourly log buckets instead of raw rows — a window's oldest hour may reach up to an hour further back). All alert SQL is validated: only `SELECT` / `WITH` is accepted, anything else (`INSERT`, `ALTER`, `DROP`, …) breaks the rule.
+
+A rule without `check:` still runs its `query:` against the server, as before — the way to try a new rule before writing its check. So do all rules when `-output-format native` or `tsv` is used: the checks read the JSONEachRow files.
 
 ### Rule outcomes
 
@@ -758,7 +787,7 @@ Every run reports four distinct outcomes, because each means something different
 | **fired** | The rule ran and matched rows — a real finding. |
 | **clean** | The rule ran and matched nothing. |
 | **errored** | The rule could not run (bad SQL, a column missing on this version, no `SELECT` grant). **Not a finding** — counted and displayed separately, and excluded from "checked". |
-| **not applicable** (skipped) | The system table the rule queries doesn't exist here — `crash_log` on a healthy self-managed instance, or a config-disabled `text_log`/`query_log` — or the rule declares `modes:` and this run is in another mode (a per-replica comparison that needs the cloud fan-out, a replication-queue rule on SharedMergeTree). Excluded from "checked" so it never reads as a check that passed; the reason is recorded per rule. |
+| **not applicable** (skipped) | A file the check reads was not collected (skipped in an essential run, without a Keeper session, past the time budget, or failed — the collector and the reason are named), or the system table doesn't exist here — `crash_log` on a healthy self-managed instance, or a config-disabled `text_log`/`query_log` — or the rule declares `modes:` and this run is in another mode (a per-replica comparison that needs the cloud fan-out, a replication-queue rule on SharedMergeTree). Excluded from "checked" so it never reads as a check that passed; the reason is recorded per rule. |
 
 ```
 Alert evaluation complete: 8 rule(s) checked, 1 fired, 2 errored, 1 not applicable
@@ -791,6 +820,10 @@ description: |
 tags:
   - mutations
   - performance
+check: go:mutation_running_too_long # the Go check evaluated over the collected files
+source:                              # the collector files it reads (documentation; a test
+  - system.mutations                 # requires every one to be a shipped collector)
+  - system.version
 # modes: [cloud]                     # optional: run only in these modes (cloud | onprem | gov);
                                      # elsewhere the rule is reported as not applicable, not errored —
                                      # for queries that only make sense with a clusterAllReplicas
@@ -814,7 +847,7 @@ message: "Mutation {mutation_id} on {database}.{table} running {hours_running}h"
 #       WHERE parts_to_do > 0 GROUP BY database, table          # like query.
 ```
 
-In `dashboard.html`, every alert that fired, or whose query failed, carries a collapsed **queries to run on your cluster** line under its instances. Opening it shows the rule's `query` exactly as it ran — `{sys.*}` already expanded for the bundle's mode, so it pastes into `clickhouse-client` on the same cluster — and the rule's `investigate:` follow-ups, each with a copy button. Rules that found nothing carry no SQL, and `alerts_summary.json` never does (it is counts only). On a cloud bundle the queries keep their `clusterAllReplicas(…)` form, which needs the same `REMOTE` grant the collection did.
+In `dashboard.html`, every alert that fired, or whose check failed, carries a collapsed **queries to run on your cluster** line under its instances. Opening it shows the rule's `query` — `{sys.*}` already expanded for the bundle's mode, so it pastes into `clickhouse-client` on the same cluster — and the rule's `investigate:` follow-ups, each with a copy button. Rules that found nothing carry no SQL, and `alerts_summary.json` never does (it is counts only). On a cloud bundle the queries keep their `clusterAllReplicas(…)` form, which needs the same `REMOTE` grant the collection did.
 
 ### `{sys.<table>}` placeholder
 
@@ -836,7 +869,8 @@ In `message:`, `{column_name}` is replaced with the value from each result row. 
 1. Drop a new `.yaml` file in `alerts/` following the schema above.
 2. Reference system tables via `{sys.<table>}`, not hard-coded names.
 3. Keep the query strictly read-only — the security validator will block anything else.
-4. Run the tool with `-skip-archive -skip-config` for a fast feedback loop.
+4. Run the tool with `-skip-archive -skip-config` for a fast feedback loop; without `check:` the query runs live.
+5. Write the check: a `func(*bundle.Bundle, mode string) ([]map[string]interface{}, error)` registered with `RegisterCheck` in `internal/alert/checks_*.go`, returning the columns `message:` uses. If a column it needs is not collected yet, add it to the collector. Add fixture tests (`internal/alert/checks_fixture_test.go`) for just past and just short of each threshold, then set `check:` and `source:`.
 
 ### Bundled alert rules
 
@@ -856,7 +890,7 @@ The repo ships with 18 alert rules in `alerts/` (plus version-gated overrides in
 | `merges_stalled` | warning | An hour in the last 24 with more than 100 `NewPart` events and zero completed merges (`part_log`) — Keeper down, pool paused or every merge failing |
 | `fetch_pool_saturated` | warning | Hourly average of `BackgroundFetchesPoolTask` at ≥ 90 % of `background_fetches_pool_size` in 3 of the last 24 hours, per replica — the fetch executor has no queue, so on SharedMergeTree this is parts-propagation lag |
 | `schedule_pool_saturated` | warning | Hourly average of `BackgroundSchedulePoolTask` at ≥ 95 % of `background_schedule_pool_size` in 3 of the last 24 hours, per replica — every table's periodic tasks run here; tens of thousands of replicated tables pin it first |
-| `parts_propagation_lag` | warning | *(cloud only — `modes: [cloud]`)* A replica is ≥ 3 blocks and ≥ 10 min behind the newest replica on a partition of a SharedMergeTree table — parts-propagation lag; one instance per replica with its worst partition, the full list in `system.parts_max_block_by_replica` |
+| `parts_propagation_lag` | warning | *(cloud only — `modes: [cloud]`)* A replica is ≥ 32 blocks behind the newest replica on a partition, or has none of a partition written to in the last day, of a SharedMergeTree table — parts-propagation lag; one instance per replica with its worst partition, the full list in `system.parts_max_block_by_replica` |
 | `too_many_simultaneous_queries` | warning | More than 10 code-202 (`TOO_MANY_SIMULTANEOUS_QUERIES`) errors in the last hour (`max_concurrent_queries` hit) |
 | `too_many_parts` | warning | A partition has more than 300 active parts (inserts are delayed from `parts_to_delay_insert` = 1000 and rejected with code 252 `TOO_MANY_PARTS` at `parts_to_throw_insert` = 3000) |
 | `large_parts` | warning | A single active part is larger than 150 GB |
@@ -864,7 +898,7 @@ The repo ships with 18 alert rules in `alerts/` (plus version-gated overrides in
 | `detached_parts_exist` | info | Parts exist in the `detached/` folder (failed merges, manual detach, replication conflicts) |
 | `keeper_xid_renewal_due` | info | *(24.3+ only)* A Keeper session is within 24 h of the **32-bit** counter limit (2³¹) at the rate its host is measured to use, where that host has one live Keeper connection and at least 2 h of `metric_log` behind the estimate. Reported as headroom, not as a renewal that will happen: with `use_xid_64` enabled in `<zookeeper>` the counter is 64-bit and never wraps, and no system table exposes that setting — check `configuration/`. On a default 32-bit counter the renewal is a short burst of Keeper exceptions and a reconnect; investigate only if INSERTs failed in those minutes (`query_log`, or flushes in `asynchronous_insert_log`) |
 
-Every rule is a single `SELECT` against system tables; rows returned become alert instances in the dashboard. Rules that read a log table look back **24 hours or 7 days, per hour**, not just the last hour — bundles are usually collected after recovery, and an hour-only rule is blind to the incident it exists to surface. Open the YAML files directly to see the exact thresholds and tweak them.
+Every rule is a Go check over the collected files, with the same test as a `SELECT` in `query:`; rows returned become alert instances in the dashboard. In cloud mode the Keeper rules read the per-host `metric_log_by_host_3_days`, so their "usual" median spans 3 days there, not 7. Rules that read a log table look back **24 hours or 7 days, per hour**, not just the last hour — bundles are usually collected after recovery, and an hour-only rule is blind to the incident it exists to surface. Open the YAML files directly to see the exact thresholds and tweak them.
 
 ## Query analysis mode
 

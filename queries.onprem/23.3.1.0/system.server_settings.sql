@@ -1,3 +1,4 @@
+-- tier: essential
 -- system.server_settings first appeared in 23.3, so this collector
 -- lives only in a version directory and has no root counterpart: on an
 -- older server the finder skips it instead of failing the run. Gated at

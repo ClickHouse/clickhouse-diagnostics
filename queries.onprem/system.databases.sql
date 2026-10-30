@@ -1,3 +1,4 @@
+-- tier: essential
 -- One row per database with its engine. The count of Replicated databases is a
 -- Keeper-load signal (one DDLWorker, one Keeper watch set and one DDL log per
 -- database per replica), and system.tables alone cannot tell Atomic from

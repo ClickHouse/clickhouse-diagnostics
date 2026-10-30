@@ -1,3 +1,4 @@
+-- tier: essential
 -- 22.10+ variant: includes unreserved_space (added to system.disks in
 -- 22.10). See the root file for the 22.8/22.9 baseline.
 SELECT
@@ -10,7 +11,11 @@ SELECT
     if(total_space_b > 0,
        round(free_space_b / total_space_b * 100, 1),
        0) AS free_pct,
-    type
+    type,
+    -- exact bytes: free_pct is rounded to 0.1, and the low-space check must
+    -- not miss 14.96 % as 15.0
+    free_space_b  AS free_bytes,
+    total_space_b AS total_bytes
 FROM (
     SELECT
         name,

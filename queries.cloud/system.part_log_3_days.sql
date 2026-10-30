@@ -1,10 +1,15 @@
+-- tier: essential
 -- Window: 3 days. part_log records every part event (NewPart, MergeParts, DownloadPart,
 -- RemovePart …) and reaches tens of GiB per week on a busy replica; three days keep a baseline around an incident at a fraction of the scan.
+-- Hourly per host, like the 23.11+ variant (hostName(): part_log has no
+-- hostname column before 23.11), so the alert checks read the same shape
+-- on every version.
 SELECT
-    toStartOfInterval(event_time, toIntervalHour(12)) AS time,
+    toStartOfInterval(event_time, toIntervalHour(1)) AS time,
     event_type,
     merge_reason,
     partition_id,
+    hostName() AS hostname,
     concat(database, '.', table) AS table_name,
     error,
     any(pl.exception) AS exception,

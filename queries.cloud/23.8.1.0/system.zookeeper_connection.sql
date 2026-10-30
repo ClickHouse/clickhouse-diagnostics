@@ -1,3 +1,5 @@
+-- tier: essential
+-- needs: keeper
 -- Keeper connection per replica: replicas pinned to one Keeper host, or with a
 -- much younger session than their peers, are the ones that lost the session.
 SELECT

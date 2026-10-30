@@ -7,11 +7,19 @@ description: |
   queries, and make backup/restore operations slower. Consider reviewing
   the partition key for the affected table so that parts are split more
   granularly.
+# Scans per-table data: not run in an essential collection.
+tier: full
 tags:
   - storage
   - parts
   - performance
 
+# Evaluated by the Go check over the files already collected (no second
+# query to the server). query: below is the same test in SQL, for the
+# customer to run live; the check mirrors it.
+check: go:large_parts
+source:
+  - system.parts
 query: |
   SELECT
     database,

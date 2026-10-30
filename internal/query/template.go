@@ -3,6 +3,7 @@ package query
 import (
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -82,6 +83,17 @@ type Vars struct {
 	// GovSalt, when non-empty, replaces every '%salt%' literal in the
 	// SQL with the customer-supplied salt for gov-mode hashing.
 	GovSalt string
+
+	// MaxLookback, when non-zero and no From is given, caps every
+	// {from:<default>} longer than it (essential collection: 1 day instead
+	// of 3 or 7). An explicit From always wins.
+	MaxLookback time.Duration
+
+	// DetachedScope / DetachedScopeP fill {detached_scope} and
+	// {detached_scope_p} (gov files, columns qualified with p.). Empty means
+	// every table ("1"); see DetachedScope.
+	DetachedScope  string
+	DetachedScopeP string
 }
 
 // Apply substitutes every placeholder in sql whose value is present in
@@ -100,7 +112,9 @@ type Vars struct {
 // query, preventing leakage of unbound templates to the server.
 func Apply(sql string, vars Vars) string {
 	sql = expandSysPlaceholders(sql, vars.Mode)
-	sql = expandWindowPlaceholders(sql, vars.From, vars.To)
+	sql = expandWindowPlaceholders(sql, vars.From, vars.To, vars.MaxLookback)
+	sql = strings.ReplaceAll(sql, "{detached_scope_p}", scopeOr1(vars.DetachedScopeP))
+	sql = strings.ReplaceAll(sql, "{detached_scope}", scopeOr1(vars.DetachedScope))
 
 	if vars.QueryID != "" {
 		sql = strings.ReplaceAll(sql, "{query_id}", "'"+vars.QueryID+"'")
@@ -271,7 +285,7 @@ func utcLiteral(t time.Time) string {
 // with the flag value when one was supplied, and with the query's own
 // default otherwise. The substituted flag value is a quoted UTC literal,
 // matching the bare {from} / {to} form used by query analysis.
-func expandWindowPlaceholders(sql string, from, to time.Time) string {
+func expandWindowPlaceholders(sql string, from, to time.Time, maxLookback time.Duration) string {
 	return reWindowPlaceholder.ReplaceAllStringFunc(sql, func(match string) string {
 		g := reWindowPlaceholder.FindStringSubmatch(match)
 		name, spec := g[1], g[2]
@@ -283,9 +297,42 @@ func expandWindowPlaceholders(sql string, from, to time.Time) string {
 		if !bound.IsZero() {
 			return utcLiteral(bound)
 		}
+		if name == "from" && maxLookback > 0 {
+			if d, ok := windowSpecDuration(spec); ok && d > maxLookback {
+				return fmt.Sprintf("now() - INTERVAL %d HOUR", int64((maxLookback+time.Hour-1)/time.Hour))
+			}
+		}
 		if def, ok := windowDefaultSQL(spec); ok {
 			return def
 		}
 		return match // malformed — leave it for UnboundPlaceholders
 	})
+}
+
+// windowSpecDuration is the length of a {from:<spec>} default (15d, 12h,
+// 30m); ok=false for "now" or a malformed spec.
+func windowSpecDuration(spec string) (time.Duration, bool) {
+	if _, ok := windowDefaultSQL(spec); !ok || spec == "now" {
+		return 0, false
+	}
+	n, err := strconv.ParseInt(spec[:len(spec)-1], 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	switch spec[len(spec)-1] {
+	case 'd':
+		return time.Duration(n) * 24 * time.Hour, true
+	case 'h':
+		return time.Duration(n) * time.Hour, true
+	case 'm':
+		return time.Duration(n) * time.Minute, true
+	}
+	return 0, false
+}
+
+func scopeOr1(s string) string {
+	if s == "" || s == "1" {
+		return "1"
+	}
+	return "(" + s + ")"
 }

@@ -92,9 +92,13 @@ Collectors that read Keeper (`system.distributed_ddl_queue`, `system.zookeeper_c
 
 Useful flags: `-query-timeout` (default 240 s — the server enforces it as `max_execution_time`, so a collector query that overruns shows up as a clean `Code: 159` in the customer's `query_log`; `0` disables), `-output-dir` (default `./clickhouse_results`), `-output-format jsonl|native|tsv` (**leave at `jsonl`** — this skill and `inspect_bundle.py` can only read `.jsonl`, and a `native`/`tsv` bundle is refused; see bundle-layout §1), `-skip-alerts`, `-skip-dashboard`, `-skip-archive`, `-alerts-dir`, `-config-dir`, `-logs-dir`, `-logs-max-mb` (default 50), `-logs-include-archives`, `-host-info on|off|auto`, `-logs on|off|auto`.
 
+## 4a. Essential or full (`-collect auto|essential|full`)
+
+Default `auto`: a one-second load probe chooses **full**, or **essential** on a struggling server (slow `SELECT 1`, near `max_concurrent_queries` or the memory limit, load above 2× cores, read-only replicas); a full run also switches to essential mid-run when a query times out or two in a row take > 30 s. Essential = only `-- tier: essential` collectors, 1-day windows, 30 s per query, a 3 min budget (`-time-budget`), `max_threads = 2` / 1 GiB / low priority, no per-table alerts or panels; with no Keeper session the Keeper-waiting queries are skipped. The bundle says which in `execution_log.txt` (`collect:`), the dashboard banner and the pre-pass. When a customer reports the tool "takes too long" or "cannot run on the node in trouble", that is what `auto` is for; force `-collect essential` on a node you know is struggling, and ask for `-collect full` later, once it is healthy, for parts, tables, detached parts and the 3–7-day history.
+
 ## 5. Time windows
 
-Collection windows are per query: 7 days for `query_log`, `metric_log` (fixed columns), `asynchronous_insert_log`, `blob_storage_log`, `error_log`, `distributed_ddl_queue`; **3 days** for `part_log`, `query_views_log` and `metric_log_coordination` (the wide or high-volume ones); **1 day** for `system.text_log` (capped at 2000 rows), the text_log histogram and Keeper markers, and `zookeeper_log` errors. `-from`/`-to` (RFC3339 or `YYYY-MM-DD`, UTC) override **every** window at once; alert rules keep their own windows by design.
+Collection windows are per query: 7 days for `query_log`, `metric_log` (fixed columns), `asynchronous_insert_log`, `blob_storage_log`, `error_log`, `distributed_ddl_queue`; **3 days** for `part_log`, `query_views_log` and `metric_log_coordination` (the wide or high-volume ones); **1 day** for `system.text_log` (capped at 2000 rows), the text_log histogram and Keeper markers, and `zookeeper_log` errors. `-from`/`-to` (RFC3339 or `YYYY-MM-DD`, UTC) override **every** window at once; alert rules keep their own look-back, measured over the collected files (from v0.9 they send no query), so with `-to` it ends at `-to`.
 
 ```bash
 # exactly the incident window (cheapest, most focused)

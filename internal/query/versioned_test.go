@@ -213,6 +213,12 @@ func TestFindVersionedFiles_RealRepoDirs(t *testing.T) {
 		"queries.onprem/system.view_refreshes.sql": true,
 		"queries.gov/system.view_refreshes.sql":    true,
 		"queries.cloud/system.view_refreshes.sql":  true,
+		// system.database_replicas arrived in 25.9; it replaces
+		// system.clusters.is_active, which made the server ask every
+		// Replicated-database replica for its status.
+		"queries.onprem/system.database_replicas.sql": true,
+		"queries.gov/system.database_replicas.sql":    true,
+		"queries.cloud/system.database_replicas.sql":  true,
 		// system.aggregated_zookeeper_log arrived in 25.9, `component` in 26.2
 		// and `is_subrequest` in 26.3. Before 26.3 sub-requests share buckets
 		// with standalone requests and carry the whole Multi's latency, so the

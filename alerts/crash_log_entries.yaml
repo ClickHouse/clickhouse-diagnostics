@@ -10,6 +10,13 @@ tags:
   - stability
   - crash
 
+# Evaluated by the Go check over the files already collected (no second
+# query to the server). query: below is the same test in SQL, for the
+# customer to run live; the check mirrors it.
+check: go:crash_log_entries
+source:
+  - system.crash_log
+  - system.crash_log_presence
 query: |
   SELECT
     toString(event_time)  AS event_time,

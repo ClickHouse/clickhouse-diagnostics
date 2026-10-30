@@ -102,5 +102,12 @@ FROM
 )
 WHERE blocks_behind > 0
    OR notEmpty(replicas_missing_partition)
-ORDER BY length(replicas_missing_partition) DESC, blocks_behind DESC, newest_part_skew_s DESC
+-- The rows the parts_propagation_lag alert counts come first, so the cap
+-- never cuts them for older noise: replicas >= 32 blocks behind, then
+-- missing partitions newest first (the alert counts those written to in
+-- the last day, so a recent one always sorts ahead of old ones).
+ORDER BY blocks_behind >= 32 DESC,
+         notEmpty(replicas_missing_partition) DESC,
+         cluster_last_part_time DESC,
+         blocks_behind DESC, newest_part_skew_s DESC
 LIMIT 1000

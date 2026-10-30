@@ -1,3 +1,4 @@
+-- tier: essential
 -- Root variant for the oldest supported servers (22.8+):
 -- `default` and `alias_for` were added to system.settings in 23.4 — see
 -- 23.4.1.0/system.settings.sql for the variant that includes `default`.
