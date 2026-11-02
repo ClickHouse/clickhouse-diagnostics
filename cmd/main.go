@@ -943,7 +943,8 @@ func main() {
 		// The panels read the collected JSONEachRow files; with -output-format
 		// native or tsv they query the server, as before.
 		if outputFormat.Name == query.FormatJSONL.Name {
-			gen = gen.WithBundle(bundle.Open(finalOutputDir, collectorStatus(rec)).WithWindowEnd(collectTo))
+			gen = gen.WithBundle(bundle.Open(finalOutputDir, collectorStatus(rec)).WithWindowEnd(collectTo)).
+				WithWindow(collectFrom, collectTo)
 		}
 		// Write the execution log once now so the dashboard's Collected Files
 		// panel indexes it; the final write below refreshes it with the

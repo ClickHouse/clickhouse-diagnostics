@@ -16,5 +16,9 @@ FROM clusterAllReplicas(default, system.error_log)
 WHERE event_date >= toDate({from:7d}, timezone()) AND event_date <= toDate({to:now}, timezone())
   AND event_time > {from:7d} AND event_time <= {to:now}
 GROUP BY time, hostname, code, error, remote
-ORDER BY time, errors DESC
+-- The Keeper-dependent codes come first, so the cap never cuts them (the
+-- dashboard's Keeper panel and the Keeper health checks read them; at most
+-- 168 hours x 5 codes x 2 remote values = 1680 rows): a noisy server's
+-- other codes lose their latest hours to the cap, the Keeper series never.
+ORDER BY code IN (999, 242, 319, 571, 252) DESC, time, errors DESC
 LIMIT 20000

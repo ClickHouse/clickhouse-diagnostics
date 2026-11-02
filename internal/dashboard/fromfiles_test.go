@@ -271,3 +271,65 @@ func TestTemplate_FullBannerListsPanelsWithoutData(t *testing.T) {
 		t.Error("the full-run banner does not render skipped_panels")
 	}
 }
+
+// Second review round: missing sources are named, never shown as zero.
+func TestFromFiles_MissingSourcesAreNamed(t *testing.T) {
+	files := fixtureRun()
+	delete(files, "system.parts_by_table")
+	files["system.replicas"] = []frow{{"database": "db", "table": "b", "is_readonly": 0}}
+	dir := runDir(t, files)
+	st := map[string]bundle.Status{}
+	for _, c := range []string{"system.parts_by_table", "system.replicas_problem_tables", "system.error_log_7_days",
+		"system.data_skipping_indices", "system.view_refreshes"} {
+		st[c] = bundle.Status{State: "skipped", Reason: "time budget"}
+	}
+	g := NewGenerator(nil, "onprem").WithBundle(bundle.Open(dir, st))
+	if err := g.Generate(dir, nil); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(filepath.Join(dir, "dashboard.html"))
+	p := payloadOf(t, string(raw))
+	sp := strings.Join(func() []string {
+		var s []string
+		for _, x := range p["collect"].(map[string]interface{})["skipped_panels"].([]interface{}) {
+			s = append(s, x.(string))
+		}
+		return s
+	}(), " | ")
+	for _, c := range []string{"system.parts_by_table", "system.replicas_problem_tables", "system.error_log_7_days",
+		"system.data_skipping_indices", "system.view_refreshes"} {
+		if !strings.Contains(sp, c+" skipped") {
+			t.Errorf("banner does not name %s: %s", c, sp)
+		}
+	}
+	tl := p["tables_list"].([]interface{})
+	if len(tl) != 2 || tl[0].(map[string]interface{})["size"] != "n/a" {
+		t.Errorf("tables without parts_by_table: sizes must be n/a, got %v", tl)
+	}
+	// error_log skipped: the query_log fallback still fills the panel.
+	if ke := p["keeper_errors_hourly"].([]interface{}); len(ke) != 1 || !strings.Contains(p["keeper_errors_source"].(string), "query_log") {
+		t.Errorf("Keeper errors fallback: %v %v", ke, p["keeper_errors_source"])
+	}
+}
+
+// Headings say the window the files cover.
+func TestFromFiles_WindowLabels(t *testing.T) {
+	g := NewGenerator(nil, "onprem")
+	if got := g.windowLabel("last 3 days"); got != "last 3 days" {
+		t.Errorf("default: %s", got)
+	}
+	g.WithCollectMode("essential", "load", nil)
+	if got := g.windowLabel("last 7 days"); got != "last day (essential run)" {
+		t.Errorf("essential: %s", got)
+	}
+	g.WithWindow(time.Date(2026, 10, 20, 0, 0, 0, 0, time.UTC), time.Date(2026, 10, 21, 6, 0, 0, 0, time.UTC))
+	if got := g.windowLabel("last 7 days"); got != "2026-10-20 00:00 UTC – 2026-10-21 06:00 UTC" {
+		t.Errorf("-from/-to: %s", got)
+	}
+	for _, want := range []string{`Part Log Events (<span data-win="3d">`, `TTL Activity (<span data-win="3d">`,
+		`Keeper Health (<span data-win="7d">`, "querySelectorAll('[data-win]')"} {
+		if !strings.Contains(htmlTemplate, want) {
+			t.Errorf("template lacks %q", want)
+		}
+	}
+}

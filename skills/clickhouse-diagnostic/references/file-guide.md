@@ -149,7 +149,7 @@ Windows: `*_7_days` files cover the last 7 days (or `-from/-to`); `system.text_l
 **Read first:** top 10 by `value`; `last_error_time` relative to the collection time; `last_error_message` for the top codes (map codes with `error-codes.md`).
 **Healthy looks like:** low counts of client-side codes (47, 60, 62) and nothing recent in the memory/Keeper/parts families.
 **Red flags:** 241 (P-10), 252 (P-01), 999/242 (P-40), 243 (HC-4.1), 173/76 (P-13), 49/1001 (P-30), 40/226 (P-31), 499 (P-45), 202 (P-20) — especially with `last_error_time` inside the incident window.
-**Traps:** **cumulative since server start** — 10 000 hits over 90 days of uptime is not 10 000 in 3 hours; pair with uptime (dashboard `uptime` or `host_info.os.uptime_seconds` if the server restarted with the host). Message hashed and trace empty in gov.
+**Traps:** **cumulative since server start** — 10 000 hits over 90 days of uptime is not 10 000 in 3 hours; pair with uptime (dashboard `uptime` or `host_info.os.uptime_seconds` if the server restarted with the host). Message hashed and trace empty in gov. Cloud: one row per replica (`hostname`, v0.9), the 100 largest of each — sum per error for the cluster.
 **Pairs with:** `query_log_details.exception_code` (which queries), `part_log.error` (which merges), `text_log`/`logs/` (context).
 
 ### system.merges
@@ -376,7 +376,7 @@ Windows: `*_7_days` files cover the last 7 days (or `-from/-to`); `system.text_l
 **Read first:** `errors` per hour for 999, 242, 252, 107, 499, 241; `remote = 1` rows (errors received from other servers — interserver/distributed); the first hour a code appears.
 **Healthy looks like:** a flat, low baseline of expected codes (60 UNKNOWN_TABLE from probes, 516 auth noise), no bursts.
 **Red flags:** bursts that line up with the Keeper health test hours (HC-3.8); a code present in every hour at a steady rate (a retry loop — P-41/P-47); `remote = 1` bursts (peers failing, 86/221).
-**Traps:** absent below 24.8 or when `<error_log>` is disabled; counts are events, not distinct incidents; the error *name* is the ClickHouse constant, not a message — pair with `system.errors.last_error_message` and `text_log`.
+**Traps:** absent below 24.8 or when `<error_log>` is disabled; counts are events, not distinct incidents; the error *name* is the ClickHouse constant, not a message — pair with `system.errors.last_error_message` and `text_log`. Capped at 20 000 rows with the Keeper-dependent codes (999, 242, 319, 571, 252) first (v0.9): exactly 20 000 rows means other codes lost their latest hours, never the Keeper ones.
 **Pairs with:** `system.errors` (message + trace), `query_log_details` (which queries), `part_log` (which merges), `metric_log_coordination`.
 
 ### system.text_log_keeper_1_day

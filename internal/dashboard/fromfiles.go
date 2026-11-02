@@ -105,7 +105,7 @@ func (g *Generator) collectFromFiles() map[string]interface{} {
 	// ── Storage ──
 	p["storage_by_db"] = storageByDB(byTable)
 	p["engines_dist"] = enginesDist(userTables)
-	p["tables_list"] = tablesList(userTables, byTable, haveTables)
+	p["tables_list"] = tablesList(userTables, byTable, haveTables, haveParts)
 	p["top_tables"] = topTables(byTable)
 
 	// ── Query log ──
@@ -155,7 +155,7 @@ func (g *Generator) collectFromFiles() map[string]interface{} {
 	rq, _ := g.filesRows("replication queue", "system.replication_queue")
 	p["replication_queue"] = replicationQueuePanel(rq, g.mode, host)
 	reps, _ := g.filesRows("replicas", "system.replicas")
-	problem, _ := g.bundle.Rows("system.replicas_problem_tables") // optional: Keeper-backed counts
+	problem, _ := g.filesRows("replica counts", "system.replicas_problem_tables") // Keeper-backed active/total
 	p["replicas"] = replicasPanel(reps, problem, g.mode, host)
 
 	// ── Keeper health and pools ──
@@ -165,7 +165,7 @@ func (g *Generator) collectFromFiles() map[string]interface{} {
 	p["pool_sizes"] = g.poolSizesFromFiles()
 	p["pools_now"] = collectedAt
 
-	if el, ok := g.bundle.Rows("system.error_log_7_days"); ok == nil {
+	if el, ok := g.filesRows("Keeper errors", "system.error_log_7_days"); ok {
 		p["keeper_errors_hourly"] = keeperErrorsFromErrorLog(el)
 		p["keeper_errors_source"] = "system.error_log — every thread, background merges and fetches included"
 	} else {
@@ -189,8 +189,34 @@ func (g *Generator) collectFromFiles() map[string]interface{} {
 		p["async_inserts"] = rows{}
 	}
 
+	p["windows"] = map[string]string{"7d": g.windowLabel("last 7 days"), "3d": g.windowLabel("last 3 days")}
+
 	g.collectAnalysisFromFiles(p)
 	return p
+}
+
+// WithWindow records an explicit -from / -to, for the panel headings.
+func (g *Generator) WithWindow(from, to time.Time) *Generator {
+	g.windowFrom, g.windowTo = from, to
+	return g
+}
+
+// windowLabel is what a panel built from a collector with default look-back
+// def actually covers: the explicit -from/-to window, the 1 day an
+// essential run caps every window to, or the default.
+func (g *Generator) windowLabel(def string) string {
+	const f = "2006-01-02 15:04 UTC"
+	switch {
+	case !g.windowFrom.IsZero() && !g.windowTo.IsZero():
+		return g.windowFrom.UTC().Format(f) + " – " + g.windowTo.UTC().Format(f)
+	case !g.windowFrom.IsZero():
+		return "since " + g.windowFrom.UTC().Format(f)
+	case !g.windowTo.IsZero():
+		return "until " + g.windowTo.UTC().Format(f)
+	case g.essential():
+		return "last day (essential run)"
+	}
+	return def
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────
@@ -337,7 +363,9 @@ func enginesDist(userTables []bundle.Row) rows {
 	return limit(out, 15)
 }
 
-func tablesList(userTables, byTable []bundle.Row, haveTables bool) rows {
+// tablesList: every user table with its size. Without parts_by_table the
+// sizes are "n/a", never a 0 that reads as an empty table.
+func tablesList(userTables, byTable []bundle.Row, haveTables, haveParts bool) rows {
 	out := rows{}
 	if !haveTables {
 		return out
@@ -352,6 +380,10 @@ func tablesList(userTables, byTable []bundle.Row, haveTables bool) rows {
 			"parts": s.Int("parts"), "total_rows": readableQuantity(s.Float("rows")), "size": readableSize(s.Float("bytes_on_disk")),
 			"bytes_on_disk": s.Int("bytes_on_disk"), "partition_key": t.Str("partition_key"), "sorting_key": t.Str("sorting_key"),
 			"storage_policy": t.Str("storage_policy")})
+		if !haveParts {
+			r := out[len(out)-1]
+			r["parts"], r["total_rows"], r["size"] = "n/a", "n/a", "n/a"
+		}
 	}
 	byNum(out, "bytes_on_disk")
 	return limit(out, 2000)
@@ -1236,7 +1268,7 @@ func (g *Generator) schemaGraphFromFiles(version string) map[string]interface{} 
 	}
 
 	indices := rows{}
-	if is, err := g.bundle.Rows("system.data_skipping_indices"); err == nil {
+	if is, ok := g.filesRows("schema graph indices", "system.data_skipping_indices"); ok {
 		for _, i := range is {
 			if notSystemDB(i.Str("database")) {
 				indices = append(indices, map[string]interface{}{"database": i.Str("database"), "table": i.Str("table"),
@@ -1290,8 +1322,7 @@ func (g *Generator) schemaGraphFromFiles(version string) map[string]interface{} 
 	// Refreshes: the replica that runs the refresh, not the ones reporting
 	// RunningOnAnotherReplica.
 	refreshes := rows{}
-	rf, err := g.bundle.Rows("system.view_refreshes")
-	hasRefresh := err == nil
+	rf, hasRefresh := g.filesRows("schema graph refreshes", "system.view_refreshes")
 	if hasRefresh {
 		m := map[string]map[string]interface{}{}
 		var order []string
