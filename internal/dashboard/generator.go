@@ -12,6 +12,7 @@ import (
 
 	"clickhouse-diagnostic/internal"
 	"clickhouse-diagnostic/internal/alert"
+	"clickhouse-diagnostic/internal/bundle"
 	"clickhouse-diagnostic/internal/hostinfo"
 	"clickhouse-diagnostic/internal/keeper"
 	"clickhouse-diagnostic/internal/query"
@@ -42,6 +43,9 @@ type Generator struct {
 	detachedScope string   // {detached_scope} for the detached panel (see query.DetachedScope)
 	keeperDown    bool     // no Keeper session: skip the panels that wait for one
 	stop          func() bool
+	bundle        *bundle.Bundle // the run directory: when set, panels read the collected files (fromfiles.go)
+	windowFrom    time.Time      // explicit -from / -to, for the panel headings
+	windowTo      time.Time
 }
 
 // keeperPanels wait on a live Keeper session.
@@ -449,9 +453,16 @@ func (g *Generator) Generate(outputDir string, alertResults []alert.Result) erro
 	// exists: a dashboard.html copied out of the bundle then shows a note where
 	// the tab would be, not a broken frame.
 	version, _ := payload["version"].(string)
-	if g.essential() {
+	var sg map[string]interface{}
+	switch {
+	case g.bundle != nil:
+		sg = g.schemaGraphFromFiles(version) // nil when system.tables was not collected
+	case g.essential():
 		g.skippedPanels = append(g.skippedPanels, "schema graph")
-	} else if sg := g.collectSchemaGraph(version); sg != nil {
+	default:
+		sg = g.collectSchemaGraph(version)
+	}
+	if sg != nil {
 		dst := filepath.Join(outputDir, schemaGraphFile)
 		if err := os.WriteFile(dst, []byte(buildSchemaGraphHTML(sg)), 0640); err != nil {
 			fmt.Printf("  [dashboard] schema graph not written: %v\n", err)
@@ -982,6 +993,9 @@ func (g *Generator) keeperConnectionSQL() string {
 }
 
 func (g *Generator) collect() map[string]interface{} {
+	if g.bundle != nil {
+		return g.collectFromFiles()
+	}
 	p := map[string]interface{}{
 		"generated_at":    time.Now().UTC().Format("2006-01-02 15:04:05 UTC"),
 		"mode":            g.mode,
@@ -1097,13 +1111,7 @@ func (g *Generator) collect() map[string]interface{} {
 	// round-tripped through JSON so the dashboard shows exactly the shape the
 	// file does rather than a second, drifting projection of it.
 	if g.hostInfo != nil {
-		if raw, err := json.Marshal(g.hostInfo); err == nil {
-			var hi map[string]interface{}
-			if err := json.Unmarshal(raw, &hi); err == nil {
-				p["host_info"] = hi
-			}
-		}
-		p["host_checks"] = hostChecks(g.hostInfo)
+		g.addHostInfo(p)
 	}
 
 	// Logs: bounded Warning+ rows only. text_log is opt-in (it is off by
@@ -1443,6 +1451,17 @@ func (g *Generator) collect() map[string]interface{} {
 	g.collectAnalysis(p)
 
 	return p
+}
+
+// addHostInfo embeds the host facts.
+func (g *Generator) addHostInfo(p map[string]interface{}) {
+	if raw, err := json.Marshal(g.hostInfo); err == nil {
+		var hi map[string]interface{}
+		if err := json.Unmarshal(raw, &hi); err == nil {
+			p["host_info"] = hi
+		}
+	}
+	p["host_checks"] = hostChecks(g.hostInfo)
 }
 
 // collectAnalysis runs the query-analysis SQL files (same set the
@@ -2157,7 +2176,7 @@ footer{text-align:center;color:var(--ink-muted);font-size:var(--click-font-size-
 
 <!-- ── QUERY ACTIVITY ── -->
 <section id="sec-queries">
-  <h2>📊 Query Activity (last 7 days)</h2>
+  <h2>📊 Query Activity (<span data-win="7d">last 7 days</span>)</h2>
   <div class="charts-grid">
     <div class="chart-card" style="grid-column:1/-1">
       <h3>Queries per Hour by Type</h3>
@@ -2180,7 +2199,7 @@ footer{text-align:center;color:var(--ink-muted);font-size:var(--click-font-size-
 
 <!-- ── QUERY DEEP DIVE ── -->
 <section id="sec-deepdive">
-  <h2>🔍 Query Deep Dive (last 7 days)</h2>
+  <h2>🔍 Query Deep Dive (<span data-win="7d">last 7 days</span>)</h2>
   <div class="charts-grid">
     <div class="chart-card">
       <h3>Top 20 Slowest Query Patterns (avg duration ms)</h3>
@@ -2193,7 +2212,7 @@ footer{text-align:center;color:var(--ink-muted);font-size:var(--click-font-size-
       <pre class="sql-peek" id="peek-heavy-reads" style="display:none"></pre>
     </div>
     <div class="chart-card" style="grid-column:1/-1">
-      <h3>Activity by User — Executions &amp; Errors (last 7 days)</h3>
+      <h3>Activity by User — Executions &amp; Errors (<span data-win="7d">last 7 days</span>)</h3>
       <div class="chart-wrap h200"><canvas id="chart-user-activity"></canvas></div>
     </div>
   </div>
@@ -2205,7 +2224,7 @@ footer{text-align:center;color:var(--ink-muted);font-size:var(--click-font-size-
 
 <!-- ── EXCEPTIONS ── -->
 <section id="sec-exceptions">
-  <h2>⚠️ Exceptions (last 7 days)</h2>
+  <h2>⚠️ Exceptions (<span data-win="7d">last 7 days</span>)</h2>
   <div class="charts-grid">
     <div class="chart-card">
       <h3>Top Exception Codes</h3>
@@ -2220,7 +2239,7 @@ footer{text-align:center;color:var(--ink-muted);font-size:var(--click-font-size-
 
 <!-- ── PART LOG ── -->
 <section id="sec-partlog">
-  <h2>🔧 Part Log Events (last 7 days)</h2>
+  <h2>🔧 Part Log Events (<span data-win="3d">last 7 days</span>)</h2>
   <div class="charts-grid">
     <div class="chart-card" style="grid-column:1/-1">
       <h3>Part Events per Day by Type</h3>
@@ -2279,7 +2298,7 @@ footer{text-align:center;color:var(--ink-muted);font-size:var(--click-font-size-
 <section id="sec-replication">
   <h2>🔄 Replication Queue</h2>
   <div class="tbl-wrap"><div id="tbl-replication"></div></div>
-  <div class="sub-title">Background pools (last 7 days, hourly average tasks vs pool size)</div>
+  <div class="sub-title">Background pools (<span data-win="7d">last 7 days</span>, hourly average tasks vs pool size)</div>
   <p class="host-note" id="pools-note">Each pool fails differently when pinned at its size. <b>Fetch</b>: a queue with no queue — a fetch that finds no free slot is dropped and retried later, silently; on a SharedMergeTree replica that is parts-propagation lag (alert <code>fetch_pool_saturated</code>). <b>Schedule</b>: periodic tasks are not lost but late — parts-set updates, replication queue processing, cleanup wait for a slot; tens of thousands of replicated tables pin it first (<code>schedule_pool_saturated</code>). <b>Merge / mutation</b>: merges wait and parts accumulate — the classic too-many-parts build-up (HC-2.7). Dashed line = the pool size; the series is the worst replica's hourly average.</p>
   <div class="charts-grid" id="pools-charts">
     <div class="chart-card">
@@ -2324,7 +2343,7 @@ footer{text-align:center;color:var(--ink-muted);font-size:var(--click-font-size-
 
 <!-- ── KEEPER HEALTH ── -->
 <section id="sec-keeper" style="display:none">
-  <h2>🔑 Keeper Health (last 7 days)</h2>
+  <h2>🔑 Keeper Health (<span data-win="7d">last 7 days</span>)</h2>
   <div id="keeper-health-body" style="display:none">
   <p class="host-note">Two counters per hour decide the verdict: <b>transactions</b> (work Keeper completed for this server) and <b>hardware exceptions</b> (connection loss, session expiry, operation timeout). More than 1000 exceptions while traffic holds is a <b>blip</b> — a session lost and re-established. Exceptions while traffic drops below half of the 7-day median means Keeper was <b>unavailable</b> to this server: inserts fail with 999/319, merges are not scheduled, DDL stalls, and TOO_MANY_PARTS follows.</p>
   <div class="tbl-wrap"><div id="tbl-keeper-verdict"></div></div>
@@ -2411,7 +2430,7 @@ footer{text-align:center;color:var(--ink-muted);font-size:var(--click-font-size-
   </div>
   <div class="sub-title">High Part-Count Partitions (&gt;100 parts — potential code 252 TOO_MANY_PARTS risk)</div>
   <div class="tbl-wrap"><div id="tbl-high-parts"></div></div>
-  <div class="sub-title" style="margin-top:18px">TTL Activity (last 7 days)</div>
+  <div class="sub-title" style="margin-top:18px">TTL Activity (<span data-win="3d">last 7 days</span>)</div>
   <div class="tbl-wrap"><div id="tbl-ttl-activity"></div></div>
 </section>
 
@@ -3436,6 +3455,14 @@ document.addEventListener('DOMContentLoaded',function(){
     +(DATA.node?'<br>Node: '+esc(DATA.node)+(DATA.uptime?' &middot; up '+esc(DATA.uptime)+' at collection':''):'')
     +(DATA.collection?'<br>Collection: '+esc(DATA.collection):'');
 
+  // Panel headings say the window the data covers. Built from the collected
+  // files, that is the collectors' window (-from/-to, an essential run's
+  // 1 day, a 3-day part log); the live fallback keeps the default text.
+  document.querySelectorAll('[data-win]').forEach(function(el){
+    const w=(DATA.windows||{})[el.getAttribute('data-win')];
+    if(w) el.textContent=w;
+  });
+
   // What kind of diagnostic this is: an essential collection (a struggling
   // server, or -collect essential) has 1-day windows and fewer files, and
   // the reader has to know that before reading any absence as health.
@@ -3453,7 +3480,8 @@ document.addEventListener('DOMContentLoaded',function(){
         +'Missing data here is not evidence of health. Re-run with <code>-collect full</code> once the node is healthy for the complete picture.</span>';
     } else {
       h='<b>Full diagnostic</b> — '+esc(c.summary||'')
-        +(sc.length?'<br><span class="muted">'+esc(String(sc.length))+' collector(s) skipped (time budget): '+sc.slice(0,12).map(esc).join(', ')+'.</span>':'');
+        +(sc.length?'<br><span class="muted">'+esc(String(sc.length))+' collector(s) skipped (time budget): '+sc.slice(0,12).map(esc).join(', ')+'.</span>':'')
+        +(sp.length?'<br><span class="muted">Panels without their data: '+sp.map(esc).join(', ')+' — missing data here is not evidence of health.</span>':'');
     }
     el.innerHTML=h; el.style.display='';
   })();

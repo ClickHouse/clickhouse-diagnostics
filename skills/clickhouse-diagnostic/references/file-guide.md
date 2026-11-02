@@ -149,7 +149,7 @@ Windows: `*_7_days` files cover the last 7 days (or `-from/-to`); `system.text_l
 **Read first:** top 10 by `value`; `last_error_time` relative to the collection time; `last_error_message` for the top codes (map codes with `error-codes.md`).
 **Healthy looks like:** low counts of client-side codes (47, 60, 62) and nothing recent in the memory/Keeper/parts families.
 **Red flags:** 241 (P-10), 252 (P-01), 999/242 (P-40), 243 (HC-4.1), 173/76 (P-13), 49/1001 (P-30), 40/226 (P-31), 499 (P-45), 202 (P-20) — especially with `last_error_time` inside the incident window.
-**Traps:** **cumulative since server start** — 10 000 hits over 90 days of uptime is not 10 000 in 3 hours; pair with uptime (dashboard `uptime` or `host_info.os.uptime_seconds` if the server restarted with the host). Message hashed and trace empty in gov.
+**Traps:** **cumulative since server start** — 10 000 hits over 90 days of uptime is not 10 000 in 3 hours; pair with uptime (dashboard `uptime` or `host_info.os.uptime_seconds` if the server restarted with the host). Message hashed and trace empty in gov. Cloud: one row per replica (`hostname`, v0.9), the 100 largest of each — sum per error for the cluster.
 **Pairs with:** `query_log_details.exception_code` (which queries), `part_log.error` (which merges), `text_log`/`logs/` (context).
 
 ### system.merges
@@ -289,6 +289,24 @@ Windows: `*_7_days` files cover the last 7 days (or `-from/-to`); `system.text_l
 **Traps:** one day only (the alerts' look-back) — the 7-day trend is in `query_log_details_7_days`; `exception` is one sample per row and absent in gov; cloud sums every replica.
 **Pairs with:** `query_log_details_7_days` (which pattern, user, table), `system.errors`, `error_log_7_days`.
 
+### system.query_log_by_hour_7_days / system.query_log_by_pattern_7_days (v0.9, onprem and cloud)
+**Why we run it:** exact query counts — once per query, no per-table repetition — for the traffic shape and for the slowest and heaviest patterns; the dashboard's query panels are built from them.
+**Question:** how much ran each hour and of which kind; which `normalized_query_hash` is slowest, reads the most, fails, and for which user?
+**Read first:** by hour: `count` by `(time, query_kind)` for `type = 'QueryFinish'`, and `exception_code != 0` rows; by pattern: `total_duration_ms / timed_count` (average of the timed QueryFinish rows), `max_duration_ms`, `total_read_bytes / count`, exception-type `count` per `hash`.
+**Healthy looks like:** a flat or diurnal rate; slow patterns explained by what they read.
+**Red flags:** as for `query_log_details_7_days` (P-50/P-51 heavy patterns, P-55 a monitoring user on top, P-10/P-20/P-40 failures).
+**Traps:** `hash` is text (a UInt64 JavaScript would round); `sample_query` is one 600-character execution; `type` splits each pattern into QueryFinish and exception rows — sum the right ones; not collected in gov (no dashboard there).
+**Pairs with:** `query_log_details_7_days` (which tables a pattern touched), `query_analysis/`.
+
+### system.parts_by_table (v0.9, onprem and cloud)
+**Why we run it:** per-table totals of every active part — `system.parts` keeps only the 50 000 largest, which understates tables made of many small parts.
+**Question:** which tables hold the data, in how many parts, how well compressed?
+**Read first:** `bytes_on_disk` (largest first), `parts`, `rows / parts`, `data_uncompressed_bytes / data_compressed_bytes`.
+**Healthy looks like:** sizes matching the customer's expectation; ratio > 3; parts in the tens or hundreds per table.
+**Red flags:** thousands of parts with few rows each (P-02); a `system`-sized surprise is not here (user databases only — see `system.parts`).
+**Traps:** active parts only; one row per table, no partition detail (`system.parts_by_partition`); full tier — absent in an essential run.
+**Pairs with:** `system.tables` (engine, keys), `system.parts_by_partition`, `part_log_3_days`.
+
 ### system.part_log_3_days
 **Why we run it:** the history of background work — it shows whether merges keep up with inserts, how big inserts are, and which merges/mutations fail with which code; `system.merges` alone is a single instant.
 **Question:** what did background work do over the window — parts created, merged, mutated, fetched, removed — and did any of it fail?
@@ -358,7 +376,7 @@ Windows: `*_7_days` files cover the last 7 days (or `-from/-to`); `system.text_l
 **Read first:** `errors` per hour for 999, 242, 252, 107, 499, 241; `remote = 1` rows (errors received from other servers — interserver/distributed); the first hour a code appears.
 **Healthy looks like:** a flat, low baseline of expected codes (60 UNKNOWN_TABLE from probes, 516 auth noise), no bursts.
 **Red flags:** bursts that line up with the Keeper health test hours (HC-3.8); a code present in every hour at a steady rate (a retry loop — P-41/P-47); `remote = 1` bursts (peers failing, 86/221).
-**Traps:** absent below 24.8 or when `<error_log>` is disabled; counts are events, not distinct incidents; the error *name* is the ClickHouse constant, not a message — pair with `system.errors.last_error_message` and `text_log`.
+**Traps:** absent below 24.8 or when `<error_log>` is disabled; counts are events, not distinct incidents; the error *name* is the ClickHouse constant, not a message — pair with `system.errors.last_error_message` and `text_log`. Capped at 20 000 rows with the Keeper-dependent codes (999, 242, 319, 571, 252) first (v0.9): exactly 20 000 rows means other codes lost their latest hours, never the Keeper ones.
 **Pairs with:** `system.errors` (message + trace), `query_log_details` (which queries), `part_log` (which merges), `metric_log_coordination`.
 
 ### system.text_log_keeper_1_day

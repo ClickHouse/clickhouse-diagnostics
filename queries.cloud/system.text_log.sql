@@ -1,5 +1,6 @@
 -- tier: essential
 SELECT
+    hostName() AS hostname,
     event_time,
     level,
     logger_name,

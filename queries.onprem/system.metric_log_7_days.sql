@@ -23,6 +23,12 @@ SELECT
     avg(CurrentMetric_InterserverConnection)                 AS avg_interserver_connections,
     sum(ProfileEvent_ZooKeeperTransactions)                  AS zk_transactions,
     sum(ProfileEvent_ZooKeeperHardwareExceptions)            AS zk_hw_exceptions,
+    -- The dashboard's Keeper panel: user exceptions, the request latency
+    -- numerator and the session range. All exist on 22.8.
+    sum(ProfileEvent_ZooKeeperUserExceptions)                AS zk_user_exceptions,
+    sum(ProfileEvent_ZooKeeperWaitMicroseconds)              AS zk_wait_us,
+    min(CurrentMetric_ZooKeeperSession)                      AS zk_sessions_min,
+    max(CurrentMetric_ZooKeeperSession)                      AS zk_sessions_max,
     -- Local-disk I/O, so "is the disk the bottleneck?" is answerable from the
     -- bundle at all. A support case advised raising EBS throughput for slow
     -- merges off a screenshot the customer happened to send, because nothing
