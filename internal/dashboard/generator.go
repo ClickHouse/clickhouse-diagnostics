@@ -3470,7 +3470,8 @@ document.addEventListener('DOMContentLoaded',function(){
         +'Missing data here is not evidence of health. Re-run with <code>-collect full</code> once the node is healthy for the complete picture.</span>';
     } else {
       h='<b>Full diagnostic</b> — '+esc(c.summary||'')
-        +(sc.length?'<br><span class="muted">'+esc(String(sc.length))+' collector(s) skipped (time budget): '+sc.slice(0,12).map(esc).join(', ')+'.</span>':'');
+        +(sc.length?'<br><span class="muted">'+esc(String(sc.length))+' collector(s) skipped (time budget): '+sc.slice(0,12).map(esc).join(', ')+'.</span>':'')
+        +(sp.length?'<br><span class="muted">Panels without their data: '+sp.map(esc).join(', ')+' — missing data here is not evidence of health.</span>':'');
     }
     el.innerHTML=h; el.style.display='';
   })();

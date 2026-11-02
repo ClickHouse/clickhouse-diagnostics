@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"clickhouse-diagnostic/internal"
 	"clickhouse-diagnostic/internal/bundle"
@@ -200,5 +201,73 @@ func TestReadableFormats(t *testing.T) {
 		if got := readableQuantity(in); got != want {
 			t.Errorf("readableQuantity(%v) = %s, want %s", in, got, want)
 		}
+	}
+}
+
+// Review fixes on the file-based panels, one regression each.
+func TestFromFiles_ReviewFixes(t *testing.T) {
+	// -to earlier than collection: the windows end there, in server time.
+	to := time.Date(2026, 10, 20, 9, 0, 0, 0, time.UTC)
+	if got := windowEnd("2026-10-29 12:00:00", "Europe/Paris", to); got != "2026-10-20 11:00:00" {
+		t.Errorf("windowEnd with -to: %s", got)
+	}
+	if got := windowEnd("2026-10-29 12:00:00", "UTC", time.Time{}); got != "2026-10-29 12:00:00" {
+		t.Errorf("windowEnd without -to: %s", got)
+	}
+	ai := []bundle.Row{{"time": "2026-10-20 08:00:00", "status": "Ok", "flushes": "2", "total_bytes": "10", "avg_flush_ms": "5"}}
+	if got := asyncInsertsPanel(ai, windowEnd("2026-10-29 12:00:00", "UTC", to)); len(got) != 1 {
+		t.Errorf("async inserts of an incident ending at -to are kept: %v", got)
+	}
+
+	// Slow patterns: averages over the timed executions only.
+	pat := []bundle.Row{{"hash": "1", "query_kind": "Select", "user": "u", "type": "QueryFinish", "count": "2", "timed_count": "1",
+		"total_duration_ms": "100", "total_read_bytes": "8388608", "timed_read_bytes": "4194304",
+		"total_memory_usage": "2097152", "timed_memory_usage": "1048576"}}
+	if s := querySlow(pat); s[0]["avg_read_mb"] != 4.0 || s[0]["avg_memory_mb"] != 1.0 {
+		t.Errorf("slow: %v", s)
+	}
+	if h := queryHeavy(pat); h[0]["avg_read_mb"] != 4.0 {
+		t.Errorf("heavy keeps every QueryFinish: %v", h)
+	}
+
+	// Cloud mutation backlogs differ per replica: the largest is kept.
+	ms := []bundle.Row{{"database": "db", "table": "a", "mutation_id": "m", "parts_to_do": "2"},
+		{"database": "db", "table": "a", "mutation_id": "m", "parts_to_do": "200"}}
+	if m := mutationsPanel(ms); len(m) != 1 || m[0]["parts_to_do"] != int64(200) {
+		t.Errorf("mutations: %v", m)
+	}
+
+	// Cloud replication queue: the serving replica's.
+	rq := []bundle.Row{{"hostname": "r1", "table": "a", "type": "GET_PART"}, {"hostname": "r2", "table": "a", "type": "GET_PART"}}
+	if q := replicationQueuePanel(rq, "cloud", "r1"); len(q) != 1 {
+		t.Errorf("replication queue: %v", q)
+	}
+	if q := replicationQueuePanel(rq, "onprem", "r1"); len(q) != 2 {
+		t.Errorf("onprem keeps the file as is: %v", q)
+	}
+
+	// Disk capacities: the exact UInt64 text (2^64-1 = unlimited).
+	ds := []bundle.Row{{"name": "s3", "free_bytes": "18446744073709551615", "total_bytes": "18446744073709551615"}}
+	if d := disksPanel(ds, "h"); d[0]["total_space"] != "18446744073709551615" {
+		t.Errorf("disks: %v", d)
+	}
+
+	// Cloud pool sizes: each host's latest, not its largest.
+	dir := runDir(t, map[string][]frow{"system.metric_log_by_host_3_days": {
+		{"hostname": "r1", "time": "2026-10-28 10:00:00", "max(CurrentMetric_BackgroundFetchesPoolSize)": "32"},
+		{"hostname": "r1", "time": "2026-10-29 10:00:00", "max(CurrentMetric_BackgroundFetchesPoolSize)": "16"},
+	}})
+	g := NewGenerator(nil, "cloud").WithBundle(bundle.Open(dir, nil))
+	if got := g.poolSizesFromFiles()["fetch"]; got != 16 {
+		t.Errorf("pool size: want the latest 16, got %d", got)
+	}
+}
+
+// A full run names the panels whose collector failed, not only an
+// essential one.
+func TestTemplate_FullBannerListsPanelsWithoutData(t *testing.T) {
+	i := strings.Index(htmlTemplate, "'<b>Full diagnostic</b>")
+	if i < 0 || !strings.Contains(htmlTemplate[i:i+700], "sp.length?") {
+		t.Error("the full-run banner does not render skipped_panels")
 	}
 }

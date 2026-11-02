@@ -72,7 +72,8 @@ func (g *Generator) collectFromFiles() map[string]interface{} {
 	host, collectedAt := "", ""
 	if v, ok := g.filesRows("version", "system.version"); ok && len(v) > 0 {
 		p["version"] = v[0].Str("version")
-		host, collectedAt = v[0].Str("hostname"), v[0].Str("collected_at")
+		host = v[0].Str("hostname")
+		collectedAt = windowEnd(v[0].Str("collected_at"), v[0].Str("timezone"), g.bundle.WindowEnd())
 	}
 
 	tables, haveTables := g.filesRows("table and part counts", "system.tables")
@@ -152,7 +153,7 @@ func (g *Generator) collectFromFiles() map[string]interface{} {
 		p["clusters"] = rows{}
 	}
 	rq, _ := g.filesRows("replication queue", "system.replication_queue")
-	p["replication_queue"] = replicationQueuePanel(rq)
+	p["replication_queue"] = replicationQueuePanel(rq, g.mode, host)
 	reps, _ := g.filesRows("replicas", "system.replicas")
 	problem, _ := g.bundle.Rows("system.replicas_problem_tables") // optional: Keeper-backed counts
 	p["replicas"] = replicasPanel(reps, problem, g.mode, host)
@@ -193,6 +194,24 @@ func (g *Generator) collectFromFiles() map[string]interface{} {
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────
+
+// windowEnd is where the collected log windows end, as a server-timezone
+// DateTime: the server's now() at collection, or the explicit -to when that
+// is earlier — the files stop there, so "the last 24 hours" ends there too.
+func windowEnd(collectedAt, tz string, to time.Time) string {
+	if to.IsZero() {
+		return collectedAt
+	}
+	loc, err := time.LoadLocation(tz)
+	if err != nil || tz == "" {
+		loc = time.UTC
+	}
+	now, err := time.ParseInLocation("2006-01-02 15:04:05", collectedAt, loc)
+	if err != nil || !to.Before(now) {
+		return collectedAt
+	}
+	return to.In(loc).Format("2006-01-02 15:04:05")
+}
 
 // readableSize is ClickHouse formatReadableSize: powers of 1024, two
 // decimals ("1.50 GiB").
@@ -433,6 +452,8 @@ func foldPatterns(byPattern []bundle.Row, key func(r bundle.Row) string) (map[st
 			a.dur += r.Float("total_duration_ms")
 			a.read += r.Float("total_read_bytes")
 			a.mem += r.Float("total_memory_usage")
+			a.timedRead += r.Float("timed_read_bytes")
+			a.timedMem += r.Float("timed_memory_usage")
 			if d := r.Float("max_duration_ms"); d > a.maxDur {
 				a.maxDur = d
 			}
@@ -466,7 +487,7 @@ func querySlow(byPattern []bundle.Row) rows {
 		den := math.Max(a.timed, 1)
 		out = append(out, map[string]interface{}{"hash": a.hash, "query_kind": a.kind, "user": a.user,
 			"executions": int64(a.timed), "avg_duration_ms": round(a.dur/den, 0), "max_duration_ms": int64(a.maxDur),
-			"avg_read_mb": round(a.read/den/1048576, 2), "avg_memory_mb": round(a.mem/den/1048576, 2),
+			"avg_read_mb": round(a.timedRead/den/1048576, 2), "avg_memory_mb": round(a.timedMem/den/1048576, 2),
 			"errors": int64(a.errors), "sample_query": a.sample})
 	}
 	byNum(out, "avg_duration_ms")
@@ -671,23 +692,28 @@ func crashLogPanel(cs []bundle.Row) rows {
 	return limit(out, 100)
 }
 
-// mutationsPanel: unfinished mutations, not being killed; cloud lists each
-// one once per replica, so it is kept once.
+// mutationsPanel: unfinished mutations, not being killed. Cloud lists each
+// one once per replica, each with its own backlog: it is kept once, with
+// the largest parts_to_do.
 func mutationsPanel(ms []bundle.Row) rows {
 	out := rows{}
-	seen := map[string]bool{}
+	seen := map[string]map[string]interface{}{}
 	for _, m := range ms {
 		if m.Int("parts_to_do") <= 0 || m.Int("is_killed") == 1 {
 			continue
 		}
 		k := m.Str("database") + "\x00" + m.Str("table") + "\x00" + m.Str("mutation_id")
-		if seen[k] {
+		if e, ok := seen[k]; ok {
+			if n := m.Int("parts_to_do"); n > e["parts_to_do"].(int64) {
+				e["parts_to_do"] = n
+			}
 			continue
 		}
-		seen[k] = true
-		out = append(out, map[string]interface{}{"database": m.Str("database"), "table": m.Str("table"),
+		e := map[string]interface{}{"database": m.Str("database"), "table": m.Str("table"),
 			"mutation_id": m.Str("mutation_id"), "command": m.Str("command"), "create_time": m.Str("create_time"),
-			"parts_to_do": m.Int("parts_to_do")})
+			"parts_to_do": m.Int("parts_to_do")}
+		seen[k] = e
+		out = append(out, e)
 	}
 	byNum(out, "parts_to_do")
 	return limit(out, 20)
@@ -772,9 +798,14 @@ func clustersPanel(cs []bundle.Row) rows {
 	return out
 }
 
-func replicationQueuePanel(rq []bundle.Row) rows {
+// replicationQueuePanel: the serving replica's queue, as the live panel
+// read it (the cloud file holds every replica's).
+func replicationQueuePanel(rq []bundle.Row, mode, host string) rows {
 	out := rows{}
 	for _, r := range rq {
+		if mode == "cloud" && host != "" && r.Str("hostname") != "" && r.Str("hostname") != host {
+			continue
+		}
 		out = append(out, map[string]interface{}{"table": r.Str("table"), "type": r.Str("type"),
 			"executing": r.Str("is_currently_executing"), "last_exception": r.Str("last_exception")})
 	}
@@ -859,10 +890,13 @@ func (g *Generator) poolSizesFromFiles() map[string]int64 {
 		cols := map[string]string{"fetch": "max(CurrentMetric_BackgroundFetchesPoolSize)", "schedule": "max(CurrentMetric_BackgroundSchedulePoolSize)"}
 		if hosts, err := g.bundle.Rows("system.metric_log_by_host_3_days"); err == nil {
 			for key, col := range cols {
-				perHost := map[string]int64{}
+				// Each host's latest size, not its largest over the window:
+				// a pool cut from 32 to 16 is judged against 16.
+				perHost, latest := map[string]int64{}, map[string]string{}
 				for _, r := range hosts {
-					if v := r.Int(col); v > perHost[r.Str("hostname")] {
-						perHost[r.Str("hostname")] = v
+					h, t := r.Str("hostname"), r.Str("time")
+					if v := r.Int(col); v > 0 && t >= latest[h] {
+						perHost[h], latest[h] = v, t
 					}
 				}
 				for _, v := range perHost {
@@ -967,7 +1001,9 @@ func disksPanel(ds []bundle.Row, host string) rows {
 			pct = round(free/total*100, 1)
 		}
 		out = append(out, map[string]interface{}{"hostname": h, "name": d.Str("name"), "path": d.Str("path"), "type": d.Str("type"),
-			"free_space": int64(free), "total_space": int64(total), "free_space_human": readableSize(free),
+			// The raw capacities stay the exact UInt64 text: an object-storage
+			// disk reports 2^64-1 for "unlimited", past what int64 holds.
+			"free_space": d.Str("free_bytes"), "total_space": d.Str("total_bytes"), "free_space_human": readableSize(free),
 			"total_space_human": readableSize(total), "free_pct": pct})
 	}
 	sort.SliceStable(out, func(i, j int) bool {

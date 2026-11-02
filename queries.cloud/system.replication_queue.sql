@@ -1,5 +1,8 @@
 -- tier: essential
 SELECT 
+  -- every replica has its own queue: the host tells them apart (the
+  -- dashboard shows the serving replica's, as a local read did)
+  hostName() AS hostname,
   create_time,
   database,
   table,

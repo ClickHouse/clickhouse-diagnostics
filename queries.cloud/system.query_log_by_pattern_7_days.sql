@@ -15,6 +15,8 @@ SELECT
     max(query_duration_ms)                         AS max_duration_ms,
     sum(read_bytes)                                AS total_read_bytes,
     sum(memory_usage)                              AS total_memory_usage,
+    sumIf(read_bytes, query_duration_ms > 0)       AS timed_read_bytes,
+    sumIf(memory_usage, query_duration_ms > 0)     AS timed_memory_usage,
     leftUTF8(any(query), 600)                      AS sample_query
 FROM clusterAllReplicas(default, system.query_log)
 WHERE event_time > {from:7d} AND event_time <= {to:now}
