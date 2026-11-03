@@ -1,6 +1,6 @@
 # Running `clickhouse-diagnostic` — cheat-sheet and re-collection recipes
 
-The full reference is the repository `README.md` (sections *Usage*, *Collection window*, *Modes and Query Layout*, *Gov mode*, *Host facts and server logs*, *Alerts*, *Query analysis mode*). This page is the subset an assistant needs to tell a user how to (re-)collect the right data.
+The full reference is the repository `README.md` and its `docs/` pages: `running.md` (grants, flags, examples, *Essential or full collection*, *Collection window*, dry-run), `modes.md` (modes, gov mode), `bundle.md` (host facts, logs, configuration, output), `alerts.md`, `query-analysis.md`, `versions.md`. This page is the subset an assistant needs to tell a user how to (re-)collect the right data.
 
 ## 1. Build or obtain the binary
 

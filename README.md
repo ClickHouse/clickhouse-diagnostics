@@ -2,1219 +2,353 @@
 
 ## What this is for
 
-When a ClickHouse server misbehaves — inserts rejected, queries running out of memory, a replica read-only, a disk filling up — the answers are already in its `system` tables, its logs and the host it runs on. Getting them out by hand means a dozen queries, a config copy, a log tail, and a round-trip with support for each thing you forgot.
+When a ClickHouse server misbehaves — inserts rejected, queries running out of memory, a replica read-only, a disk filling up, Keeper slow — the answers are in its `system` tables, its logs and the host it runs on. `clickhouse-diagnostic` collects that evidence **once, read-only, in one command**, and packs it into a single `clickhouse_diagnostic_<timestamp>.tar.gz`: something to keep, share with support, open as a dashboard, or hand to an AI assistant that knows how to read it.
 
-`clickhouse-diagnostic` collects that evidence **once, read-only, in one command**, and packs it into a single `clickhouse_diagnostic_<timestamp>.tar.gz` you can keep, share with support, open in the bundled `dashboard.html`, or hand to an AI assistant that knows how to read it (see [Reading the bundle](#reading-the-bundle)). It never reads customer rows, strips credentials from configuration files, and can hash identifiers (`gov` mode) when the bundle must cross a trust boundary.
+It is built to run **on a server that is already in trouble**. Before collecting, a one-second probe looks at the server and picks how much to collect:
 
-Under the hood: per-environment query sets (`cloud` / `onprem` / `gov`) selected with `-mode`, version-aware query variants picked for the connected server, YAML-driven read-only alert rules, an optional query-analysis slice for one `query_id`/`normalized_query_hash`, a self-contained HTML dashboard, and a `tar.gz` archive of everything.
-
-## What it collects and why
-
-| Collected | Question it answers | Why it is in the bundle |
+| `-collect` | What it does | When |
 |---|---|---|
-| `system.version` | Which build is this? | Every default, limit and bug fix is version-specific. |
-| `system.parts` (active, largest 50 000) | How many parts, how big, how fragmented, on which disk? | Part count per partition is the earliest signal of insert/merge trouble (`TOO_MANY_PARTS`). |
-| `system.part_log_3_days` (3 days, hourly aggregation of `system.part_log`) | Are merges keeping up with inserts; did any merge or mutation fail? | Shows insert size, merge throughput and failing background operations with their error codes. |
-| `system.merges`, `system.mutations` | What is merging or mutating right now; what is stuck? | A stuck merge or a mutation backlog is the usual reason parts pile up while the pool looks idle. |
-| `system.replicas`, `system.replication_queue` | Is every replica writable and caught up; if not, why? | Read-only state, Keeper session loss and the shape of the queue locate replication problems. |
-| `system.replicas_problem_tables`, `system.database_replicas` (≥ 25.9), `system.replicas_answered` (cloud) | For the tables and Replicated databases in trouble: are all replicas alive, how far behind the log, what Keeper refused; which replicas answered | The Keeper-backed columns are read only where they matter (up to 200 tables, problem tables first): asking `system.replicas` or `system.clusters` for them reads every table's or database's status from Keeper, which took minutes on servers with tens of thousands of tables. |
-| `system.query_log_details_7_days` (hourly aggregation of `system.query_log`) | What ran, how slow, how much memory, what failed, by whom? | Most incidents start with the workload; this is the aggregated view, with a 500-character sample per query pattern and no customer rows. |
-| `system.query_log_by_hour_7_days` / `system.query_log_by_pattern_7_days` (onprem, cloud) | How many queries ran each hour, of which kind, how slow; which patterns are slowest, heaviest, and whose? | Counted once per query — `query_log_details_7_days` repeats a query per table — and what the dashboard's query panels read. The pattern file keeps the hash as text and one 600-character SQL sample. |
-| `system.parts_by_table` (onprem, cloud) | How many parts, rows and bytes does each user table hold? | One row per table with no cap — `system.parts` keeps only the 50 000 largest parts — for the dashboard's summary, storage, largest-tables and tables-explorer panels. |
-| `system.query_log_exceptions_1_day` (hourly, failed queries only) | How many queries failed with each code, each hour? | The exact count — `query_log_details_7_days` repeats a query once per table it touched — that the exception alerts read. No exception text in gov. |
-| `system.query_views_log_3_days` (3 days, hourly aggregation of `system.query_views_log`) | Did every materialized view fire, did any fail, and what does each cost? | An MV that "succeeds" while writing nothing is invisible in `query_log`. An MV that throws fails the parent INSERT by default (`query_log` shows `… while pushing to view X`), but with `materialized_views_ignore_errors = 1` the INSERT is clean and this is the only record. Either way the base part is already committed. |
-| `system.view_refreshes` (≥ 23.12) | Are the refreshable materialized views actually refreshing? | A `REFRESH EVERY` view never appears in `query_views_log`; this is the only place its schedule, last success and last error live. |
-| `system.data_skipping_indices` | Which tables carry data-skipping indices, on which expressions, at what granularity? | The evidence for "the index exists but the query does not use it"; also drawn on the schema graph. |
-| `system.errors`, `system.text_log` (24 h, severity first, ≤ 200 rows per logger) | Which errors, how often, with what message? | Fast triage by error code; the log slice gives the server's own words. |
-| `system.text_log_histogram_1_day` | Warning-and-worse log lines per hour, level and component, with one example each | Says *when* errors started and *which* component, independent of the 2000-row `text_log` cap. |
-| `system.error_log_7_days` (≥ 24.8) | Every error code raised anywhere in the server, per hour, background threads included | The history behind `system.errors`: puts 999 / 242 / 252 / 107 on a timeline even when no query failed. |
-| `system.text_log_keeper_1_day` | Keeper session markers per hour (expired, finalized, reconnecting, connected to which host) | The minute a Keeper session was lost and where the server reconnected — lines that are below Warning level and never reach `text_log`. |
-| `system.aggregated_zookeeper_log_by_hour_2_days`, `_by_minute_1_day`, `_paths_1_day` (≥ 26.3) | Which ClickHouse component sends which Keeper requests and how slowly (hourly); Keeper latency, volume and failures per minute (per replica in cloud); the Keeper paths with the most requests and the most net creates | Says **who** is loading Keeper, **when** it got slow and **where** znodes pile up — from a table that is on by default (since 25.9, kept 30 days), where `zookeeper_log` usually is not. |
-| `system.metric_log_7_days` (hourly aggregation of `system.metric_log`) | Memory and background-pool load over time | Tells "the server was overloaded" apart from "one query misbehaved". |
-| `system.disks`, `system.detached_parts` | Is disk running out; has data been set aside as broken? | A full disk explains many other symptoms; detached parts record corruption or replication leftovers. |
-| `system.tables`, `system.columns`, `system.dictionaries`, `system.clusters` | Schema, keys, materialized views, dictionaries, topology | Findings in parts and queries are *explained* by the schema and the cluster definition. |
-| `system.settings`, `system.server_settings` (≥ 23.3), `system.merge_tree_settings` | Which query/profile, server and server-wide MergeTree settings deviate from their defaults — the third layer carries the `TOO_MANY_PARTS` thresholds and, on SharedMergeTree, the per-table fetch batch size and leader-election period | Answers "what was tuned" without a config copy — cloud bundles have no `configuration/`; identifying server values are `REMOVED` in gov. |
-| `system.asynchronous_insert_log` (7 days) | Are async-insert flushes succeeding and how slow are they? | A lost flush is silent when `wait_for_async_insert = 0`. |
-| `system.crash_log`, `system.stack_trace` | Did the server crash; what were its threads doing? | Crash evidence needs the trace and the query that triggered it. |
-| `system.metrics`, `system.events`, `system.asynchronous_metrics` | Live gauges and cumulative counters: Keeper session and watches, read-only replicas, fetches in flight, object-storage requests, cache size, `Uptime` | The "right now" state the hourly aggregates cannot give; `Uptime` turns `system.errors` and `system.events` counts into rates. |
-| `system.metric_log_coordination_3_days` (3 days, hourly, columns selected by regex) | Keeper, object-storage, filesystem-cache and replication counters hour by hour | A Keeper outage or an S3 error burst at 03:00 is visible here even when no query failed. |
-| `system.metric_log_by_host_3_days` (cloud only; 3 days, hourly, per replica) | Which replica's background pools are pinned, at what live pool size, with what Keeper latency and CPU; on SharedMergeTree, parts selected for fetching against fetches started and leader elections per hour | `metric_log_7_days` folds the replicas together; this is the per-host view a parts-propagation-lag or Keeper-latency finding is placed with, and it shows a pool-size change arriving host by host. |
-| `system.zookeeper_connection` (≥ 23.8; `xid` from 24.3), `system.databases`, `system.storage_policies` | Which Keeper node, how old the session, how far its request counter has run; how many `Replicated` databases; which disks back which policy | The coordination and storage topology behind replication and "file doesn't exist" findings. |
-| `system.parts_max_block_recent` (all modes), `system.parts_max_block_by_replica` (cloud) | Which replica is behind on which partition, by how many blocks, and which replicas hold none of a partition at all | On SharedMergeTree a lagging replica returns fewer rows than its siblings. Block numbers are allocated per partition and are monotonic, so the gap between a replica's newest block and the cluster's is a real count of parts it has not fetched — and a replica with no part of a partition, which contributes no row to compare, is found by subtracting the partition's replica set from the table's. The full `system.parts` dump is read on one replica and keeps the 50 000 largest parts, which drops exactly the fresh small ones that show lag. |
-| `system.distributed_ddl_queue` (7 days), `system.replicated_fetches` | Stuck or failed `ON CLUSTER` / Replicated-database DDL with per-host status; part fetches in flight | DDL replay storms (`TABLE_ALREADY_EXISTS` on `.tmp.inner_id` tables, code 571) and wedged fetches are visible only here. |
-| `system.zookeeper_log_errors_1_day`, `system.blob_storage_log_7_days` (only when the tables are enabled) | Failed Keeper requests per hour, operation and error code (errors only — the table is far too large to aggregate whole); object-storage uploads, deletes and failures per hour | Direct evidence for "Keeper stopped answering" and "the blob was deleted / never written". |
-| `host_info.json` (onprem) | OS, CPU, RAM, disks, THP, overcommit, limits, cgroups | A large share of self-managed incidents are host settings ClickHouse itself warns about at startup. |
-| `logs/` (onprem) | Restarts, startup warnings, fatal stacks, the first error of an incident | System tables lose this on restart; the log files keep it. |
-| `keeper/<host>_<port>.txt` (onprem, gov with the host hashed) | What each Keeper member says about itself: leader or follower, Raft log position, snapshot size and transfer settings, outstanding requests, its own latency, znode count, version | A Keeper-latency or session-loss finding is settled on the Keeper side; no `system.*` table carries these. |
-| `configuration/` | Which settings deviate from defaults | Memory limits, pools, Keeper, storage policies, log-table TTLs — with credentials removed. |
-| Alert results + `dashboard.html` | What is already over a threshold | Eleven read-only rules give the headline before anyone reads a file. |
+| `auto` *(default)* | Full collection on a healthy server, essential on a struggling one; switches to essential mid-run if queries start timing out | Almost always |
+| `full` | Everything, with the normal look-back windows (7, 3 or 1 day per table) | A healthy server, when you want the complete picture |
+| `essential` | Only the cheap, decisive tables, 1-day windows, short timeouts, a 3-minute budget, gentle query settings | A node that is overloaded, out of memory or has lost Keeper |
 
-Details per file (columns, windows, gov differences) are in [Modes and Query Layout](#modes-and-query-layout) and, for readers of the bundle, in `skills/clickhouse-diagnostic/references/file-guide.md`.
+**How it works.** Every query is a read-only `SELECT` against a `system` table — customer rows are never read. The results are written as files, then the alert rules and the dashboard are built **from those files**: nothing more is asked of the server after collection. Configuration files are copied with credentials removed, and `gov` mode hashes every identifier when the bundle must leave the organisation.
 
 ## Quick start
 
-```bash
-make build                                   # → ./bin/clickhouse-diagnostic  (or download a release binary)
-cd <directory containing queries.onprem/ queries.cloud/ queries.gov/ alerts/>   # query folders are resolved from the CWD
-
-# self-managed node (host facts + logs are collected because the tool runs on the server)
-./bin/clickhouse-diagnostic -mode onprem -host localhost -user sys_read_only
-
-# ClickHouse Cloud service
-./bin/clickhouse-diagnostic -mode cloud -host <svc>.<region>.aws.clickhouse.cloud -port 8443 -protocol https \
-  -user sys_read_only -skip-config
-
-# hashed identifiers, for bundles that must leave your organisation
-./bin/clickhouse-diagnostic -mode gov -host ch-01 -user sys_read_only -salt <YourPrivateSalt>
-```
-
-> **Passing the password non-interactively.** `export CLICKHOUSE_PASSWORD='…'` and omit `-password`: the tool reads the variable when the flag is absent, and it stays out of `ps` and shell history. `-password` still works and takes precedence. Rotate the password after a scripted run.
-
-Each run leaves `clickhouse_diagnostic_<ts>.tar.gz` in the output directory (`-output-dir`, default `clickhouse_results/`), next to the unpacked results in `clickhouse_results/clickhouse_diagnostic_<ts>/` (open `dashboard.html` there; older releases named both `clickhouse_backup_<ts>`). Before the first run create the read-only user — see [Required grants](#required-grants). Useful next steps:
+Download the archive for your platform from [Releases](https://github.com/ClickHouse/clickhouse-diagnostics/releases/latest), extract it, and run from the extracted folder (it holds the binary and the `queries.*` and `alerts/` folders it reads). Create the read-only user first — see [Required grants](#required-grants).
 
 ```bash
-./bin/clickhouse-diagnostic -mode onprem -host ch-01 -from 2026-08-14T09:00:00Z -to 2026-08-14T13:00:00Z   # just the incident window
-./bin/clickhouse-diagnostic -mode onprem -host ch-01 --normalized-query-hash <hash>                         # deep-dive one query pattern
-./bin/clickhouse-diagnostic -mode onprem -host ch-01 -dry-run                                               # list every query it would run, collect nothing
+export CLICKHOUSE_PASSWORD='…'     # read when -password is absent; stays out of ps and shell history
+
+# A self-managed node: run it on the server, so host facts, logs and configs are collected too
+./clickhouse-diagnostic -mode onprem -host localhost -user sys_read_only
+
+# A ClickHouse Cloud service
+./clickhouse-diagnostic -mode cloud -host <service>.<region>.aws.clickhouse.cloud -port 8443 -protocol https -user sys_read_only
+
+# Identifiers hashed, for a bundle that must leave your organisation
+./clickhouse-diagnostic -mode gov -host ch-01 -user sys_read_only -salt <YourPrivateSalt>
 ```
 
-## Reading the bundle
+Each run leaves `clickhouse_diagnostic_<ts>.tar.gz` in `clickhouse_results/`, next to the unpacked folder. Open **`dashboard.html`** from that folder first, then read the bundle with the [AI skill](#troubleshoot-with-the-ai-skill).
 
-Three options, in increasing depth:
-
-1. **`dashboard.html`** — open it from the results folder; alerts, storage, query activity, replication, disks, host tunables and (when requested) query analysis, all in one self-contained page. See [Dashboard](#dashboard).
-2. **`inspect_bundle.py`** — a standard-library Python pre-pass that prints coverage, inventory and the deterministic health checks in the terminal, from the archive or the folder:
-   ```bash
-   python3 skills/clickhouse-diagnostic/scripts/inspect_bundle.py clickhouse_diagnostic_<ts>.tar.gz
-   ```
-3. **The AI skill** — `skills/clickhouse-diagnostic/` teaches Claude Code, Codex CLI or any assistant that reads `SKILL.md`/`AGENTS.md` how to read a bundle and how to run the tool: what each file answers, thresholds aligned with the alert rules, an anonymised catalogue of recurring ClickHouse failure patterns, a summary template with evidence (`file → column → value`), recommended actions and follow-up prompts, and the exact re-collection command when the bundle does not cover the question. In Claude Code the skill is auto-discovered when you open this repository (`.claude/skills/clickhouse-diagnostic`, a symlink) — run `/clickhouse-diagnostic <bundle>` or ask "analyse this bundle"; Codex is pointed at it by the root `AGENTS.md` (`.agents/skills/clickhouse-diagnostic`). To use it from another directory, copy or symlink `skills/clickhouse-diagnostic` into your assistant's skills folder. The skill never modifies or uploads the bundle; see `skills/clickhouse-diagnostic/references/privacy.md`.
-
-## What leaves your machine
-
-Before sending an archive to anyone:
-
-- The tool **never selects customer rows** — every query reads a `system` table. Free-text columns can still carry customer values (query text, exception messages, log lines); see [Gov mode and hashed names](#gov-mode-and-hashed-names) for what is withheld or hashed when that matters.
-- `configuration/` is **credential-stripped** (passwords, keys, tokens, PEM blocks) but keeps hostnames, IPs, cluster topology and table names — review it before sharing. See [Configuration Collection](#configuration-collection).
-- `-dry-run` prints every SELECT the tool would run, with `EXPLAIN ESTIMATE`, and collects nothing — use it for a security review first. See [Dry-run mode](#dry-run-mode).
-- `gov` mode hashes database/table/user/host names with your private salt and withholds the dashboard, query text, configs, host facts and logs. **The salt and the local `*_gov_name_mapping.csv` never leave your machine.**
-- `alerts_summary.json` (when written) contains rule names and counts only, never matched rows.
-- `keeper/` holds Keeper's own read-only four-letter replies (`ruok`, `isro`, `lgif`, `srvr`, `mntr`, `conf`, `dirs`): version, Raft log position, settings, latency, outstanding requests, node counts; in gov `conf` keeps only numbers, booleans and plain words — paths, hosts and customer-chosen names say REMOVED. The commands that list client addresses (`stat`, `cons`) are never sent; gov hashes the member's host. See [Keeper facts](#keeper--what-each-keeper-member-says-about-itself).
-
----
-
-*The sections below are the full reference.*
-
-## Usage
-
-> These examples use `./clickhouse-diagnostic`. If you built via `make` the binary is at `./bin/clickhouse-diagnostic` — invoke that path or symlink it. See [Installation](#installation) if you don't have a binary yet.
-
-### Required grants
-
-The tool is read-only and never reads customer tables — every query reads a `system` table. That bounds what it *queries*, not what reaches the bundle: some `system` tables describe customer data in free text (query text, exception messages, log lines), so see [Gov mode and hashed names](#gov-mode-and-hashed-names) for what is withheld or hashed when that matters. Two grants are enough for `onprem` and `gov` mode:
+## Required grants
 
 ```sql
 CREATE USER sys_read_only IDENTIFIED WITH sha256_password BY '<password>';
-
 GRANT SHOW DATABASES, SHOW TABLES, SHOW COLUMNS ON *.* TO sys_read_only;
-GRANT SELECT ON system.*                               TO sys_read_only;
+GRANT SELECT ON system.* TO sys_read_only;
 ```
 
-```
-┌─GRANTS FOR sys_read_only────────────────────────────────────────────────┐
-│ GRANT SHOW DATABASES, SHOW TABLES, SHOW COLUMNS ON *.* TO sys_read_only │
-│ GRANT SELECT ON system.* TO sys_read_only                               │
-└─────────────────────────────────────────────────────────────────────────┘
+**Cloud mode** also needs `GRANT REMOTE, CREATE TEMPORARY TABLE ON *.* TO sys_read_only` (its queries read every replica through `clusterAllReplicas`).
+
+<details>
+<summary>Why these grants, and what a missing one looks like</summary>
+
+- `SELECT ON system.*` — every query reads a `system` table; nothing else is ever selected.
+- `SHOW …` — ClickHouse lists only the objects the user has *some* privilege on. Without these the run still succeeds, but the bundle silently describes a fraction of the server. If `system.databases` holds only `system`, the grant is missing.
+- Do not grant `SELECT` on the data databases instead: it collects the same bundle but gives the diagnostic user read access to customer data.
+- Configs, host facts and logs are read from the local filesystem, so they need OS read access, not grants.
+
+Details and measurements: [docs/running.md](docs/running.md#required-grants).
+</details>
+
+## Examples
+
+```bash
+export CLICKHOUSE_PASSWORD='…'          # read when -password is absent; stays out of ps and shell history
+
+# ── How much to collect ─────────────────────────────────────────────────────
+# auto (default): full on a healthy server, essential on a struggling one.
+# The run prints what it chose and why, e.g.
+#   "essential collection, chosen automatically: load average 26.6 on 8 cores"
+./clickhouse-diagnostic -mode onprem -host localhost -user diag
+
+# Force everything, whatever the load (once the node is healthy again)
+./clickhouse-diagnostic -mode onprem -host localhost -user diag -collect full
+
+# Force the light version: cheap tables, 1-day windows, 30 s per query, 3 min in total
+./clickhouse-diagnostic -mode onprem -host localhost -user diag -collect essential
+
+# A node in trouble, every second counts: tighter budget and timeout
+./clickhouse-diagnostic -mode onprem -host localhost -user diag -collect essential -time-budget 90s -query-timeout 20s
+
+# ── An incident at a known time ─────────────────────────────────────────────
+# -from / -to replace every table's default look-back; the alerts and the
+# dashboard then judge that window. A few hours is also the cheapest run there is.
+./clickhouse-diagnostic -mode onprem -host ch-01 -user diag -from 2026-08-14T09:00:00Z -to 2026-08-14T13:00:00Z
+
+# Widen every window instead: everything since 21 July
+./clickhouse-diagnostic -mode onprem -host ch-01 -user diag -from 2026-07-21
+
+# ── A whole cluster ─────────────────────────────────────────────────────────
+# Asks one node for the hosts, shows the plan, then collects each host in turn.
+# One bundle per host in cluster_bundles_<ts>/; each host picks its own mode.
+./clickhouse-diagnostic cluster -user diag
+./clickhouse-diagnostic cluster -user diag -yes                       # no confirmation prompt
+./clickhouse-diagnostic cluster -user diag -collect-from each-node    # print the command to run ON each host
+                                                                      # (adds its server logs and configs)
+
+# ── One slow or failing query ───────────────────────────────────────────────
+# A query_id from a ticket: its details, ProfileEvents and log lines, compared
+# with the fast and slow runs of the same query shape (48 h around it)
+./clickhouse-diagnostic -mode onprem -host ch-01 -user diag -query-id 3f2c9a6e-5b1d-4c8a-9e7f-2a4b6c8d0e1f
+
+# A query shape (normalized_query_hash) that regressed this week: the slowest
+# execution is picked automatically and compared with the rest
+./clickhouse-diagnostic -mode onprem -host ch-01 -user diag -normalized-query-hash 7769688026807387533 -from 2026-10-26
+
+# Both, over an explicit window
+./clickhouse-diagnostic -mode onprem -host ch-01 -user diag -query-id 3f2c9a6e-5b1d-4c8a-9e7f-2a4b6c8d0e1f \
+  -normalized-query-hash 7769688026807387533 -from 2026-10-30T08:00:00Z -to 2026-10-30T12:00:00Z
+
+# ── Cloud and gov ───────────────────────────────────────────────────────────
+./clickhouse-diagnostic -mode cloud -host <service>.<region>.aws.clickhouse.cloud -port 8443 -protocol https -user diag
+./clickhouse-diagnostic -mode gov -host ch-01 -user diag -salt <YourPrivateSalt>    # names hashed; no dashboard
+
+# ── Before and after ────────────────────────────────────────────────────────
+./clickhouse-diagnostic -mode onprem -host ch-01 -user diag -dry-run    # list every SELECT and its EXPLAIN ESTIMATE; collect nothing
+./clickhouse-diagnostic -mode onprem -host ch-01 -user diag -airgap     # a dashboard that opens without internet
 ```
 
-| Grant | Why it is needed |
+Each run prints the archive it wrote (`clickhouse_results/clickhouse_diagnostic_<ts>.tar.gz`). The essential choice is also the `collect:` line of `execution_log.txt` and a banner in `dashboard.html`, which lists what was skipped. More: [docs/running.md](docs/running.md#examples), [`cluster-collect/`](cluster-collect/README.md), [Query analysis](#query-analysis), [`airgap/`](airgap/README.md).
+
+## Troubleshoot with the AI skill
+
+`skills/clickhouse-diagnostic/` teaches an AI assistant — Claude Code, Codex CLI, or any assistant that reads `SKILL.md` / `AGENTS.md` — to read a bundle the way a ClickHouse support engineer would. It checks what the bundle covers, runs the health checks, matches the findings against a catalogue of recurring ClickHouse failure patterns taken from real escalations, and writes a short summary where **every finding cites `file → column → value`**, with the recommended fix, and the exact re-collection command when the bundle cannot answer the question.
+
+**Start it.** Open this repository in Claude Code (the skill is discovered automatically) and run:
+
+```
+/clickhouse-diagnostic ~/Downloads/clickhouse_diagnostic_20261102_160031.tar.gz
+```
+
+Codex finds it through `AGENTS.md`. From another folder, copy or symlink `skills/clickhouse-diagnostic` into your assistant's skills directory.
+
+**Ask it things like:**
+- *"Analyse this bundle — why are inserts failing with TOO_MANY_PARTS?"*
+- *"Is Keeper the bottleneck? Which replica, which component, since when?"*
+- *"This replica is read-only — what happened, and what should the customer do?"*
+- *"What should I re-collect to confirm this?"* — it answers with the command.
+
+**It knows the failures we have seen.** The skill carries a catalogue of nearly 50 recurring ClickHouse failures, each with what you see in the bundle, what it usually means, how to verify it and the fix that worked — anonymised from real escalations. When the evidence matches, the summary names the pattern. For example, on a bundle where every replica went read-only:
+
+> **Keeper has no leader, so every replicated table is read-only** — resembles P-61.
+> `keeper/keeper2_9181.txt` → `mntr` `zk_latest_snapshot_size` = 2.4 GiB with `conf` `snapshot_transfer_chunk_size=0`; its `lgif` `last_log_idx` is below the leader's `first_log_idx`; all three members answer *"not currently serving requests"*.
+> The member that fell behind can only catch up through a snapshot, and a snapshot over 2 GiB fails to transfer in one piece, so each new leader loses leadership within seconds.
+> **Fix:** keep the lagging member stopped, restart the up-to-date members together, then set `snapshot_transfer_chunk_size` on every member before starting it again.
+
+Other Keeper patterns it recognises: the session-expiry cascade after a quorum loss, one replica's Keeper requests slow while its siblings are fine, disk-metadata znodes piling up until Keeper runs out of memory, a background task looping on Keeper. The same holds for parts, merges, memory, mutations, disks and inserts.
+
+The skill works offline and never modifies or uploads the bundle; it applies a privacy check before anything leaves the machine ([`privacy.md`](skills/clickhouse-diagnostic/references/privacy.md)).
+
+## What it collects and why
+
+<details>
+<summary>Show</summary>
+
+About 60 collectors, all `system` tables or host facts:
+
+- **Parts, merges and mutations** — part counts per partition and table, merge and mutation backlogs, three days of part events.
+- **Replication and Keeper** — replica health, the replication queue, Keeper sessions and request counters, what each Keeper member reports about itself, and (26.3+) who sends Keeper which requests, when and on which paths.
+- **Queries** — seven days of activity per hour and per query pattern, failures by error code, the slowest and heaviest patterns.
+- **Errors and logs** — error counters and their history, a severity-first slice of `text_log`, the server log files (on-prem).
+- **Resources** — background pools, memory and CPU per hour; disks, detached parts, object storage.
+- **Schema and settings** — tables, columns, dictionaries, materialized views, clusters; the settings that differ from their defaults; configuration files with credentials removed.
+- **The host** (on-prem) — OS, CPU, memory, disks, and the kernel settings ClickHouse warns about.
+
+Every file, the question it answers and why it is in the bundle: [docs/collectors.md](docs/collectors.md).
+</details>
+
+## Modes (`-mode onprem | cloud | gov`)
+
+<details>
+<summary>Show</summary>
+
+- **`onprem`** — one self-managed server; run it on the server to also collect host facts, logs, configs and Keeper's own answers. A SharedMergeTree cluster is detected and collected across its replicas.
+- **`cloud`** — a ClickHouse Cloud service; every per-replica table is read on all replicas (`clusterAllReplicas`).
+- **`gov`** — like `onprem`, with database, table, user and host names hashed with your private salt; no dashboard, query text, configs, host facts or logs. The salt and the name-mapping file never leave your machine.
+
+Details: [docs/modes.md](docs/modes.md).
+</details>
+
+## Command-line flags
+
+<details>
+<summary>The flags you will use most</summary>
+
+| Flag | What it does |
 |---|---|
-| `SELECT ON system.*` | Every diagnostic query, alert rule and dashboard panel reads a `system` table. Nothing outside `system` is ever selected. |
-| `SHOW DATABASES, SHOW TABLES, SHOW COLUMNS ON *.*` | ClickHouse filters the object-listing system tables down to what the user holds *some* privilege on. Without `SHOW DATABASES`/`SHOW TABLES` the tool sees only part of the cluster; without `SHOW COLUMNS`, `system.columns` comes back with **no rows for your databases** while every other file looks normal. |
+| `-mode onprem\|cloud\|gov` | Which kind of server (see [Modes](#modes--mode-onprem--cloud--gov)) |
+| `-host`, `-port`, `-protocol`, `-user` | Where to connect; the password comes from `CLICKHOUSE_PASSWORD` or a prompt |
+| `-collect auto\|full\|essential` | How much to collect (see [What this is for](#what-this-is-for)) |
+| `-from`, `-to` | Collect this window instead of each table's default look-back |
+| `-time-budget`, `-query-timeout` | Cap the whole run and each query |
+| `-query-id`, `-normalized-query-hash` | Add a focused analysis of one query |
+| `-dry-run` | List what would run; collect nothing |
+| `-output-dir` | Where results go (default `./clickhouse_results`) |
+| `-salt` | Gov-mode hashing salt |
+| `-airgap` | A dashboard that opens without internet |
+| `-skip-config`, `-skip-alerts`, `-skip-dashboard`, `-skip-archive` | Leave a step out |
 
-> **Do not substitute `SELECT` on the data databases.** `GRANT SELECT ON <db>.*` also populates the listing tables, and collects exactly the same bundle — measured on 26.2.19.43, `system.tables` 2, `system.columns` 5, `system.databases` 2, `system.parts` 1 under either grant set — but it hands the diagnostic user read access to customer data, which the `SHOW` grants do not (a `SELECT` against a user table is refused with 497 under them).
+Every flag: `./clickhouse-diagnostic -help`, or [docs/running.md](docs/running.md#command-line-flags).
+</details>
 
-> **A missing `SHOW` grant does not produce an error — it silently truncates the results.** Every query still reports success; the bundle just describes a fraction of the server. Measured on a test instance with one user database:
->
-> | Table | With the grant | Without it |
-> |---|---|---|
-> | `system.tables` | 141 | 112 |
-> | `system.databases` | 5 | 1 |
-> | `system.columns` | 3258 | 2520 |
-> | `system.parts` | 102 | 101 |
->
-> This is the failure mode to watch for: a bundle that looks complete but is missing the customer's own tables. If `system.databases` contains only `system`, the `SHOW` grant is missing — the tool now prints a warning at startup when it can see no database outside `system`, but an older binary will not.
->
-> With **neither** grant the run still completes: the protected system tables fail with `Code: 497 … Not enough privileges` (visible in `execution_log.txt`) while `system.tables`, `system.columns` and `system.databases` come back as **empty files** rather than errors, so the archive is a few hundred KB that describes nothing. Check the archive size against another node before sending it.
+## Collection modes in detail
 
-Neither grant exposes customer data: `SHOW` reveals object *names* and metadata only, and `SELECT` is scoped to `system`.
+<details>
+<summary>How auto decides, and what essential changes</summary>
 
-#### Cloud mode needs two more
+`auto` runs a short probe (in-memory tables only) and collects essential when `SELECT 1` takes over 1 s, `system.metrics` over 2 s, running queries reach 80 % of `max_concurrent_queries`, memory reaches 90 % of the server limit, the load average passes twice the cores, or replicated tables are read-only. A full run also switches to essential mid-run when a query times out or two in a row take more than 30 s.
 
-`cloud` mode wraps its queries in `clusterAllReplicas(...)` so results span every replica rather than only the node you connected to. Every request runs with `skip_unavailable_shards = 1`: a replica that is down is left out instead of failing every per-replica collector, and `system.replicas_answered` in the bundle says which replicas did not answer. Distributed execution needs two further grants:
+Essential runs only the collectors marked `-- tier: essential`, caps every 3- and 7-day window to 1 day, sets a 30 s per-query timeout and a 3-minute budget, and runs with `max_threads = 2`, `max_memory_usage = 1 GiB` and the lowest priority. With Keeper lost, the queries that would wait for a session are skipped.
 
-```sql
-GRANT REMOTE                ON *.* TO sys_read_only;
-GRANT CREATE TEMPORARY TABLE ON *.* TO sys_read_only;
-```
-
-So the full set for cloud is:
-
-```
-┌─GRANTS FOR sys_read_only────────────────────────────────────────────────────────────────────────────────┐
-│ GRANT SHOW DATABASES, SHOW TABLES, SHOW COLUMNS, CREATE TEMPORARY TABLE, REMOTE ON *.* TO sys_read_only │
-│ GRANT SELECT ON system.* TO sys_read_only                                                               │
-└─────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-```
-
-Unlike the `SHOW` grant, these fail loudly rather than truncating:
-
-```
-Code: 497. DB::Exception: Not enough privileges. To execute this query,
-it's necessary to have the grant REMOTE ON *.*. (ACCESS_DENIED)
-
-Code: 497. DB::Exception: Not enough privileges. To execute this query,
-it's necessary to have the grant CREATE TEMPORARY TABLE ON *.*. (ACCESS_DENIED)
-```
-
-`onprem` and `gov` need neither — verified by revoking both and re-running (21/21 and 19/19 queries, 0 errors).
-
-#### What grants do *not* cover
-
-Config collection, `host_info.json` and `logs/` read the **local filesystem**, not the database, so they depend on OS permissions instead: read access to `/etc/clickhouse-server/`, `/var/log/clickhouse-server/` and `/proc`. See [Host facts and server logs](#host-facts-and-server-logs).
-
-### Interactive run
-
-```bash
-./clickhouse-diagnostic
-```
-
-You will be prompted for any value not supplied on the command line:
-
-| Prompt | Default |
-|---|---|
-| Protocol (http/https) | `http` |
-| ClickHouse host | `localhost` |
-| ClickHouse port | `8123` (http) / `8443` (https) |
-| Username | _empty_ |
-| Password (hidden) | _empty_ |
-| Mode (cloud/onprem/gov) | `onprem` — only when `-mode` is absent entirely; see below |
-| Config directory | `/etc/clickhouse-server/config.d/` — `onprem` only; `cloud` and `gov` do not ask (see below) |
-| Gov-mode salt (hidden, `gov` mode only) | _empty_ |
-
-#### How `-mode` is resolved
-
-`onprem` is the least protective of the three modes, so the tool never *guesses* it. A `-mode` value it cannot parse is a hard error with a non-zero exit — it is not rounded down to `onprem`, because a mistyped `-mode gov` would then collect unhashed database and table names from a run that asked for hashing, and in a scripted collection nobody reads the warning:
-
-```
-$ clickhouse-diagnostic -mode govv ...
-Error: invalid mode "govv" — choose cloud, onprem, gov; did you mean "gov"?
-$ echo $?
-1
-```
-
-The `onprem` default applies only when `-mode` is absent altogether. On a terminal you are prompted and Enter accepts it; with stdin closed the default is used and announced:
-
-```
-No -mode given and stdin is not a terminal; using onprem.
-```
-
-Values are trimmed and lower-cased, and these spellings are accepted:
-
-| Mode | Also accepted |
-|---|---|
-| `cloud` | `ch-cloud`, `clickhouse-cloud` |
-| `onprem` | `on-prem`, `on_prem`, `on-premise(s)`, `onpremise(s)`, `self-hosted`, `selfhosted`, `self_hosted` |
-| `gov` | *nothing* — the protective mode takes no alias, so a near-miss is rejected rather than resolved by guesswork |
-
-### Command-line flags
-
-Run `./clickhouse-diagnostic -help` to see the full list. Current flags:
-
-```
--host string           ClickHouse Host
--port string           ClickHouse Port
--user string           Username
--password string       Password (not recommended for security reasons)
--protocol string       Protocol (http or https)
--mode string           Query mode (cloud, onprem, gov) (default "onprem")
--output-dir string     Directory for results output (default "./clickhouse_results")
--config-dir string     ClickHouse config directory to collect
-                       (default: /etc/clickhouse-server/config.d/)
--alerts-dir string     Directory containing alert YAML rule files (default "./alerts")
--salt string           Gov-mode hashing salt (8–64 alphanumeric chars;
-                       prompts interactively if empty; gov mode only)
--query-id string       Run query analysis focused on this query_id (UUID).
-                       See "Query analysis mode" below.
--normalized-query-hash string
-                       Run query analysis focused on this normalized_query_hash
-                       (UInt64). Can be combined with --query-id, or used alone.
--from string           Time-window start for query analysis (RFC3339 or YYYY-MM-DD).
-                       Defaults to "last 3 days" when --query-id is set, or
-                       "last 7 days" when only --normalized-query-hash is set.
--to string             Time-window end for query analysis (default: now).
--analysis-dir string   Directory containing query-analysis SQL files
-                       (default "./queries.query_analysis")
--output-format string  Serialisation format for query results:
-                       jsonl|native|tsv (default "jsonl").
-                       See "Output format" below.
--host-info string      Collect host OS/CPU/memory/disk/process facts:
-                       auto|on|off (default "auto" — on for onprem only).
-                       See "Host facts and server logs" below.
--logs string           Collect ClickHouse server log files from disk:
-                       auto|on|off (default "auto" — on for onprem only).
--logs-dir string       Directory holding server logs (default: discovered
-                       from the server config, then /var/log/clickhouse-server)
--logs-max-mb int       Per-file cap for collected logs, in MiB (default 50).
-                       Larger files are tail-truncated.
--logs-include-archives Also collect rotated logs (*.gz, *.zst). Off by default.
--keeper-mntr string    Ask every Keeper member in system.zookeeper_connection
-                       for its read-only four-letter replies and write keeper/<host>_<port>.txt:
-                       auto|on|off (default "auto" — on for onprem and gov,
-                       off for cloud). See "Keeper facts" below.
--collect-text-log      Collect a time-bounded slice of system.text_log.
-                       Requires --from and --to; rejected in gov mode.
--text-log-level string Minimum severity for --collect-text-log
-                       (Fatal|Critical|Error|Warning|Notice|Information|
-                       Debug|Trace). Default: all levels.
--text-log-limit int    Row cap for --collect-text-log (default 500000)
--dry-run               List every query that would be executed (with the
-                       system tables each touches and a read-only
-                       EXPLAIN ESTIMATE per SELECT) and exit. No results,
-                       no archive. See "Dry-run mode" below.
--skip-config           Skip collecting configuration files
--skip-alerts           Skip evaluating alert rules
--single-node           On a SharedMergeTree cluster (cloud_mode = 1), keep -mode onprem
-                       collecting THIS node only instead of switching to cloud
-                       collection over clusterAllReplicas(default, ...)
--skip-dashboard        Skip generating HTML dashboard
--skip-archive          Skip creating archive of results and configuration
-```
-
-Any flag left empty on the command line is prompted for interactively (except the `-skip-*` toggles and `-output-dir` / `-alerts-dir`, which use their defaults silently).
-
-### Examples
-
-Run against a Cloud cluster (configuration files are skipped automatically in `cloud` mode: the server's config directory is not on the machine running the tool; pass `-config-dir` to collect one anyway):
-
-```bash
-./clickhouse-diagnostic -mode cloud -host my-service.us-east-1.aws.clickhouse.cloud \
-  -port 8443 -protocol https -user default
-```
-
-Run against an on-prem node, write everything to a custom directory:
-
-```bash
-./clickhouse-diagnostic -mode onprem -host prod-ch-01 \
-  -output-dir ./diagnostics-2026-05-13
-```
-
-Run a quick check with only queries (no alerts, no dashboard, no archive):
-
-```bash
-./clickhouse-diagnostic -mode onprem -host localhost \
-  -skip-alerts -skip-dashboard -skip-archive
-```
-
-Government / hashed-PII mode with a non-default alerts directory:
-
-```bash
-# Salt is prompted interactively (hidden input). To pass it explicitly:
-./clickhouse-diagnostic -mode gov -host gov-ch-01 \
-  -alerts-dir ./alerts.gov -salt myDeployment2026
-```
-
-> **Gov mode requires a salt** — see [Gov mode and hashed names](#gov-mode-and-hashed-names) for what it does and why you need it.
-
-Fully non-interactive (CI / automation):
-
-```bash
-./clickhouse-diagnostic -mode cloud \
-  -protocol https -host $CH_HOST -port 8443 \
-  -user $CH_USER -password $CH_PASS \
-  -skip-config
-```
-
-> **Security:** prefer the interactive password prompt or an environment variable over `-password` — flags appear in `ps`/shell history.
-
-## Essential or full collection (`-collect`)
-
-A server in trouble is exactly when a diagnostic is needed, and exactly when a full collection costs the most. Before collecting, the tool runs a short load probe (about a second, in-memory tables only) and picks how much to collect:
-
-| `-collect` | What happens |
-|---|---|
-| `auto` (default) | **Full** collection, unless the probe sees a struggling server — `SELECT 1` slower than 1 s, `system.metrics` slower than 2 s, running queries at 80 % of `max_concurrent_queries`, memory at 90 % of the server limit, load average above 2× the cores, or read-only replicated tables. Then **essential**. A full run also switches to essential **mid-run** when a query times out or two in a row take more than 30 s. |
-| `essential` | Always essential. |
-| `full` | Always full — no switch, whatever the probe says. |
-
-An **essential** collection runs only the collectors marked `-- tier: essential` (version, metrics, processes, errors, replicas and replication queue, merges, mutations, Keeper session, disks, the last day of `query_log` / `part_log` / `metric_log` / `error_log` / `text_log`), with:
-
-- every 3- and 7-day window reduced to **1 day** (an explicit `-from` / `-to` still wins);
-- a **30 s** per-query timeout (unless `-query-timeout` was given) and a **3 min** budget for the whole run (`-time-budget` to change it) — what has not run by then is skipped and listed;
-- `max_threads = 2`, `max_memory_usage = 1 GiB` and the lowest `priority`, each checked first and left out if the user's settings profile refuses it;
-- the dashboard panels that read every table left out; an alert rule whose source file was not collected is reported as *not applicable*, naming the skipped collector.
-
-When the probe sees **no Keeper session while replicated tables are read-only**, the queries that wait for a session (`system.zookeeper_connection`, `system.database_replicas`, `system.replicas_problem_tables`, the dashboard's Keeper panel — and with them the alerts that read those files) are skipped instead of waiting for their timeout, and the Keeper four-letter commands take their members from the server configuration.
-
-On a **large SharedMergeTree** server (10 000+ tables), an `auto` run lists detached parts only for non-shared tables and the shared tables named in broken-part log lines; `-collect full` lists every table.
-
-The decision and its reasons are the `collect:` line of `execution_log.txt`, a banner at the top of `dashboard.html`, and the first finding of the analysis skill's pre-pass. Every skipped collector is in the execution log with status `skipped` and why.
+Details: [docs/running.md](docs/running.md#essential-or-full-collection--collect).
+</details>
 
 ## Collection window
 
-Most collection queries look back over a fixed period. Each declares its **own** default, so a query whose scan is unusually expensive (or unusually cheap) can say so without changing the rest:
+<details>
+<summary>Show</summary>
 
-| Query | Default look-back |
-|---|---|
-| `system.query_log_details_7_days` | 7 days |
-| `system.query_log_exceptions_1_day` | 1 day |
-| `system.query_log_by_hour_7_days` | 7 days |
-| `system.query_log_by_pattern_7_days` | 7 days |
-| `system.part_log_3_days` | 3 days |
-| `system.query_views_log_3_days` | 3 days |
-| `system.metric_log_7_days` | 7 days |
-| `system.asynchronous_insert_log_7_days` | 7 days |
-| `system.metric_log_coordination_3_days` | 3 days |
-| `system.metric_log_by_host_3_days` | 3 days |
-| `system.blob_storage_log_7_days` | 7 days |
-| `system.error_log_7_days` | 7 days |
-| `system.distributed_ddl_queue` | 7 days |
-| `system.text_log` | 1 day |
-| `system.text_log_histogram_1_day` | 1 day |
-| `system.text_log_keeper_1_day` | 1 day |
-| `system.zookeeper_log_errors_1_day` | 1 day |
-| `system.aggregated_zookeeper_log_by_hour_2_days` | 2 days |
-| `system.aggregated_zookeeper_log_by_minute_1_day` | 1 day |
-| `system.aggregated_zookeeper_log_paths_1_day` | 1 day |
+Each collector has its own default look-back: 7 days for `query_log`, `metric_log` and most log tables, 3 days for `part_log` and a few wide tables, 1 day for `text_log` and the Keeper logs. `-from` / `-to` replace all of them at once; either may be given alone. Alert rules keep their own look-back (for example "in the last hour"), measured within the collected files.
 
-> `system.text_log` and `system.zookeeper_log` stop at 1 day: they are by far the highest-volume tables here (a busy cluster writes millions of Keeper log rows an hour), and a 7-day slice is too large to be useful in a support bundle. Use `-from` when you need more.
-
-`-from` and `-to` override **every** window at once:
-
-```bash
-# Everything from a specific incident window
-./clickhouse-diagnostic -mode onprem -host prod-ch-01 \
-  -from 2026-08-14T09:00:00Z -to 2026-08-14T13:00:00Z
-
-# Widen the look-back to 30 days instead of each query's default
-./clickhouse-diagnostic -mode onprem -host prod-ch-01 -from 2026-07-21
-```
-
-Either end may be given alone: `-from` with no `-to` runs to now, and `-to` with no `-from` leaves each query's own default start. The resolved window is printed at the start of the run. Times are RFC3339 or `YYYY-MM-DD`, interpreted as UTC.
-
-The same flags also drive [query analysis](#query-analysis-mode) when `-query-id` / `-normalized-query-hash` is set.
-
-[Alert rules](#alerts) keep their own look-back (e.g. *"exception spike in the last hour"*) — it is part of what the rule means. They read the collected files, so with `-to` that look-back ends at `-to`, where the files end; a `-from` narrower than a rule's look-back gives it only the hours collected.
-
-> **A narrower window is the first thing to try on a slow or heavy collection.** The defaults are tuned for a general health check; on a busy cluster `-from` with a few hours is dramatically cheaper.
-
-### For query authors
-
-Windows are template placeholders, not literals, so they stay overridable:
-
-```sql
-WHERE event_time >  {from:7d}      -- --from if given, else now() - INTERVAL 7 DAY
-  AND event_time <= {to:now}       -- --to   if given, else now()
-```
-
-Accepted defaults are `now`, and `<N>d` / `<N>h` / `<N>m`. A malformed spec (`{from:7dd}`) is **not** substituted — the query is refused rather than silently run unbounded. A test asserts no shipped query hard-codes an interval, so a new one that does will fail CI rather than quietly ignore the flags.
-
-## Output format
-
-Query results are written one file per query, in the format chosen by `-output-format`. The default is **`jsonl`**.
-
-| Value | ClickHouse format | Extension | |
-|---|---|---|---|
-| `jsonl` *(default)* | `JSONEachRow` | `.jsonl` | One self-describing JSON object per line. `grep`- and `jq`-able, and every row carries its column names — which matters because `system.query_log` has ~60 columns and positional formats leave you counting fields back to a header. |
-| `native` | `Native` | `.native` | The ClickHouse binary format used before v0.3.0. Column-oriented, exactly typed, reloadable with no schema — but unreadable without a ClickHouse to load it into. |
-| `tsv` | `TSVWithNamesAndTypes` | `.tsv` | Names on line 1, **types on line 2**. The most faithful text format for reload, but positional, so it reads poorly for wide tables. |
-
-### Queries are bounded on the server
-
-The only bound used to be client-side: a 5-minute HTTP timeout. That timeout and the server had no relationship — when it fired, Go closed the connection and the tool moved on while the server kept executing. `cancel_http_readonly_queries_on_client_close` defaults to `0` on self-managed, so on a slow cluster you accumulate abandoned queries, each still burning CPU and memory, while the collector stacks more on top. Cloud sets it to `1`, which is why this was invisible in Cloud testing and only bit the self-managed audience the tool is mainly for.
-
-Every request now carries `max_execution_time` (default 240s, set with `-query-timeout`). The server enforces it, so a slow query fails with a clean `Code: 159` that lands in the customer's `query_log` and can be diagnosed, instead of vanishing into a silent disconnect. The HTTP client waits 60s longer than whatever `-query-timeout` says, so the server always wins the race. `-query-timeout=0` disables both.
-
-Two more settings ride along. `cancel_http_readonly_queries_on_client_close=1` tells the server to drop the query when we disconnect — it only applies under `readonly>0`, and note it does **not** fire over HTTPS today: on a graceful close the server's liveness peek sees the TLS `close_notify` bytes and concludes the peer is still there ([ClickHouse#96737](https://github.com/ClickHouse/ClickHouse/issues/96737)). It works on plain `http`, which is why `max_execution_time` is the limit to rely on. `enable_http_compression=1` lets the server gzip the response, which matters on bastion hosts over a slow link; Go's transport requests and decompresses it transparently, and will stop doing so if anyone ever sets `Accept-Encoding` by hand.
-
-### Large integers are never rounded
-
-JSON numbers are IEEE-754 doubles in most parsers, so an unquoted `UInt64` above 2^53 is silently corrupted on read — JavaScript turns `18446744073709551615` into `18446744073709552000`, and so does any `jq` expression that does arithmetic on it. This is not hypothetical: `normalized_query_hash` and every `cityHash64` value in `system.query_log` are full-width `UInt64`.
-
-The tool therefore pins `output_format_json_quote_64bit_integers=1` on every request, so 64-bit integers are emitted as **quoted strings** and survive every parser exactly. The setting is writable under `readonly=1`, so a server-side profile could otherwise turn it off — pinning it is what makes the guarantee hold rather than depend on the server's configuration.
-
-`native` and `tsv` are exact by construction. Cast on read when you reload:
-
-```bash
-clickhouse-local -q "SELECT toUInt64(normalized_query_hash) FROM file('x.jsonl','JSONEachRow')"
-```
-
-### Size
-
-The shipped artefact is a `tar.gz`, and JSON's repeated keys compress away almost entirely. Measured on a real bundle (21 queries, ClickHouse 24.8):
-
-| Format | Uncompressed | **Archive (`tar.gz`)** |
-|---|---|---|
-| `jsonl` | 2.20 MB | **225 KB** |
-| `native` | 1.83 MB | 240 KB |
-| `tsv` | 2.12 MB | 272 KB |
-
-`jsonl` is 20% larger on disk but produces the **smallest archive** of the three, so the readable default costs nothing in what you actually send.
+Every collector's window: [docs/running.md](docs/running.md#collection-window).
+</details>
 
 ## Schema graph
 
 ![The schema graph: one database section with its tables, materialized views, dictionary and Distributed table, edges following the data flow, columns listed per node with key columns in red](docs/images/schema-graph.png)
 
-Every run in `cloud` or `onprem` mode also writes **`schema_graph.html`** next to `dashboard.html`: an interactive map of how data flows through the schema, adapted from ClickHouse's own `/schema` page and rendered entirely from data captured at collection time — it works from disk with no server and no network.
+Every `onprem` and `cloud` run also writes **`schema_graph.html`**: an interactive map of how data flows through the schema — tables, materialized views, dictionaries and Distributed tables, with edges from source to target. Click a node for its keys, columns, neighbours and `CREATE` statement; search, filter and drag. It works from disk with no server or network, and opens from the dashboard's *Schema Graph* tab. Details: [docs/dashboard.md](docs/dashboard.md#schema-graph).
 
-- **One node per table**, grouped by database and coloured by engine: MergeTree family, materialized view, refreshable MV, dictionary, Distributed, view. Each node lists its columns (key columns in red, defaulted columns in green) and, for tables that hold data, the row count and size.
-- **Edges follow the data.** A materialized view sits between the table it reads and the table it writes — including the implicit `.inner_id.*` table of an MV declared with an `ENGINE`; a dictionary points at its source table; a Distributed table at the shard table behind it. Chains are laid out left to right, deepest first, so the longest MV pipeline is what you see at the top. Where `system.tables` records no dependency — a refreshable MV, a plain view, a Distributed table — the source edge is **inferred from the DDL** (`FROM` / `JOIN`, or the Distributed engine arguments) and drawn **dashed**, and the sidebar says so.
-- **The grey ribbon** under a node carries what you would otherwise open the DDL for: row count and size for a table; for a refreshable MV its schedule — `EVERY 2 MINUTE OFFSET 30 SECOND RANDOMIZE FOR 10 SECOND` — with the schedule underlined when there is **no** `RANDOMIZE FOR`, so thirty views that all fire at the same instant read as thirty underlines; for a dictionary its `LIFETIME`; for a table the number of data-skipping indices.
-- **Column names show their role**, not one red: primary key bold red, sorting-only red, partition key dotted-underlined amber, sampling key dashed teal, defaulted columns green — a column can carry several. The sidebar tags each column `PRIMARY KEY` / `ORDER BY` / `PARTITION BY` / `SAMPLE BY` and lists the skip indices with type, expression and granularity.
-- **Click a node** for its keys, partitioning, full column list, the tables it reads from and writes to, refresh schedule and status for a refreshable MV, dictionary lifetime, status and last error, and the `CREATE` statement — **pretty-printed by the server** (`formatQueryOrNull`, one clause per line, on servers that have it) and syntax-highlighted on the page, with credentials in engine arguments shown as `[HIDDEN]`.
-- **Search** matches table *and* column names and dims everything else; filter to one database; drag nodes, zoom, re-layout; keyboard users can Tab to a node and press Enter.
+## Dry-run
 
-Open it from the dashboard's **Schema Graph** tab — the page loads into the frame only when you click, so nobody pays for it otherwise — or open the file directly from the bundle folder. Why it is a separate file, how the two pages share a theme, and what the credential redaction covers is under [Dashboard → Schema graph](#schema-graph-1).
+<details>
+<summary>Show</summary>
 
-## Dry-run mode
-
-Security-conscious customers can pass `-dry-run` to see exactly which queries the tool would execute, against which tables, **without** any actual data collection:
-
-```bash
-./clickhouse-diagnostic -mode cloud -host my-service.region.aws.clickhouse.cloud \
-  -port 8443 -protocol https -user default \
-  -dry-run
-```
-
-What `-dry-run` does:
-
-- Lists every SELECT that would be sent (file-based, query-analysis bundle, and any alert rule without a `check:`; the shipped alert rules and the dashboard read the collected files and send none)
-- Tags each query with the `system.*` tables it touches
-- Adds a read-only `EXPLAIN ESTIMATE` block under each SELECT — reports the rows/marks/parts the query **would** scan but reads no data parts. See [the EXPLAIN ESTIMATE docs](https://clickhouse.com/docs/sql-reference/statements/explain#explain-estimate).
-- Renders empty estimates as `this table is empty` (the planner's confirmation that nothing matches the predicate)
-- Skips `-skip-config` and `-skip-archive` automatically (no side-effect files)
-
-What still reaches the server in dry-run:
-
-| Call | Why |
-|---|---|
-| `SELECT version()` | Picks the right query variant for the server version |
-| Pre-flight for `--query-id` / `--normalized-query-hash` | Derives the hash + event_time (or the slowest query_id) so the printed analysis SQL has real values, not unbound `{query_id}` markers |
-| `SELECT DISTINCT host, port FROM system.zookeeper_connection` (`-keeper-mntr`) | Lists the Keeper members so the dry run can say which it would contact; printed when it runs |
-| `EXPLAIN ESTIMATE <query>` per SELECT | Read-only metadata only |
-
-Combine with the query-analysis flags to dry-run the focused bundle too:
-
-```bash
-./clickhouse-diagnostic -mode cloud -host ... \
-  -dry-run \
-  -normalized-query-hash 15477159632099527852
-```
-
-Sample block of the output:
-
-```
-[28]
-    Tables: system.query_log
-    SQL:
-      SELECT ts, query_id, query_duration_ms, ...
-      FROM system.query_log
-      WHERE query_id = '30df7836-fe07-4f42-9d52-832a69abbb8b'
-        AND event_time >= '2026-05-28 09:06:21'
-        AND event_time <= '2026-06-04 09:06:21'
-    EXPLAIN ESTIMATE:
-      ┌─database─┬─table─────┬─parts─┬─rows─┬─marks─┐
-      │ system   │ query_log │     2 │   14 │     2 │
-      └──────────┴───────────┴───────┴──────┴───────┘
-```
-
-## Modes and Query Layout
-
-**SharedMergeTree auto-switch.** A `-mode onprem` run against a server with `cloud_mode = 1` (a self-hosted SharedMergeTree cluster) switches to the `queries.cloud/` set on its own — every per-replica system table (`query_log`, `part_log`, `errors`, `metric_log`, `text_log` …) fans out over the `default` cluster, while the shared tables (`parts`, `tables`, `columns`, `databases`, `replicas`, `replication_queue`, `mutations`, `detached_parts`) are read from one replica as in any cloud collection — while still collecting host facts, configuration and log files from the machine running the tool (this node's when you run it there — the `warnings:` header line says when `-host` pointed elsewhere), which cloud mode alone never does. The run says so, and `execution_log.txt` records `collection: onprem → cloud: SharedMergeTree detected`. It needs `REMOTE` and `CREATE TEMPORARY TABLE ON *.*`; without them the run stays on one node and records why. `-single-node` disables the switch. The header also records `node:` (`hostName()`, `FQDN()`) and `uptime:`, and the tool warns when repeated probes answer with different hostnames (a load balancer) or when `-host` is remote while local files are being collected — the two ways a bundle ends up describing the wrong machine.
-
-`-mode` selects which top-level query directory the tool reads from:
-
-| Mode | Query directory | Notes |
-|---|---|---|
-| `cloud` | `queries.cloud/` | Uses `clusterAllReplicas(...)` to fan out across replicas |
-| `onprem` | `queries.onprem/` | Single-node `system.*` references |
-| `gov` | `queries.gov/` | On-prem shape with PII columns hashed; omits `crash_log`/`stack_trace` (may contain sensitive symbols) |
-
-> ⚠️ **The `queries.<mode>/` directory MUST exist in the current working directory when you run the binary.** The tool resolves the queries folder as a path *relative to your CWD* (e.g. `./queries.onprem`), not relative to the binary itself. So if you ship the binary to another host, you must ship the matching `queries.<mode>/` folder alongside it and `cd` into the directory containing both before running.
->
-> Recommended bundling pattern:
-> ```bash
-> # Build + bundle locally
-> make release
-> tar czf clickhouse-diagnostic.tgz \
->   bin/clickhouse-diagnostic-linux-amd64 \
->   queries.cloud queries.onprem queries.gov
->
-> # On the target host
-> scp clickhouse-diagnostic.tgz host:/tmp/
-> ssh host
-> mkdir -p /opt/ch-diag && cd /opt/ch-diag && tar xzf /tmp/clickhouse-diagnostic.tgz
-> ./bin/clickhouse-diagnostic-linux-amd64 -mode onprem ...   # CWD now has the queries.* folders
-> ```
->
-> Running from `/`, `~`, or any other directory without `queries.<mode>/` as a sibling will fail with `Error: Queries folder './queries.<mode>' does not exist`.
-
-Alert queries use the same mode — see [Alerts](#alerts).
-
-> **Self-hosted SharedMergeTree clusters** (`cloud_mode = 1` in `system.settings`, table engines `Shared*MergeTree`, an `s3_with_keeper` disk): every replica keeps its own `system.*` tables, so `-mode onprem` describes **one node of N** — its parts, errors, part_log, query_log and text_log only. The tool prints a warning when it detects `cloud_mode = 1`. Run `-mode cloud` for the cluster-wide view (fans out over the `default` cluster with `clusterAllReplicas`; needs `GRANT REMOTE` and `CREATE TEMPORARY TABLE`) and keep an `onprem` run from one node for host facts, configuration and log files.
-
-### Gov mode and hashed names
-
-In `gov` mode, every database and table name written to the support-bound output is replaced with `hex(SHA256(name + salt))`. The salt is supplied by **you** at runtime (via `-salt` or the interactive prompt) — the tool does **not** ship with a default. This is what makes the hashes meaningful: without a per-customer salt, anyone with the source could pre-compute hashes for common names like `users`, `events`, or `orders` and reverse the obfuscation.
-
-**The settings collectors hash nothing** — neither setting names nor values. A setting value is a server tuning knob rather than a customer identifier, and the mapping CSV below is built from `system.tables`, so a hashed setting value would be unreversible noise rather than protection. `system.settings` therefore emits every value as the server reports it. In `system.server_settings`, the few values that name customer infrastructure — anything path- or URL-shaped, plus `default_database`, `default_replica_name`, `interserver_http_host`, `default_profile`, `merge_workload` and `mutation_workload` — are **removed** instead of salted, replaced by `REMOVED` (the same sentinel the config sanitiser uses). The setting name, its ClickHouse default and `changed` all survive, so the archive still shows *that* a path was customised without showing what it is. On a 26.7 server that is 21 of 439 rows removed and 418 readable.
-
-**Salt requirements:**
-
-- 8–64 ASCII alphanumeric characters (`A–Z`, `a–z`, `0–9`)
-- No spaces, no punctuation, no quotes — keeps the value safe inside SQL string literals
-- Pick something **not guessable from public information** (avoid your company name, deployment ID, or anything in your support tickets)
-- **Re-use the same salt across runs** if you want hashes to be comparable over time
-
-**What the tool produces in gov mode:**
-
-```
-clickhouse_results/
-├── clickhouse_diagnostic_YYYYMMDD_HHMMSS/                   # → goes into the archive
-│   └── *.jsonl                                              # hashed names inside
-├── clickhouse_diagnostic_YYYYMMDD_HHMMSS.tar.gz            # → the archive, send this
-└── clickhouse_diagnostic_YYYYMMDD_HHMMSS_gov_name_mapping.csv   # → stays LOCAL
-```
-
-The mapping CSV (real_name → hashed_name) is written **outside** the timestamped backup folder, so it is **never** picked up by `tar` when the archive is built. Keep it on your machine for your own correlation work — and confirm before sending the archive that the salt and the CSV did not accidentally land inside it.
-
-**What to share with support:**
-
-| File | Share with support? |
-|---|---|
-| `clickhouse_diagnostic_*.tar.gz` | Yes |
-| `clickhouse_diagnostic_*_gov_name_mapping.csv` | **No — keep local** |
-| The salt value itself | **No — keep local** |
-
-If you lose the salt, the hashes in past archives are no longer reversible (you can still run a new diagnostic with a fresh salt — but old and new hashes won't compare).
-
-### What gov mode does not produce
-
-Several outputs are deliberately withheld in gov mode, because each is part of the support-bound archive and none can be hashed meaningfully:
-
-| Output | Why |
-|---|---|
-| `dashboard.html` | Its panels are built in Go and select raw identifiers — database/table names for up to 2000 tables, disk paths, users — plus server-generated text (`last_exception`, `last_error_message`). Hashing every panel is the follow-up that would restore it. |
-| Query analysis (`--query-id` / `--normalized-query-hash`) | The bundle embeds raw query text, exception messages and full DDL. Freeform SQL text can't be hashed without destroying its diagnostic value, so the flags are rejected outright. |
-| **Query text in `system.query_log_details_7_days`** | The onprem/cloud collectors archive the first 500 characters of one sampled query per `normalized_query_hash`, so a hash in that file can still be mapped back to SQL once the server is gone. Query text embeds customer literals, so the gov variant omits the column entirely — it is the only mode where that mapping is unavailable. |
-| **Configuration files** (`configuration/`) | The XML embeds raw hostnames — `<macros>` shard/replica names, `<remote_servers>`, `<zookeeper>` hosts. Sanitisation strips credentials, not identifiers, and an XML tree can't be hashed while remaining mergeable. |
-| **Host facts** (`host_info.json`) | Hostname, mount paths and process command lines are exactly the identifiers gov hashing protects — and a command line can't be hashed while staying useful. |
-| **Server log files** (`logs/`) | Log lines carry raw queries, table names and paths as free text. Hashing a log destroys the reason to collect it. |
-| **`--collect-text-log`** | Same reasoning as the log files: `system.text_log` messages embed raw SQL and identifiers. The flag is rejected in gov mode. |
-
-Because the dashboard is the only other consumer of alert results, gov runs instead write **[`alerts_summary.json`](#alerts_summaryjson)** into the archive — so you still get *"`too_many_parts` fired, 12 instances"* without the table names.
-
-Everything else — the per-mode result files — is hashed as described above.
-
-### Version-specific queries
-
-Inside each mode directory, you can override a query for a specific ClickHouse version by placing it in a subdirectory named `MAJOR.MINOR.PATCH.BUILD`. The tool picks the highest version ≤ the connected server.
-
-```
-queries.onprem/
-├── system.detached_parts.sql     # default (works from 22.8)
-├── 22.11.1.0/
-│   └── system.detached_parts.sql # adds bytes_on_disk/path (servers ≥ 22.11)
-└── 23.11.1.0/
-    └── system.detached_parts.sql # also adds modification_time (servers ≥ 23.11)
-```
-
-Directories that don't parse as a version are skipped.
-
-The same convention applies to `queries.query_analysis/` (`.sql` files) and `alerts/` (`.yaml` rules): place a file with the same name in a `MAJOR.MINOR.PATCH.BUILD` subdirectory to override the root version for servers at or above that version.
-
-```
-alerts/
-├── detached_parts_exist.yaml     # default rule (works from 22.8)
-└── 22.11.1.0/
-    └── detached_parts_exist.yaml # adds bytes_on_disk (column added in 22.11)
-```
-
-A file that exists **only** in a version subdirectory (no root counterpart) is simply skipped on older servers — use this for queries against system tables that don't exist yet (e.g. `system.asynchronous_insert_log`, added in 22.10).
-
-> **Overrides match by base filename, case-sensitively.** A file in a version subdirectory overrides a root file only when their names are identical, including case. If you rename the file in the version directory — or just change its case (`Foo.yaml` vs `foo.yaml`) — it is treated as a *separate* query/rule (both run), not an override. Keep the filename byte-for-byte identical to the root when you intend to override it.
-
-### Supported ClickHouse versions
-
-The tool targets **ClickHouse 22.8 and newer** for on-prem servers. Root-level query and alert files stick to columns and syntax available in 22.8; anything newer lives behind a version subdirectory. Current gates (verified against the ClickHouse changelogs):
-
-| Feature | Added in | Gated at |
-|---|---|---|
-| `ARRAY JOIN` over a `Map` (`ProfileEvents`) | after 22.8 | roots use `mapKeys()`/`mapValues()` (all versions) |
-| `system.asynchronous_insert_log` table | 22.10 | `queries.{onprem,gov}/22.10.1.0/` |
-| `system.disks.unreserved_space` | 22.10 | `queries.{onprem,gov}/22.10.1.0/` |
-| `system.detached_parts.bytes_on_disk`, `path` | 22.11 | `queries.{onprem,gov}/22.11.1.0/`, `alerts/22.11.1.0/` (gov gates `bytes_on_disk` only — it never collects `path`/`disk`) |
-| `GROUP BY ALL` syntax | 22.12 | root files use explicit key lists |
-| `dateDiff('millisecond', …)` sub-second unit | after 22.12 | async latency uses float subtraction of `*_microseconds` |
-| `system.text_log.message_format_string` | 23.1 | `queries.query_analysis/23.1.1.0/` |
-| `system.server_settings` table | 23.3 | `queries.{onprem,gov}/23.3.1.0/` (no root file — skipped below 23.3; cloud carries it at root) |
-| `system.asynchronous_insert_log.rows` | 23.4 | `queries.{onprem,gov}/23.4.1.0/` (22.10–23.3 report `bytes`) |
-| `system.settings.default` | 23.4 | `queries.{onprem,gov}/23.4.1.0/` (`default` is the only column their roots omit; the cloud root has it) |
-| `system.clusters` replicated-db columns (`database_shard_name`, `database_replica_name`, `name`; `is_active` deliberately not selected) | 23.5 | `queries.*/23.5.1.0/` |
-| `system.query_log.query_cache_usage` | 23.8 | `queries.query_analysis/23.8.1.0/` |
-| `system.zookeeper_connection` table | 23.8 | `queries.*/23.8.1.0/` (no root file — skipped below 23.8 in every mode) |
-| `system.zookeeper_connection.xid`, `last_zxid_seen`, `availability_zone` | 24.3 | `queries.*/24.3.1.0/`; `alerts/24.3.1.0/keeper_xid_renewal_due.yaml` (no root rule — not applicable below 24.3) |
-| `system.query_log.peak_threads_usage` | 23.9 | `queries.query_analysis/23.9.1.0/` |
-| `hostname` column in system log tables | 23.11 | `queries.*/23.11.1.0/` (roots use `hostName()`) |
-| `system.blob_storage_log` table (needs `<blob_storage_log>` config) | 23.11 | `queries.*/23.11.1.0/` (no root file — skipped below 23.11 in every mode) |
-| `system.tables.total_bytes_uncompressed` | 23.12 | `queries.query_analysis/23.12.1.0/` |
-| `system.view_refreshes` table | 23.12 | `queries.*/23.12.1.0/` (no root file — skipped below 23.12 in every mode) |
-| `system.mutations.is_killed` | 24.1 | `alerts/24.1.1.0/` (root omits the filter) |
-| `background_*_pool_size` moved from `system.settings` to `system.server_settings` | 23.3 | `alerts/23.3.1.0/` (`fetch_pool_saturated`, `schedule_pool_saturated`; `system.settings` still lists the names on newer servers with the old session defaults, so the root rule would compare against the wrong size there) |
-| `system.tables.metadata_version` | 24.2 | `queries.*/24.2.1.0/` |
-| `system.error_log` table | 24.8 | `queries.*/24.8.1.0/` (no root file — skipped below 24.8 in every mode) |
-| `system.database_replicas` table | 25.9 | `queries.*/25.9.1.0/` (no root file — skipped below 25.9 in every mode) |
-| `system.aggregated_zookeeper_log` with `component` (26.2) and `is_subrequest` (26.3) | 26.3 | `queries.*/26.3.1.0/` (no root file — skipped below 26.3 in every mode: the table exists from 25.9, but before 26.3 sub-requests share buckets with standalone requests and carry the whole Multi's latency) |
-| `system.zookeeper_log.duration_microseconds` (replaces `duration_ms`) | 24.3 | `queries.*/24.3.1.0/` (roots use `duration_ms`; output stays in ms on every rung) |
-| `system.tables.parameterized_view_parameters` | 25.4 | `queries.{onprem,cloud}/25.4.1.0/` (gov: not collected) |
-| `system.tables.target_database`, `target_table` (an MV's write target, including the implicit `.inner_id.*` table) | 26.6 | `queries.*/26.6.1.0/` (gov hashes both) |
-
-The dashboard (`internal/dashboard/generator.go`) builds its SQL dynamically, so instead of version directories it probes the live schema at runtime (`hasColumn`/`hasTable`) and adapts each panel — covering the same columns (`error_count`, `is_killed`, `bytes_on_disk`, the async table/`rows`, `crash_log`) plus optional tables that may be disabled by config.
-
-`queries.cloud/` targets managed ClickHouse Cloud, which always runs recent versions — it carries the recent rungs (`23.5.1.0/`, `23.11.1.0/`, `24.2.1.0/`, `25.4.1.0/`) but none of the sub-23.5 gating, because Cloud never runs that old. The **22.8 floor applies to `queries.onprem/` and `queries.gov/`** (both are self-hosted — gov is on-prem with hashed PII, and neither uses `clusterAllReplicas`) as well as the shared `queries.query_analysis/` + `alerts/` directories. Note gov's `system.tables` ladder deliberately tops out at `24.2.1.0/` — it does not collect `parameterized_view_parameters` (identifier-like values gov would otherwise have to hash).
-
-Overrides are matched **only** at the top level of each directory; a version subdirectory nested deeper (e.g. `alerts/foo/25.4.1.0/`) is not treated as a nested override of `alerts/foo/`.
-
-## Host facts and server logs
-
-Beyond what ClickHouse reports about itself, the tool collects the surrounding context that usually explains it: the host it runs on, and the log files on that host's disk.
-
-### When these run
-
-Both collectors read the **machine executing the tool**, so `-host-info` and `-logs` take `auto` (the default), `on` or `off` rather than a plain skip flag:
-
-| Mode | `auto` resolves to | Why |
-|---|---|---|
-| `onprem` | **on** | The tool runs on the ClickHouse server, so `/proc` and `/var/log/clickhouse-server` describe that server. |
-| `cloud` | **off** | ClickHouse Cloud is reached over the network. Local host facts and log files would describe your laptop or bastion — confidently wrong data in a support bundle is worse than none. Pass `-host-info=on` / `-logs=on` if you are pointing cloud mode at a self-managed node. |
-| `gov` | **off**, unconditionally | Hostnames, mount paths, process command lines and log bodies are exactly what gov hashing protects, and none of them can be hashed while staying useful. `-host-info=on` is **rejected**, not ignored. |
-
-Both are also skipped under `--dry-run`, which promises to write nothing. The mode matrix is pinned by tests in `cmd/local_collector_test.go`.
-
-### `keeper/` — what each Keeper member says about itself
-
-`-keeper-mntr auto|on|off` (default `auto`) sends seven read-only four-letter commands to the Keeper members and writes one `keeper/<host>_<port>.txt` per member. The member list is the union of two sources: `system.zookeeper_connection`, which names the member each configured connection is **on right now** (one row per connection — the default `<zookeeper>` block and every auxiliary one — not one per ensemble member), and every `<zookeeper><node>` in the server configuration (`-config-dir` and the adjacent `config.xml`) when the tool runs on the server. The second is what reaches the followers this server is *not* connected to — the member a Keeper incident is usually about. A run without access to the configuration (remote `-host`, cloud, gov without `-config-dir`) probes the connected member only, and says so in the execution log.
-
-| Command | What it answers |
-|---|---|
-| `ruok` | liveness (`imok`) |
-| `srvr` | Keeper version, latency min/avg/max, received/sent, connections, **outstanding requests**, zxid, **mode** (leader / follower / standalone), node count |
-| `mntr` | the same as `zk_*` counters, plus followers and synced followers (on the leader), znode / watch / ephemeral counts, memory, latest snapshot size |
-| `isro` | `ro` for a read-only member or observer, `rw` otherwise |
-| `lgif` | the member's Raft log: first / last index, committed vs leader-committed, last snapshot index (absent before 23.x) |
-| `conf` | the coordination settings in force — `snapshot_distance`, `reserved_log_items`, `snapshot_transfer_chunk_size`, `write_snapshot_version` … (in gov only numbers, booleans and plain words survive) |
-| `dirs` | bytes on disk in the snapshot and log directories |
-
-`ruok`, `isro` and `lgif` are sent first because they answer even on a member that is **not serving** (no quorum, still loading its snapshot); the others then reply `This instance is not currently serving requests`, which is recorded as the member's status. Every command is read-only, goes nowhere near Raft and does not grow with the data size: ~0.3 ms each on a healthy member. The members are asked **in parallel** and a member gets nothing more after its first network failure, so one or several hung members cost one read timeout (10 s) in total, not one per command. Commands with side effects (`csnp`, `rqld`, `ydld`, `rcvr`, `srst`, `crst`, `rclc`, `clrs`) are never sent. Each file names its ensemble (`# ensemble: default`, or the auxiliary ZooKeeper's name — hashed in gov), so members of different ensembles are never compared; an auxiliary member's file is `<ensemble>__<host>_<port>.txt`, so a default and an auxiliary connection to one host:port never overwrite each other.
-
-These are the server-side facts a Keeper finding is settled with: `metric_log` says how long *this server* waited for Keeper, `zookeeper_connection` says which member it talks to, and only Keeper itself says whether that member is the leader, how many requests it has queued and what it runs. Each command opens its own TCP connection (3 s dial, 10 s read) because Keeper closes after one reply; a member that is down or refuses four-letter words is recorded as such in its file and in `execution_log.txt`, never a failed run. `stat` and `cons` are **never sent**: they list client addresses.
-
-| Mode | `auto` resolves to | Why |
-|---|---|---|
-| `onprem` | **on** | The tool runs beside the cluster, so the Keeper ports are reachable. |
-| `gov` | **on**, host hashed | The counters are numbers; the only identifier is the member's host, which is written as `hex(SHA256(host ‖ salt))` in the file name and header — the same form `system.zookeeper_connection` carries in a gov bundle, so the two join. Any reply line carrying an `ip:port` is dropped as a safeguard. |
-| `cloud` | **off** | A managed service's Keeper is not reachable from outside. `-keeper-mntr=on` is honoured with a warning for a self-managed cluster collected in cloud mode. |
-
-Under `--dry-run` the members are listed and nothing is contacted; the one-row-per-connection `SELECT` on `system.zookeeper_connection` that builds the list is a metadata pre-flight read, executed for real and printed like the version probe. Per-member statuses in `execution_log.txt`: `ok` (all three commands answered), `partial` (some did — usually a word missing from `four_letter_word_white_list`), `refused`, `timeout` (including a reply cut short by the 10 s deadline, kept in the file and marked truncated), `failed` (every command failed for another reason, or the file could not be written). Servers before 23.8 have no `system.zookeeper_connection`, so the step is skipped and says so. Keeper must allow the three words in `four_letter_word_white_list` (the default `*` does); an empty reply is annotated accordingly.
-
-### `host_info.json` — OS, kernel and hardware
-
-Read from `/proc`, `/sys` and `/etc` with no external dependencies, so it only yields data when the tool runs **on the ClickHouse host** — which is why `auto` restricts it to onprem. Forced on elsewhere, each section is marked unavailable with a note rather than silently empty.
-
-| Section | Contents |
-|---|---|
-| `os` | hostname, **distro + version** (`/etc/os-release`), kernel version and full banner, arch, uptime |
-| `cpu` | logical CPUs, model, vendor, load average, and the vector flags ClickHouse dispatches on (`avx2`, `avx512f`, … / `asimd`, `sve` on ARM) |
-| `memory` | total / free / available / buffers / cached / swap, in bytes |
-| `disks` | every real mount: device, mount point, fs type, total, free, used % (pseudo- and file-bind mounts filtered out) |
-| `top_processes_by_rss` | top 25 by RSS — pid, ppid, state, threads, RSS, command |
-| `clickhouse_relevant_tunables` | **transparent hugepages** + defrag, `vm.swappiness`, `vm.overcommit_memory`, `vm.max_map_count`, `fs.nr_open`, `fs.file-max`, **cgroup memory/CPU limits**, and the running server's own `LimitNOFILE` |
-
-That last row is the point of the collector: THP set to `always`, a cgroup memory cap far below `MemTotal`, or a low `LimitNOFILE` explain a large share of ClickHouse incidents and are invisible from inside the database.
-
-### `logs/` — server log files
-
-```bash
-./clickhouse-diagnostic -mode onprem -host ch-01           # discovers the log directory
-./clickhouse-diagnostic -mode onprem -logs-dir /data/ch/logs
-```
-
-The directory is resolved in this order:
-
-1. `-logs-dir`, used verbatim (a bad path is reported, never silently replaced)
-2. **`<log>` / `<errorlog>` paths read from the server configuration** — operators relocate logs more often than they change anything else, and this is what stops a bundle from quietly containing none
-3. `/var/log/clickhouse-server`
-
-Both 2 and 3 are collected when they differ. `*.log` is copied by default; `-logs-include-archives` adds rotated `*.gz`/`*.zst`. Files above `-logs-max-mb` (default 50) are **tail**-truncated — the recent end is kept, with a header recording what was dropped so the first surviving line isn't mistaken for the start of the log.
-
-> At `<level>debug</level>` a busy server writes 50 MB in **seconds**, so the tail of `clickhouse-server.log` rarely reaches back to an incident that ended hours earlier (the `.err.log` tail usually covers a few hours). For the incident timeline rely on `system.text_log_histogram_1_day` and the hourly aggregates, and raise `-logs-max-mb` (or ship the rotated file with `-logs-include-archives`) only when a specific log passage is needed.
-
-### `--collect-text-log` — a bounded slice of `system.text_log`
-
-**Off by default and requires an explicit window**, because `text_log` is the highest-volume table ClickHouse writes: an unbounded dump would be enormous and would itself load the server.
-
-```bash
-./clickhouse-diagnostic -mode onprem -host ch-01 \
-  -collect-text-log --from 2026-08-20T14:00:00Z --to 2026-08-20T15:00:00Z \
-  -text-log-level Warning
-```
-
-| Flag | Meaning |
-|---|---|
-| `-collect-text-log` | Enable it. **Requires `--from` and `--to`** — the run fails fast otherwise. |
-| `-text-log-level` | Minimum severity (`Fatal`…`Trace`). Omit for all levels. |
-| `-text-log-limit` | Row cap (default 500 000). |
-
-Written as `text_log_<timestamp>.<ext>`, in the [configured output format](#output-format). In cloud mode it fans out across replicas; `message_format_string` is only selected on 23.1+. If `system.text_log` is disabled (the ClickHouse default) the tool says so and explains how to enable it, rather than reporting a bare error.
+`-dry-run` prints every `SELECT` the tool would send, the system tables each one touches and a read-only `EXPLAIN ESTIMATE` (the rows and parts it would scan), then exits without collecting or writing anything. Details: [docs/running.md](docs/running.md#dry-run-mode).
+</details>
 
 ## Alerts
 
-Alert rules are plain YAML files in `alerts/` (override with `-alerts-dir`). Each rule names a **check** (`check: go:<name>`, a Go function in `internal/alert/checks_*.go`) that is evaluated over the files the collectors already wrote — the rules send **no query of their own**, so a run on a struggling server costs the collection and nothing more. If the check returns any rows, the alert fires and the rows are surfaced in the dashboard. The rule's `query:` is the same test written as a read-only SELECT: it is what the dashboard hands the customer to run live, and the check mirrors it (hourly log buckets instead of raw rows — a window's oldest hour may reach up to an hour further back). All alert SQL is validated: only `SELECT` / `WITH` is accepted, anything else (`INSERT`, `ALTER`, `DROP`, …) breaks the rule.
+<details>
+<summary>Show</summary>
 
-A rule without `check:` still runs its `query:` against the server, as before — the way to try a new rule before writing its check. So do all rules when `-output-format native` or `tsv` is used: the checks read the JSONEachRow files.
+19 read-only rules in `alerts/` give the headline before anyone reads a file — too many parts, replicas read-only, Keeper unavailable or flapping, saturated background pools, failing merges, low disk, crashes, long-running mutations, exception spikes and more. Each rule is evaluated over the collected files; its SQL is shown in the dashboard for the customer to run on their own cluster. A rule whose data was not collected says *not applicable*, never clean.
 
-### Rule outcomes
-
-Every run reports four distinct outcomes, because each means something different to whoever reads the archive:
-
-| Outcome | Meaning |
-|---|---|
-| **fired** | The rule ran and matched rows — a real finding. |
-| **clean** | The rule ran and matched nothing. |
-| **errored** | The rule could not run (bad SQL, a column missing on this version, no `SELECT` grant). **Not a finding** — counted and displayed separately, and excluded from "checked". |
-| **not applicable** (skipped) | A file the check reads was not collected (skipped in an essential run, without a Keeper session, past the time budget, or failed — the collector and the reason are named), or the system table doesn't exist here — `crash_log` on a healthy self-managed instance, or a config-disabled `text_log`/`query_log` — or the rule declares `modes:` and this run is in another mode (a per-replica comparison that needs the cloud fan-out, a replication-queue rule on SharedMergeTree). Excluded from "checked" so it never reads as a check that passed; the reason is recorded per rule. |
-
-```
-Alert evaluation complete: 8 rule(s) checked, 1 fired, 2 errored, 1 not applicable
-```
-
-Only rules that actually produced an answer count as *checked*. The dashboard mirrors this: findings get a severity badge, errored rules get a muted **⚠ N Could not run** chip (never a red severity count), and skipped rules are listed as "not applicable" with their reason (table not present, or the rule's `modes:` exclude this run mode).
-
-A missing **column** is always an error, never "not applicable" — that's the signal that a rule needs [version-gating](#version-specific-queries).
-
-### `alerts_summary.json`
-
-The HTML dashboard is the only other place alert results are recorded, so whenever it **isn't** produced the archive would otherwise contain no trace that the rules ran at all. In that case the tool writes `alerts_summary.json` into the output directory instead. It appears when:
-
-- `-mode gov` (the dashboard is [withheld](#what-gov-mode-does-not-produce)),
-- `-skip-dashboard` was passed, or
-- dashboard generation failed.
-
-It records each rule's name, title, severity, file (including the version-override directory, e.g. `24.1.1.0/…`), outcome (`fired` / `clean` / `error` / `skipped`) and **instance count**, plus the run totals. **Matched rows are never included in any mode** — their columns are defined per-rule, so they routinely carry database and table names. The count is the substitute: *"`too_many_parts` fired, 12 instances"*.
-
-> **Cloud caveat.** In `cloud` mode per-replica tables are read through `clusterAllReplicas`, so an `UNKNOWN_TABLE` can mean *absent everywhere* or *present on only some replicas* — and `system.crash_log` exists only on the node that crashed. The tool therefore counts how many replicas actually have the table before deciding: zero means genuinely not applicable, anything else (or an unverifiable answer) surfaces the error rather than risk hiding a real crash.
-
-### YAML schema
-
-```yaml
-name: mutation_running_too_long      # unique snake_case id
-title: "Mutation running > 3h"       # human-readable title
-severity: warning                    # critical | warning | info  (default warning)
-description: |
-  Multi-line explanation of what this alert means and what to do about it.
-tags:
-  - mutations
-  - performance
-check: go:mutation_running_too_long # the Go check evaluated over the collected files
-source:                              # the collector files it reads (documentation; a test
-  - system.mutations                 # requires every one to be a shipped collector)
-  - system.version
-# modes: [cloud]                     # optional: run only in these modes (cloud | onprem | gov);
-                                     # elsewhere the rule is reported as not applicable, not errored —
-                                     # for queries that only make sense with a clusterAllReplicas
-                                     # fan-out, or with a replication queue SharedMergeTree lacks
-
-query: |
-  SELECT database, table, mutation_id,
-         dateDiff('hour', create_time, now()) AS hours_running,
-         parts_to_do
-  FROM {sys.mutations}
-  WHERE parts_to_do > 0
-    AND dateDiff('hour', create_time, now()) > 3
-  ORDER BY hours_running DESC
-
-message: "Mutation {mutation_id} on {database}.{table} running {hours_running}h"
-
-# investigate:                       # optional: follow-ups for the customer to run on their own
-#   - title: "Mutations still running, per table"     # cluster when the rule fires — the
-#     query: |                       # "which one?" a finding raises. Shown, never run by the tool;
-#       SELECT database, table, count() FROM {sys.mutations}   # read-only SELECT, {sys.*} expanded
-#       WHERE parts_to_do > 0 GROUP BY database, table          # like query.
-```
-
-In `dashboard.html`, every alert that fired, or whose check failed, carries a collapsed **queries to run on your cluster** line under its instances. Opening it shows the rule's `query` — `{sys.*}` already expanded for the bundle's mode, so it pastes into `clickhouse-client` on the same cluster — and the rule's `investigate:` follow-ups, each with a copy button. Rules that found nothing carry no SQL, and `alerts_summary.json` never does (it is counts only). On a cloud bundle the queries keep their `clusterAllReplicas(…)` form, which needs the same `REMOTE` grant the collection did.
-
-### `{sys.<table>}` placeholder
-
-Use `{sys.<table>}` in the query — the evaluator rewrites it based on the run mode:
-
-| Mode | `{sys.query_log}` expands to |
-|---|---|
-| `onprem`, `gov` | `system.query_log` |
-| `cloud` | `clusterAllReplicas(default, system.query_log)` |
-
-This is what lets the same alert work across single-node and Cloud deployments. Tables whose rows are shared across replicas (`parts`, `tables`, `mutations`, `replicas`, `replication_queue`, `detached_parts`, `columns`, `databases`) are **not** wrapped even in cloud mode — `clusterAllReplicas` would duplicate their rows (see `internal/query/template.go`).
-
-### Message templating
-
-In `message:`, `{column_name}` is replaced with the value from each result row. One formatted message is produced per row, so an alert that returns 5 rows produces 5 messages in the dashboard.
-
-### Adding a new alert
-
-1. Drop a new `.yaml` file in `alerts/` following the schema above.
-2. Reference system tables via `{sys.<table>}`, not hard-coded names.
-3. Keep the query strictly read-only — the security validator will block anything else.
-4. Run the tool with `-skip-archive -skip-config` for a fast feedback loop; without `check:` the query runs live.
-5. Write the check: a `func(*bundle.Bundle, mode string) ([]map[string]interface{}, error)` registered with `RegisterCheck` in `internal/alert/checks_*.go`, returning the columns `message:` uses. If a column it needs is not collected yet, add it to the collector. Add fixture tests (`internal/alert/checks_fixture_test.go`) for just past and just short of each threshold, then set `check:` and `source:`.
-
-### Bundled alert rules
-
-The repo ships with 18 alert rules in `alerts/` (plus version-gated overrides in `alerts/<version>/`, and one rule that exists only there — `keeper_xid_renewal_due`, 24.3+). They are intended as a starting point — adjust thresholds to match your workload.
-
-| Rule | Severity | Fires when |
-|---|---|---|
-| `crash_log_entries` | critical | `system.crash_log` is non-empty (server crashed at least once) |
-| `replica_readonly` | critical | A replicated table is in read-only mode (lost Keeper session, disk full, network partition) |
-| `replication_queue_errors` | critical | Replication queue entries have a non-empty `last_exception` |
-| `disk_space_low` | critical | A disk that **holds user data** has less than 15% free space — **on any replica** in cloud mode, with the reporting host named in the message. A disk is counted when some user table's storage policy names it (`system.storage_policies` × `system.tables.storage_policy`); one that none does is not data capacity — on a managed service it is the local filesystem cache, sized to be filled, which otherwise fired this rule on a healthy service at 14.7% free. The filter is evidence, not a mode check, so a self-managed cluster collected in cloud mode still raises a critical for a hot local data disk. No user table with a policy = every disk judged |
-| `keeper_health` | critical | The two-signal Keeper health test per hour over 7 days: more than 1000 `ZooKeeperHardwareExceptions` **and** `ZooKeeperTransactions` below 50 % of the 7-day median — Keeper effectively unavailable (low traffic alone never fires: an idle hour is not an outage); catches outages that never reached `query_log` |
-| `keeper_connection_blips` | warning | More than 1000 `ZooKeeperHardwareExceptions` in an hour while Keeper traffic stayed at or above 50 % of usual (a positive 7-day median) — a session lost and re-established |
-| `keeper_exception_spike` | warning | More than 20 KEEPER_EXCEPTION (code 999) errors in one hour of the last 24 hours (one instance per hour) |
-| `high_exception_rate` | warning | More than 50 query exceptions for a single exception code in one hour of the last 24 hours (one instance per hour and code, worst 24) |
-| `background_operation_failures` | warning | More than 50 failed merges / fetches / mutations with the same code in one hour of the last 24 (`part_log`) |
-| `merges_stalled` | warning | An hour in the last 24 with more than 100 `NewPart` events and zero completed merges (`part_log`) — Keeper down, pool paused or every merge failing |
-| `fetch_pool_saturated` | warning | Hourly average of `BackgroundFetchesPoolTask` at ≥ 90 % of `background_fetches_pool_size` in 3 of the last 24 hours, per replica — the fetch executor has no queue, so on SharedMergeTree this is parts-propagation lag |
-| `schedule_pool_saturated` | warning | Hourly average of `BackgroundSchedulePoolTask` at ≥ 95 % of `background_schedule_pool_size` in 3 of the last 24 hours, per replica — every table's periodic tasks run here; tens of thousands of replicated tables pin it first |
-| `parts_propagation_lag` | warning | *(cloud only — `modes: [cloud]`)* A replica is ≥ 32 blocks behind the newest replica on a partition, or has none of a partition written to in the last day, of a SharedMergeTree table — parts-propagation lag; one instance per replica with its worst partition, the full list in `system.parts_max_block_by_replica` |
-| `too_many_simultaneous_queries` | warning | More than 10 code-202 (`TOO_MANY_SIMULTANEOUS_QUERIES`) errors in the last hour (`max_concurrent_queries` hit) |
-| `too_many_parts` | warning | A partition has more than 300 active parts (inserts are delayed from `parts_to_delay_insert` = 1000 and rejected with code 252 `TOO_MANY_PARTS` at `parts_to_throw_insert` = 3000) |
-| `large_parts` | warning | A single active part is larger than 150 GB |
-| `mutation_running_too_long` | warning | A mutation has been running for more than 3 hours |
-| `detached_parts_exist` | info | Parts exist in the `detached/` folder (failed merges, manual detach, replication conflicts) |
-| `keeper_xid_renewal_due` | info | *(24.3+ only)* A Keeper session is within 24 h of the **32-bit** counter limit (2³¹) at the rate its host is measured to use, where that host has one live Keeper connection and at least 2 h of `metric_log` behind the estimate. Reported as headroom, not as a renewal that will happen: with `use_xid_64` enabled in `<zookeeper>` the counter is 64-bit and never wraps, and no system table exposes that setting — check `configuration/`. On a default 32-bit counter the renewal is a short burst of Keeper exceptions and a reconnect; investigate only if INSERTs failed in those minutes (`query_log`, or flushes in `asynchronous_insert_log`) |
-
-Every rule is a Go check over the collected files, with the same test as a `SELECT` in `query:`; rows returned become alert instances in the dashboard. In cloud mode the Keeper rules read the per-host `metric_log_by_host_3_days`, so their "usual" median spans 3 days there, not 7. Rules that read a log table look back **24 hours or 7 days, per hour**, not just the last hour — bundles are usually collected after recovery, and an hour-only rule is blind to the incident it exists to surface. Open the YAML files directly to see the exact thresholds and tweak them.
-
-## Query analysis mode
-
-When you already know **which** query is the problem — a specific `query_id` from a customer ticket or a `normalized_query_hash` from a slow-query rollup — the tool can collect a focused slice of `query_log`, `text_log`, and `processors_profile_log` so you can understand *why* it was slow without bringing back the whole system. The analysis runs **in addition to** the regular per-mode collection; it does not replace it.
-
-> **Not available in gov mode.** Query-analysis output embeds raw query text, exception messages, identifiers and full DDL — exactly the values gov-mode hashing exists to protect, and they can't be meaningfully hashed inside freeform text. `--query-id` / `--normalized-query-hash` are therefore rejected when `-mode gov` is set.
-
-### Invoking it
-
-| You have | Pass | What you get |
-|---|---|---|
-| A specific `query_id` (from a ticket) | `--query-id <uuid>` | Tool auto-derives the `normalized_query_hash` from `system.query_log`, centres the time window on the query's `event_time`, and runs both single-id and group queries |
-| A `normalized_query_hash` (from a dashboard) | `--normalized-query-hash <uint64>` | Tool auto-derives the **slowest** `query_id` for that hash within the window (so the single-id files — ProfileEvents, text_log, tables-referenced — are populated) and runs the full bundle |
-| Both | both flags | Skips both pre-flight derivations; otherwise identical to passing either alone |
-| A specific time window | `--from <RFC3339>` / `--to <RFC3339>` | Overrides the auto-derived window (RFC3339 or `YYYY-MM-DD` accepted) |
-
-Works in all three modes (`cloud`, `onprem`, `gov`) — table references adapt the same way as the alert evaluator (`clusterAllReplicas(...)` in cloud, plain `system.*` elsewhere).
-
-**Gov mode caveat**: the `query` and `tables` columns in `system.query_log` contain raw, *unhashed* SQL and table names. The standard gov-mode collection already exposes this; query-analysis does not change that surface. If your environment can't ship raw SQL out, skip the analysis flags in gov mode.
-
-### What it collects
-
-Twelve `.sql` files under `queries.query_analysis/`, each written to `<backup>/query_analysis/<name>_<ts>.<ext>`:
-
-**Single-query-id (need `--query-id` or one auto-derived from `--normalized-query-hash`)**
-
-| File | What it answers |
-|---|---|
-| `query_details.sql` | The full `query_log` row — duration, memory, read rows, query text, exception, profile events |
-| `profile_events.sql` | All `ProfileEvents` for this execution, sorted by value descending. *Most useful single artifact.* |
-| `text_log_parts.sql` | Just the "Selected X/Y parts by partition key, Z marks…" and "Reading approx. N rows with M streams" log lines — answers "did we full-scan?" |
-| `text_log_full.sql` | Every `text_log` row for the query (up to 5000) — fallback when the targeted slices don't show the issue |
-| `tables_for_query.sql` | Current DDL + size for the tables the query touched (joined from `query_log.tables`) |
-
-**Hash-group (need `--normalized-query-hash`, auto-derived from `--query-id`)**
-
-| File | What it answers |
-|---|---|
-| `fast_slow_query_ids.sql` | The slowest and fastest `query_id` for this hash in the window — defines the comparison pair |
-| `profile_events_compare.sql` | Side-by-side `ProfileEvents` for slow vs fast execution with `delta` and `percentage_diff` columns. *Most diagnostic query in the bundle.* |
-| `hash_by_host.sql` | Per-hostname execution count, avg / p95 / max duration, memory, errors — surfaces "one node is slow" patterns |
-| `hash_summary.sql` | Per-minute execution count (executions / succeeded / failed). Drives the "Executions per minute" stacked bar. |
-| `failed_over_time.sql` | Failed-execution count per minute, split by exception code — feeds the "Failed queries per minute" stacked bar |
-| `failed_queries.sql` | Per-table × per-error breakdown of failures (tables touched, error type, user, count, first/last seen, sample exception) |
-| `executions_timeline.sql` | One row per individual execution of the hash (`LIMIT 10000`, most recent first), including `ProfileEvents['UserTimeMicroseconds']`. Drives all five per-execution scatter charts (duration / memory / CPU / read rows / read bytes). |
-
-### Dashboard integration
-
-When `--query-id` or `--normalized-query-hash` is set and `--skip-dashboard` is not, the generated `dashboard.html` includes a new **🔍 Query Analysis** section near the top of the nav.
-
-**Focus header**: which `query_id` (user-supplied OR auto-derived slowest), which hash, time window, plus the focus execution's duration / memory / read-rows, plus a one-line comparison of the slow vs fast `query_id` durations (e.g. "slowest 2400 ms · fastest 50 ms → 48× slower").
-
-**Query text card** (cloud / onprem only): the exact SQL of the focus execution, monospaced and scrollable. Hidden — and also stripped from the embedded JSON — in `gov` mode, because the query text contains the table names gov mode is otherwise hashing.
-
-**Per-execution scatters** — five charts, one dot per individual query (up to 10 000 rows from `executions_timeline.sql`). Green dot = success, red cross = failure. Hover shows `query_id`, hostname, exception code, and the metric value in human units:
-
-| Chart | Y axis | Notes |
-|---|---|---|
-| Per-execution duration | sec or min (adaptive at 200 s) | the "why was THIS execution slow" view |
-| Per-execution memory usage | MiB / GiB / TiB (adaptive) | |
-| Per-execution user CPU | sec | from `ProfileEvents['UserTimeMicroseconds']` |
-| Per-execution read rows | rows | |
-| Per-execution read bytes | MiB / GiB / TiB (adaptive) | |
-
-**Count bars** — minute-bucketed (the one place per-execution doesn't apply, since the metric *is* "1"):
-
-| Chart | X | Y |
-|---|---|---|
-| Executions per minute | event minute | count, stacked succeeded / failed |
-| Failed queries per minute | event minute | count, stacked by exception code (`MEMORY_LIMIT_EXCEEDED (241)`, `TIMEOUT_EXCEEDED (159)`, …) |
-
-**Single-execution row**:
-
-- Top 30 `ProfileEvents` for the focus execution
-- Fast vs slow `ProfileEvents` (top 30 by `|delta|`)
-
-**Detail tables**:
-
-- Per-host distribution (executions / durations / memory / errors per hostname)
-- Failed queries breakdown (per table × error type × user)
-- Tables referenced by the focus query (current DDL + size)
-- "Selected X parts, Y marks" log lines for the slowest execution
-- Full `text_log` for the slowest execution (scrollable)
-
-The section is hidden when neither analysis flag is set.
-
-### Example
-
-```bash
-# A customer ticket has a query_id that timed out. Look at it and how it
-# compares to other recent runs of the same statement shape.
-./clickhouse-diagnostic --mode cloud \
-  --host my-cluster.clickhouse.cloud --port 8443 --protocol https --user default \
-  --query-id 1bc3abaf-968f-4d4f-be3d-f77251b1ff0b \
-  --skip-config -skip-archive
-# → Pre-flight: query_id ... → normalized_query_hash 7769688026807387533 (event_time ...)
-# → Query analysis: running 12 file(s) (window <event-time-centred 48h>)
-# → 12 written, 0 skipped
-# → dashboard.html now has a "Query Analysis" section
-```
-
-```bash
-# A dashboard shows a particular hash regressing this week. Run the
-# group-comparison only over the last 7 days; no individual query_id.
-./clickhouse-diagnostic --mode onprem --host prod-ch-01 \
-  --normalized-query-hash 7769688026807387533 \
-  --from 2026-05-23 --to 2026-05-30
-# → 12 written, 0 skipped — the tool auto-derives a representative
-#   query_id (the slowest execution in the window), so the single-id
-#   files run too. If no execution exists in the window, the 5
-#   single-id files are skipped instead (7 written, 5 skipped).
-```
+Rules, outcomes and how to add one: [docs/alerts.md](docs/alerts.md).
+</details>
 
 ## Dashboard
 
-When `-skip-dashboard` is not set, the tool generates a single self-contained `dashboard.html` inside the per-run results folder. The dashboard embeds all query results inline as JSON and loads only Chart.js from a CDN, so it can be opened from disk (`file://`) on any machine with internet access.
+<details>
+<summary>Show</summary>
 
-Every panel is built from the files the collectors already wrote (`internal/dashboard/fromfiles.go`): **no query is sent to the server after collection**, so the dashboard costs a struggling server nothing and shows exactly the window that was collected — `-from`/`-to` and an essential run's 1-day cap included. A panel whose source collector was skipped or failed is listed in the banner with the collector's name; one whose table this server does not have is hidden, as before. With `-output-format native` or `tsv` the panels query the server instead, as they did before. Differences from the live panels: the Part Log panels cover the collector's **3 days**, not 7; a cloud bundle's Replicas Health shows the serving replica's 200 most-affected tables (the `system.replicas` collector keeps the worst 200 per replica); and the schema graph's `CREATE` statements are the server's original single-line text (only a live `formatQueryOrNull` can pretty-print them).
+`dashboard.html` is one self-contained page: alerts, storage, query activity, replication, Keeper health, background pools, disks, logs, host facts and (when requested) query analysis. It is built from the bundle's files, says which kind of collection it was and what is missing, and opens from disk. Gov mode does not produce it.
 
-### Sections
+Sections and previews: [docs/dashboard.md](docs/dashboard.md).
+</details>
 
-| # | Section | What it shows |
-|---|---|---|
-| 1 | 🚨 **Alert Summary** | Fired alerts grouped by severity (critical / warning / info), with the row-level message template expanded per instance. Long content collapses: a message is shown up to the ClickHouse stack trace (a real one runs 1700+ characters over 15 lines, of which ~200 are the error) and capped at 260 characters, with the complete text one click away under *full message and stack trace*; only the first 5 instances are listed, the rest behind *N more instances*; and a rule description shows its first paragraph, the rest under *more about this rule*. Nothing is dropped from the page — `DATA.alerts` still carries every row in full. Rules that **could not run** appear with a ⚠ marker and a separate "Could not run" chip — they are never counted in the severity badge. Rules that are **not applicable** here are listed in a muted footnote. A green "no issues" banner appears when nothing fired. |
-| 2 | 📈 **Overview** | Top-level counters: server version, uptime, total databases, total tables, active parts, total size |
-| 3 | 📦 **Storage** | Size by database (horizontal bar), table-engine distribution (doughnut), and a top-20-by-size table list |
-| 4 | 📋 **Tables Explorer** | Searchable / paginated table of every user table with engine, parts, rows, size, partition / sorting keys, and storage policy |
-| 5 | 📊 **Query Activity** (last 7 days) | Queries per hour by kind (stacked bar), count by kind, average duration & memory by kind |
-| 6 | 🔍 **Query Deep Dive** (last 7 days) | Top 20 slowest query patterns (by avg duration), top 20 heaviest reads (avg MB/query), per-user executions & errors, slow-query details and per-user summary tables |
-| 7 | ⚠️ **Exceptions** (last 7 days) | Top exception codes by count, plus an exception-details table with the most recent message per code |
-| 8 | 🔧 **Part Log Events** (last 3 days — the collector's window) | Part events per day by event type (stacked bar) and event-type distribution |
-| 9 | 📖 **Dictionaries** | Status distribution (LOADED / FAILED / LOADING), bytes allocated per dictionary, lifetime configuration (min/max), and a details table including `last_exception` (gov mode emits an empty value here) |
-| 10 | 💥 **Crash Log** | Recent entries from `system.crash_log` — section is hidden when the table is empty |
-| 11 | ⏳ **Pending Operations** | Pending mutations and detached-parts tables side by side |
-| 12 | 🔄 **Replication Queue** | Current entries in `system.replication_queue` with type, table, and last exception |
-| 13 | 🌐 **Cluster Nodes** (cloud mode only) | Hosts in the `default` cluster with shard / replica / active status |
-| 14 | 🔁 **Replicas Health** | Replication-delay distribution, queue-size by table, per-replica details (only shown when replicated tables exist) |
-| 14a | 🔑 **Keeper Health** (last 7 days) | Shown when `system.metric_log` has rows. Per hour: Keeper transactions (line) against hardware exceptions (bars coloured by verdict), mean request latency (`ZooKeeperWaitMicroseconds / ZooKeeperTransactions`), Keeper-dependent error codes (999 / 242 / 319 / 571 / 252 from `system.error_log` on 24.8+, else `query_log`), and the live `system.zookeeper_connection` rows. A verdict table applies the same rule as the `keeper_health` alert: > 1000 exceptions with traffic below 50 % of the 7-day median = unavailable; with traffic holding = blip. A **Keeper members** table, shown whenever `keeper/` is in the bundle (even without `metric_log`), lists what each member reports about itself — ensemble, state, role, version, Raft log first → last and committed vs leader-committed, latest snapshot, `snapshot_transfer_chunk_size`, snapshot format, bytes on disk — marked ⛔ / ⚠ by the same rules as the pre-pass's HC-3.18–3.20 (a test runs both readers on the same files and requires the same verdicts), with a banner when no member of an ensemble *in the bundle* is serving — which does not exclude voters outside it holding a quorum. Apache ZooKeeper's "This ZooKeeper instance is not currently serving requests" counts like Keeper's wording. |
-| 15 | 💾 **Disk Usage** | Free vs used space per disk plus a disk-details table |
-| 16 | 🛑 **Server Error Counters** | Top 20 cumulative error codes from `system.errors`, high-part-count partitions (>100 parts → potential code-252 `TOO_MANY_PARTS` risk), and TTL activity from `part_log` |
-| 17 | ⚡ **Async Insert Activity** (last 24 h) | Flush count per hour by status — section is hidden when `system.asynchronous_insert_log` is empty or in gov mode |
-| 18 | 🕸 **Schema Graph** | The table-dependency graph — tables, materialized views, dictionaries and Distributed tables with the edges data flows along — served from a second page, `schema_graph.html`, that the tab loads into a frame only when clicked. See *Schema graph* below. |
+## Query analysis
 
-In addition, when `--query-id` or `--normalized-query-hash` is set, a **🔍 Query Analysis** section appears near the top of the nav. See [Query analysis mode](#query-analysis-mode) for what it contains.
+<details>
+<summary>Show</summary>
 
-A sidebar on the left lists every section and highlights the one you are reading. The arrow at the left of the sticky header hides or shows it (the choice is remembered in the browser, like the theme); while hidden, the arrow shows the name of the current section. Sections that depend on cluster-specific or version-specific data (Crash Log, Cluster Nodes, Replicas Health, Async Inserts, Query Analysis) are hidden when there is nothing to show.
+`-query-id` or `-normalized-query-hash` adds 12 focused collectors for one query: its details and ProfileEvents, its log lines, the tables it read, how it compares with its fast and slow siblings, and its failures over time. Not available in gov mode.
 
-### Previewing the Keeper Health panel without an outage
+Details: [docs/query-analysis.md](docs/query-analysis.md).
+</details>
 
-`make dashboard-preview` renders three pages from anonymised fixtures. `bin/alerts_preview.html` exercises every Alert Summary collapse case — a message carrying a stack trace, more instances than the inline cap, a short message that needs no disclosure, a rule whose query failed, a rule that was not applicable. `bin/keeper_incident_preview.html` is shaped like a real Keeper outage on a shared-storage cluster: 48 hours of Keeper counters (a blip on day one, quorum lost for eight hours on day two), the `keeper_health`, `keeper_connection_blips`, `merges_stalled`, `background_operation_failures`, `high_exception_rate` and `too_many_parts` alerts as they would fire, the error codes per hour and a re-established Keeper session. Use it to see what the panel and the alerts look like before an incident, or to review a theme or wording change. `bin/schema_graph_preview.html` is a small fixture pipeline with every node kind — MergeTree source, MVs with explicit and implicit targets, a refreshable MV, a dictionary, a Distributed table, a view, and a table with credentials in its DDL — reachable from the preview dashboard's Schema tab.
+## Host facts, Keeper and server logs
 
-### What's interactive vs static
+<details>
+<summary>Show</summary>
 
-- **Interactive**: Tables Explorer (full text search, database/engine filters, pagination); all charts (hover tooltips, legend toggling); the Alert Summary disclosures (native `<details>`, so they work without JavaScript and survive `Ctrl-F` only when open).
-- **Static**: every other table — they render in a fixed order, but their underlying JSON is embedded in the page so you can `grep DATA dashboard.html | head` if you want raw values.
+On-prem runs on the server also collect `host_info.json` (OS, kernel, CPU, memory, disks, limits), the server log files (tail-capped), and what each Keeper member reports about itself through its read-only four-letter commands. Cloud runs skip them; gov keeps Keeper's numbers only.
 
+Details: [docs/bundle.md](docs/bundle.md#host-facts-and-server-logs).
+</details>
 
-### Schema graph
+## Configuration collection
 
-What the page looks like and what each element means is in [Schema graph](#schema-graph) above; this section is the design record.
+<details>
+<summary>Show</summary>
 
-`schema_graph.html` is written next to `dashboard.html` and is an adaptation of ClickHouse's own `/schema` page (`programs/server/schema.html`, Apache-2.0), with every live query replaced by JSON embedded at collection time: `system.tables`, `system.columns`, `system.dictionaries` and `system.view_refreshes`, system databases excluded. Nodes are coloured by engine (MergeTree, MV, refreshable MV, dictionary, Distributed, view); edges follow `dependencies_*` / `loading_dependencies_*` and — on 26.6+ — `target_table`, the only source that names the implicit `.inner_id.*` table of an MV declared with an `ENGINE`. Click a node for its keys, columns, neighbours and `CREATE` statement; search matches table and column names; drag, zoom and filter by database.
+On-prem, `/etc/clickhouse-server/` is copied with passwords, keys, tokens and certificates replaced — hostnames, IPs and topology stay, so review it before sharing. Cloud and gov runs do not collect it.
 
-Why a second file: the graph needs every column of every user table embedded, and that grows with the schema — ~750 KiB on a near-empty server, tens of MB on a service with thousands of tables. Inlining it would slow `dashboard.html` for every reader. Instead the dashboard's **Schema Graph** tab assigns the file as an `<iframe>` source on the first click (a navigation, which `file://` permits, where `fetch()` of a sibling file is blocked), so nobody pays for the graph until they ask for it. The two pages share the theme through `localStorage`; the frame cannot be scripted across the `file://` boundary and does not need to be. If the frame stays blank, the bundle folder was not copied whole.
+Details: [docs/bundle.md](docs/bundle.md#configuration-collection).
+</details>
 
-**Credentials.** `create_table_query`, `engine_full` and `system.dictionaries.source` carry engine arguments — an S3 secret key, a MySQL password, `kafka_sasl_password`. Servers from 23.x mask these as `'[HIDDEN]'` themselves; a 22.x server does not. Both the collected JSONL (`system.tables`, `system.dictionaries`) and the graph payload pass through a redactor (`internal/collection/sqlredact.go`) that masks the credential positions of every known engine and table function (S3-family, MySQL, PostgreSQL, MongoDB, `remote()`, Redis, Azure, …), plus the byte-shape heuristics the config sanitizer uses (URL basic-auth, AWS key ids, JWTs, `keyword = 'value'`), writing the server's own `[HIDDEN]` token so old and new bundles read alike. `execution_log.txt` notes how many values each collector replaced. This is field-level and JSONL-only: a `-output-format native|tsv` bundle carries the DDL unredacted and says so.
-## Configuration Collection
+## Output layout
 
-When `-skip-config` is not set, the tool reads files from `-config-dir` (default `/etc/clickhouse-server/config.d/`; in `cloud` mode collection is skipped unless `-config-dir` is given explicitly, and `gov` mode never collects) and writes sanitised copies into the run's `configuration/` directory (inside `clickhouse_diagnostic_<timestamp>/`), mirroring the source tree — `config.d/storage.xml` and `users.d/storage.xml` stay distinct, and the directory a file came from (which determines ClickHouse's merge order) is preserved.
+<details>
+<summary>Show</summary>
 
-Sanitisation runs in two layers — proper XML / YAML parsing first, then a heuristic byte-pattern pass over the result. If a file cannot be parsed, the tool **fails closed**: a warning is logged and the file is skipped rather than shipped un-sanitised.
+One folder per run in `clickhouse_results/`, plus its `.tar.gz`: a `<collector>_<ts>.jsonl` per collector, `execution_log.txt` (every query's outcome, time and size), `dashboard.html`, `schema_graph.html`, and the `configuration/`, `logs/`, `keeper/` and `host_info.json` extras.
 
-### What gets sanitised
+Details: [docs/bundle.md](docs/bundle.md#output-layout).
+</details>
 
-**Structural** (driven by tag / attribute / YAML-key name, case-insensitive):
+## Supported versions
 
-- Any name matching the exact list: `client_id`, `tenant_id`, `account_name`, `account_key`, `storage_account_url`, `role_arn`, `role_session_name`, `session_token`, `connection_string`
-- Any name **containing** one of: `password`, `passwd`, `secret`, `credential`, `token`, `private_key`, `api_key`, `access_key`, `service_account` — so future or custom tags like `<my_db_password>`, `<gcp_service_account_credentials>`, `<legacy_api_token>` are caught without code changes
-- XML attribute values with the same naming rules: `password="..."`, `aws_access_key_id="..."`, etc.
-- Multi-line values inside the above tags (the previous regex-only implementation missed these)
+<details>
+<summary>Show</summary>
 
-**Heuristic** (byte-shape signatures, applied to the whole file including comments and free text):
+ClickHouse **22.8 and newer** on-prem and in gov mode; every ClickHouse Cloud version. Newer columns and tables live in version subdirectories (`queries.<mode>/MAJOR.MINOR.PATCH.BUILD/`), picked for the connected server.
 
-- PEM-encapsulated private keys (`-----BEGIN ... PRIVATE KEY-----` blocks)
-- AWS access key IDs (`AKIA…`, `ASIA…`)
-- JWT tokens (`eyJ…` three-segment shape)
-- Bcrypt password hashes (`$2[abxy]$…`)
-- Long hex strings (40+ chars — SHA-1, SHA-256, longer)
-- Long base64 blobs (128+ chars — GCP service-account payloads etc.)
-- Credentials embedded in URLs (`proto://user:pw@host` — only the password is redacted, host stays)
-- `keyword: value` / `keyword = value` / `keyword "value"` disclosures in prose, where keyword contains `password`, `secret`, `token`, `api_key`, `access_key`, `private_key`, or `credential` — catches values pasted into XML comments or YAML `# notes`
+Details: [docs/versions.md](docs/versions.md).
+</details>
 
-### What does **not** get sanitised
+## Building from source
 
-- Hostnames, IPs, cluster topology
-- Database and table names
-- Performance / resource settings
-- Non-security configuration
-- Prose mentioning credential keywords without an actual value (e.g. `password requirements are documented elsewhere`)
+<details>
+<summary>Show</summary>
 
-The heuristic intentionally favours over-redaction over under-redaction — a stray flagged hash in the output is harmless, a leaked credential is not. Always review the contents of the run's `configuration/` directory before sharing the archive.
-
-## Output Layout
-
-A single run produces:
-
-```
-clickhouse_results/
-├── clickhouse_diagnostic_YYYYMMDD_HHMMSS/                   # → archived
-│   ├── system.parts_YYYYMMDD_HHMMSS.jsonl                   #   one file per query
-│   ├── system.mutations_YYYYMMDD_HHMMSS.jsonl
-│   ├── ...
-│   ├── configuration/                                       #   sanitised configs, tree preserved (unless -skip-config; never in gov)
-│   │   ├── config.xml
-│   │   ├── config.d/…
-│   │   └── users.d/…
-│   ├── query_analysis/                                      #   only with --query-id / --hash
-│   ├── keeper/<host>_<port>.txt                             #   four-letter replies per Keeper member (-keeper-mntr; gov hashes the host; not in cloud by default)
-│   ├── dashboard.html                                       #   unless -skip-dashboard or gov
-│   ├── execution_log.txt                                    #   every collector: outcome, wall time, size; alerts; phases
-│   └── alerts_summary.json                                  #   when alerts ran but dashboard.html is absent
-├── clickhouse_diagnostic_YYYYMMDD_HHMMSS.tar.gz             # → the archive, unless -skip-archive
-└── clickhouse_diagnostic_YYYYMMDD_HHMMSS_gov_name_mapping.csv   # → LOCAL only (gov mode)
+```bash
+make build      # → ./bin/clickhouse-diagnostic
+make test
+make release    # every platform, static binaries, into ./bin/
 ```
 
-- **Query results**: one file per query, in the format chosen by [`-output-format`](#output-format) (default `jsonl`)
-- **Dashboard**: standalone `dashboard.html`, loads Chart.js from CDN
-- **Execution log**: `execution_log.txt` — one line per collector query with its version directory, outcome (`ok` / `failed` / `empty`), wall time, result bytes and rows, plus every alert rule with its outcome and duration, one `keeper` entry per Keeper member probed (`ok` / `partial` / `refused` / `timeout`), and the wall time of each phase (collectors, keeper facts, host facts, logs, config, alerts, dashboard). The *Most expensive collectors* list is what to read before adapting a window in `queries.<mode>/`; the *Failed collectors* list is what separates "the table was empty" from "the query never ran". Contains file names, timings and ClickHouse error text only — no result data.
-- **Archive**: `tar.gz` containing the per-run results directory — `configuration/` now lives *inside* it, tree intact, so a bundle can only ever contain this run's configs. (Before v0.3.0 it was a flat, process-wide `./configuration` beside the run directory; anything parsing bundles by that path needs updating.)
-- **Gov-mode mapping CSV** (gov mode only): sits next to the backup folder, **not inside it** — never goes into the archive. See [Gov mode and hashed names](#gov-mode-and-hashed-names).
+Go 1.23+. Details: [docs/building.md](docs/building.md).
+</details>
 
 ## Troubleshooting
 
-**"Queries folder './queries.<mode>' does not exist"**
-The mode you passed has no matching directory at the repo root. Check `-mode` matches one of `cloud`, `onprem`, `gov`.
+<details>
+<summary>Show</summary>
 
-**"Config directory does not exist"**
-Use `-skip-config` or pass the correct path with `-config-dir`. Cloud users should always use `-skip-config`.
+The most common surprises: a bundle that looks complete but misses the customer's tables (a `SHOW` grant is missing), `Code: 497` in cloud mode (`REMOTE` / `CREATE TEMPORARY TABLE` missing), and a collector that failed — every failure is listed with the server's error in `execution_log.txt`.
 
-**"Connection refused" / timeouts**
-Verify the server is reachable on the chosen `-protocol` + `-host` + `-port`. The default port differs by protocol (8123 vs 8443).
+Details: [docs/troubleshooting.md](docs/troubleshooting.md).
+</details>
 
-**"security: query must be SELECT or WITH" (alert blocked)**
-An alert YAML has a non-read-only statement. Alert queries are restricted to `SELECT` / `WITH`; rewrite the query or remove the rule.
+## Output format, bounds and sizes
 
-**"Invalid gov-mode salt: must be 8–64 ASCII alphanumeric characters"**
-The `-salt` value (or interactive prompt input) contains spaces, punctuation, or is the wrong length. Pick a value that matches `[A-Za-z0-9]{8,64}` — see [Gov mode and hashed names](#gov-mode-and-hashed-names).
+<details>
+<summary>Show</summary>
 
-**Dashboard charts blank**
-The generated `dashboard.html` loads Chart.js from a public CDN. Open it in an environment with internet access, or see [`airgap/`](airgap/README.md) to build a dashboard that needs no network.
+Results are JSONEachRow by default (`-output-format jsonl`; `native` and `tsv` exist too, and with them the alerts and dashboard query the server). Every query is bounded on the server, 64-bit integers are written as strings so they are never rounded, and a bundle is typically a few tens of MB — more when server logs are included (each file capped at 50 MiB).
 
-**"Permission denied" on config files**
-You don't have read access to `-config-dir`. Either run with appropriate privileges or use `-skip-config`.
+Details: [docs/bundle.md](docs/bundle.md#output-format).
+</details>
 
-## Installation
+## Documentation
 
-### Prerequisites
-
-- Go 1.23 or later (the module declares `go 1.23.9`)
-- `make` (optional — convenience targets only; everything also works with plain `go` commands)
-- Network access to a ClickHouse HTTP(S) interface
-- Read access to the ClickHouse config directory (optional, only if collecting configs)
-
-### Build with Make (recommended)
-
-The repo ships with a `Makefile` that wraps the common workflows. From the repo root:
-
-```bash
-make deps        # go mod download && go mod tidy
-make build       # produces ./bin/clickhouse-diagnostic
-make run         # builds (if needed) and runs the binary interactively
-make test        # go test -v ./...
-make fmt         # go fmt ./...
-make lint        # golangci-lint run  (requires golangci-lint installed)
-make clean       # remove ./bin, ./clickhouse_results, ./configuration, *.tar.gz
-make help        # list every target
-```
-
-### Build with `go` directly
-
-If you don't want to use `make`:
-
-```bash
-# Fetch and tidy dependencies
-go mod download
-go mod tidy
-
-# Build a binary at ./clickhouse-diagnostic
-go build -o clickhouse-diagnostic ./cmd
-
-# Or install into $GOPATH/bin (or $GOBIN) so it's on your PATH
-go install ./cmd
-```
-
-### Cross-platform release builds
-
-`make release` produces binaries for the platforms we ship:
-
-```bash
-make release
-# Output (in ./bin/):
-#   clickhouse-diagnostic-linux-amd64
-#   clickhouse-diagnostic-darwin-amd64
-#   clickhouse-diagnostic-darwin-arm64
-#   clickhouse-diagnostic-windows-amd64.exe
-```
-
-To cross-compile for a single target without `make`:
-
-```bash
-GOOS=linux  GOARCH=amd64 go build -o bin/clickhouse-diagnostic-linux-amd64  ./cmd
-GOOS=darwin GOARCH=arm64 go build -o bin/clickhouse-diagnostic-darwin-arm64 ./cmd
-```
-
-Builds are statically linked Go binaries — copy the file to the target host and run, no runtime dependencies required.
+| Page | What is in it |
+|---|---|
+| [docs/collectors.md](docs/collectors.md) | Every collected file: the question it answers and why it is in the bundle |
+| [docs/running.md](docs/running.md) | Grants, flags, examples, collection modes, the collection window, dry-run |
+| [docs/modes.md](docs/modes.md) | onprem, cloud and gov; what gov hashes and withholds; what leaves your machine |
+| [docs/alerts.md](docs/alerts.md) | The alert rules, their outcomes, the YAML format, adding a rule |
+| [docs/dashboard.md](docs/dashboard.md) | Dashboard sections, the schema graph, previews |
+| [docs/query-analysis.md](docs/query-analysis.md) | Analysing one query |
+| [docs/bundle.md](docs/bundle.md) | Output format and layout, host facts, Keeper, logs, configuration |
+| [docs/versions.md](docs/versions.md) | Supported versions and version-specific queries |
+| [docs/building.md](docs/building.md) | Building and releasing |
+| [docs/troubleshooting.md](docs/troubleshooting.md) | When a run or a bundle looks wrong |
+| [cluster-collect/](cluster-collect/README.md) | Collecting every host of a cluster |
+| [airgap/](airgap/README.md) | A dashboard that opens offline |
+| [skills/clickhouse-diagnostic/](skills/clickhouse-diagnostic/SKILL.md) | The AI skill that reads a bundle |
