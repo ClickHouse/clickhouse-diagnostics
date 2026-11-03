@@ -17,4 +17,4 @@ The same skill is exposed to Claude Code via `.claude/skills/clickhouse-diagnost
 - Bundles are confidential customer evidence: analyse locally, quote the minimum, never upload or paste identifiers outside the machine without the checklist in `skills/clickhouse-diagnostic/references/privacy.md`. Never modify a bundle.
 - No network calls with bundle content. Version research against GitHub is allowed only when the user asks and only with version strings, setting names and error texts.
 - Do not commit, push or open PRs unless the user explicitly asks for it in the current session.
-- Go code: `make test` must pass; query files live under `queries.<mode>/` with version subdirectories (`MAJOR.MINOR.PATCH.BUILD/`); alert rules under `alerts/` must remain read-only `SELECT`s. See `README.md` → *Version-specific queries* before adding SQL.
+- Go code: `make test` must pass; query files live under `queries.<mode>/` with version subdirectories (`MAJOR.MINOR.PATCH.BUILD/`); alert rules under `alerts/` must remain read-only `SELECT`s. See `docs/versions.md` → *Version-specific queries* before adding SQL.
