@@ -137,7 +137,7 @@ Codex finds it through `AGENTS.md`. From another folder, copy or symlink `skills
 > **Keeper has no leader, so every replicated table is read-only** — resembles P-61.
 > `keeper/keeper2_9181.txt` → `mntr` `zk_latest_snapshot_size` = 2.4 GiB with `conf` `snapshot_transfer_chunk_size=0`; its `lgif` `last_log_idx` is below the leader's `first_log_idx`; all three members answer *"not currently serving requests"*.
 > The member that fell behind can only catch up through a snapshot, and a snapshot over 2 GiB fails to transfer in one piece, so each new leader loses leadership within seconds.
-> **Fix:** keep the lagging member stopped, restart the up-to-date members together, then set `snapshot_transfer_chunk_size` on every member before starting it again.
+> **Fix:** keep the lagging member stopped and restart the up-to-date members together, so they form a quorum from their own logs. Then set `snapshot_transfer_chunk_size` and `nuraft_snapshot_sync_ctx_timeout_ms` on every member — both need a restart, so restart the serving members first, with writers paused — and only then start the lagging member.
 
 Other Keeper patterns it recognises: the session-expiry cascade after a quorum loss, one replica's Keeper requests slow while its siblings are fine, disk-metadata znodes piling up until Keeper runs out of memory, a background task looping on Keeper. The same holds for parts, merges, memory, mutations, disks and inserts.
 

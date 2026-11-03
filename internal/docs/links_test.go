@@ -120,3 +120,31 @@ func TestDocsLinksResolve(t *testing.T) {
 		t.Fatalf("checked only %d links", checked)
 	}
 }
+
+// A release archive ships the binary with the Makefile's DATA_DIRS, the
+// README and AGENTS.md. Every top-level path the README links to has to be
+// in it, or a downloaded release points at files it does not contain.
+func TestReleasePayloadHoldsReadmeLinks(t *testing.T) {
+	mk, err := os.ReadFile("../../Makefile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile(`(?m)^DATA_DIRS=(.*)$`).FindSubmatch(mk)
+	if m == nil {
+		t.Fatal("no DATA_DIRS in the Makefile")
+	}
+	shipped := map[string]bool{"README.md": true, "AGENTS.md": true}
+	for _, d := range strings.Fields(string(m[1])) {
+		shipped[d] = true
+	}
+	for _, l := range links(t, "../../README.md") {
+		if regexp.MustCompile(`^[a-z]+:`).MatchString(l) || strings.HasPrefix(l, "#") {
+			continue
+		}
+		target, _, _ := strings.Cut(l, "#")
+		top := strings.Split(filepath.ToSlash(filepath.Clean(target)), "/")[0]
+		if !shipped[top] {
+			t.Errorf("README links to %q, but %s is not in the release archive (Makefile DATA_DIRS)", l, top)
+		}
+	}
+}
