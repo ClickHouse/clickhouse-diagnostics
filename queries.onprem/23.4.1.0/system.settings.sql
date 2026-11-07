@@ -1,12 +1,12 @@
 -- tier: essential
--- 23.4+ variant: system.settings gained `default` in 23.4, which turns
--- changed = 1 from a bare flag into a readable diff (value vs default).
--- The root system.settings.sql is the 22.8-compatible variant.
+-- 23.4+ 变体：system.settings 在 23.4 增加了 `default`，使
+-- changed = 1 从一个裸标志变成可读的差异（value 对比 default）。
+-- 根文件 system.settings.sql 是与 22.8 兼容的变体。
 --
--- `readonly` is deliberately not collected: it reports this session's
--- readonly=1 (pkg/clickhouse.go:176), so it is 1 for every row on every
--- run and would read as "a profile has locked every setting". Real
--- per-profile constraints live in system.settings_profile_elements.
+-- `readonly` 被刻意不采集：它报告的是本会话的
+-- readonly=1（pkg/clickhouse.go:176），所以每次运行每一行都是 1，
+-- 会被读成“某个 profile 锁死了所有设置”。真正的
+-- 按 profile 约束存放在 system.settings_profile_elements。
 SELECT
     name,
     value,

@@ -1,10 +1,10 @@
 -- tier: essential
--- Active parts per partition, for every partition with more than 100 —
--- the count TOO_MANY_PARTS (252) is about. system.parts keeps only the
--- 50 000 largest parts (it is a per-part listing), which drops exactly the
--- small fresh parts that pile up in such a partition, so this file counts
--- them instead: cheap columns only, no part is read. Essential, so the
--- too_many_parts alert still has its source when the run is cut short.
+-- 每个分区的活跃 part 数，只列出超过 100 个的分区——
+-- TOO_MANY_PARTS (252) 关注的正是这个数量。system.parts 只保留
+-- 50 000 个最大的 part（它是逐 part 列表），恰好会丢掉在这种分区里
+-- 越积越多的小而新的 part，所以这个文件改为自己计数：
+-- 只用廉价列，不读取任何 part。标记为 essential，这样即使采集
+-- 被提前中断，too_many_parts 告警仍然有数据来源。
 SELECT
     database,
     table,

@@ -18,9 +18,9 @@ SELECT
   sampling_key,
   storage_policy,
   comment,
-  -- total_rows / total_bytes are the node badges in the schema graph and the
-  -- cheapest "which tables actually hold data" answer in a bundle. Both exist
-  -- since long before the 22.8 floor.
+  -- total_rows / total_bytes 是 schema graph 中的节点徽标，也是
+  -- bundle 中回答“哪些表真正持有数据”的最廉价方式。两者都
+  -- 早在 22.8 下限之前就存在。
   total_rows,
   total_bytes,
   has_own_data,

@@ -1,12 +1,12 @@
--- Hourly Keeper / object-storage / cache / replication counters from metric_log,
--- selected by column-name regex so the file adapts to whatever this version
--- exports (a name that does not exist is simply absent — never an error).
--- ProfileEvent_* are summed per hour, CurrentMetric_* take the hourly max.
--- Output columns are named sum(ProfileEvent_X) / max(CurrentMetric_Y).
--- Complements metric_log_7_days, which keeps a fixed, version-stable set.
--- Window: 3 days. The regex selects ~270 of ~1700 metric_log columns, so a
--- 7-day scan on a busy server reads >100 MiB compressed for the incident
--- hours alone; three days keep a baseline and cost a third of that.
+-- 来自 metric_log 的每小时 Keeper / 对象存储 / 缓存 / 复制计数器，
+-- 按列名正则选取，因此该文件能适配当前版本导出的列
+-- （不存在的名字直接缺席——绝不会报错）。
+-- ProfileEvent_* 按小时求和，CurrentMetric_* 取每小时最大值。
+-- 输出列命名为 sum(ProfileEvent_X) / max(CurrentMetric_Y)。
+-- 与 metric_log_7_days 互补，后者保留固定且跨版本稳定的一组列。
+-- 窗口为 3 天。该正则会选中约 1700 个 metric_log 列中的约 270 个，
+-- 因此在繁忙服务器上做 7 天扫描，仅事故时段就要读取超过 100 MiB
+-- 的压缩数据；三天既保留了基线，成本又只有三分之一。
 SELECT
     toStartOfHour(event_time) AS time,
     COLUMNS('^ProfileEvent_(ZooKeeper|Keeper|S3|DiskS3|ReadBufferFromS3|WriteBufferFromS3|AzureBlobStorage|ObjectStorage|FilesystemCache|CachedReadBuffer|ReplicatedPart|MergeTreeDataWriter|InsertedParts|FailedQuery|FailedInsertQuery|FailedSelectQuery|Query$|InsertQuery$|SelectQuery$|DelayedInserts|RejectedInserts|DistributedConnectionFail|Merge$|MergedRows|MergesTimeMilliseconds)') APPLY sum,

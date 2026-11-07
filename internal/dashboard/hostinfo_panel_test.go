@@ -14,12 +14,12 @@ func findCheck(t *testing.T, rows []map[string]interface{}, setting string) map[
 			return r
 		}
 	}
-	t.Fatalf("no check for %q", setting)
+	t.Fatalf("没有针对%q的检查", setting)
 	return nil
 }
 
-// The warning bar is "ClickHouse warns about it too". These two are real checks
-// in programs/server/Server.cpp::sanityChecks.
+// 警告栏的意思是“ClickHouse也会就此告警”。这两项是
+// programs/server/Server.cpp::sanityChecks中的真实检查。
 func TestHostChecks_FlagsWhatClickHouseFlags(t *testing.T) {
 	rep := &hostinfo.Report{Tunables: hostinfo.Tunables{
 		TransparentHugepages: "always",
@@ -27,10 +27,10 @@ func TestHostChecks_FlagsWhatClickHouseFlags(t *testing.T) {
 	}}
 	rows := hostChecks(rep)
 	if got := findCheck(t, rows, "transparent_hugepages")["status"]; got != "warning" {
-		t.Errorf("THP=always must warn (ClickHouse does at startup), got %v", got)
+		t.Errorf("THP=always必须告警（ClickHouse在启动时也会告警），得到%v", got)
 	}
 	if got := findCheck(t, rows, "vm.overcommit_memory")["status"]; got != "warning" {
-		t.Errorf("overcommit_memory=2 must warn (ClickHouse does at startup), got %v", got)
+		t.Errorf("overcommit_memory=2必须告警（ClickHouse在启动时也会告警），得到%v", got)
 	}
 
 	ok := hostChecks(&hostinfo.Report{Tunables: hostinfo.Tunables{
@@ -38,93 +38,91 @@ func TestHostChecks_FlagsWhatClickHouseFlags(t *testing.T) {
 		OvercommitMemory:     "1",
 	}})
 	if got := findCheck(t, ok, "transparent_hugepages")["status"]; got != "ok" {
-		t.Errorf("THP=madvise should be ok, got %v", got)
+		t.Errorf("THP=madvise应为ok，得到%v", got)
 	}
 	if got := findCheck(t, ok, "vm.overcommit_memory")["status"]; got != "ok" {
-		t.Errorf("overcommit_memory=1 should be ok, got %v", got)
+		t.Errorf("overcommit_memory=1应为ok，得到%v", got)
 	}
 }
 
-// vm.swappiness is common database tuning folklore, but ClickHouse neither
-// checks it at startup nor documents a target — so the dashboard reports it
-// and does not grade it. Flagging it would put a recommendation in ClickHouse's
-// mouth that ClickHouse does not make.
+// vm.swappiness是常见的数据库调优经验，但ClickHouse既不在启动时
+// 检查它，也没有记录目标值——因此dashboard只报告它而不评级。
+// 标记告警会把一个ClickHouse并未给出的建议说成是它的建议。
 func TestHostChecks_DoesNotInventRecommendations(t *testing.T) {
 	rows := hostChecks(&hostinfo.Report{Tunables: hostinfo.Tunables{Swappiness: "60"}})
 	sw := findCheck(t, rows, "vm.swappiness")
 	if sw["status"] == "warning" {
-		t.Error("swappiness must not be graded: ClickHouse has no documented target for it")
+		t.Error("swappiness不应被评级：ClickHouse没有为其记录目标值")
 	}
 	if sw["value"] != "60" {
-		t.Errorf("swappiness value should still be reported, got %v", sw["value"])
+		t.Errorf("swappiness值仍应被报告，得到%v", sw["value"])
 	}
 }
 
-// ClickHouse warns when available memory at startup is under 2 GiB.
+// 启动时可用内存低于2 GiB时，ClickHouse会告警。
 func TestHostChecks_LowAvailableMemory(t *testing.T) {
 	low := hostChecks(&hostinfo.Report{Memory: hostinfo.MemoryInfo{Available: true, AvailableBytes: 1 << 30}})
 	if got := findCheck(t, low, "available memory")["status"]; got != "warning" {
-		t.Errorf("1 GiB available must warn, got %v", got)
+		t.Errorf("可用内存1 GiB必须告警，得到%v", got)
 	}
 	high := hostChecks(&hostinfo.Report{Memory: hostinfo.MemoryInfo{Available: true, AvailableBytes: 8 << 30}})
 	if got := findCheck(t, high, "available memory")["status"]; got != "ok" {
-		t.Errorf("8 GiB available should be ok, got %v", got)
+		t.Errorf("可用内存8 GiB应为ok，得到%v", got)
 	}
 }
 
-// An unreadable tunable must never render as a healthy one.
+// 无法读取的tunable绝不能渲染为健康状态。
 func TestHostChecks_UnreadableIsNotHealthy(t *testing.T) {
 	rows := hostChecks(&hostinfo.Report{})
 	c := findCheck(t, rows, "transparent_hugepages")
 	if c["status"] == "ok" {
-		t.Error("an unread tunable must not report as ok")
+		t.Error("未读取的tunable不应报告为ok")
 	}
 	if c["value"] != "(unreadable)" {
-		t.Errorf("unread value should say so, got %v", c["value"])
+		t.Errorf("未读取的值应如实说明，得到%v", c["value"])
 	}
 }
 
-// Both rlimits unreadable used to join to the literal "/" — non-empty, so it
-// sailed past the (unreadable) guard and rendered as a healthy row.
+// 两个rlimit都不可读时，过去会连接成字面量“/”——它非空，
+// 因此能绕过(unreadable)防护并渲染为健康行。
 func TestHostChecks_UnreadableRlimitsAreNotSlash(t *testing.T) {
 	rows := hostChecks(&hostinfo.Report{})
 	c := findCheck(t, rows, "open files (soft/hard)")
 	if c["value"] == "/" {
-		t.Fatal(`two unread rlimits rendered as "/" instead of (unreadable)`)
+		t.Fatal(`两个未读取的rlimit被渲染成"/"而不是(unreadable)`)
 	}
 	if c["value"] != "(unreadable)" {
-		t.Errorf("unread rlimits should say (unreadable), got %v", c["value"])
+		t.Errorf("未读取的rlimit应显示(unreadable)，得到%v", c["value"])
 	}
 }
 
 func TestHostChecks_NilReport(t *testing.T) {
 	if rows := hostChecks(nil); rows != nil {
-		t.Errorf("nil report should yield no checks, got %d", len(rows))
+		t.Errorf("nil report不应产生检查，得到%d", len(rows))
 	}
 }
 
-// The panel is hidden unless host_info is present, so a skipped host-info run
-// does not leave an empty shell in Overview.
+// 除非存在host_info，否则面板是隐藏的，因此跳过的host-info运行
+// 不会在Overview中留下空壳。
 func TestTemplate_HostPanelIsConditional(t *testing.T) {
 	for _, want := range []string{`id="host-block"`, "const hi=DATA.host_info;", "if(!hi)return;",
 		"tbl-host-os", "tbl-host-tunables", "tbl-host-procs", "host-notes"} {
 		if !strings.Contains(htmlTemplate, want) {
-			t.Errorf("host panel missing %q", want)
+			t.Errorf("主机面板缺少%q", want)
 		}
 	}
 }
 
-// gib() must distinguish "the collector could not read this" (null/empty)
-// from a genuine zero. swap_total_bytes is 0 on every host with swap
-// disabled, and rendering that as "—" tells the reader the value is
-// unknown when it is in fact the single most useful thing to know about
-// swap. A truthiness check (b ? ... : '—') conflates the two.
+// gib()必须区分“collector无法读取”（null/空）与真正的零。
+// 在每台禁用swap的主机上swap_total_bytes都是0，将其渲染成“—”
+// 会让读者以为该值未知，而实际上这是关于swap最有用的信息。
+// 真值判断（b ? ... : '—'）会把两者混为一谈。
 func TestTemplate_GibRendersZeroAsZero(t *testing.T) {
 	want := `const gib=b=>(b==null||b==='')?'—':(Number(b)/1073741824).toFixed(2)+' GiB';`
 	if !strings.Contains(htmlTemplate, want) {
-		t.Errorf("gib helper missing or changed; want %q", want)
+		t.Errorf("gib辅助函数缺失或已变更；期望%q", want)
 	}
 	if strings.Contains(htmlTemplate, `const gib=b=>b?`) {
-		t.Error("gib uses a truthiness check, so a real 0-byte reading renders as missing")
+		t.Error("gib使用真值判断，因此真实的0字节读数会被渲染为缺失")
 	}
 }

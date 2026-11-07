@@ -8,31 +8,27 @@ import (
 	"time"
 )
 
-// SharedSystemTables lists system.* tables whose contents are the same on
-// every replica — both in ClickHouse Cloud (SharedMergeTree, shared storage)
-// and in self-managed ReplicatedMergeTree clusters. Wrapping these with
-// clusterAllReplicas duplicates every row once per replica and produces
-// inflated counts / repeated alert rows.
+// SharedSystemTables 列出内容在每个 replica 上都相同的 system.* 表 ——
+// 既包括 ClickHouse Cloud（SharedMergeTree、共享存储），也包括自管理
+// ReplicatedMergeTree 集群。对这类表套用 clusterAllReplicas 会让每一行
+// 按每个 replica 重复一次，产生虚高的计数 / 重复的告警行。
 //
-// This is the single source of truth used by the alert evaluator, the
-// dashboard generator, and the new query-analysis collector. If you
-// add a system table to one of those code paths, update this map.
+// 这是告警评估器、dashboard 生成器以及新的查询分析采集器共用的唯一事实来源。
+// 如果你把某张 system 表加入其中某条代码路径，请同步更新这个映射。
 //
-// Notable exception: system.dictionaries is NOT in this list even
-// though the dictionary DEFINITIONS are shared via Keeper in CH Cloud.
-// The reason is the runtime state columns (status, bytes_allocated,
-// query_count, hit_rate) are per-replica — a dict that's been queried
-// on replica A but not yet on replica B shows different status on
-// each. We want to see per-pod loading state, so we let cloud mode
-// wrap with clusterAllReplicas; callers add hostname() to the SELECT
-// to label each row with its pod.
+// 一个显著的例外：system.dictionaries 不在这个列表中，尽管在 CH Cloud 中
+// 字典的 DEFINITION 是通过 Keeper 共享的。原因是运行时状态列（status、
+// bytes_allocated、query_count、hit_rate）是 per-replica 的 —— 一个在
+// replica A 上查询过、但尚未在 replica B 上查询过的字典，在各副本上会显示
+// 不同的状态。我们想看到每个 pod 的加载状态，因此让 cloud 模式用
+// clusterAllReplicas 包裹；调用方在 SELECT 中加入 hostname()，
+// 为每一行标出它所属的 pod。
 //
-// "Shared" here refers to ROW CONTENTS, not table existence. This is
-// about avoiding clusterAllReplicas row duplication when reading a
-// table. It is unrelated to whether a table EXISTS on every replica —
-// per-node system log tables (e.g. crash_log) may be absent on some
-// replicas even though `tables` is listed here. The dashboard's
-// hasTable() probe handles that separately.
+// 这里的 "Shared" 指的是行内容，而不是表是否存在。它只关乎读取一张表时
+// 如何避免 clusterAllReplicas 造成的行重复。它与一张表是否存在于每个 replica
+// 上无关 —— 按节点记录的 system 日志表（例如 crash_log）在某些 replica 上
+// 可能不存在，即使 `tables` 列在这里。dashboard 的 hasTable() 探测
+// 会单独处理这种情况。
 var SharedSystemTables = map[string]bool{
 	"columns":           true,
 	"databases":         true,
@@ -44,10 +40,10 @@ var SharedSystemTables = map[string]bool{
 	"tables":            true,
 }
 
-// SysTable returns the mode-appropriate system table reference.
-// In cloud mode, per-replica tables (query_log, part_log, text_log,
-// errors, …) are wrapped with clusterAllReplicas so the result spans
-// every replica. Tables in SharedSystemTables are queried directly.
+// SysTable 返回模式对应的 system 表引用。
+// 在 cloud 模式下，per-replica 的表（query_log、part_log、text_log、
+// errors 等）会用 clusterAllReplicas 包裹，使结果覆盖每个 replica。
+// SharedSystemTables 中的表则直接查询。
 func SysTable(mode, table string) string {
 	if strings.ToLower(mode) == "cloud" && !SharedSystemTables[table] {
 		return fmt.Sprintf("clusterAllReplicas(default, system.%s)", table)
@@ -55,61 +51,58 @@ func SysTable(mode, table string) string {
 	return "system." + table
 }
 
-// Vars holds the substitution values for a query template. All fields
-// are optional; the Apply function only replaces placeholders whose
-// matching field is non-zero.
+// Vars 保存查询模板的替换值。所有字段都是可选的；
+// Apply 只替换对应字段非零的占位符。
 //
-// Validation is the caller's responsibility — Vars values are spliced
-// directly into the SQL string. Use the package-level Validate*
-// helpers (or the equivalent in cmd/main.go) before populating Vars.
+// 校验由调用方负责 —— Vars 的值会直接拼接进 SQL 字符串。在填充 Vars 之前，
+// 请使用包级的 Validate* 辅助函数（或 cmd/main.go 中的等价实现）。
 type Vars struct {
-	// Mode selects the ClickHouse topology — "cloud" / "onprem" / "gov".
-	// Required for {sys.<table>} substitution to pick the right reference.
+	// Mode 选择 ClickHouse 拓扑 —— "cloud" / "onprem" / "gov"。
+	// {sys.<table>} 替换需要它来选取正确的引用。
 	Mode string
 
-	// QueryID, when non-empty, replaces every {query_id} placeholder
-	// with the quoted UUID 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx'.
+	// QueryID 非空时，把每个 {query_id} 占位符替换为带引号的 UUID
+	// 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx'。
 	QueryID string
 
-	// NormalizedQueryHash, when non-empty, replaces every
-	// {normalized_query_hash} placeholder with the bare numeric value.
+	// NormalizedQueryHash 非空时，把每个 {normalized_query_hash}
+	// 占位符替换为不带引号的数值。
 	NormalizedQueryHash string
 
-	// From / To, when non-zero, replace {from} / {to} placeholders with
-	// quoted ClickHouse DateTime literals in UTC.
+	// From / To 非零时，把 {from} / {to} 占位符替换为 UTC 的
+	// 带引号 ClickHouse DateTime 字面量。
 	From time.Time
 	To   time.Time
 
-	// GovSalt, when non-empty, replaces every '%salt%' literal in the
-	// SQL with the customer-supplied salt for gov-mode hashing.
+	// GovSalt 非空时，把 SQL 中的每个 '%salt%' 字面量替换为
+	// 客户提供的、用于 gov 模式哈希的 salt。
 	GovSalt string
 
-	// MaxLookback, when non-zero and no From is given, caps every
-	// {from:<default>} longer than it (essential collection: 1 day instead
-	// of 3 or 7). An explicit From always wins.
+	// MaxLookback 非零且未给出 From 时，为每个长于它的
+	// {from:<default>} 设上限（essential 采集：1 天而不是 3 天或 7 天）。
+	// 显式给出的 From 始终优先。
 	MaxLookback time.Duration
 
-	// DetachedScope / DetachedScopeP fill {detached_scope} and
-	// {detached_scope_p} (gov files, columns qualified with p.). Empty means
-	// every table ("1"); see DetachedScope.
+	// DetachedScope / DetachedScopeP 填充 {detached_scope} 和
+	// {detached_scope_p}（gov 文件，相关列带 p. 前缀）。为空表示
+	// 所有表（"1"）；见 DetachedScope。
 	DetachedScope  string
 	DetachedScopeP string
 }
 
-// Apply substitutes every placeholder in sql whose value is present in
-// vars. Placeholders supported (case-sensitive):
+// Apply 替换 sql 中所有在 vars 里提供了值的占位符。
+// 支持的占位符（区分大小写）：
 //
-//	{sys.<table>}             — mode-appropriate system table reference
-//	{query_id}                — 'uuid' (quoted)
-//	{normalized_query_hash}   — 12345 (unquoted numeric)
-//	{from}, {to}              — 'YYYY-MM-DD HH:MM:SS' UTC (quoted)
-//	{from:15d}, {to:now}      — the flag value if given, else the
-//	                            query's own default window
+//	{sys.<table>}             — 模式对应的 system 表引用
+//	{query_id}                — 'uuid'（带引号）
+//	{normalized_query_hash}   — 12345（不带引号的数值）
+//	{from}, {to}              — 'YYYY-MM-DD HH:MM:SS' UTC（带引号）
+//	{from:15d}, {to:now}      — 若给出了该 flag 则用其值，否则用
+//	                            查询自身的默认窗口
 //	'%salt%'                  — '<gov-salt>'
 //
-// Placeholders whose corresponding Vars field is empty are left intact
-// — the executor's empty-placeholder check then refuses to send the
-// query, preventing leakage of unbound templates to the server.
+// 对应 Vars 字段为空的占位符会保持原样 —— 随后 executor 的空占位符检查
+// 会拒绝发送该查询，防止未绑定的模板泄漏到服务器。
 func Apply(sql string, vars Vars) string {
 	sql = expandSysPlaceholders(sql, vars.Mode)
 	sql = expandWindowPlaceholders(sql, vars.From, vars.To, vars.MaxLookback)
@@ -134,16 +127,14 @@ func Apply(sql string, vars Vars) string {
 	return sql
 }
 
-// expandSysPlaceholders walks the SQL and replaces every {sys.<table>}
-// occurrence with SysTable(mode, table). Hand-rolled (no regex) because
-// the placeholder shape is fixed and trivial — keeps the dependency
-// surface in this package small.
+// expandSysPlaceholders 遍历 SQL，把每个 {sys.<table>} 出现处
+// 替换为 SysTable(mode, table)。手工实现（不用正则）是因为占位符形态
+// 固定且简单 —— 这让本包依赖面保持很小。
 func expandSysPlaceholders(sql, mode string) string {
-	// No mode, no expansion. Expanding with "" would quietly behave like
-	// onprem — the first {sys.query_log} written into queries.cloud/ would
-	// collect one replica instead of fanning out, with nothing failing.
-	// Leaving the placeholder makes UnboundPlaceholders refuse the query,
-	// which points at the wiring bug instead of shipping a wrong bundle.
+	// 没有 mode 就不展开。用 "" 展开会悄悄表现得像 onprem ——
+	// 写进 queries.cloud/ 的第一个 {sys.query_log} 将只采集一个 replica
+	// 而不是扇出，而且不会有任何报错。保留占位符则会让 UnboundPlaceholders
+	// 拒绝该查询，从而指向接线错误，而不是产出一个错误的 bundle。
 	if strings.TrimSpace(mode) == "" {
 		return sql
 	}
@@ -162,46 +153,41 @@ func expandSysPlaceholders(sql, mode string) string {
 	}
 }
 
-// reBoundPlaceholder matches our known placeholder shape — a name
-// composed of ASCII letters, digits, dots, and underscores, between
-// braces. This deliberately does NOT match the empty `{}` form, so
-// ClickHouse log-format strings like
+// reBoundPlaceholder 匹配我们已知的占位符形态 —— 由 ASCII 字母、数字、点号和
+// 下划线组成的名称，位于花括号之间。它刻意不匹配空的 `{}` 形式，因此像
 //
 //	'Selected {}/{} parts by partition key, …'
 //
-// — which appear as literal values in some queries — are left alone.
+// 这样的 ClickHouse 日志格式字符串 —— 它们在某些查询中作为字面值出现 ——
+// 会被原样保留。
 var rePlaceholder = regexp.MustCompile(`\{[A-Za-z0-9_.]+\}`)
 
-// UnboundPlaceholders returns any named {…} placeholders left in sql
-// after Apply. Used by the executor as a safety check: if a required
-// value (e.g. {query_id}) was never bound, the SQL would reach the
-// server with a literal '{query_id}' and either parse-error or — worse
-// — return zero rows silently. Better to refuse the query.
+// UnboundPlaceholders 返回 Apply 之后仍留在 sql 中的具名 {…} 占位符。
+// 由 executor 用作安全检查：如果某个必需的值（例如 {query_id}）从未绑定，
+// SQL 会带着字面量 '{query_id}' 到达服务器，要么解析报错，要么 —— 更糟 ——
+// 悄悄返回零行。拒绝该查询更好。
 //
-// Empty `{}` braces (the ClickHouse log-format placeholder) are
-// ignored. '%salt%' is intentionally NOT flagged here: any .sql file
-// under queries.gov/ contains it as a marker and the executor only
-// substitutes when GovSalt is set (gov mode), so its presence after
-// Apply is expected and not an error in non-gov modes.
+// 空的 `{}` 花括号（ClickHouse 日志格式占位符）会被忽略。
+// '%salt%' 在此刻意不被标记：queries.gov/ 下的任何 .sql 文件都把它作为标记
+// 包含在内，而 executor 只在设置了 GovSalt（gov 模式）时才做替换，
+// 因此它在 Apply 之后仍存在是预期行为，在非 gov 模式下不是错误。
 func UnboundPlaceholders(sql string) []string {
-	// Scan with comments stripped. Query files legitimately mention
-	// ClickHouse macros in prose — queries.gov/system.replication_queue.sql
-	// explains that replica_name "is conventionally the {replica} macro" —
-	// and flagging those would refuse a query over a comment. The stripped
-	// copy is used for detection only; the SQL sent is untouched.
+	// 去掉注释后再扫描。查询文件会在说明文字中合法地提到
+	// ClickHouse 宏 —— queries.gov/system.replication_queue.sql 解释说
+	// replica_name“习惯上是 {replica} 宏” —— 标记这些会仅因一条注释
+	// 就拒绝查询。去掉注释后的副本只用于检测；发送的 SQL 不受影响。
 	scan := reLineComment.ReplaceAllString(reBlockComment.ReplaceAllString(sql, " "), " ")
 
 	matches := rePlaceholder.FindAllString(scan, -1)
-	// A window placeholder whose default spec is malformed (e.g.
-	// {from:7dd}) is left untouched by expandWindowPlaceholders. It does
-	// not match rePlaceholder because of the colon, so report it here —
-	// otherwise a typo would reach the server as a literal brace.
+	// 默认规格格式错误的窗口占位符（例如
+	// {from:7dd}）会被 expandWindowPlaceholders 原样保留。由于含有冒号，
+	// 它不匹配 rePlaceholder，因此在这里报告它 —— 否则一个拼写错误
+	// 就会以字面花括号的形式到达服务器。
 	matches = append(matches, reWindowLeftover.FindAllString(scan, -1)...)
 	if len(matches) == 0 {
 		return nil
 	}
-	// Stable de-dup so identical unbound placeholders don't repeat
-	// in the operator-facing warning.
+	// 稳定去重，使相同的未绑定占位符不会在面向运维人员的警告中重复出现。
 	seen := make(map[string]struct{}, len(matches))
 	out := make([]string, 0, len(matches))
 	for _, m := range matches {
@@ -214,32 +200,29 @@ func UnboundPlaceholders(sql string) []string {
 	return out
 }
 
-// reWindowPlaceholder matches a time-window placeholder that carries its
-// own default: {from:15d}, {from:12h}, {to:now}.
+// reWindowPlaceholder 匹配自带默认值的时间窗口占位符：
+// {from:15d}、{from:12h}、{to:now}。
 //
-// Each collection query used to hard-code its window as a literal. The
-// default now lives with the query rather than being flattened to one
-// global value, because the cost of a wide scan differs sharply per
-// table — text_log keeps a 1-day default where the other log tables use
-// 7, and a future query needing a longer or shorter reach can say so
-// without affecting the rest. --from / --to override all of them at once.
+// 过去每个采集查询都把窗口硬编码为字面量。现在默认值随查询本身走，而不是
+// 被压平成单一的全局值，因为宽范围扫描的代价因表而异 —— text_log 保留
+// 1 天的默认值，而其他日志表用 7 天，未来需要更长或更短范围的查询可以
+// 自行声明，而不影响其他查询。--from / --to 会一次性覆盖所有这些默认值。
 var reWindowPlaceholder = regexp.MustCompile(`\{(from|to):([A-Za-z0-9]+)\}`)
 
-// reWindowLeftover finds a window placeholder that expandWindowPlaceholders
-// declined to replace, i.e. one whose default spec is malformed. Reported
-// by UnboundPlaceholders so the executor refuses the query instead of
-// sending a literal brace to the server.
+// reWindowLeftover 查找 expandWindowPlaceholders 拒绝替换的窗口占位符，
+// 即默认规格格式错误的那些。由 UnboundPlaceholders 报告，使 executor
+// 拒绝该查询，而不是把字面花括号发送到服务器。
 var reWindowLeftover = regexp.MustCompile(`\{(?:from|to):[^{}]*\}`)
 
-// windowDefaultSQL turns a placeholder's default spec into SQL.
+// windowDefaultSQL 把占位符的默认规格转换为 SQL。
 //
 //	now  -> now()
 //	15d  -> now() - INTERVAL 15 DAY
 //	12h  -> now() - INTERVAL 12 HOUR
 //	30m  -> now() - INTERVAL 30 MINUTE
 //
-// Returns ok=false for anything else, which leaves the placeholder in
-// place to be caught as unbound rather than silently widening a window.
+// 其他情况返回 ok=false，从而让占位符保持原样，随后被当作未绑定捕获，
+// 而不是悄悄放宽时间窗口。
 func windowDefaultSQL(spec string) (string, bool) {
 	if spec == "now" {
 		return "now()", true
@@ -254,7 +237,7 @@ func windowDefaultSQL(spec string) (string, bool) {
 		}
 	}
 	if n == "" || strings.TrimLeft(n, "0") == "" {
-		return "", false // a zero-length window is never intended
+		return "", false // 从未有意使用零长度窗口
 	}
 	var interval string
 	switch unit {
@@ -270,21 +253,20 @@ func windowDefaultSQL(spec string) (string, bool) {
 	return fmt.Sprintf("now() - INTERVAL %s %s", n, interval), true
 }
 
-// utcLiteral renders a flag-supplied timestamp as SQL. The timezone is
-// spelled out because ClickHouse parses a BARE string literal in the
-// DateTime column's timezone — the server's, not UTC. On a server with
-// <timezone>America/New_York</timezone>, a bare '2026-03-01 10:30:00'
-// lands five hours away from the UTC instant the operator asked for,
-// and nothing fails: the window is silently shifted. Verified live:
-// bare vs explicit differ by exactly the zone offset.
+// utcLiteral 把 flag 提供的时间戳渲染为 SQL。这里显式写出时区，是因为
+// ClickHouse 会按 DateTime 列所在时区（服务器的时区，而不是 UTC）解析裸字符串
+// 字面量。在 <timezone>America/New_York</timezone> 的服务器上，裸的
+// '2026-03-01 10:30:00' 会与运维人员想要的 UTC 时刻相差五个小时，而且
+// 不会有任何报错：窗口被悄悄平移了。已在线验证：裸写与显式声明
+// 恰好相差一个时区偏移。
 func utcLiteral(t time.Time) string {
 	return "toDateTime('" + t.UTC().Format("2006-01-02 15:04:05") + "', 'UTC')"
 }
 
-// expandWindowPlaceholders replaces {from:<default>} / {to:<default>}
-// with the flag value when one was supplied, and with the query's own
-// default otherwise. The substituted flag value is a quoted UTC literal,
-// matching the bare {from} / {to} form used by query analysis.
+// expandWindowPlaceholders 在提供了 flag 值时把 {from:<default>} /
+// {to:<default>} 替换为 flag 值，否则替换为查询自身的默认值。
+// 替换后的 flag 值是带引号的 UTC 字面量，与查询分析所用的裸
+// {from} / {to} 形式一致。
 func expandWindowPlaceholders(sql string, from, to time.Time, maxLookback time.Duration) string {
 	return reWindowPlaceholder.ReplaceAllStringFunc(sql, func(match string) string {
 		g := reWindowPlaceholder.FindStringSubmatch(match)
@@ -305,12 +287,12 @@ func expandWindowPlaceholders(sql string, from, to time.Time, maxLookback time.D
 		if def, ok := windowDefaultSQL(spec); ok {
 			return def
 		}
-		return match // malformed — leave it for UnboundPlaceholders
+		return match // 格式错误 —— 留给 UnboundPlaceholders
 	})
 }
 
-// windowSpecDuration is the length of a {from:<spec>} default (15d, 12h,
-// 30m); ok=false for "now" or a malformed spec.
+// windowSpecDuration 是 {from:<spec>} 默认值的长度（15d、12h、30m）；
+// 对于 "now" 或格式错误的规格返回 ok=false。
 func windowSpecDuration(spec string) (time.Duration, bool) {
 	if _, ok := windowDefaultSQL(spec); !ok || spec == "now" {
 		return 0, false

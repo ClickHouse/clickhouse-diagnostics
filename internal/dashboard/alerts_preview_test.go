@@ -8,16 +8,15 @@ import (
 	"clickhouse-diagnostic/internal/alert"
 )
 
-// TestBuildHTML_AlertsPreview renders an alerts page covering every collapse
-// case the panel has to handle — a message with a stack trace, more instances
-// than the inline cap, a short message that needs no disclosure at all, a rule
-// whose own query failed, and a rule that was not applicable — so the
-// interaction can be reviewed by eye rather than by reading the template.
-// `make dashboard-preview` writes it to bin/alerts_preview.html.
+// TestBuildHTML_AlertsPreview渲染一个alerts页面，覆盖面板需要处理的
+// 所有折叠情况——带堆栈跟踪的消息、实例数超过内联上限、无需任何
+// disclosure的短消息、自身查询失败的规则，以及不适用的规则——
+// 这样交互可以通过肉眼审查，而不必阅读模板。
+// `make dashboard-preview`会将其写入bin/alerts_preview.html。
 func TestBuildHTML_AlertsPreview(t *testing.T) {
 	dir := os.Getenv("DASHBOARD_PREVIEW_DIR")
 	if dir == "" {
-		t.Skip("set DASHBOARD_PREVIEW_DIR to render")
+		t.Skip("设置DASHBOARD_PREVIEW_DIR以渲染")
 	}
 	trace := "Code: 999. Coordination::Exception: Session expired. (KEEPER_EXCEPTION) (version 26.2.1.390 (official build)), " +
 		"Stack trace (when copying this message, always include the lines below):\n\n" +
@@ -49,31 +48,31 @@ func TestBuildHTML_AlertsPreview(t *testing.T) {
 		"generated_at": "2026-09-25 10:00:00 UTC", "mode": "onprem", "version": "26.2.1.390",
 		"uptime": "1 hours 51 minutes", "total_databases": 410, "total_tables": 33882, "active_parts": 50000, "total_size": "28.40 TiB",
 		"alerts": []alert.Result{
-			// 1. long message (stack trace) AND more instances than the cap
+			// 1. 长消息（堆栈跟踪）且实例数超过上限
 			{Name: "replication_queue_errors", Title: "Replication queue entries have exceptions", Severity: "critical", File: "replication_queue_errors.yaml",
 				Description: "A replication queue entry has a non-empty last_exception: the replica tried to execute it and the server refused.\n\nCheck: the exception text and num_tries — a high count with the same error is a stuck entry, not a slow one. Then system.replicas for the same table, and the source replica named in the message.",
 				Message:     "{database}.{table} (replica {replica_name}): {type} failed after {num_tries} tries — {last_exception}",
 				Rows:        queue},
-			// 2. short messages, many instances → only the row cap applies
+			// 2. 短消息、大量实例 → 只适用行数上限
 			{Name: "keeper_health", Title: "Keeper unavailable: session loss storm while Keeper traffic collapsed", Severity: "critical", File: "keeper_health.yaml",
 				Description: "The two-signal Keeper health test over the last 7 days, per hour.\n\nCheck next: system.zookeeper_connection (session age), part_log errors in the same hours, then the Keeper nodes themselves.",
 				Message:     "hour starting {hour} on {hostname}: {hw_exceptions} Keeper hardware exceptions, {transactions} Keeper transactions = {pct_of_usual}% of usual ({usual_transactions}/h median) — Keeper effectively unavailable to this server",
 				Rows:        keeper},
-			// 3. the control case: one short instance, single-paragraph description → no toggles at all
+			// 3. 对照用例：一个短实例、单段描述 → 完全没有开关
 			{Name: "too_many_parts", Title: "Table partition approaching too-many-parts limit", Severity: "warning", File: "too_many_parts.yaml",
 				Description: "A table partition has more than 300 active parts.",
 				Message:     "{database}.{table} partition '{partition_id}' has {parts_count} active parts — inserts are delayed from 1000 parts (parts_to_delay_insert) and rejected with code 252 TOO_MANY_PARTS at 3000 (parts_to_throw_insert)",
 				Rows:        []map[string]interface{}{{"database": "demo_app", "table": "events_summary", "partition_id": "202609", "parts_count": 3469}}},
-			// 4. a rule whose own query failed, with a trace in the error text
+			// 4. 自身查询失败的规则，错误文本中带有堆栈跟踪
 			{Name: "detached_parts_exist", Title: "Detached parts present", Severity: "info", File: "detached_parts_exist.yaml",
 				Description: "Parts exist in the detached/ folder.",
 				Error:       "error executing query: non-OK status: 500, body: " + trace},
-			// 5. not applicable here
+			// 5. 此处不适用
 			{Name: "crash_log_entries", Title: "Server crash detected", Severity: "critical", File: "crash_log_entries.yaml", Skipped: true, Reason: "table not present"},
 		},
 	}
 	if err := os.WriteFile(filepath.Join(dir, "alerts_preview.html"), []byte(buildHTML(data)), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	t.Logf("written: %s", filepath.Join(dir, "alerts_preview.html"))
+	t.Logf("已写入：%s", filepath.Join(dir, "alerts_preview.html"))
 }

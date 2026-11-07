@@ -19,7 +19,7 @@ import (
 	"clickhouse-diagnostic/pkg"
 )
 
-// Generator creates offline HTML diagnostic dashboards from ClickHouse data.
+// Generator从ClickHouse数据创建离线HTML诊断仪表盘。
 type Generator struct {
 	client        *pkg.ClickHouseClient
 	mode          string
@@ -27,59 +27,59 @@ type Generator struct {
 	analysis      query.AnalysisOpts
 	analysisDir   string
 	hostInfo      *hostinfo.Report
-	probeCache    map[string]bool // memoized hasColumn/hasTable results
-	node          string          // hostName() (FQDN()) of the server the system tables describe
-	nodeUptime    string          // how long that node had been up at collection
-	collection    string          // execution_log `collection:` note (SharedMergeTree onprem → cloud switch)
-	airgap        bool            // inline Chart.js instead of loading it from the CDN (-airgap)
-	// collect is the run's collection mode, for the banner: kind is
-	// "essential" or "full", summary the execution log's `collect:` line,
-	// skipped the collectors that did not run.
+	probeCache    map[string]bool // 缓存的hasColumn/hasTable结果
+	node          string          // system表所描述服务器的hostName()（FQDN()）
+	nodeUptime    string          // 采集时该节点已运行多久
+	collection    string          // execution_log的`collection:`备注（SharedMergeTree onprem → cloud切换）
+	airgap        bool            // 内联Chart.js而不是从CDN加载（-airgap）
+	// collect是本轮的采集模式，供横幅使用：kind为
+	// "essential"或"full"，summary是执行日志的`collect:`行，
+	// skipped是未运行的collector。
 	collectMode struct {
 		kind, summary string
 		skipped       []string
 	}
-	skippedPanels []string // heavy panels not built in an essential run
-	detachedScope string   // {detached_scope} for the detached panel (see query.DetachedScope)
-	keeperDown    bool     // no Keeper session: skip the panels that wait for one
+	skippedPanels []string // essential运行中未构建的重型面板
+	detachedScope string   // detached面板的{detached_scope}（见query.DetachedScope）
+	keeperDown    bool     // 无Keeper会话：跳过需要等待会话的面板
 	stop          func() bool
-	bundle        *bundle.Bundle // the run directory: when set, panels read the collected files (fromfiles.go)
-	windowFrom    time.Time      // explicit -from / -to, for the panel headings
+	bundle        *bundle.Bundle // 运行目录：设置后面板读取已采集的文件（fromfiles.go）
+	windowFrom    time.Time      // 显式的-from / -to，用于面板标题
 	windowTo      time.Time
 }
 
-// keeperPanels wait on a live Keeper session.
+// keeperPanels需要实时Keeper会话。
 var keeperPanels = map[string]bool{"keeper_connection": true}
 
-// WithKeeperDown skips the panels that need a live Keeper session.
+// WithKeeperDown跳过需要实时Keeper会话的面板。
 func (g *Generator) WithKeeperDown(down bool) *Generator {
 	g.keeperDown = down
 	return g
 }
 
-// WithStop skips the remaining live queries once stop() returns true (the
-// run's time budget is spent).
+// WithStop在stop()返回true后跳过剩余的实时查询（本轮
+// 时间预算已用完）。
 func (g *Generator) WithStop(stop func() bool) *Generator {
 	g.stop = stop
 	return g
 }
 
-// WithDetachedScope limits the detached-parts panel like the collector.
+// WithDetachedScope像collector一样限制detached part面板。
 func (g *Generator) WithDetachedScope(scope string) *Generator {
 	g.detachedScope = scope
 	return g
 }
 
-// heavyPanels read every table (system.parts / tables / detached_parts):
-// an essential run does not build them, the banner lists them.
+// heavyPanels读取所有表（system.parts / tables / detached_parts）：
+// essential运行不会构建它们，横幅会列出它们。
 var heavyPanels = map[string]bool{
 	"storage_by_db": true, "engines_dist": true, "tables_list": true,
 	"top_tables": true, "detached": true, "high_part_count": true,
 }
 
-// WithCollectMode says whether this was an essential or a full collection,
-// why, and which collectors were skipped: the dashboard shows it as a
-// banner, and an essential run also skips the panels that read every table.
+// WithCollectMode说明本次是essential还是完整采集、
+// 原因，以及跳过了哪些collector：dashboard会以
+// 横幅显示，essential运行还会跳过读取所有表的面板。
 func (g *Generator) WithCollectMode(kind, summary string, skipped []string) *Generator {
 	g.collectMode.kind, g.collectMode.summary, g.collectMode.skipped = kind, summary, skipped
 	return g
@@ -87,51 +87,51 @@ func (g *Generator) WithCollectMode(kind, summary string, skipped []string) *Gen
 
 func (g *Generator) essential() bool { return g.collectMode.kind == "essential" }
 
-// NewGenerator creates a new Generator.
+// NewGenerator创建一个新的Generator。
 func NewGenerator(client *pkg.ClickHouseClient, mode string) *Generator {
 	return &Generator{client: client, mode: strings.ToLower(mode)}
 }
 
-// WithServerVersion records the connected server version so the
-// query-analysis section resolves the same version-directory overrides
-// as AnalysisCollector.Collect (see collectAnalysis). Returns the
-// receiver for chaining.
+// WithServerVersion记录所连接服务器的版本，使
+// 查询分析部分解析出与AnalysisCollector.Collect相同的
+// 版本目录覆盖（见collectAnalysis）。返回
+// receiver以支持链式调用。
 func (g *Generator) WithServerVersion(v internal.Version) *Generator {
 	g.serverVersion = v
 	return g
 }
 
-// WithHostInfo attaches the host facts already collected for host_info.json,
-// so the dashboard can show the OS/kernel/CPU/memory context beside what the
-// system tables report. Nil (host-info skipped, or a non-Linux run) simply
-// omits the panel. Returns the receiver for chaining.
+// WithHostInfo附加已为host_info.json采集的host facts，
+// 使dashboard能在system表报告的内容旁显示OS/内核/CPU/内存上下文。
+// 为nil（跳过host-info，或非Linux运行）时
+// 直接省略该面板。返回receiver以支持链式调用。
 func (g *Generator) WithHostInfo(r *hostinfo.Report) *Generator {
 	g.hostInfo = r
 	return g
 }
 
-// WithCollection repeats the execution log's node / uptime / collection
-// header lines in the dashboard header, so a reader who opens the HTML
-// first sees which node this is and whether the run switched to cloud
-// collection on a SharedMergeTree cluster. Empty strings leave the header
-// as it was. Returns the receiver for chaining.
+// WithCollection在dashboard头部重复执行日志的node / uptime / collection
+// 头行，使先打开HTML的读者
+// 能看到这是哪个节点，以及本轮是否在SharedMergeTree集群上切换到了cloud
+// 采集。空字符串保持头部原样。
+// 返回receiver以支持链式调用。
 func (g *Generator) WithCollection(node, uptime, collection string) *Generator {
 	g.node, g.nodeUptime, g.collection = node, uptime, collection
 	return g
 }
 
-// hostChecks evaluates the collected tunables against the checks CLICKHOUSE
-// ITSELF makes at startup, and returns one row per check.
+// hostChecks依据CLICKHOUSE自身在启动时执行的检查
+// 评估已采集的可调参数，并为每项检查返回一行。
 //
-// The bar for a "warning" here is deliberately narrow: the server has to warn
-// about it too. Everything in this list maps to a real check in
-// programs/server/Server.cpp::sanityChecks (or, for max_map_count,
-// src/Common/Exception.cpp), so the dashboard never invents a recommendation
-// ClickHouse does not make.
+// 这里判定"warning"的门槛刻意定得很窄：服务器自身也必须
+// 就此告警。此列表中的每一项都对应
+// programs/server/Server.cpp::sanityChecks中的真实检查（对于max_map_count
+// 则是src/Common/Exception.cpp），因此dashboard绝不会凭空给出
+// ClickHouse并未提出的建议。
 //
-// Deliberately NOT flagged: vm.swappiness. It is common tuning folklore for
-// databases, but ClickHouse neither checks it at startup nor documents a
-// target, so it is reported as a plain fact.
+// 刻意不标记：vm.swappiness。这是数据库调优中常见的
+// 民间说法，但ClickHouse既不在启动时检查，也未记录
+// 目标值，因此只作为事实报告。
 func hostChecks(r *hostinfo.Report) []map[string]interface{} {
 	if r == nil {
 		return nil
@@ -139,7 +139,7 @@ func hostChecks(r *hostinfo.Report) []map[string]interface{} {
 	t := r.Tunables
 	out := []map[string]interface{}{}
 	add := func(name, value, status, note string) {
-		// A tunable we could not read must never render as a healthy one.
+		// 无法读取的可调参数绝不能渲染成健康状态。
 		if value == "" {
 			value, status = "(unreadable)", "unknown"
 		}
@@ -171,8 +171,8 @@ func hostChecks(r *hostinfo.Report) []map[string]interface{} {
 	add("fs.file-max", t.FsFileMax, "info", "")
 	add("cgroup memory limit", t.CgroupMemoryLimit, "info", "")
 	add("cgroup cpu max", t.CgroupCPUMax, "info", "")
-	// Join only when something was read: "" + " / " + "" trims to "/", which
-	// would sneak past add()'s empty-value guard and render as healthy.
+	// 仅在读到了内容时拼接："" + " / " + ""会trim成"/"，
+	// 从而绕过add()的空值保护并渲染为健康。
 	nofile := ""
 	if t.ClickHouseNofileSoft != "" || t.ClickHouseNofileHard != "" {
 		nofile = strings.TrimSpace(t.ClickHouseNofileSoft + " / " + t.ClickHouseNofileHard)
@@ -181,7 +181,7 @@ func hostChecks(r *hostinfo.Report) []map[string]interface{} {
 	add("max processes (soft)", t.ClickHouseNprocSoft, "info",
 		"RLIMIT_NPROC — the OS cap on tasks, not the max_threads setting")
 
-	// The one memory check ClickHouse makes at startup.
+	// ClickHouse在启动时执行的唯一一项内存检查。
 	if r.Memory.Available && r.Memory.AvailableBytes > 0 {
 		const twoGiB = 2 << 30
 		status, note := "ok", ""
@@ -194,17 +194,17 @@ func hostChecks(r *hostinfo.Report) []map[string]interface{} {
 	return out
 }
 
-// WithAnalysis attaches query-analysis options + the directory holding
-// the .sql files. When opts is enabled, Generate adds a "Query
-// Analysis" section to the dashboard, rendered from the same SQL the
-// AnalysisCollector writes to disk. Returns the receiver for chaining.
+// WithAnalysis附加查询分析选项+存放
+// .sql文件的目录。当opts启用时，Generate会向dashboard添加"Query
+// Analysis"部分，使用AnalysisCollector写入磁盘的相同SQL
+// 渲染。返回receiver以支持链式调用。
 func (g *Generator) WithAnalysis(opts query.AnalysisOpts, dir string) *Generator {
 	g.analysis = opts
 	g.analysisDir = dir
 	return g
 }
 
-// chResult is the JSONCompact response envelope from ClickHouse.
+// chResult是ClickHouse的JSONCompact响应信封。
 type chResult struct {
 	Meta []struct {
 		Name string `json:"name"`
@@ -214,7 +214,7 @@ type chResult struct {
 	Rows int                 `json:"rows"`
 }
 
-// records converts chResult rows to a slice of column→value maps.
+// records将chResult的行转换为column→value映射的切片。
 func (r *chResult) records() []map[string]interface{} {
 	if r == nil || r.Rows == 0 {
 		return []map[string]interface{}{}
@@ -234,17 +234,17 @@ func (r *chResult) records() []map[string]interface{} {
 	return out
 }
 
-// sysTable returns the correct system table reference for the current mode.
-// Delegated to the shared template helper — see internal/query/template.go
-// for the cloud-shared-tables allowlist (single source of truth).
+// sysTable返回当前模式下正确的system表引用。
+// 委托给共享模板helper — 参见internal/query/template.go
+// 中的cloud-shared-tables允许列表（唯一事实来源）。
 func (g *Generator) sysTable(table string) string {
 	return query.SysTable(g.mode, table)
 }
 
-// parseUInt64 extracts an integer from a JSONCompact cell. ClickHouse
-// serialises UInt64/Int64 as JSON strings by default
-// (output_format_json_quote_64bit_integers=1), so a direct unmarshal into
-// float64 fails silently. This helper accepts both forms.
+// parseUInt64从JSONCompact单元格中提取整数。ClickHouse
+// 默认将UInt64/Int64序列化为JSON字符串
+// （output_format_json_quote_64bit_integers=1），因此直接unmarshal到
+// float64会静默失败。此helper同时接受两种形式。
 func parseUInt64(raw json.RawMessage) int64 {
 	var s string
 	if err := json.Unmarshal(raw, &s); err == nil {
@@ -257,7 +257,7 @@ func parseUInt64(raw json.RawMessage) int64 {
 	return int64(n)
 }
 
-// execJSON runs a SQL statement (no FORMAT clause) and parses the JSONCompact response.
+// execJSON运行一条SQL语句（不带FORMAT子句）并解析JSONCompact响应。
 func (g *Generator) execJSON(sql string) (*chResult, error) {
 	raw, err := g.client.ExecuteQueryWithFormat(sql)
 	if err != nil {
@@ -265,23 +265,23 @@ func (g *Generator) execJSON(sql string) (*chResult, error) {
 	}
 	var res chResult
 	if err := json.Unmarshal([]byte(raw), &res); err != nil {
-		return nil, fmt.Errorf("json parse: %w (%.200s)", err, raw)
+		return nil, fmt.Errorf("JSON 解析失败：%w（%.200s）", err, raw)
 	}
 	return &res, nil
 }
 
-// safeQuery runs a query, prints a warning on failure, and always returns records.
+// safeQuery运行查询，失败时打印警告，并且始终返回records。
 func (g *Generator) safeQuery(label, sql string) []map[string]interface{} {
 	if g.essential() && heavyPanels[label] {
 		g.skippedPanels = append(g.skippedPanels, label)
 		return []map[string]interface{}{}
 	}
 	if g.keeperDown && keeperPanels[label] {
-		g.skippedPanels = append(g.skippedPanels, label+" (no Keeper session)")
+		g.skippedPanels = append(g.skippedPanels, label+"（无 Keeper 会话）")
 		return []map[string]interface{}{}
 	}
 	if g.stop != nil && g.stop() {
-		g.skippedPanels = append(g.skippedPanels, label+" (time budget)")
+		g.skippedPanels = append(g.skippedPanels, label+"（时间预算）")
 		return []map[string]interface{}{}
 	}
 	res, err := g.execJSON(sql)
@@ -292,9 +292,9 @@ func (g *Generator) safeQuery(label, sql string) []map[string]interface{} {
 	return res.records()
 }
 
-// scalarCount runs sql (expected to return a single count()) and returns
-// the value. count() is UInt64, JSON-rendered as a quoted string, so both
-// string and numeric forms are parsed.
+// scalarCount运行sql（预期返回单个count()）并返回
+// 该值。count()是UInt64，JSON渲染为带引号的字符串，因此
+// 字符串和数值两种形式都会被解析。
 func (g *Generator) scalarCount(sql string) (int64, error) {
 	r, err := g.execJSON(sql)
 	if err != nil {
@@ -315,19 +315,19 @@ func (g *Generator) scalarCount(sql string) (int64, error) {
 	return 0, nil
 }
 
-// probe runs a schema-existence count query (memoized by key) and reports
-// whether the object exists.
+// probe运行一次模式存在性count查询（按key缓存），并报告
+// 对象是否存在。
 //
-// On a probe ERROR it fails OPEN — assumes the object is present and prints
-// a [dashboard] warning. A transient probe failure must not silently
-// downgrade the dashboard to its oldest-server shape (this tool exists to
-// diagnose; a silent downgrade would be the wrong default). If the object
-// really is absent, the subsequent full query fails through safeQuery,
-// which surfaces its own visible warning. A genuine zero count means
-// "absent" and selects the fallback.
+// 探测出错时它FAIL OPEN — 假定对象存在并打印
+// 一条[dashboard]警告。临时性探测失败不得静默
+// 将dashboard降级为最旧服务器的形态（本工具存在的意义
+// 就是诊断；静默降级是错误的默认行为）。若对象
+// 确实不存在，后续的完整查询会经safeQuery失败，
+// 并给出自己的可见警告。真正的零计数意味着
+// "不存在"，从而选择回退方案。
 func (g *Generator) probe(key, sql string) bool {
-	// No client to probe with (e.g. unit tests building SQL in isolation):
-	// assume present so we emit the full, modern query.
+	// 没有可用于探测的client（例如隔离构建SQL的单元测试）：
+	// 假定存在，以便输出完整的现代查询。
 	if g.client == nil {
 		return true
 	}
@@ -339,7 +339,7 @@ func (g *Generator) probe(key, sql string) bool {
 	}
 	n, err := g.scalarCount(sql)
 	if err != nil {
-		fmt.Printf("  [dashboard] schema probe %q failed: %v (assuming present)\n", key, err)
+		fmt.Printf("  [dashboard] schema 探测 %q 失败：%v（假定存在）\n", key, err)
 		g.probeCache[key] = true
 		return true
 	}
@@ -348,24 +348,24 @@ func (g *Generator) probe(key, sql string) bool {
 	return present
 }
 
-// hasColumn / hasTable let the dashboard's live queries stay compatible
-// across the supported version range (ClickHouse 22.8+) without
-// hard-coding per-column "added-in" versions. The dashboard builds its
-// SQL dynamically (unlike the .sql query files, which use the
-// version-directory mechanism), so a runtime schema check is both
-// simpler and more robust — it also covers optional tables that may be
-// disabled by config on any version. Schema is identical across
-// replicas, so these check the local system tables directly.
+// hasColumn / hasTable让dashboard的实时查询在
+// 支持的版本范围（ClickHouse 22.8+）内保持兼容，而无需
+// 硬编码每个列的"引入版本"。dashboard动态
+// 构建SQL（不同于使用版本目录机制的
+// .sql查询文件），因此运行时模式检查既
+// 更简单也更稳健 — 它还覆盖了可能在任何版本上
+// 被配置禁用的可选表。模式在各副本间
+// 相同，因此这些检查直接查询本地system表。
 func (g *Generator) hasColumn(table, column string) bool {
-	// Guard against a privilege-blind probe. ClickHouse filters
-	// system.columns by grant SILENTLY — a user without SELECT on
-	// system.<table> gets zero rows, not ACCESS_DENIED. That reads as
-	// "column absent" and would degrade every gated panel to its
-	// oldest-server shape on a modern server, with no warning (observed
-	// on a Cloud 26.2 service with only database-level grants).
+	// 防止权限盲区导致的误判。ClickHouse会
+	// 按grant静默过滤system.columns — 没有system.<table>
+	// SELECT权限的用户得到零行，而不是ACCESS_DENIED。这会被读成
+	// "列不存在"，并会让每个受控面板在现代服务器上
+	// 降级为最旧服务器的形态，且没有任何警告（在仅具
+	// 数据库级grant的Cloud 26.2服务上观察到）。
 	//
-	// A table that really exists always has columns, so "I can't see ANY
-	// column of this table" means the probe cannot answer — fail open.
+	// 真正存在的表一定有列，因此"看不到此表的任何
+	// 一列"意味着探测无法作答 — fail open。
 	if !g.probeCanSeeColumns(table) {
 		return true
 	}
@@ -374,9 +374,9 @@ func (g *Generator) hasColumn(table, column string) bool {
 		table, column))
 }
 
-// probeCanSeeColumns reports whether system.columns exposes any column of
-// the given system table to the current user. Warns once per table when it
-// cannot, since every hasColumn() answer for that table is then a guess.
+// probeCanSeeColumns报告system.columns是否向当前用户
+// 暴露给定system表的任何列。当无法看到时
+// 每张表警告一次，因为此后该表的所有hasColumn()答案都只是猜测。
 func (g *Generator) probeCanSeeColumns(table string) bool {
 	key := "visible:" + table
 	if g.probeCache != nil {
@@ -387,54 +387,54 @@ func (g *Generator) probeCanSeeColumns(table string) bool {
 	visible := g.probe(key, fmt.Sprintf(
 		"SELECT count() FROM system.columns WHERE database='system' AND table='%s'", table))
 	if !visible {
-		// Don't attribute the cause: this probe reads the LOCAL
-		// system.columns, so zero rows can mean a missing SELECT grant OR —
-		// in cloud — a table that only exists on a remote replica. Both lead
-		// to the same fail-open, so state the effect and let the operator
-		// judge the cause.
-		fmt.Printf("  [dashboard] cannot inspect columns of system.%s locally "+
-			"— assuming modern columns are present\n", table)
+		// 不要归咎原因：此探测读取的是本地
+		// system.columns，因此零行可能意味着缺少SELECT grant，或者 —
+		// 在cloud中 — 表只存在于远程副本。两者都
+		// 导致相同的fail-open，因此只陈述结果，让操作者
+		// 判断原因。
+		fmt.Printf("  [dashboard] 无法在本地检查 system.%s 的列 "+
+			"— 假定现代列均存在\n", table)
 	}
 	return visible
 }
 
 func (g *Generator) hasTable(table string) bool {
-	// Unlike column schema (identical across replicas), a table's
-	// *existence* can be per-replica — system.crash_log only materialises
-	// on the node that crashed. In cloud mode we probe every replica so a
-	// crash on a non-serving node is at least DETECTED (the probe returns
-	// true and the panel query runs).
+	// 与列模式（各副本相同）不同，表的
+	// *存在性*可能因副本而异 — system.crash_log只会
+	// 在崩溃的节点上出现。cloud模式下我们探测每个副本，这样
+	// 非服务节点上的崩溃至少能被DETECTED（探测返回
+	// true，且面板查询会执行）。
 	//
-	// Honest limit: in that partial-existence case the guarded panel
-	// query — clusterAllReplicas(default, system.<table>) — still raises
-	// UNKNOWN_TABLE on the replicas that lack the table, so the outcome
-	// is a visible [dashboard] error rather than the crashed node's rows.
-	// That is the intended "surface, don't hide" tradeoff: rendering the
-	// rows would need a fault-tolerant per-node fan-out.
+	// 诚实的局限：在这种部分存在的情况下，受控面板
+	// 查询 — clusterAllReplicas(default, system.<table>) — 仍会在
+	// 缺少该表的副本上抛出UNKNOWN_TABLE，因此结果
+	// 是可见的[dashboard]错误，而不是崩溃节点的行。
+	// 这正是预期的"暴露而非隐藏"权衡：要渲染这些行
+	// 需要容错的逐节点扇出。
 	//
-	// (system.tables is listed in SharedSystemTables — see
-	// internal/query/template.go — because its user-table rows are the
-	// same everywhere; that's about row contents, not the existence of
-	// per-node system log tables, which is what we probe here.)
+	// （system.tables列在SharedSystemTables中 — 参见
+	// internal/query/template.go — 因为它的用户表行在
+	// 各处相同；这说的是行内容，而不是
+	// 逐节点system日志表的存在性，后者才是我们在这里探测的。）
 	tablesRef := "system.tables"
 	if g.mode == "cloud" {
 		tablesRef = "clusterAllReplicas(default, system.tables)"
 	}
-	// Same privilege-blindness guard as hasColumn: system.tables is
-	// filtered by grant without erroring, and a server always has SOME
-	// system tables — so zero rows means the probe can't answer. Fail open
-	// and let the panel query surface its own error.
+	// 与hasColumn相同的权限盲区保护：system.tables会
+	// 按grant过滤而不报错，而服务器总会有SOME
+	// system表 — 因此零行意味着探测无法作答。fail open
+	// 并让面板查询暴露自己的错误。
 	//
-	// Warn only on the first table, not once per guarded panel: the probe is
-	// memoized but a bare Printf after it would repeat the same line for
-	// crash_log, asynchronous_insert_log, …
+	// 只在第一张表上警告，而不是每个受控面板一次：探测结果
+	// 已缓存，但在其后直接Printf会为
+	// crash_log、asynchronous_insert_log等重复同一行。
 	const visKey = "visible:system-tables"
 	_, alreadyProbed := g.probeCache[visKey]
 	if !g.probe(visKey, fmt.Sprintf(
 		"SELECT count() FROM %s WHERE database='system'", tablesRef)) {
 		if !alreadyProbed {
-			fmt.Printf("  [dashboard] cannot read %s — assuming the system log "+
-				"tables exist (check SELECT grants if panels look empty)\n", tablesRef)
+			fmt.Printf("  [dashboard] 无法读取 %s — 假定系统日志表存在 "+
+				"（若面板为空请检查 SELECT 授权）\n", tablesRef)
 		}
 		return true
 	}
@@ -442,36 +442,36 @@ func (g *Generator) hasTable(table string) bool {
 		"SELECT count() FROM %s WHERE database='system' AND name='%s'", tablesRef, table))
 }
 
-// Generate produces dashboard.html inside outputDir.
-// alertResults may be nil or empty if alert evaluation was skipped.
+// Generate在outputDir中生成dashboard.html。
+// 若跳过了告警评估，alertResults可能为nil或空。
 func (g *Generator) Generate(outputDir string, alertResults []alert.Result) error {
-	fmt.Println("\nGenerating HTML dashboard...")
+	fmt.Println("\n正在生成 HTML 仪表盘...")
 	payload := g.collect()
-	// The schema graph is a second, self-contained page next to dashboard.html,
-	// loaded on demand from the Schema tab (see schema_graph.go for why it is
-	// not inlined). Written first, and the payload points at it only once it
-	// exists: a dashboard.html copied out of the bundle then shows a note where
-	// the tab would be, not a broken frame.
+	// 模式关系图是dashboard.html旁独立自包含的第二页面，
+	// 从Schema标签页按需加载（为何不内联见schema_graph.go）。
+	// 它先写入，只有当它存在后payload才指向它：
+	// 此后从bundle复制出的dashboard.html会在该标签页处显示提示，
+	// 而不是一个损坏的框架。
 	version, _ := payload["version"].(string)
 	var sg map[string]interface{}
 	switch {
 	case g.bundle != nil:
-		sg = g.schemaGraphFromFiles(version) // nil when system.tables was not collected
+		sg = g.schemaGraphFromFiles(version) // system.tables未采集时为nil
 	case g.essential():
-		g.skippedPanels = append(g.skippedPanels, "schema graph")
+		g.skippedPanels = append(g.skippedPanels, "模式关系图")
 	default:
 		sg = g.collectSchemaGraph(version)
 	}
 	if sg != nil {
 		dst := filepath.Join(outputDir, schemaGraphFile)
 		if err := os.WriteFile(dst, []byte(buildSchemaGraphHTML(sg)), 0640); err != nil {
-			fmt.Printf("  [dashboard] schema graph not written: %v\n", err)
+			fmt.Printf("  [dashboard] 未写入模式关系图：%v\n", err)
 		} else {
 			payload["schema_graph"] = schemaGraphSummary(sg)
-			fmt.Printf("Schema graph saved: %s\n", dst)
+			fmt.Printf("模式关系图已保存：%s\n", dst)
 		}
 	}
-	// Needs outputDir, so it happens here rather than in collect().
+	// 需要outputDir，因此在这里而不是在collect()中完成。
 	payload["bundle_files"] = collectBundleFiles(outputDir)
 	payload["collect"] = map[string]interface{}{
 		"kind": g.collectMode.kind, "summary": g.collectMode.summary,
@@ -487,16 +487,16 @@ func (g *Generator) Generate(outputDir string, alertResults []alert.Result) erro
 	html := renderHTML(payload, g.airgap)
 	dst := filepath.Join(outputDir, "dashboard.html")
 	if err := os.WriteFile(dst, []byte(html), 0640); err != nil {
-		return fmt.Errorf("write dashboard: %w", err)
+		return fmt.Errorf("写入 dashboard 失败：%w", err)
 	}
-	fmt.Printf("Dashboard saved: %s\n", dst)
+	fmt.Printf("仪表盘已保存：%s\n", dst)
 	return nil
 }
 
-// keeperPanelData reads keeper/<member>.txt — written before the dashboard,
-// in the same run directory — for the Keeper members panel. Nothing when the
-// files are absent (older bundles, cloud by default, -keeper-mntr off), so
-// the panel is not rendered at all rather than shown empty.
+// keeperPanelData读取keeper/<member>.txt — 在dashboard之前写入，
+// 位于同一运行目录 — 供Keeper成员面板使用。文件
+// 不存在时（旧bundle、cloud默认、-keeper-mntr关闭）返回空，
+// 因此面板完全不渲染，而不是显示为空。
 func keeperPanelData(runDir string) map[string]interface{} {
 	ms := keeper.ReadMembers(runDir)
 	if len(ms) == 0 {
@@ -505,9 +505,9 @@ func keeperPanelData(runDir string) map[string]interface{} {
 	return map[string]interface{}{"keeper_members": ms, "keeper_leaderless": keeper.Leaderless(ms)}
 }
 
-// tablesListSQL builds the all-tables query (with size). system.tables and
-// system.parts are shared across replicas, so the same query works for
-// cloud, onprem, and gov.
+// tablesListSQL构建所有表的查询（含大小）。system.tables和
+// system.parts在各副本间共享，因此同一查询适用于
+// cloud、onprem和gov。
 func (g *Generator) tablesListSQL() string {
 	notSystem := "database NOT IN ('system','information_schema','INFORMATION_SCHEMA')"
 	return fmt.Sprintf(`
@@ -532,38 +532,38 @@ func (g *Generator) tablesListSQL() string {
 		LIMIT 2000`, g.sysTable("tables"), g.sysTable("parts"), notSystem)
 }
 
-// sampleQueryCol returns the projection for a representative SQL text per
-// normalized_query_hash — or a redaction stub in gov mode.
+// sampleQueryCol返回每个
+// normalized_query_hash的代表性SQL文本投影 — 或在gov模式下返回脱敏占位。
 //
-// Every row in one of these groups shares a normalized_query_hash, i.e. the
-// same query SHAPE, so any(query) is a genuine example of the group rather
-// than an arbitrary mix; only the literals belong to whichever execution was
-// picked. It is truncated because a pathological query can be megabytes and
-// this text is embedded directly in the HTML.
+// 这些分组中的每一行共享一个normalized_query_hash，即
+// 相同的查询SHAPE，因此any(query)是该分组的真实示例，
+// 而不是任意混合；只有字面量属于被选中的那次执行。
+// 它被截断，因为病态查询可能有数兆字节，
+// 而这段文本会直接嵌入HTML。
 //
-// Gov mode gets a stub: queries.gov/*.sql hashes database and table names, and
-// query_log.query is the raw SQL the customer ran against those same names, so
-// shipping it here would undo the hashing.
+// gov模式得到占位：queries.gov/*.sql会哈希数据库和表名，
+// 而query_log.query是客户针对这些同名对象运行的原始SQL，
+// 在此处输出它会破坏哈希。
 func (g *Generator) sampleQueryCol() string {
 	if g.mode == "gov" {
 		return "'' AS sample_query"
 	}
-	// leftUTF8: byte-wise left() would split a multi-byte character in the
-	// query text and leave invalid UTF-8. Same reason as the collectors.
+	// leftUTF8：按字节的left()会在查询文本中拆分多字节
+	// 字符，留下无效UTF-8。与collector中的原因相同。
 	return "leftUTF8(any(query), 600) AS sample_query"
 }
 
-// querySlowSQL builds the slowest-query-patterns panel.
+// querySlowSQL构建最慢查询模式面板。
 //
-// hash is the FULL normalized_query_hash, as a string. It is a UInt64, so it
-// must never reach the page as a JSON number: JavaScript rounds past 2^53 and
-// would silently corrupt the identifier the reader is meant to copy.
+// hash是完整的normalized_query_hash，以字符串表示。它是UInt64，
+// 绝不能以JSON数字到达页面：JavaScript会舍入超过2^53的值，
+// 从而静默破坏读者本应复制的标识符。
 func (g *Generator) querySlowSQL() string {
-	// Same window contract as queryByUserSQL: exception rows must be IN the
-	// window or countIf(exception_code != 0) is structurally always zero —
-	// failures log as ExceptionWhileProcessing/ExceptionBeforeStart, never
-	// QueryFinish. Cost aggregates stay QueryFinish-only (sum/greatest rather
-	// than avgIf, so an all-failure shape yields 0, not a JSON-hostile nan).
+	// 与queryByUserSQL相同的窗口约定：异常行必须IN
+	// 窗口内，否则countIf(exception_code != 0)在结构上恒为零 —
+	// 失败会记录为ExceptionWhileProcessing/ExceptionBeforeStart，绝不会
+	// 是QueryFinish。成本聚合仍仅限QueryFinish（用sum/greatest而不是
+	// avgIf，因此全失败的形态得到0，而不是对JSON不友好的nan）。
 	return fmt.Sprintf(
 		`SELECT toString(normalized_query_hash) AS hash,
 				query_kind, user,
@@ -587,8 +587,8 @@ func (g *Generator) querySlowSQL() string {
 	)
 }
 
-// queryHeavySQL builds the heaviest-reads panel. Same full-hash and
-// sample-query contract as querySlowSQL.
+// queryHeavySQL构建读取量最大的面板。与
+// querySlowSQL相同的完整hash和示例查询约定。
 func (g *Generator) queryHeavySQL() string {
 	return fmt.Sprintf(
 		`SELECT toString(normalized_query_hash) AS hash,
@@ -607,49 +607,49 @@ func (g *Generator) queryHeavySQL() string {
 	)
 }
 
-// textLogRowCap bounds what the Logs panel embeds.
+// textLogRowCap限制Logs面板嵌入的行数。
 //
-// This number is the whole reason the panel is safe. The raw server logs are
-// tail-copied into the bundle at up to 50 MiB PER FILE (--logs-max-mb), and
-// inlining that into a self-contained HTML would produce a document the
-// browser must parse as one string literal before it paints anything. So the
-// panel embeds bounded, structured, already-triaged rows from system.text_log
-// and the Collected Files panel links to the raw files.
+// 这个数字正是面板安全的原因。原始服务器日志以每文件
+// 最多50 MiB（--logs-max-mb）尾部拷贝进bundle，
+// 将其内联到自包含HTML会生成一个浏览器必须先作为
+// 单个字符串字面量解析完才能绘制的文档。因此
+// 面板嵌入来自system.text_log的有界、结构化、已分诊的行，
+// 而“已采集文件”面板链接到原始文件。
 const textLogRowCap = 1000
 
-// textLogMessageCap trims each message. system.text_log messages are unbounded
-// (stack traces, whole queries); at the row cap an untrimmed column is the
-// difference between a ~350 KiB payload and a multi-megabyte one.
+// textLogMessageCap截断每条消息。system.text_log消息无界
+// （堆栈跟踪、整条查询）；在行数上限下，未截断的列是
+// 约350 KiB负载与数兆字节负载之间的差别。
 const textLogMessageCap = 300
 
-// textLogSQL builds the Logs panel query: recent Warning-and-worse only.
+// textLogSQL构建Logs面板查询：仅最近的Warning及更严重级别。
 //
-// Info/Debug/Trace are deliberately excluded. They are the bulk of the volume
-// and the reason a naive log panel is unusable; anyone who needs them wants the
-// raw file, which is linked under Collected Files.
+// 刻意排除Info/Debug/Trace。它们构成了大部分数据量，
+// 也是朴素日志面板不可用的原因；需要它们的人想要的是
+// 原始文件，已在“已采集文件”下链接。
 func (g *Generator) textLogSQL() string {
 	host := ""
 	if g.hasColumn("text_log", "hostname") {
 		host = "hostname,"
 	}
-	// Filter and slice in a SUBQUERY, format in the outer SELECT.
+	// 在SUBQUERY中过滤和切片，在外层SELECT中格式化。
 	//
-	// The analyzer resolves WHERE-clause identifiers against SELECT aliases, so
-	// a flat `SELECT toString(event_time) AS event_time ... WHERE event_time >
-	// now() - INTERVAL 24 HOUR` compares String to DateTime and dies with
-	// NO_COMMON_TYPE (code 386) — verified against 26.4.5.143. That is the same
-	// trap already documented for exception_code in the exceptions panel; here
-	// the inner query keeps event_time a DateTime so the predicate is typed,
-	// and only the outer projection stringifies it.
+	// 分析器会根据SELECT别名解析WHERE子句中的标识符，因此
+	// 扁平的`SELECT toString(event_time) AS event_time ... WHERE event_time >
+	// now() - INTERVAL 24 HOUR`会将String与DateTime比较并以
+	// NO_COMMON_TYPE（code 386）失败 — 已在26.4.5.143上验证。这与
+	// exceptions面板中已为exception_code记录的陷阱相同；这里
+	// 内层查询让event_time保持DateTime，使谓词有类型，
+	// 只有外层投影将其转成字符串。
 	//
-	// Ordering the outer query by the stringified value is still chronological:
-	// 'YYYY-MM-DD hh:mm:ss' sorts lexicographically in time order.
+	// 按字符串化值对外层查询排序仍然按时间顺序：
+	// 'YYYY-MM-DD hh:mm:ss'按字典序排序即为时间顺序。
 	//
-	// leftUTF8 rather than left: left() counts bytes, so truncating a message
-	// mid-character leaves invalid UTF-8. json.Marshal masks that as U+FFFD
-	// here rather than breaking the page, but the archived collectors write
-	// the server's bytes straight to disk and cannot afford it, so both use
-	// the same function.
+	// 用leftUTF8而不是left：left()按字节计数，因此截断消息
+	// 可能拆分字符并留下无效UTF-8。json.Marshal会将其掩盖为U+FFFD
+	// 而不破坏页面，但归档collector会把服务器字节直接写入
+	// 磁盘，无法承受这一点，因此两者使用
+	// 相同的函数。
 	return fmt.Sprintf(
 		`SELECT toString(event_time) AS event_time,
 				%s level, logger_name,
@@ -667,15 +667,15 @@ func (g *Generator) textLogSQL() string {
 	)
 }
 
-// collectBundleFiles indexes every file the run wrote next to dashboard.html,
-// so the dashboard can point at the rest of the bundle instead of swallowing
-// it. Nothing here is embedded: the raw server logs alone are tail-copied at up
-// to 50 MiB per file (--logs-max-mb), and inlining that would produce a
-// document the browser cannot open.
+// collectBundleFiles为运行写入dashboard.html旁的每个文件建立索引，
+// 使dashboard能指向bundle的其余部分，而不是将其
+// 吞掉。这里不嵌入任何内容：仅原始服务器日志就以每文件
+// 最多50 MiB（--logs-max-mb）尾部拷贝，内联会生成
+// 浏览器无法打开的文档。
 //
-// Paths are bundle-relative, so the links resolve from the extracted archive
-// and simply 404 if someone mails dashboard.html on its own — which is why the
-// panel says the files live beside it.
+// 路径是bundle相对的，因此链接在解压的归档中有效，
+// 如果单独寄出dashboard.html则只会404 — 这就是
+// 面板说明文件位于其旁边的缘故。
 func collectBundleFiles(outputDir string) []map[string]interface{} {
 	out := []map[string]interface{}{}
 	err := filepath.Walk(outputDir, func(path string, info os.FileInfo, err error) error {
@@ -687,8 +687,8 @@ func collectBundleFiles(outputDir string) []map[string]interface{} {
 			return nil
 		}
 		rel = filepath.ToSlash(rel)
-		// The dashboard does not list itself — nor its schema graph page, which
-		// it opens from its own tab — and OS turds are not artifacts.
+		// dashboard不列出自己 — 也不列出它从自身标签页打开的
+		// 模式关系图页面 — 操作系统垃圾文件也不是产物。
 		if rel == "dashboard.html" || rel == schemaGraphFile || strings.HasPrefix(info.Name(), ".") {
 			return nil
 		}
@@ -716,8 +716,8 @@ func collectBundleFiles(outputDir string) []map[string]interface{} {
 	return out
 }
 
-// path0 returns the top-level folder of a bundle-relative path, or "" for a
-// file sitting at the bundle root.
+// path0返回bundle相对路径的顶层文件夹，对于位于
+// bundle根目录的文件则返回""。
 func path0(rel string) string {
 	if i := strings.Index(rel, "/"); i >= 0 {
 		return rel[:i]
@@ -725,7 +725,7 @@ func path0(rel string) string {
 	return ""
 }
 
-// formatBytes renders a byte count in the largest sensible unit.
+// formatBytes以最合理的最大单位渲染字节数。
 func formatBytes(b int64) string {
 	const u = 1024
 	if b < u {
@@ -739,10 +739,10 @@ func formatBytes(b int64) string {
 	return fmt.Sprintf("%.1f %ciB", float64(b)/float64(div), "KMGT"[exp])
 }
 
-// topTablesSQL builds the largest-tables panel.
+// topTablesSQL构建最大表面板。
 //
-// total_rows uses formatReadableQuantity, NOT formatReadableSize: the latter is
-// the byte formatter and renders 1,992,000 rows as "1.90 MiB".
+// total_rows使用formatReadableQuantity，而不是formatReadableSize：后者是
+// 字节格式化器，会把1,992,000行渲染成"1.90 MiB"。
 func (g *Generator) topTablesSQL() string {
 	return fmt.Sprintf(
 		`SELECT database, table, count() AS parts,
@@ -759,18 +759,18 @@ func (g *Generator) topTablesSQL() string {
 	)
 }
 
-// queryByUserSQL builds the per-user activity summary.
+// queryByUserSQL构建每用户活动摘要。
 //
-// The window must include the exception types, not just QueryFinish: a failed
-// query is logged as ExceptionWhileProcessing (threw during execution) or
-// ExceptionBeforeStart (threw during parsing/analysis, e.g. UNKNOWN_TABLE) and
-// NEVER as QueryFinish. Scoping the whole query to QueryFinish made
-// countIf(exception_code != 0) structurally always 0, so the panel's error
-// column — and the alert-row highlight keyed on it — could never fire.
+// 窗口必须包含异常类型，而不仅是QueryFinish：失败的
+// 查询会记录为ExceptionWhileProcessing（执行期间抛出）或
+// ExceptionBeforeStart（解析/分析期间抛出，例如UNKNOWN_TABLE），
+// 绝不会是QueryFinish。将整个查询限定在QueryFinish会使
+// countIf(exception_code != 0)在结构上恒为0，因此面板的错误
+// 列 — 以及以它为键的alert-row高亮 — 永远无法触发。
 //
-// executions and the cost aggregates stay QueryFinish-only so their meaning is
-// unchanged. Average duration is sum/count rather than avgIf so a user with
-// only failures yields 0 instead of a JSON-hostile nan.
+// executions和成本聚合仍仅限QueryFinish，使其含义
+// 不变。平均耗时是sum/count而不是avgIf，因此只有
+// 失败的用户得到0，而不是对JSON不友好的nan。
 func (g *Generator) queryByUserSQL() string {
 	return fmt.Sprintf(
 		`SELECT user,
@@ -788,29 +788,29 @@ func (g *Generator) queryByUserSQL() string {
 	)
 }
 
-// dictionariesSQL builds the dictionaries query, omitting last_exception
-// for gov. In cloud mode the query goes through clusterAllReplicas so
-// we get one row per (dictionary, replica) — dictionary RUNTIME state
-// (status, bytes_allocated, hit_rate, query_count) is per-pod even
-// though the definition is shared via Keeper, and a dict that's been
-// queried on pod A but not on pod B will appear LOADED on A and
-// NOT_LOADED on B. hostname() is evaluated remotely on each replica so
-// we can label each row with the pod that produced it.
+// dictionariesSQL构建字典查询，对gov省略last_exception。
+// cloud模式下查询经过clusterAllReplicas，因此
+// 每个(dictionary, replica)得到一行 — 字典的RUNTIME状态
+// （status、bytes_allocated、hit_rate、query_count）是按pod的，
+// 尽管定义通过Keeper共享；在pod A上被查询过而在pod B上没有的
+// 字典会在A上显示LOADED，在B上显示
+// NOT_LOADED。hostname()在每个副本上远程求值，
+// 因此可以用产生该行的pod标记每一行。
 //
-// Column choice tracks the system.dictionaries reference:
+// 列选择依据system.dictionaries参考：
 //
 //	https://clickhouse.com/docs/operations/system-tables/dictionaries
 //
-// In gov mode we additionally redact `source`, `origin`, `comment`
-// and `last_exception` — these can carry connection strings, file
-// paths, exception text and user comments that reveal schema or
-// infrastructure details that gov mode is otherwise hashing.
+// gov模式下我们额外脱敏`source`、`origin`、`comment`
+// 和`last_exception` — 它们可能携带连接字符串、文件
+// 路径、异常文本和用户注释，从而泄露gov模式
+// 原本正在哈希的模式或基础设施细节。
 //
-// NOTE: currently unreachable — cmd/main.go refuses to generate the
-// dashboard in gov mode at all, because the other ~20 panels select raw
-// identifiers this redaction doesn't cover. Kept (like the gov branches
-// in the async panel and collectAnalysis) for the hashed-gov-dashboard
-// follow-up that would restore it; it is NOT a live guarantee today.
+// 注意：目前不可达 — cmd/main.go在gov模式下
+// 完全拒绝生成dashboard，因为其余约20个面板会选取原始
+// 标识符，而本脱敏并未覆盖。保留它（与异步面板和
+// collectAnalysis中的gov分支一样），以便后续恢复哈希gov dashboard
+// 的后续工作；它NOT是今天的生效保证。
 func (g *Generator) dictionariesSQL() string {
 	exceptionCol, sourceCol, originCol, commentCol := "last_exception", "source", "origin", "comment"
 	if g.mode == "gov" {
@@ -819,8 +819,8 @@ func (g *Generator) dictionariesSQL() string {
 		originCol = "'' AS origin"
 		commentCol = "'' AS comment"
 	}
-	// error_count was added to system.dictionaries after 22.8; fall back
-	// to 0 so the dashboard column still renders on older servers.
+	// error_count是在22.8之后加入system.dictionaries的；回退
+	// 到0，使dashboard列在较旧服务器上仍能渲染。
 	errorCountCol := "error_count"
 	if !g.hasColumn("dictionaries", "error_count") {
 		errorCountCol = "0 AS error_count"
@@ -849,14 +849,14 @@ func (g *Generator) dictionariesSQL() string {
 		errorCountCol, sourceCol, originCol, commentCol, exceptionCol, g.sysTable("dictionaries"))
 }
 
-// collect gathers all metrics from ClickHouse and returns a JSON-ready map.
-// keeperMetricSQL is the Keeper Health panel's primary series: the two
-// counters the Keeper health test is built on (see alerts/keeper_health.yaml
-// and the skill's HC-3.8), per hour over 7 days, plus the inputs for the
-// latency line and the session range. metric_log is one row per second per
-// server, so reading five narrow columns over a week is a few MiB — cheap
-// enough for a live dashboard query. Columns that a version lacks are
-// replaced by 0 so the panel degrades instead of erroring.
+// collect从ClickHouse收集所有指标并返回可直接JSON化的map。
+// keeperMetricSQL是Keeper Health面板的主序列：
+// Keeper健康测试所基于的两个计数器（见alerts/keeper_health.yaml
+// 和skill的HC-3.8），按小时覆盖7天，外加
+// 延迟线和会话范围所需的输入。metric_log是每服务器每秒一行，
+// 因此读取一周的五个窄列只有几MiB — 足够便宜，
+// 可用于实时dashboard查询。某版本缺少的列
+// 会替换为0，使面板降级而不是报错。
 func (g *Generator) keeperMetricSQL(hasWait, hasSession bool) string {
 	wait := "0 AS wait_us"
 	if hasWait {
@@ -879,10 +879,10 @@ func (g *Generator) keeperMetricSQL(hasWait, hasSession bool) string {
 		wait, sess, g.sysTable("metric_log"))
 }
 
-// poolsMetricSQL is the background pools panel's series: per hour, the
-// hourly average of tasks in the fetch, schedule and merge pools and the
-// max over replicas of that average, so one saturated node among idle ones
-// is not averaged away. Three narrow columns over 7 days of metric_log.
+// poolsMetricSQL是后台池面板的序列：每小时，
+// fetch、schedule和merge池中任务的每小时平均值，以及
+// 该平均值在各副本上的最大值，这样空闲节点中的一台饱和节点
+// 不会被平均掉。7天metric_log的三个窄列。
 func (g *Generator) poolsMetricSQL() string {
 	return fmt.Sprintf(
 		`SELECT time,
@@ -901,20 +901,20 @@ func (g *Generator) poolsMetricSQL() string {
 		g.sysTable("metric_log"))
 }
 
-// poolSizes reads background_*_pool_size from system.server_settings (23.3+)
-// or system.settings (older); one scalar per pool. On a cloud collection the
-// table fans out and min() over replicas is taken: the chart's series is the
-// worst replica's occupancy, so the smallest pool is the line it must be
-// judged against — a larger sibling's size would hide saturation. A missing
-// table or setting yields 0 — no reference line.
+// poolSizes从system.server_settings（23.3+）或
+// system.settings（更旧）读取background_*_pool_size；每个池一个标量。cloud采集中
+// 该表会扇出，并取各副本的min()：图表的序列是
+// 最差副本的占用，因此最小的池是判定时必须
+// 对照的线 — 更大的兄弟池会掩盖饱和。缺失的
+// 表或设置得到0 — 没有参考线。
 func (g *Generator) poolSizes() map[string]int64 {
 	out := map[string]int64{"fetch": 0, "schedule": 0, "merge": 0}
-	// The source follows the server version, not table visibility: from 23.3
-	// the sizes live in system.server_settings, and system.settings keeps
-	// listing the names with the old session defaults (8 / 128 vs real
-	// 16 / 512). A 23.3+ server whose server_settings is unreadable (grant)
-	// therefore gets no line at all rather than a wrong one. With an unknown
-	// version (unit tests) fall back to whichever table exists.
+	// 来源跟随服务器版本，而不是表可见性：从23.3起
+	// 大小位于system.server_settings，而system.settings仍
+	// 以旧的会话默认值列出这些名称（8 / 128，而真实
+	// 值为16 / 512）。server_settings不可读（grant）的23.3+服务器
+	// 因此完全没有线，而不是一条错误的线。对于未知
+	// 版本（单元测试）则回退到存在的任一张表。
 	table := "settings"
 	v := g.serverVersion
 	switch {
@@ -924,7 +924,7 @@ func (g *Generator) poolSizes() map[string]int64 {
 		}
 		table = "server_settings"
 	case v != (internal.Version{}):
-		// below 23.3: system.settings is authoritative
+		// 低于23.3：system.settings是权威来源
 	case g.hasTable("server_settings"):
 		table = "server_settings"
 	}
@@ -938,13 +938,13 @@ func (g *Generator) poolSizes() map[string]int64 {
 	return out
 }
 
-// keeperErrorsSQL counts the Keeper-dependent error codes per hour: 999
+// keeperErrorsSQL按小时统计依赖Keeper的错误码：999
 // KEEPER_EXCEPTION, 242 TABLE_IS_READ_ONLY, 319 UNKNOWN_STATUS_OF_INSERT,
-// 571 DATABASE_REPLICATION_FAILED and 252 TOO_MANY_PARTS (the usual
-// aftermath of merges not being scheduled). system.error_log (24.8+) is
-// preferred because it counts every thread — background merges, fetches and
-// DDL workers never reach query_log; the query_log fallback says so in the
-// panel subtitle.
+// 571 DATABASE_REPLICATION_FAILED和252 TOO_MANY_PARTS（通常
+// 是merge未被调度的后果）。system.error_log（24.8+）
+// 更受青睐，因为它统计每个线程 — 后台merge、fetch和
+// DDL worker从不进入query_log；query_log回退会在
+// 面板副标题中说明这一点。
 func (g *Generator) keeperErrorsSQL(useErrorLog bool) string {
 	if useErrorLog {
 		return fmt.Sprintf(
@@ -967,16 +967,16 @@ func (g *Generator) keeperErrorsSQL(useErrorLog bool) string {
 		g.sysTable("query_log"))
 }
 
-// keeperConnectionSQL lists the live Keeper connections (23.8+): which host,
-// how old the session is, whether it is expired. Per replica in cloud mode.
+// keeperConnectionSQL列出实时Keeper连接（23.8+）：哪个主机、
+// 会话有多旧、是否过期。cloud模式下按副本。
 func (g *Generator) keeperConnectionSQL() string {
 	host := ""
 	if g.mode == "cloud" {
 		host = "hostName() AS replica, "
 	}
-	// xid (24.3+) is the session's request counter; it wraps at 2^31 and the
-	// client renews the session — the alert keeper_xid_renewal_due turns it
-	// into hours of headroom, this column lets the reader see the raw value.
+	// xid（24.3+）是会话的请求计数器；它在2^31处回绕，
+	// 客户端会续期会话 — 告警keeper_xid_renewal_due将其
+	// 转换为小时余量，此列让读者看到原始值。
 	xid := ""
 	if g.hasColumn("zookeeper_connection", "xid") {
 		xid = ", toString(xid) AS xid"
@@ -1009,15 +1009,15 @@ func (g *Generator) collect() map[string]interface{} {
 		"total_size":      "N/A",
 	}
 
-	// version
+	// 版本
 	if r, err := g.execJSON("SELECT version() AS version"); err == nil && r.Rows > 0 {
 		var v string
 		_ = json.Unmarshal(r.Data[0][0], &v)
 		p["version"] = v
 	}
 
-	// uptime — the execution log's short form when the run recorded one, so
-	// both artefacts say the same thing; otherwise ask the server.
+	// 运行时间 — 本轮记录了执行日志的短格式时使用它，
+	// 使两个产物说法一致；否则询问服务器。
 	if g.nodeUptime == "" {
 		if r, err := g.execJSON("SELECT formatReadableTimeDelta(uptime()) AS uptime"); err == nil && r.Rows > 0 {
 			var v string
@@ -1026,9 +1026,9 @@ func (g *Generator) collect() map[string]interface{} {
 		}
 	}
 
-	// tables / databases summary (reads every table: not in an essential run)
+	// 表/数据库摘要（读取所有表：essential运行中不执行）
 	if g.essential() {
-		g.skippedPanels = append(g.skippedPanels, "table and part counts")
+		g.skippedPanels = append(g.skippedPanels, "表与 part 计数")
 	} else if r, err := g.execJSON(fmt.Sprintf(
 		`SELECT uniq(database) AS dbs, count() AS tbls
 		 FROM %s
@@ -1039,9 +1039,9 @@ func (g *Generator) collect() map[string]interface{} {
 		p["total_tables"] = parseUInt64(r.Data[0][1])
 	}
 
-	// active parts summary (reads every part: not in an essential run)
+	// 活动part摘要（读取每个part：essential运行中不执行）
 	if g.essential() {
-		// counted with the table summary above
+		// 已在上面的表摘要中计数
 	} else if r, err := g.execJSON(fmt.Sprintf(
 		`SELECT count() AS parts, formatReadableSize(sum(bytes_on_disk)) AS sz
 		 FROM %s
@@ -1055,12 +1055,12 @@ func (g *Generator) collect() map[string]interface{} {
 		p["total_size"] = sz
 	}
 
-	// ── Storage ──────────────────────────────────────────────────────────────
+	// ── 存储 ────────────────────────────────────────────────────────────────
 
-	// Compute each aggregate once and reference its alias in derived columns:
-	// CH 25.12's analyzer rejects repeated sum(bytes_on_disk) in the same
-	// SELECT — the second occurrence is treated as a nested aggregate,
-	// raising ILLEGAL_AGGREGATION.
+	// 每个聚合只计算一次，并在派生列中引用其别名：
+	// CH 25.12的分析器拒绝在同一
+	// SELECT中重复的sum(bytes_on_disk) — 第二次出现会被当作嵌套聚合，
+	// 抛出ILLEGAL_AGGREGATION。
 	p["storage_by_db"] = g.safeQuery("storage_by_db", fmt.Sprintf(
 		`SELECT database, count() AS parts, sum(rows) AS rows,
 			sum(bytes_on_disk) AS bytes_total,
@@ -1082,11 +1082,11 @@ func (g *Generator) collect() map[string]interface{} {
 		g.sysTable("tables"),
 	))
 
-	// ── Tables explorer ───────────────────────────────────────────────────────
+	// ── 表浏览器 ─────────────────────────────────────────────────────────────
 
 	p["tables_list"] = g.safeQuery("tables_list", g.tablesListSQL())
 
-	// ── Query log ─────────────────────────────────────────────────────────────
+	// ── 查询日志 ─────────────────────────────────────────────────────────────
 
 	p["query_by_time"] = g.safeQuery("query_by_time", fmt.Sprintf(
 		`SELECT toString(toStartOfHour(event_time)) AS time,
@@ -1107,15 +1107,15 @@ func (g *Generator) collect() map[string]interface{} {
 		g.sysTable("query_log"),
 	))
 
-	// Host facts, straight from the same Report that becomes host_info.json —
-	// round-tripped through JSON so the dashboard shows exactly the shape the
-	// file does rather than a second, drifting projection of it.
+	// Host facts，直接来自将成为host_info.json的同一Report —
+	// 通过JSON往返，使dashboard显示与
+	// 文件完全相同的结构，而不是第二个漂移的投影。
 	if g.hostInfo != nil {
 		g.addHostInfo(p)
 	}
 
-	// Logs: bounded Warning+ rows only. text_log is opt-in (it is off by
-	// default in OSS), so an absent table simply hides the panel.
+	// 日志：仅限有界的Warning+行。text_log需要显式启用（它在
+	// OSS中默认关闭），因此表不存在时直接隐藏面板。
 	if g.hasTable("text_log") {
 		p["text_log"] = g.safeQuery("text_log", g.textLogSQL())
 		p["text_log_row_cap"] = textLogRowCap
@@ -1126,10 +1126,10 @@ func (g *Generator) collect() map[string]interface{} {
 
 	p["query_by_user"] = g.safeQuery("query_by_user", g.queryByUserSQL())
 
-	// exceptions — return exception_code as the raw integer. In CH 25.12 the
-	// analyzer resolves WHERE-clause identifiers against SELECT aliases, so
-	// aliasing toString(exception_code) AS exception_code makes
-	// `WHERE exception_code != 0` compare a String to a UInt8 → NO_COMMON_TYPE.
+	// 异常 — 将exception_code作为原始整数返回。在CH 25.12中
+	// 分析器根据SELECT别名解析WHERE子句标识符，因此
+	// 将toString(exception_code)别名设为AS exception_code会使
+	// `WHERE exception_code != 0`将String与UInt8比较 → NO_COMMON_TYPE。
 	p["exceptions"] = g.safeQuery("exceptions", fmt.Sprintf(
 		`SELECT exception_code,
 				any(exception) AS msg, count() AS count
@@ -1139,7 +1139,7 @@ func (g *Generator) collect() map[string]interface{} {
 		g.sysTable("query_log"),
 	))
 
-	// ── Part log ──────────────────────────────────────────────────────────────
+	// ── Part日志 ────────────────────────────────────────────────────────────
 
 	p["part_log_by_time"] = g.safeQuery("part_log_by_time", fmt.Sprintf(
 		`SELECT toString(toStartOfDay(event_time)) AS time,
@@ -1159,19 +1159,19 @@ func (g *Generator) collect() map[string]interface{} {
 		g.sysTable("part_log"),
 	))
 
-	// ── Dictionaries ──────────────────────────────────────────────────────────
+	// ── 字典 ────────────────────────────────────────────────────────────────
 
 	p["dictionaries"] = g.safeQuery("dictionaries", g.dictionariesSQL())
-	// Review finding: system.dictionaries.source (and last_exception, which can
-	// quote a connection string) reached this panel unredacted on servers below
-	// 23.x. Same redactor as the JSONL collectors and the schema graph.
+	// 评审发现：system.dictionaries.source（以及last_exception，它可能
+	// 引用连接字符串）在低于23.x的服务器上未经脱敏地进入了此面板。
+	// 与JSONL collector和模式关系图使用相同的脱敏器。
 	redactDictionaryPanel(p["dictionaries"].([]map[string]interface{}))
 
-	// ── Crash log ─────────────────────────────────────────────────────────────
+	// ── 崩溃日志 ─────────────────────────────────────────────────────────────
 
-	// system.crash_log only exists once the server has recorded a crash,
-	// so it is absent on a healthy instance of any version — skip the
-	// panel rather than emit a spurious "table doesn't exist" warning.
+	// system.crash_log只有在服务器记录过崩溃后才存在，
+	// 因此任何版本的正常实例上都不存在 — 跳过
+	// 面板，而不是发出虚假的"表不存在"警告。
 	if g.hasTable("crash_log") {
 		p["crash_log"] = g.safeQuery("crash_log", fmt.Sprintf(
 			`SELECT toString(event_time) AS event_time,
@@ -1184,12 +1184,12 @@ func (g *Generator) collect() map[string]interface{} {
 		p["crash_log"] = []map[string]interface{}{}
 	}
 
-	// ── Pending work ──────────────────────────────────────────────────────────
+	// ── 待处理工作 ───────────────────────────────────────────────────────────
 
 	p["top_tables"] = g.safeQuery("top_tables", g.topTablesSQL())
 
-	// is_killed was added to system.mutations after 22.8; only filter on
-	// it when present, otherwise show all in-progress mutations.
+	// is_killed是在22.8之后加入system.mutations的；仅在
+	// 存在时过滤它，否则显示所有进行中的mutation。
 	killedFilter := ""
 	if g.hasColumn("mutations", "is_killed") {
 		killedFilter = "AND is_killed = 0"
@@ -1203,8 +1203,8 @@ func (g *Generator) collect() map[string]interface{} {
 		g.sysTable("mutations"), killedFilter,
 	))
 
-	// bytes_on_disk was added to system.detached_parts in 22.11; fall
-	// back to a count-only view (no size) on older servers.
+	// bytes_on_disk在22.11加入system.detached_parts；在更旧的
+	// 服务器上回退为仅计数的视图（无大小）。
 	detachedSize, detachedOrder := "formatReadableSize(sum(bytes_on_disk)) AS size", "sum(bytes_on_disk)"
 	if !g.hasColumn("detached_parts", "bytes_on_disk") {
 		detachedSize, detachedOrder = "'n/a' AS size", "count()"
@@ -1221,9 +1221,9 @@ func (g *Generator) collect() map[string]interface{} {
 		detachedSize, g.sysTable("detached_parts"), query.Apply("{detached_scope}", query.Vars{DetachedScope: g.detachedScope}), detachedOrder,
 	))
 
-	// cluster nodes (cloud only). No is_active: asking for it makes the server
-	// query every Replicated-database replica's status (see
-	// queries.*/23.5.1.0/system.clusters.sql).
+	// 集群节点（仅cloud）。不查询is_active：请求它会使服务器
+	// 查询每个Replicated数据库副本的状态（见
+	// queries.*/23.5.1.0/system.clusters.sql）。
 	if g.mode == "cloud" {
 		p["clusters"] = g.safeQuery("clusters",
 			`SELECT cluster, host_name,
@@ -1242,13 +1242,13 @@ func (g *Generator) collect() map[string]interface{} {
 		g.sysTable("replication_queue"),
 	))
 
-	// ── Replicas health ───────────────────────────────────────────────────────
+	// ── 副本健康 ─────────────────────────────────────────────────────────────
 
-	// total_replicas / active_replicas are read from Keeper for every table
-	// they are asked for, so they come only for the up-to-200 tables that
-	// system.replicas_problem_tables picks (problem tables first); the other
-	// rows show them blank. system.replicas filters on database/table before
-	// reading statuses, which is what makes the IN cheap.
+	// total_replicas / active_replicas会从Keeper读取所询问的每张表，
+	// 因此只对system.replicas_problem_tables挑选的最多200张表提供
+	// （问题表优先）；其他行中这些字段为空。
+	// system.replicas会在读取状态前按database/table过滤，
+	// 这正是IN查询廉价的原因。
 	p["replicas"] = g.safeQuery("replicas", fmt.Sprintf(
 		`SELECT r.database AS database, r.table AS table, is_leader, is_readonly, is_session_expired,
 			 future_parts, parts_to_check, queue_size,
@@ -1272,21 +1272,21 @@ func (g *Generator) collect() map[string]interface{} {
 		g.sysTable("replicas"),
 	))
 
-	// ── Keeper health ─────────────────────────────────────────────────────────
+	// ── Keeper健康 ───────────────────────────────────────────────────────────
 	//
-	// The panel is hidden when metric_log has no rows (table disabled, or a
-	// server without Keeper never touches these counters anyway).
+	// 当metric_log没有行时隐藏该面板（表被禁用，或
+	// 不使用Keeper的服务器本来就不会触及这些计数器）。
 	if g.hasTable("metric_log") {
 		hasWait := g.hasColumn("metric_log", "ProfileEvent_ZooKeeperWaitMicroseconds")
 		hasSession := g.hasColumn("metric_log", "CurrentMetric_ZooKeeperSession")
 		p["keeper_metric_hourly"] = g.safeQuery("keeper_metric_hourly", g.keeperMetricSQL(hasWait, hasSession))
-		// The degraded query substitutes `0 AS wait_us` / `0 AS sessions_*`,
-		// which is also what a server that never contacts Keeper reports — so
-		// a zero value cannot tell "column absent" from "legitimately zero".
-		// Record which it is here, where hasColumn() already knows, instead of
-		// letting a reader guess: the panel JS would otherwise blame the server
-		// version, and the skill reads these columns straight out of DATA
-		// (bundle-layout §6) where a 0 looks like a lost Keeper session.
+		// 降级查询会替换为`0 AS wait_us` / `0 AS sessions_*`，
+		// 这也是从不联系Keeper的服务器所报告的内容 — 因此
+		// 零值无法区分"列不存在"和"确实为零"。
+		// 在hasColumn()已知的地方记录是哪种情况，而不是
+		// 让读者猜测：否则面板JS会归咎于服务器
+		// 版本，而skill会直接从DATA读取这些列
+		// （bundle-layout §6），其中0看起来像是丢失了Keeper会话。
 		p["keeper_wait_available"] = hasWait
 		p["keeper_session_available"] = hasSession
 	} else {
@@ -1294,22 +1294,22 @@ func (g *Generator) collect() map[string]interface{} {
 		p["keeper_wait_available"] = false
 		p["keeper_session_available"] = false
 	}
-	// ── Background pools ──────────────────────────────────────────────────────
+	// ── 后台池 ───────────────────────────────────────────────────────────────
 	//
-	// Hourly average tasks in the fetch / schedule / merge pools against the
-	// pool sizes (HC-2.13 / 2.14). Pool size 0 (setting not readable) draws
-	// no reference line. On cloud collection every replica's hours are folded
-	// into one series by max(): a saturated node must show even when its
-	// siblings are idle.
+	// fetch / schedule / merge池中任务的每小时平均值与
+	// 池大小的对照（HC-2.13 / 2.14）。池大小为0（设置不可读）时不画
+	// 参考线。cloud采集中每个副本的小时数据通过max()折叠
+	// 为一个序列：饱和节点即使兄弟节点空闲
+	// 也必须显现。
 	if g.hasTable("metric_log") {
 		p["pools_hourly"] = g.safeQuery("pools_hourly", g.poolsMetricSQL())
 	} else {
 		p["pools_hourly"] = []map[string]interface{}{}
 	}
 	p["pool_sizes"] = g.poolSizes()
-	// Server-side "now" for the pools panel's 24-hour window: anchored on
-	// collection time, like the live alert's now() - 24 h, so a metric_log
-	// that stopped updating days ago cannot turn a card amber today.
+	// 池面板24小时窗口的服务器端"now"：锚定在
+	// 采集时间，与实时告警的now() - 24 h一样，因此停止更新数天的
+	// metric_log不会让卡片今天变成琥珀色。
 	p["pools_now"] = ""
 	if r, err := g.execJSON("SELECT toString(now()) AS now"); err == nil && r.Rows > 0 {
 		var v string
@@ -1320,9 +1320,9 @@ func (g *Generator) collect() map[string]interface{} {
 	useErrorLog := g.hasTable("error_log")
 	p["keeper_errors_hourly"] = g.safeQuery("keeper_errors_hourly", g.keeperErrorsSQL(useErrorLog))
 	if useErrorLog {
-		p["keeper_errors_source"] = "system.error_log — every thread, background merges and fetches included"
+		p["keeper_errors_source"] = "system.error_log — 包含所有线程，包括后台 merge 和 fetch"
 	} else {
-		p["keeper_errors_source"] = "system.query_log — queries only; background merges, fetches and DDL workers are not counted (system.error_log needs 24.8+)"
+		p["keeper_errors_source"] = "system.query_log — 仅查询；后台 merge、fetch 和 DDL worker 未计入（system.error_log 需要 24.8+）"
 	}
 	if g.hasTable("zookeeper_connection") {
 		p["keeper_connection"] = g.safeQuery("keeper_connection", g.keeperConnectionSQL())
@@ -1330,13 +1330,13 @@ func (g *Generator) collect() map[string]interface{} {
 		p["keeper_connection"] = []map[string]interface{}{}
 	}
 
-	// ── Disk usage ────────────────────────────────────────────────────────────
+	// ── 磁盘使用 ─────────────────────────────────────────────────────────────
 
-	// system.disks is per-replica, so in cloud mode this fans out and every
-	// replica contributes its own (largely identical) disk list — measured
-	// 11 disks → 33 rows on a 3-replica service. Without a host label those
-	// read as duplicates. hostName() is evaluated on the replica that
-	// produced the row, exactly as dictionariesSQL does.
+	// system.disks是按副本的，因此cloud模式下会扇出，每个
+	// 副本贡献自己的（大体相同的）磁盘列表 — 在3副本服务上测得
+	// 11个磁盘 → 33行。没有主机标签时，这些行
+	// 会被读成重复。hostName()在产生该行的副本上
+	// 求值，与dictionariesSQL完全一样。
 	p["disks"] = g.safeQuery("disks", fmt.Sprintf(
 		`SELECT hostName() AS hostname,
 			 name, path, type,
@@ -1351,21 +1351,21 @@ func (g *Generator) collect() map[string]interface{} {
 		g.sysTable("disks"),
 	))
 
-	// ── Server errors (cumulative error counters) ──────────────────────────────
+	// ── 服务器错误（累计错误计数器） ──────────────────────────────────────────
 
-	// system.errors holds PER-REPLICA counters, so hard-coding system.errors
-	// here showed only the serving node's errors and hid the other replicas'
-	// entirely (measured on a 3-replica Cloud service). Fan out via
-	// sysTable, then aggregate to cluster-wide totals: this panel renders as
-	// one bar per error, so emitting a row per replica would produce
-	// duplicate same-labelled bars instead of a single meaningful count.
+	// system.errors保存的是PER-REPLICA计数器，因此硬编码system.errors
+	// 只会显示服务节点的错误，完全隐藏其他副本的错误
+	// （在3副本Cloud服务上测得）。通过
+	// sysTable扇出，再聚合成集群总量：此面板每个错误
+	// 渲染为一条柱，因此每个副本发一行会产生
+	// 重复的同名柱，而不是一个有意义的计数。
 	p["server_errors"] = g.safeQuery("server_errors", fmt.Sprintf(
-		// Aggregate under a NON-colliding alias in a subquery, then rename to
-		// `value` outside. Aliasing sum(value) AS value in the same SELECT
-		// shadows the source column, and the analyzer then resolves the bare
-		// `value` inside argMax()/WHERE against the aggregate →
-		// ILLEGAL_AGGREGATION. Same subquery trick as
-		// alerts/disk_space_low.yaml.
+		// 在子查询中使用NON-colliding别名聚合，然后在外层重命名为
+		// `value`。在同一SELECT中将sum(value)别名为AS value
+		// 会遮蔽源列，随后分析器会将裸
+		// `value`在argMax()/WHERE中解析为聚合 →
+		// ILLEGAL_AGGREGATION。与
+		// alerts/disk_space_low.yaml使用相同的子查询技巧。
 		`SELECT name, code, total AS value, last_error_time, last_error_message
 		 FROM (
 			 SELECT name, code,
@@ -1380,7 +1380,7 @@ func (g *Generator) collect() map[string]interface{} {
 		g.sysTable("errors"),
 	))
 
-	// ── High part-count tables (potential "too many parts") ───────────────────
+	// ── part数过高的表（潜在的"too many parts"） ─────────────────────────────
 
 	p["high_part_count"] = g.safeQuery("high_part_count", fmt.Sprintf(
 		`SELECT database, table, partition_id, count() AS parts_count
@@ -1393,7 +1393,7 @@ func (g *Generator) collect() map[string]interface{} {
 		g.sysTable("parts"),
 	))
 
-	// ── TTL activity (part_log, last 7 days) ──────────────────────────────────
+	// ── TTL活动（part_log，最近7天） ─────────────────────────────────────────
 
 	p["ttl_activity"] = g.safeQuery("ttl_activity", fmt.Sprintf(
 		`SELECT toString(toStartOfDay(event_time)) AS day,
@@ -1409,29 +1409,29 @@ func (g *Generator) collect() map[string]interface{} {
 		g.sysTable("part_log"),
 	))
 
-	// ── Async insert activity (last 24 h, skip gov) ───────────────────────────
+	// ── 异步插入活动（最近24小时，跳过gov） ─────────────────────────────────
 
-	// system.asynchronous_insert_log was added in 22.10; skip the panel
-	// on older servers where the table doesn't exist.
+	// system.asynchronous_insert_log在22.10加入；在表不存在的
+	// 较旧服务器上跳过该面板。
 	if g.mode != "gov" && g.hasTable("asynchronous_insert_log") {
 		asyncTable := "system.asynchronous_insert_log"
 		if g.mode == "cloud" {
 			asyncTable = "clusterAllReplicas(default, merge(system, '^asynchronous_insert_log'))"
 		}
-		// total_bytes exists since the table's inception (22.10); the `rows`
-		// column was added in 23.4 (absent on 22.10–23.3). Always report
-		// bytes and add rows when available, so no rendered column is ever
-		// blank (the front-end shows both); 'n/a' reads more honestly than a
-		// literal 0 when the column is unavailable.
+		// total_bytes自该表诞生（22.10）就存在；`rows`
+		// 列在23.4加入（22.10–23.3中不存在）。始终报告
+		// bytes，并在可用时加上rows，使渲染出的列永不
+		// 为空（前端两者都显示）；列不可用时'n/a'比字面
+		// 0更诚实。
 		rowsCol := "'n/a' AS total_rows"
 		if g.hasColumn("asynchronous_insert_log", "rows") {
 			rowsCol = "toString(sum(rows)) AS total_rows"
 		}
-		// Queue→flush latency in ms. We avoid dateDiff('millisecond', …):
-		// the sub-second unit errors on older servers (22.12: BAD_ARGUMENTS).
-		// event_time_microseconds / flush_time_microseconds are DateTime64(6)
-		// and exist since 22.10, so subtracting them as floats gives true
-		// sub-second latency across the whole supported range.
+		// Queue→flush延迟（毫秒）。我们避免dateDiff('millisecond', …)：
+		// 亚秒单位在较旧服务器上会报错（22.12：BAD_ARGUMENTS）。
+		// event_time_microseconds / flush_time_microseconds是DateTime64(6)，
+		// 自22.10起存在，因此将它们作为浮点数相减可在整个
+		// 支持范围内得到真正的亚秒延迟。
 		p["async_inserts"] = g.safeQuery("async_inserts", fmt.Sprintf(
 			`SELECT toString(toStartOfHour(event_time)) AS hour,
 				 status, count() AS flushes,
@@ -1447,13 +1447,13 @@ func (g *Generator) collect() map[string]interface{} {
 		p["async_inserts"] = []map[string]interface{}{}
 	}
 
-	// ── Query analysis (optional) ──────────────────────────────────────────
+	// ── 查询分析（可选） ──────────────────────────────────────────────────
 	g.collectAnalysis(p)
 
 	return p
 }
 
-// addHostInfo embeds the host facts.
+// addHostInfo嵌入host facts。
 func (g *Generator) addHostInfo(p map[string]interface{}) {
 	if raw, err := json.Marshal(g.hostInfo); err == nil {
 		var hi map[string]interface{}
@@ -1464,31 +1464,31 @@ func (g *Generator) addHostInfo(p map[string]interface{}) {
 	p["host_checks"] = hostChecks(g.hostInfo)
 }
 
-// collectAnalysis runs the query-analysis SQL files (same set the
-// AnalysisCollector writes to disk), embedding the JSONCompact output
-// into the dashboard payload so the front-end can render the "Query
-// Analysis" section. No-op when WithAnalysis was not called or when
-// opts.Enabled() is false.
+// collectAnalysis运行查询分析SQL文件（与
+// AnalysisCollector写入磁盘的相同集合），将JSONCompact输出
+// 嵌入dashboard payload，使前端能渲染"Query
+// Analysis"部分。未调用WithAnalysis或
+// opts.Enabled()为false时不做任何事。
 //
-// Each file's content is template-substituted in memory, the trailing
-// `FORMAT Native` clause stripped, then sent to ClickHouse with
-// `FORMAT JSONCompact` (via safeQuery). If a file still has unbound
-// placeholders after substitution (e.g. single-id files when only
-// --normalized-query-hash was given), it is silently skipped — the
-// missing key is then absent from the payload and the front-end hides
-// the corresponding card.
+// 每个文件的内容在内存中进行模板替换，去掉末尾的
+// `FORMAT Native`子句，然后通过safeQuery以
+// `FORMAT JSONCompact`发送给ClickHouse。如果文件在替换后仍有
+// 未绑定占位符（例如仅提供--normalized-query-hash时的
+// 单id文件），则静默跳过 —
+// 缺失的key因此不在payload中，前端会隐藏
+// 对应卡片。
 func (g *Generator) collectAnalysis(p map[string]interface{}) {
 	if !g.analysis.Enabled() || g.analysisDir == "" {
 		return
 	}
-	// A zero server version sorts below every version directory, so
-	// FindVersionedFiles would return only root files and the dashboard
-	// would run the 22.8 baseline on a modern server (the round-1
-	// regression). cmd/main.go always calls WithServerVersion after a
-	// successful version probe, so this only trips if a future caller
-	// forgets — warn loudly rather than silently degrade.
+	// 零服务器版本排序在所有版本目录之下，因此
+	// FindVersionedFiles只会返回根目录文件，dashboard
+	// 会在现代服务器上运行22.8基线（第一轮的
+	// 回归）。cmd/main.go总会在成功的版本探测后
+	// 调用WithServerVersion，因此只有未来的调用者
+	// 忘记时才会触发 — 大声警告而不是静默降级。
 	if g.serverVersion == (internal.Version{}) {
-		fmt.Println("  [dashboard] warning: server version unknown; query-analysis panels fall back to the oldest (root) query variants")
+		fmt.Println("  [dashboard] 警告：服务器版本未知；查询分析面板回退到最旧的（根目录）查询变体")
 	}
 	vars := query.Vars{
 		Mode:                g.mode,
@@ -1498,8 +1498,8 @@ func (g *Generator) collectAnalysis(p map[string]interface{}) {
 		To:                  g.analysis.To,
 	}
 
-	// Map of payload key → .sql filename. Keys match the JS fetches
-	// in the dashboard template (DATA.qa_*).
+	// payload key → .sql文件名的映射。key与dashboard模板中的
+	// JS取数（DATA.qa_*）匹配。
 	files := map[string]string{
 		"qa_details":          "query_details.sql",
 		"qa_profile":          "profile_events.sql",
@@ -1515,20 +1515,20 @@ func (g *Generator) collectAnalysis(p map[string]interface{}) {
 		"qa_executions":       "executions_timeline.sql",
 	}
 
-	// Resolve version-directory overrides exactly as AnalysisCollector
-	// does, so the dashboard renders the SAME variant that the archive
-	// writes to disk. Reading the root file directly would run the
-	// downgraded 22.8 baseline on modern servers. (On a resolver ERROR
-	// the two paths intentionally differ: Collect aborts the archive
-	// bundle, while the dashboard warns and degrades to root files so
-	// the section isn't entirely blank.)
-	resolved := map[string]string{} // base name → full path
+	// 完全按照AnalysisCollector的方式解析版本目录覆盖，
+	// 使dashboard渲染与归档写入磁盘的相同变体。
+	// 直接读取根文件会在现代服务器上运行降级的
+	// 22.8基线。（在解析器ERROR时
+	// 两条路径故意不同：Collect会中止归档
+	// bundle，而dashboard会警告并降级到根文件，
+	// 使该部分不完全空白。）
+	resolved := map[string]string{} // 基名 → 完整路径
 	vf, err := query.FindVersionedFiles(g.analysisDir, g.serverVersion, ".sql")
 	if err != nil {
-		// Don't silently blank the whole Query Analysis section on a
-		// resolver error (unreadable dir, broken symlink, …): warn and
-		// fall back to the root files below.
-		fmt.Printf("  [dashboard] query-analysis file resolution failed: %v (falling back to root files)\n", err)
+		// 不要在解析器错误（目录不可读、符号链接损坏等）时
+		// 静默清空整个Query Analysis部分：警告并
+		// 回退到下面的根文件。
+		fmt.Printf("  [dashboard] 查询分析文件解析失败：%v（回退到根目录文件）\n", err)
 	}
 	for _, f := range vf {
 		resolved[f.Name] = f.FullPath
@@ -1536,19 +1536,19 @@ func (g *Generator) collectAnalysis(p map[string]interface{}) {
 	for key, fname := range files {
 		path, ok := resolved[fname]
 		if !ok {
-			// Fall back to the root file. For a version-dir-only file
-			// gated above this server there is no root, so os.ReadFile
-			// fails below and we skip it — matching Collect().
+			// 回退到根文件。对于被此服务器门控的仅版本目录
+			// 文件，没有根文件，因此下面的os.ReadFile
+			// 会失败，我们跳过它 — 与Collect()一致。
 			path = filepath.Join(g.analysisDir, fname)
 		}
 		raw, err := os.ReadFile(path)
 		if err != nil {
-			// A resolved path failing to read (deleted/permissions race)
-			// is diagnostic-worthy — log like Collect does. A version-dir-
-			// only file below its gate simply has no root path and lands
-			// here silently by design.
+			// 解析后的路径读取失败（删除/权限竞态）
+			// 值得诊断 — 像Collect那样记录日志。仅版本目录的
+			// 文件若低于其门控就根本没有根路径，按设计会
+			// 静默落到这里。
 			if ok {
-				fmt.Printf("  [dashboard] %s: read %s: %v\n", key, path, err)
+				fmt.Printf("  [dashboard] %s：读取 %s：%v\n", key, path, err)
 			}
 			continue
 		}
@@ -1556,21 +1556,21 @@ func (g *Generator) collectAnalysis(p map[string]interface{}) {
 		if len(query.UnboundPlaceholders(sql)) > 0 {
 			continue
 		}
-		// Strip trailing `FORMAT Native` so safeQuery can append
-		// JSONCompact via the standard execJSON path.
+		// 去掉末尾的`FORMAT Native`，使safeQuery能通过标准
+		// execJSON路径追加JSONCompact。
 		sql = stripTrailingFormat(sql)
 		if err := query.ValidateQueryContent(sql); err != nil {
-			fmt.Printf("  [dashboard] %s: blocked analysis query in %s: %v\n", key, fname, err)
+			fmt.Printf("  [dashboard] %s：%s 中的分析查询被拦截：%v\n", key, fname, err)
 			continue
 		}
 		rows := g.safeQuery(key, sql)
-		// Defence in depth for gov mode: the dashboard JSON is part
-		// of the support archive, so any field that the JS would
-		// otherwise hide should also be cleared from the embedded
-		// payload. The `query` and `exception` columns in
-		// system.query_log contain raw text the customer ran
-		// (referencing the same table names gov-mode hashes
-		// elsewhere); empty them out before embedding.
+		// gov模式的纵深防御：dashboard JSON是
+		// 支持归档的一部分，因此JS本来会隐藏的任何字段
+		// 也应从嵌入的payload中清除。
+		// system.query_log中的`query`和`exception`列
+		// 包含客户运行的原始文本
+		// （引用了gov模式在其他地方哈希的相同表名）；
+		// 在嵌入前将它们清空。
 		if g.mode == "gov" {
 			for _, r := range rows {
 				for _, sensitive := range []string{"query", "exception", "sample_query", "sample_exception"} {
@@ -1588,17 +1588,17 @@ func (g *Generator) collectAnalysis(p map[string]interface{}) {
 	p["qa_hash"] = g.analysis.NormalizedQueryHash
 	p["qa_from"] = g.analysis.From.UTC().Format(time.RFC3339)
 	p["qa_to"] = g.analysis.To.UTC().Format(time.RFC3339)
-	// qa_mode gates the rendering of the focus query's SQL text: in
-	// gov mode we still hash database/table names in queries.gov/*.sql,
-	// but query_log.query stores the raw SQL the customer ran, which
-	// references the same names. Exposing it in the dashboard would
-	// defeat the hashing. JS hides the card when mode == 'gov'.
+	// qa_mode控制焦点查询SQL文本的渲染：在
+	// gov模式下我们仍在queries.gov/*.sql中哈希数据库/表名，
+	// 但query_log.query保存客户运行的原始SQL，它
+	// 引用了相同的名称。在dashboard中暴露它会
+	// 破坏哈希。当mode == 'gov'时JS会隐藏该卡片。
 	p["qa_mode"] = g.mode
 }
 
-// stripTrailingFormat removes a trailing `FORMAT <name>` clause (and
-// any whitespace / semicolons after it). The dashboard always wants
-// JSONCompact, which the underlying execJSON wrapper appends.
+// stripTrailingFormat删除末尾的`FORMAT <name>`子句（以及
+// 其后的任何空白/分号）。dashboard始终需要
+// JSONCompact，由底层execJSON包装器追加。
 func stripTrailingFormat(sql string) string {
 	t := strings.TrimRight(sql, " \t\r\n;")
 	idx := strings.LastIndex(strings.ToUpper(t), "FORMAT")
@@ -1613,14 +1613,14 @@ func stripTrailingFormat(sql string) string {
 	return t
 }
 
-// buildHTML serialises the payload into the HTML template, loading Chart.js
-// from the CDN.
+// buildHTML将payload序列化到HTML模板，从
+// CDN加载Chart.js。
 func buildHTML(data map[string]interface{}) string {
 	return renderHTML(data, false)
 }
 
-// renderHTML is buildHTML with the -airgap choice: when airgap is set,
-// Chart.js is inlined (see airgap.go) and the page needs no network.
+// renderHTML是带-airgap选择的buildHTML：设置airgap时，
+// Chart.js会内联（见airgap.go），页面无需网络。
 func renderHTML(data map[string]interface{}, airgap bool) string {
 	page := htmlTemplate
 	if airgap {
@@ -1630,18 +1630,18 @@ func renderHTML(data map[string]interface{}, airgap bool) string {
 	return strings.Replace(page, "/*DATA*/null", string(b), 1)
 }
 
-// htmlTemplate is the complete self-contained dashboard page.
-// Chart.js is loaded from CDN (inlined with -airgap); all ClickHouse data is
-// embedded inline.
-// themeTokensCSS is the Click UI token layer — palette primitives, the light and
-// dark semantic roles, type, spacing, radii and shadows — declared once and
-// shared by dashboard.html and schema_graph.html so the two pages can never
-// drift apart in theme. Both dark scopes live here: the OS preference (media
-// query, zero specificity via :where()) and the in-page toggle
-// (data-cui-theme). See theme_test.go for what must survive an edit.
+// htmlTemplate是完整的自包含dashboard页面。
+// Chart.js从CDN加载（使用-airgap时内联）；所有ClickHouse数据
+// 都内联嵌入。
+// themeTokensCSS是Click UI token层 — 调色板原语、浅色和
+// 深色语义角色、排版、间距、圆角和阴影 — 只声明一次，
+// 由dashboard.html和schema_graph.html共享，使两个页面永远不会
+// 在主题上漂移。两个深色作用域都在这里：操作系统偏好（媒体
+// 查询，通过:where()实现零特异性）和页面内切换
+// （data-cui-theme）。编辑后必须保留的内容见theme_test.go。
 const themeTokensCSS = `:root{
   color-scheme:light;
-  /* primitives actually referenced */
+  /* 实际引用的原语 */
   --click-palette-neutral-0:#ffffff;
   --click-palette-neutral-750:#1F1F1C;
   --click-palette-neutral-725:#282828;
@@ -1652,7 +1652,7 @@ const themeTokensCSS = `:root{
   --click-palette-slate-900:#161517;
   --click-palette-brand-300:#FAFF69;
 
-  /* global semantic tokens (light.json) */
+  /* 全局语义token（light.json） */
   --click-global-color-background-default:#ffffff;
   --click-global-color-background-muted:#f6f7fa;
   --click-global-color-text-default:#161517;
@@ -1660,7 +1660,7 @@ const themeTokensCSS = `:root{
   --click-global-color-stroke-default:#e6e7e9;
   --click-global-color-accent-default:#151515;
 
-  /* report-level surface roles, expressed in tokens */
+  /* 报告级表面角色，以token表达 */
   --surface-page:var(--click-global-color-background-muted);
   --surface-card:var(--click-global-color-background-default);
   --surface-sunken:var(--click-palette-slate-50);
@@ -1669,17 +1669,17 @@ const themeTokensCSS = `:root{
   --ink-muted:var(--click-global-color-text-muted);
   --stroke:var(--click-global-color-stroke-default);
 
-  /* chrome that stays dark in both themes (ClickHouse product header) */
+  /* 两种主题下都保持深色的界面外框（ClickHouse产品头部） */
   --header-bg:var(--click-palette-neutral-900);
   --header-ink:var(--click-palette-neutral-0);
   --header-logo:var(--click-palette-brand-300);
 
-  /* status ramp — semantic tokens, reserved meaning, never used for a series */
+  /* 状态色阶 — 语义token，保留含义，从不用于数据序列 */
   --status-critical:#f10000;        /* danger.500  */
   --status-warning:#F55A00;         /* warning.500 */
   --status-good:#008A0B;            /* success.700 */
   --status-info:#1D64EC;            /* info.500    */
-  --status-neutral:#696e79;         /* slate.600 — "the rule itself errored" */
+  --status-neutral:#696e79;         /* slate.600 — "规则本身出错" */
   --status-critical-bg:#ffdddd;     /* danger.50   */
   --status-warning-bg:#FFE2D1;      /* warning.50  */
   --status-good-bg:#E5FFE8;         /* success.50  */
@@ -1692,7 +1692,7 @@ const themeTokensCSS = `:root{
   --status-neutral-ink:#53575f;     /* slate.700   */
   --link:#1D64EC;                   /* info.500    */
 
-  /* type (primitives.json → typography.font.*) */
+  /* 排版（primitives.json → typography.font.*） */
   --click-font-regular:"Inter","SF Pro Display",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Oxygen,Ubuntu,Cantarell,"Open Sans","Helvetica Neue",sans-serif;
   --click-font-mono:"Inconsolata",Consolas,"SFMono Regular",ui-monospace,monospace;
   --click-font-size-0:0.625rem; --click-font-size-1:0.75rem; --click-font-size-2:0.875rem;
@@ -1701,7 +1701,7 @@ const themeTokensCSS = `:root{
   --click-font-weight-1:400; --click-font-weight-2:500; --click-font-weight-3:600; --click-font-weight-4:700;
   --click-line-height-1:150%; --click-line-height-2:160%;
 
-  /* space + border + shadow (primitives.json → spaces/border/shadow) */
+  /* 间距+边框+阴影（primitives.json → spaces/border/shadow） */
   --click-space-1:0.25rem; --click-space-2:0.5rem;  --click-space-3:0.75rem;
   --click-space-4:1rem;    --click-space-5:1.5rem;  --click-space-6:2rem; --click-space-7:2.5rem;
   --click-radii-1:0.25rem; --click-radii-2:0.5rem;  --click-radii-3:0.75rem; --click-radii-full:9999px;
@@ -1711,9 +1711,9 @@ const themeTokensCSS = `:root{
   --click-transition-smooth:150ms;
 }
 
-/* Dark theme. Declared under both scopes so the OS setting and the in-page
-   toggle each win where they should: :where() keeps the media block at zero
-   specificity so an explicit light stamp beats OS-dark. */
+/* 深色主题。在两个作用域下都声明，使操作系统设置和页面内
+   切换各自在应胜出的地方胜出：:where()让媒体查询块保持零
+   特异性，使显式的浅色标记能胜过系统深色。 */
 @media (prefers-color-scheme:dark){
   :root:where(:not([data-cui-theme="light"])){
     color-scheme:dark;
@@ -1732,7 +1732,7 @@ const themeTokensCSS = `:root{
     --status-info-bg:#061C47;     --status-neutral-bg:#282828;
     --status-critical-ink:#ffbaba; --status-warning-ink:#FFCBAD; --status-good-ink:#99FFA1;
     --status-info-ink:#A1BEF7;     --status-neutral-ink:#b3b6bd;
-    --link:#A1BEF7;                /* info.200 — info.500 is too dark to read here */
+    --link:#A1BEF7;                /* info.200 — info.500在这里太暗，难以辨认 */
     --click-shadow-1:0 4px 6px -1px rgba(0,0,0,.5), 0 2px 4px -1px rgba(0,0,0,.4);
     --click-shadow-5:0 2px 2px 0 rgba(0,0,0,.3);
   }
@@ -1754,62 +1754,62 @@ const themeTokensCSS = `:root{
   --status-info-bg:#061C47;     --status-neutral-bg:#282828;
   --status-critical-ink:#ffbaba; --status-warning-ink:#FFCBAD; --status-good-ink:#99FFA1;
   --status-info-ink:#A1BEF7;     --status-neutral-ink:#b3b6bd;
-  --link:#A1BEF7;                /* info.200 — info.500 is too dark to read here */
+  --link:#A1BEF7;                /* info.200 — info.500在这里太暗，难以辨认 */
   --click-shadow-1:0 4px 6px -1px rgba(0,0,0,.5), 0 2px 4px -1px rgba(0,0,0,.4);
   --click-shadow-5:0 2px 2px 0 rgba(0,0,0,.3);
 }
 `
 
-// htmlTemplate is the complete self-contained dashboard page, assembled from
-// its head, the shared token layer and the body so the tokens are a single
-// source of truth (see themeTokensCSS).
+// htmlTemplate是完整的自包含dashboard页面，由
+// 头部、共享token层和主体组装而成，使token只有
+// 一个事实来源（见themeTokensCSS）。
 var htmlTemplate = htmlTemplateHead + themeTokensCSS + htmlTemplateTail
 
 const htmlTemplateHead = `<!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>ClickHouse Diagnostic Dashboard</title>
-<script>/* stamp the saved theme before first paint so the page never flashes */
+<title>ClickHouse 诊断仪表盘</title>
+<script>/* 在首次绘制前写入已保存的主题，使页面永不闪烁 */
 try{var _t=localStorage.getItem("chdiag-theme");if(_t)document.documentElement.setAttribute("data-cui-theme",_t);}catch(e){}
-/* same for the sidebar: a saved "collapsed" applies before layout, and a
-   narrow viewport starts collapsed unless the reader chose otherwise */
+/* 侧栏同理：已保存的"collapsed"在布局前生效，而
+   窄视口默认折叠，除非读者另有选择 */
 try{var _n=localStorage.getItem("chdiag-nav");if(_n==="collapsed"||(!_n&&window.innerWidth<900))document.documentElement.classList.add("nav-collapsed");}catch(e){}
 </script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
 <style>
 /* ─────────────────────────────────────────────────────────────────────────────
-   Click UI token layer.
+   Click UI token层。
 
-   Click UI ships as a React library (@clickhouse/click-ui + ClickUIProvider),
-   which this report cannot use: it is one self-contained HTML file opened
-   offline from a tarball, with no build step. The design system's documented
-   escape hatch for exactly that case is its token layer — CSS custom
-   properties, themed via data-cui-theme on <html>. So the values below are
-   vendored verbatim from ClickHouse/click-ui tokens/themes/{primitives,light,
-   dark}.json; every hex is a real token, none is eyeballed.
+   Click UI以React库（@clickhouse/click-ui + ClickUIProvider）形式发布，
+   本报告无法使用它：本报告是一个从tar包离线打开的
+   自包含HTML文件，没有构建步骤。设计系统针对这种情况
+   记录的逃生通道就是它的token层 — CSS自定义
+   属性，通过<html>上的data-cui-theme设置主题。因此下面的值
+   逐字取自ClickHouse/click-ui tokens/themes/{primitives,light,
+   dark}.json；每个十六进制值都是真实token，没有一个是凭眼估的。
 
-   Surfaces are chosen so charts sit on #ffffff (light) / #1F1F1C (dark) — the
-   two surfaces the categorical palette in the script below was validated
-   against. Do not repoint --surface-card without re-running that validation.
+   选择表面色使图表位于#ffffff（浅色）/ #1F1F1C（深色）上 — 这是下面
+   脚本中的分类调色板已验证所依据的两个
+   表面。重新运行该验证前不要更改--surface-card。
    ───────────────────────────────────────────────────────────────────────── */
 `
 
 const htmlTemplateTail = `
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:var(--click-font-regular);background:var(--surface-page);color:var(--ink);font-size:var(--click-font-size-2);line-height:var(--click-line-height-1)}
-/* Header and nav stick as ONE band. They used to stick separately, with the
-   nav pinned at a hardcoded top:53px that had to equal the header's height —
-   it did not (the header measures ~74px), so once scrolled the header covered
-   the top 21px of the nav and its labels were sliced in half. A single sticky
-   wrapper removes the constant instead of re-tuning it. --topbar-h is measured
-   at runtime and drives scroll-margin and the scroll-spy, so nothing else
-   hardcodes this height either. */
+/* Header和nav作为一个整体吸附。它们过去分别吸附，
+   nav 固定在硬编码的 53px 顶部偏移，该值必须等于 header 高度——
+   但并非如此（header实测约74px），因此滚动后header遮住了
+   nav顶部21px，其标签被切成两半。改用单个吸顶
+   包装器消除了这个常量，而不是重新调整它。--topbar-h在运行时
+   测量，驱动scroll-margin和滚动监听，因此其他任何地方
+   也不必硬编码此高度。 */
 .topbar{position:sticky;top:0;z-index:100}
 header{background:var(--header-bg);color:var(--header-ink);padding:var(--click-space-3) var(--click-space-6);display:flex;align-items:center;gap:var(--click-space-3)}
-/* Brand block: the product name on the first line, the page title as a
-   smaller second line beneath it, so the header reads as one lockup. */
+/* 品牌块：第一行是产品名，页面标题作为
+   下方更小的第二行，使头部读起来像一个整体。 */
 header .brand{display:flex;flex-direction:column;line-height:1.15}
 header .logo{font-size:var(--click-font-size-5);font-weight:var(--click-font-weight-4);color:var(--header-logo);letter-spacing:-.5px}
 header h1{font-size:var(--click-font-size-1);font-weight:var(--click-font-weight-2);opacity:.8;letter-spacing:.2px}
@@ -1817,23 +1817,23 @@ header .meta{margin-left:auto;text-align:right;font-size:var(--click-font-size-1
 header .meta .badge{margin:0 var(--click-space-1) 0 0;vertical-align:1px}
 #theme-toggle{margin-left:var(--click-space-4);background:transparent;color:var(--header-ink);border:var(--click-border-width-1) solid rgba(255,255,255,.25);border-radius:var(--click-radii-full);padding:var(--click-space-1) var(--click-space-3);font:inherit;font-size:var(--click-font-size-1);cursor:pointer;white-space:nowrap;transition:background var(--click-transition-smooth)}
 #theme-toggle:hover{background:rgba(255,255,255,.12)}
-/* Section navigation is a fixed sidebar on the left, under the sticky
-   header, with an arrow in the header to hide and show it. It used to be a
-   horizontal strip under the header; with 22 sections that overflowed the
-   viewport at ordinary widths and the overflow scrolled sideways, so the
-   sections past the edge were effectively unreachable. A vertical list
-   scales with the section count. --nav-w is the one width everything is
-   offset by; when collapsed the sidebar slides off and <main> takes the
-   space back. The state lives on <html> (class nav-collapsed) so the
-   bootstrap script in <head> can stamp it before first paint. */
+/* 分节导航是左侧固定侧栏，位于吸顶
+   header下方，header中有一个箭头用于隐藏和显示它。它过去是
+   header下方的水平条；在22个分节时，普通宽度下会溢出
+   视口且溢出部分横向滚动，因此边缘之外
+   的分节实际上无法到达。垂直列表
+   随分节数量伸缩。--nav-w是所有偏移所依据的唯一宽度；
+   折叠时侧栏滑出，<main>收回
+   空间。状态保存在<html>上（class nav-collapsed），
+   使<head>中的引导脚本能在首次绘制前写入。 */
 :root{--nav-w:180px}
 #nav-toggle{display:inline-flex;align-items:center;gap:var(--click-space-2);background:transparent;color:var(--header-ink);border:var(--click-border-width-1) solid rgba(255,255,255,.25);border-radius:var(--click-radii-full);padding:var(--click-space-1) var(--click-space-2);font:inherit;font-size:var(--click-font-size-1);cursor:pointer;white-space:nowrap;flex:none;transition:background var(--click-transition-smooth)}
 #nav-toggle:hover{background:rgba(255,255,255,.12)}
 #nav-toggle svg{width:18px;height:18px;flex:none;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;transition:transform .2s ease}
-/* one chevron, pointing at the sidebar's edge: left while shown (hide), right while hidden (show) */
+/* 一个箭头，指向侧栏边缘：显示时朝左（隐藏），隐藏时朝右（显示） */
 html.nav-collapsed #nav-toggle svg{transform:scaleX(-1)}
-/* the current section's name — redundant next to a visible sidebar, the
-   "you are here" once the sidebar is hidden */
+/* 当前分节名称 — 在可见侧栏旁是多余的，
+   侧栏隐藏后则是"你在这里" */
 #nav-current{display:none;max-width:14em;overflow:hidden;text-overflow:ellipsis;padding-right:var(--click-space-1)}
 html.nav-collapsed #nav-current:not(:empty){display:block}
 nav{position:fixed;top:var(--topbar-h,74px);left:0;bottom:0;width:var(--nav-w);z-index:90;background:var(--surface-card);border-right:var(--click-border-width-1) solid var(--stroke);display:flex;flex-direction:column;overflow-y:auto;padding:var(--click-space-2) 0 var(--click-space-4);transition:transform .2s ease,visibility .2s}
@@ -1842,12 +1842,12 @@ html.nav-collapsed nav{transform:translateX(-100%);visibility:hidden}
 nav a{padding:var(--click-space-2) var(--click-space-5);color:var(--ink-muted);text-decoration:none;font-size:var(--click-font-size-1);font-weight:var(--click-font-weight-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border-left:3px solid transparent;display:block}
 nav a:hover{color:var(--ink);background:var(--surface-sunken)}
 nav a:focus-visible{outline:2px solid var(--status-info);outline-offset:-2px}
-/* The section you are in: accent bar + weight, so it reads as state rather
-   than as the link the pointer happens to be over. */
+/* 你所在的分节：强调条+字重，使其读起来是状态，
+   而不是指针恰好悬停的链接。 */
 nav a.active{color:var(--ink);border-left-color:var(--status-info);font-weight:var(--click-font-weight-3)}
-/* Below 900px the sidebar would leave too little room for the charts, so
-   when shown it overlays the content instead of pushing it, and picking a
-   section hides it again (see the toggle script). */
+/* 低于900px时侧栏会留给图表太少空间，因此
+   显示时它覆盖内容而不是推移内容，并且选择
+   分节后会再次隐藏它（见切换脚本）。 */
 @media (max-width:900px){nav{box-shadow:var(--click-shadow-5);z-index:95}}
 @media (prefers-reduced-motion:reduce){nav,main,#nav-toggle svg{transition:none}}
 @media print{nav,#nav-toggle{display:none}html:not(.nav-collapsed) main{padding-left:var(--click-space-5);max-width:1600px}}
@@ -1888,7 +1888,7 @@ table.dt a:hover{text-decoration:underline}
 .ok-badge{background:var(--status-good-bg);color:var(--status-good-ink)}
 .err-badge{background:var(--status-critical-bg);color:var(--status-critical-ink)}
 .warn-badge{background:var(--status-warning-bg);color:var(--status-warning-ink)}
-/* search / filter bar */
+/* 搜索/过滤栏 */
 .filter-bar{display:flex;flex-wrap:wrap;gap:var(--click-space-2);align-items:center;margin-bottom:var(--click-space-3);background:var(--surface-card);border:var(--click-border-width-1) solid var(--stroke);padding:var(--click-space-3);border-radius:var(--click-radii-2)}
 .filter-bar input[type=text],.filter-bar select{padding:var(--click-space-2) var(--click-space-3);border:var(--click-border-width-1) solid var(--stroke);border-radius:var(--click-radii-1);font:inherit;font-size:var(--click-font-size-1);background:var(--surface-card);color:var(--ink);outline:none}
 .filter-bar input[type=text]{flex:1;min-width:200px}
@@ -1898,12 +1898,12 @@ table.dt a:hover{text-decoration:underline}
 .pagination button{padding:var(--click-space-1) var(--click-space-3);border:var(--click-border-width-1) solid var(--stroke);border-radius:var(--click-radii-1);background:var(--surface-card);color:var(--ink);cursor:pointer;font:inherit;font-size:var(--click-font-size-1)}
 .pagination button:hover{background:var(--surface-hover)}
 .pagination .cur{font-weight:var(--click-font-weight-3);color:var(--ink)}
-/* schema graph tab */
+/* 模式关系图标签页 */
 .schema-actions button{padding:var(--click-space-2) var(--click-space-4);border:var(--click-border-width-1) solid var(--stroke);border-radius:var(--click-radii-1);background:var(--click-global-color-accent-default);color:var(--surface-card);cursor:pointer;font:inherit;font-size:var(--click-font-size-1);font-weight:var(--click-font-weight-3)}
 .schema-actions button:hover{opacity:.85}
 .schema-actions a{color:var(--link);font-size:var(--click-font-size-1)}
 #schema-frame{width:100%;height:85vh;border:var(--click-border-width-1) solid var(--stroke);border-radius:var(--click-radii-2);background:var(--surface-card);display:block}
-/* subsection title */
+/* 子节标题 */
 #tbl-host-tunables td:last-child,#tbl-host-os td:last-child{white-space:normal;max-width:38ch}
 #tbl-host-procs td:last-child{white-space:normal;max-width:60ch;font-family:var(--click-font-mono);font-size:var(--click-font-size-0)}
 .host-note{color:var(--ink-muted);font-size:var(--click-font-size-1);margin-top:var(--click-space-2)}
@@ -1911,7 +1911,7 @@ table.dt a:hover{text-decoration:underline}
 .sub-title{font-size:var(--click-font-size-2);font-weight:var(--click-font-weight-3);color:var(--ink);margin:var(--click-space-5) 0 var(--click-space-2)}
 footer{text-align:center;color:var(--ink-muted);font-size:var(--click-font-size-1);padding:var(--click-space-5);margin-top:var(--click-space-2)}
 @media(max-width:700px){.charts-grid{grid-template-columns:1fr}}
-/* alerts */
+/* 告警 */
 .alert-ok{background:var(--status-good-bg);border:var(--click-border-width-1) solid var(--status-good);border-left:4px solid var(--status-good);padding:var(--click-space-3) var(--click-space-5);border-radius:var(--click-radii-2);color:var(--status-good-ink);font-weight:var(--click-font-weight-3)}
 .alert-skipped{background:var(--surface-sunken);border:var(--click-border-width-1) solid var(--stroke);border-left:4px solid var(--status-neutral);padding:var(--click-space-2) var(--click-space-5);border-radius:var(--click-radii-2);color:var(--ink-muted);font-size:var(--click-font-size-1);margin-top:var(--click-space-2)}
 .alert-item{background:var(--surface-card);border:var(--click-border-width-1) solid var(--stroke);border-radius:var(--click-radii-2);padding:var(--click-space-3) var(--click-space-4);margin-bottom:var(--click-space-2);border-left:4px solid var(--status-neutral);box-shadow:var(--click-shadow-5)}
@@ -1921,7 +1921,7 @@ footer{text-align:center;color:var(--ink-muted);font-size:var(--click-font-size-
 .alert-item.alert-error{border-left-color:var(--status-neutral)}
 .alert-header{display:flex;align-items:center;gap:var(--click-space-2);margin-bottom:var(--click-space-1);flex-wrap:wrap}
 .alert-title{font-weight:var(--click-font-weight-3);font-size:var(--click-font-size-2)}
-/* Status never rides on colour alone: every severity ships an icon + label. */
+/* 状态从不只靠颜色表达：每个严重级别都配有图标+标签。 */
 .alert-icon{font-style:normal;line-height:1}
 .alert-count{font-size:var(--click-font-size-0);font-weight:var(--click-font-weight-3);padding:2px var(--click-space-2);border-radius:var(--click-radii-full)}
 .alert-count.badge-critical{background:var(--status-critical-bg);color:var(--status-critical-ink)}
@@ -1936,10 +1936,10 @@ footer{text-align:center;color:var(--ink-muted);font-size:var(--click-font-size-
 .collect-banner b{font-weight:600}
 .collect-banner .muted{color:var(--ink-muted)}
 .alert-err-msg{font-size:var(--click-font-size-1);color:var(--ink-muted);margin-top:var(--click-space-1);font-style:italic}
-/* Disclosures inside an alert. A ClickHouse exception carries its stack trace
-   inline — a measured one was 1764 chars over 15 lines, of which 216 were the
-   message — and a rule may return dozens of rows, so the verbose part sits
-   behind a <details> and the alert list stays scannable. */
+/* 告警内部的折叠披露。ClickHouse异常会内联携带堆栈跟踪
+   — 实测一条在15行中有1764个字符，其中216个是
+   消息 — 而一条规则可能返回数十行，因此冗长部分放在
+   <details>后面，告警列表保持可扫读。 */
 .alert-more{margin:2px 0 0}
 .alert-more>summary{cursor:pointer;color:var(--ink-muted);font-size:var(--click-font-size-0);font-family:var(--click-font-regular);font-style:normal;list-style:none;display:inline-flex;align-items:center;gap:4px;user-select:none}
 .alert-more>summary::-webkit-details-marker{display:none}
@@ -1949,9 +1949,9 @@ footer{text-align:center;color:var(--ink-muted);font-size:var(--click-font-size-
 .alert-more>summary:focus-visible{outline:2px solid var(--status-info);outline-offset:2px;border-radius:var(--click-radii-1)}
 .alert-full{background:var(--surface-sunken);border:var(--click-border-width-1) solid var(--stroke);border-radius:var(--click-radii-1);padding:var(--click-space-2);margin:var(--click-space-1) 0 var(--click-space-2);font-family:var(--click-font-mono);font-size:var(--click-font-size-0);line-height:var(--click-line-height-1);color:var(--ink-muted);white-space:pre-wrap;word-break:break-word;max-height:360px;overflow:auto}
 .alert-desc-rest{margin-top:var(--click-space-1)}
-/* The SQL to run on the customer's own cluster for a displayed alert —
-   collapsed under one summary line; .alert-full gives it the mono,
-   scrollable, height-capped box the stack traces use. */
+/* 用于在客户自己的集群上运行所显示告警的SQL —
+   折叠在一行摘要下；.alert-full为它提供堆栈跟踪所用的
+   等宽、可滚动、限高盒子。 */
 .alert-q{margin:var(--click-space-1) 0 0}
 .alert-q-title{font-size:var(--click-font-size-0);color:var(--ink-muted);display:flex;align-items:center;gap:var(--click-space-1)}
 .alert-copy{font-size:var(--click-font-size-0);padding:0 6px;border:var(--click-border-width-1) solid var(--stroke);border-radius:var(--click-radii-1);background:var(--surface-sunken);color:var(--ink-muted);cursor:pointer}
@@ -1971,475 +1971,475 @@ footer{text-align:center;color:var(--ink-muted);font-size:var(--click-font-size-
 
 <div class="topbar">
 <header>
-  <button id="nav-toggle" type="button" aria-label="Hide section sidebar" aria-controls="main-nav" aria-expanded="true">
+  <button id="nav-toggle" type="button" aria-label="隐藏分节侧栏" aria-controls="main-nav" aria-expanded="true">
     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg>
     <span id="nav-current"></span>
   </button>
   <div class="brand">
     <div class="logo">ClickHouse</div>
-    <h1>Diagnostic Dashboard</h1>
+    <h1>诊断仪表盘</h1>
   </div>
   <div class="meta" id="hdr-meta"></div>
-  <button id="theme-toggle" type="button" aria-label="Toggle colour theme"></button>
+  <button id="theme-toggle" type="button" aria-label="切换配色主题"></button>
 </header>
 </div><!-- .topbar -->
 
-<!-- Section sidebar. Outside .topbar on purpose: the band is sticky and
-     measured for --topbar-h, and the sidebar is positioned under it from
-     that measurement rather than being part of it. -->
-<nav id="main-nav" aria-label="Sections">
-  <div class="nav-head">Sections</div>
-  <a href="#sec-alerts" id="nav-alerts">Alerts</a>
-  <a href="#sec-qa" id="nav-qa" style="display:none">Query Analysis</a>
-  <a href="#sec-overview">Overview</a>
-  <a href="#sec-storage">Storage</a>
-  <a href="#sec-tables">Tables</a>
-  <a href="#sec-schema" id="nav-schema" style="display:none">Schema Graph</a>
-  <a href="#sec-queries">Query Activity</a>
-  <a href="#sec-deepdive">Query Deep Dive</a>
-  <a href="#sec-exceptions">Exceptions</a>
-  <a href="#sec-partlog">Part Log</a>
-  <a href="#sec-dicts">Dictionaries</a>
-  <a href="#sec-crashlog" id="nav-crashlog" style="display:none">Crash Log</a>
-  <a href="#sec-pending">Pending Work</a>
-  <a href="#sec-replication">Replication</a>
-  <a href="#sec-replicas" id="nav-replicas" style="display:none">Replicas</a>
+<!-- 分节侧栏。刻意放在.topbar之外：该条带是吸顶的，
+     并为--topbar-h测量，侧栏根据该测量结果定位在其下方，
+     而不是它的一部分。 -->
+<nav id="main-nav" aria-label="分节">
+  <div class="nav-head">分节</div>
+  <a href="#sec-alerts" id="nav-alerts">告警</a>
+  <a href="#sec-qa" id="nav-qa" style="display:none">查询分析</a>
+  <a href="#sec-overview">概览</a>
+  <a href="#sec-storage">存储</a>
+  <a href="#sec-tables">表</a>
+  <a href="#sec-schema" id="nav-schema" style="display:none">模式关系图</a>
+  <a href="#sec-queries">查询活动</a>
+  <a href="#sec-deepdive">查询深入分析</a>
+  <a href="#sec-exceptions">异常</a>
+  <a href="#sec-partlog">Part 日志</a>
+  <a href="#sec-dicts">字典</a>
+  <a href="#sec-crashlog" id="nav-crashlog" style="display:none">崩溃日志</a>
+  <a href="#sec-pending">待处理工作</a>
+  <a href="#sec-replication">复制</a>
+  <a href="#sec-replicas" id="nav-replicas" style="display:none">副本</a>
   <a href="#sec-keeper" id="nav-keeper" style="display:none">Keeper</a>
-  <a href="#sec-clusters" id="nav-clusters" style="display:none">Clusters</a>
-  <a href="#sec-disks">Disks</a>
-  <a href="#sec-logs" id="nav-logs" style="display:none">Logs</a>
-  <a href="#sec-files" id="nav-files" style="display:none">Collected Files</a>
-  <a href="#sec-server-errors">Server Errors</a>
-  <a href="#sec-async-inserts" id="nav-async-inserts" style="display:none">Async Inserts</a>
+  <a href="#sec-clusters" id="nav-clusters" style="display:none">集群</a>
+  <a href="#sec-disks">磁盘</a>
+  <a href="#sec-logs" id="nav-logs" style="display:none">日志</a>
+  <a href="#sec-files" id="nav-files" style="display:none">已采集文件</a>
+  <a href="#sec-server-errors">服务器错误</a>
+  <a href="#sec-async-inserts" id="nav-async-inserts" style="display:none">异步插入</a>
 </nav>
 
 <main>
 
-<!-- ── ALERTS ── -->
+<!-- ── 告警 ── -->
 <section id="sec-alerts">
   <div id="collect-banner" class="collect-banner" style="display:none"></div>
-  <h2>🚨 Alert Summary</h2>
+  <h2>🚨 告警摘要</h2>
   <div id="alerts-summary-bar"></div>
   <div id="alerts-panel"></div>
 </section>
 
-<!-- ── QUERY ANALYSIS ── -->
+<!-- ── 查询分析 ── -->
 <section id="sec-qa" style="display:none">
-  <h2>🔍 Query Analysis</h2>
+  <h2>🔍 查询分析</h2>
   <div id="qa-focus" class="alert-item" style="border-left-color:var(--status-info);margin-bottom:var(--click-space-4)"></div>
 
-  <!-- Query text card — hidden in gov mode -->
+  <!-- 查询文本卡片 — gov模式下隐藏 -->
   <div id="qa-query-card" class="chart-card" style="display:none;margin-bottom:18px">
-    <h3>Focus query — SQL text</h3>
+    <h3>焦点查询 — SQL 文本</h3>
     <pre id="qa-query-text" style="background:var(--surface-sunken);color:var(--ink);border:var(--click-border-width-1) solid var(--stroke);padding:var(--click-space-3);border-radius:var(--click-radii-1);overflow:auto;max-height:280px;font-family:var(--click-font-mono);font-size:var(--click-font-size-1);white-space:pre-wrap;line-height:var(--click-line-height-2)"></pre>
   </div>
 
-  <!-- Per-execution scatters — one dot per individual query execution.
-       Five charts share this shape; each picks a different metric off
-       the qa_executions array and uses the same adaptive-unit + colour
-       logic (green succ, red cross failure, tooltip with query_id). -->
+  <!-- 每次执行的散点图 — 每次单独查询执行一个点。
+       五个图表共享此形状；每个从qa_executions数组中选取不同指标，
+       并使用相同的自适应单位+颜色
+       逻辑（绿色成功，红色叉失败，提示框含query_id）。 -->
   <div class="charts-grid">
     <div class="chart-card">
-      <h3>Per-execution duration</h3>
+      <h3>每次执行耗时</h3>
       <div class="chart-wrap h300"><canvas id="chart-qa-scatter"></canvas></div>
     </div>
     <div class="chart-card">
-      <h3>Per-execution memory usage</h3>
+      <h3>每次执行内存占用</h3>
       <div class="chart-wrap h300"><canvas id="chart-qa-mem"></canvas></div>
     </div>
     <div class="chart-card">
-      <h3>Per-execution user CPU</h3>
+      <h3>每次执行用户 CPU</h3>
       <div class="chart-wrap h300"><canvas id="chart-qa-cpu"></canvas></div>
     </div>
     <div class="chart-card">
-      <h3>Per-execution read rows</h3>
+      <h3>每次执行读取行数</h3>
       <div class="chart-wrap h300"><canvas id="chart-qa-rrows"></canvas></div>
     </div>
     <div class="chart-card">
-      <h3>Per-execution read bytes</h3>
+      <h3>每次执行读取字节</h3>
       <div class="chart-wrap h300"><canvas id="chart-qa-rbytes"></canvas></div>
     </div>
   </div>
 
-  <!-- Count charts — bucketed per MINUTE. Per-execution doesn't apply
-       here (count of "one" per dot would be uninformative); minute is
-       the finest useful grain. -->
+  <!-- 计数图表 — 按MINUTE分桶。这里不适用按执行
+       （每个点的计数都是"1"没有信息量）；分钟是最细的
+       有用粒度。 -->
   <div class="charts-grid" style="margin-top:18px">
     <div class="chart-card">
-      <h3>Executions per minute</h3>
+      <h3>每分钟执行次数</h3>
       <div class="chart-wrap h260"><canvas id="chart-qa-execs"></canvas></div>
     </div>
     <div class="chart-card">
-      <h3>Failed queries per minute, by error type</h3>
+      <h3>每分钟失败查询数（按错误类型）</h3>
       <div class="chart-wrap h260"><canvas id="chart-qa-failed"></canvas></div>
     </div>
   </div>
 
-  <!-- Single-execution charts -->
+  <!-- 单次执行图表 -->
   <div class="charts-grid" style="margin-top:18px">
     <div class="chart-card">
-      <h3>Top 30 ProfileEvents (slowest execution)</h3>
+      <h3>前 30 个 ProfileEvents（最慢执行）</h3>
       <div class="chart-wrap h420"><canvas id="chart-qa-profile"></canvas></div>
     </div>
     <div class="chart-card">
-      <h3>Fast vs Slow — ProfileEvents (top 30 by |delta|)</h3>
+      <h3>快 vs 慢 — ProfileEvents（按 |delta| 前 30）</h3>
       <div class="chart-wrap h420"><canvas id="chart-qa-compare"></canvas></div>
     </div>
   </div>
 
-  <div class="sub-title">Per-host distribution (hash)</div>
+  <div class="sub-title">各主机分布（hash）</div>
   <div class="tbl-wrap"><div id="tbl-qa-host"></div></div>
-  <div class="sub-title" style="margin-top:18px">Failed queries — per-table × per-error breakdown</div>
+  <div class="sub-title" style="margin-top:18px">失败查询 — 按表 × 错误类型细分</div>
   <div class="tbl-wrap"><div id="tbl-qa-failed"></div></div>
-  <div class="sub-title" style="margin-top:18px">Tables referenced by the focus query</div>
+  <div class="sub-title" style="margin-top:18px">焦点查询引用的表</div>
   <div class="tbl-wrap"><div id="tbl-qa-tables"></div></div>
-  <div class="sub-title" style="margin-top:18px">Parts / marks / streams scanned (text_log, slowest execution)</div>
+  <div class="sub-title" style="margin-top:18px">扫描的 part / mark / stream（text_log，最慢执行）</div>
   <div class="tbl-wrap"><div id="tbl-qa-parts"></div></div>
-  <div class="sub-title" style="margin-top:18px">Full text_log for the slowest execution</div>
+  <div class="sub-title" style="margin-top:18px">最慢执行的完整 text_log</div>
   <div class="tbl-wrap" style="max-height:480px;overflow-y:auto"><div id="tbl-qa-textlog"></div></div>
 </section>
 
-<!-- ── OVERVIEW ── -->
+<!-- ── 概览 ── -->
 <section id="sec-overview">
-  <h2>📈 Overview</h2>
+  <h2>📈 概览</h2>
   <div class="stats-grid" id="stats-grid"></div>
 
-  <!-- Host facts: the same content as host_info.json, shown beside what the
-       system tables report so the OS context does not need a second file. -->
+  <!-- Host facts：与host_info.json相同的内容，显示在system表
+       报告的内容旁，使OS上下文无需第二个文件。 -->
   <div id="host-block" style="display:none">
-    <div class="sub-title">Host &mdash; OS, kernel and hardware</div>
+    <div class="sub-title">主机 &mdash; 操作系统、内核与硬件</div>
     <div class="charts-grid">
       <div class="chart-card">
-        <h3>Machine</h3>
+        <h3>机器</h3>
         <div class="tbl-wrap"><div id="tbl-host-os"></div></div>
       </div>
       <div class="chart-card">
-        <h3>ClickHouse-relevant tunables</h3>
+        <h3>ClickHouse 相关可调参数</h3>
         <div class="tbl-wrap"><div id="tbl-host-tunables"></div></div>
-        <p class="host-note">Only settings ClickHouse itself checks at startup are flagged; the rest are reported as facts.</p>
+        <p class="host-note">只标记 ClickHouse 自身在启动时检查的设置；其余仅作为事实报告。</p>
       </div>
     </div>
-    <div class="sub-title">Top processes by resident memory</div>
+    <div class="sub-title">按常驻内存排序的进程</div>
     <div class="tbl-wrap"><div id="tbl-host-procs"></div></div>
     <div id="host-notes"></div>
   </div>
 </section>
 
-<!-- ── STORAGE ── -->
+<!-- ── 存储 ── -->
 <section id="sec-storage">
-  <h2>📦 Storage</h2>
+  <h2>📦 存储</h2>
   <div class="charts-grid">
     <div class="chart-card">
-      <h3>Data Size by Database</h3>
+      <h3>各数据库数据大小</h3>
       <div class="chart-wrap h360"><canvas id="chart-storage-db"></canvas></div>
     </div>
     <div class="chart-card">
-      <h3>Table Engine Distribution</h3>
+      <h3>表引擎分布</h3>
       <div class="chart-wrap h260"><canvas id="chart-engines"></canvas></div>
     </div>
   </div>
-  <div class="sub-title">Top 20 Tables by Size</div>
+  <div class="sub-title">按大小排序的前 20 张表</div>
   <div class="tbl-wrap"><div id="tbl-top-tables"></div></div>
 </section>
 
-<!-- ── TABLES EXPLORER ── -->
+<!-- ── 表浏览器 ── -->
 <section id="sec-tables">
-  <h2>📋 Tables Explorer</h2>
+  <h2>📋 表浏览器</h2>
   <div class="filter-bar">
-    <input type="text" id="tbl-search" placeholder="Search by name, engine, key…" oninput="tablesFilter()">
-    <select id="tbl-db-filter" onchange="tablesFilter()"><option value="">All databases</option></select>
-    <select id="tbl-engine-filter" onchange="tablesFilter()"><option value="">All engines</option></select>
+    <input type="text" id="tbl-search" placeholder="按名称、引擎、键搜索…" oninput="tablesFilter()">
+    <select id="tbl-db-filter" onchange="tablesFilter()"><option value="">所有数据库</option></select>
+    <select id="tbl-engine-filter" onchange="tablesFilter()"><option value="">所有引擎</option></select>
     <span class="count-badge" id="tbl-count"></span>
   </div>
   <div class="tbl-wrap"><div id="tbl-explorer"></div></div>
   <div class="pagination" id="tbl-pagination"></div>
 </section>
 
-<!-- ── SCHEMA GRAPH ── -->
-<!-- The graph lives in schema_graph.html beside this page and is loaded into
-     the frame only when asked for: assigning iframe.src is a navigation, which
-     file:// allows, while fetch()/XHR of a sibling file is blocked. Nothing is
-     paid for the graph until the tab is opened. -->
+<!-- ── 模式关系图 ── -->
+<!-- 关系图位于本页旁的schema_graph.html中，仅在请求时加载到
+     框架中：设置iframe.src是一次导航，file://允许这样做，
+     而获取同级文件的fetch()/XHR会被阻止。在打开标签页之前
+     不会为关系图付出任何代价。 -->
 <section id="sec-schema" style="display:none">
-  <h2>🕸 Schema Graph</h2>
+  <h2>🕸 模式关系图</h2>
   <p class="host-note" id="schema-note"></p>
   <div class="filter-bar schema-actions">
-    <button type="button" id="schema-load">Load the graph</button>
-    <a id="schema-open" href="schema_graph.html" target="_blank" rel="noopener">Open in a new tab ↗</a>
+    <button type="button" id="schema-load">加载关系图</button>
+    <a id="schema-open" href="schema_graph.html" target="_blank" rel="noopener">在新标签页打开 ↗</a>
     <span class="count-badge" id="schema-count"></span>
   </div>
   <div id="schema-frame-wrap" style="display:none">
-    <iframe id="schema-frame" title="Table dependency graph" loading="eager"></iframe>
+    <iframe id="schema-frame" title="表依赖关系图" loading="eager"></iframe>
   </div>
-  <p class="host-note">Tables, materialized views, dictionaries and Distributed tables, with the edges data flows along. Nodes are coloured by engine; click one for its keys, columns and CREATE statement (credentials in engine arguments read <code>[HIDDEN]</code>). The page is written beside this one — if the frame stays blank, open the full bundle folder rather than a copied-out dashboard.html.</p>
+  <p class="host-note">表、materialized view、字典和 Distributed 表，以及数据流经的边。节点按引擎着色；点击节点可查看其键、列和 CREATE 语句（引擎参数中的凭据显示为 <code>[HIDDEN]</code>）。该页面写在本页旁边 — 如果框架一直空白，请打开完整的 bundle 目录，而不是复制出来的 dashboard.html。</p>
 </section>
 
-<!-- ── QUERY ACTIVITY ── -->
+<!-- ── 查询活动 ── -->
 <section id="sec-queries">
-  <h2>📊 Query Activity (<span data-win="7d">last 7 days</span>)</h2>
+  <h2>📊 查询活动（<span data-win="7d">最近 7 天</span>）</h2>
   <div class="charts-grid">
     <div class="chart-card" style="grid-column:1/-1">
-      <h3>Queries per Hour by Type</h3>
+      <h3>每小时查询数（按类型）</h3>
       <div class="chart-wrap h260"><canvas id="chart-query-time"></canvas></div>
     </div>
     <div class="chart-card">
-      <h3>Query Count by Kind</h3>
+      <h3>查询数（按类型）</h3>
       <div class="chart-wrap h200"><canvas id="chart-query-kind"></canvas></div>
     </div>
     <div class="chart-card">
-      <h3>Avg Duration by Kind (ms)</h3>
+      <h3>平均耗时（按类型，ms）</h3>
       <div class="chart-wrap h200"><canvas id="chart-query-duration"></canvas></div>
     </div>
     <div class="chart-card">
-      <h3>Avg Memory by Kind (MB)</h3>
+      <h3>平均内存（按类型，MB）</h3>
       <div class="chart-wrap h200"><canvas id="chart-query-memory"></canvas></div>
     </div>
   </div>
 </section>
 
-<!-- ── QUERY DEEP DIVE ── -->
+<!-- ── 查询深入分析 ── -->
 <section id="sec-deepdive">
-  <h2>🔍 Query Deep Dive (<span data-win="7d">last 7 days</span>)</h2>
+  <h2>🔍 查询深入分析（<span data-win="7d">最近 7 天</span>）</h2>
   <div class="charts-grid">
     <div class="chart-card">
-      <h3>Top 20 Slowest Query Patterns (avg duration ms)</h3>
+      <h3>最慢的 20 个查询模式（平均耗时 ms）</h3>
       <div class="chart-wrap h420"><canvas id="chart-slow-queries"></canvas></div>
       <pre class="sql-peek" id="peek-slow-queries" style="display:none"></pre>
     </div>
     <div class="chart-card">
-      <h3>Top 20 Heaviest Reads (avg MB / query)</h3>
+      <h3>读取量最大的 20 个查询（平均 MB/查询）</h3>
       <div class="chart-wrap h420"><canvas id="chart-heavy-reads"></canvas></div>
       <pre class="sql-peek" id="peek-heavy-reads" style="display:none"></pre>
     </div>
     <div class="chart-card" style="grid-column:1/-1">
-      <h3>Activity by User — Executions &amp; Errors (<span data-win="7d">last 7 days</span>)</h3>
+      <h3>用户活动 — 执行次数与错误（<span data-win="7d">最近 7 天</span>）</h3>
       <div class="chart-wrap h200"><canvas id="chart-user-activity"></canvas></div>
     </div>
   </div>
-  <div class="sub-title">Slow Query Details</div>
+  <div class="sub-title">慢查询详情</div>
   <div class="tbl-wrap"><div id="tbl-slow-queries"></div></div>
-  <div class="sub-title" style="margin-top:18px">User Summary</div>
+  <div class="sub-title" style="margin-top:18px">用户摘要</div>
   <div class="tbl-wrap"><div id="tbl-user-summary"></div></div>
 </section>
 
-<!-- ── EXCEPTIONS ── -->
+<!-- ── 异常 ── -->
 <section id="sec-exceptions">
-  <h2>⚠️ Exceptions (<span data-win="7d">last 7 days</span>)</h2>
+  <h2>⚠️ 异常（<span data-win="7d">最近 7 天</span>）</h2>
   <div class="charts-grid">
     <div class="chart-card">
-      <h3>Top Exception Codes</h3>
+      <h3>异常码 Top</h3>
       <div class="chart-wrap h260"><canvas id="chart-exceptions"></canvas></div>
     </div>
     <div class="chart-card" style="display:flex;flex-direction:column">
-      <h3>Exception Details</h3>
+      <h3>异常详情</h3>
       <div class="tbl-wrap" style="max-height:320px;overflow-y:auto"><div id="tbl-exceptions"></div></div>
     </div>
   </div>
 </section>
 
-<!-- ── PART LOG ── -->
+<!-- ── Part日志 ── -->
 <section id="sec-partlog">
-  <h2>🔧 Part Log Events (<span data-win="3d">last 7 days</span>)</h2>
+  <h2>🔧 Part 日志事件（<span data-win="3d">最近 7 天</span>）</h2>
   <div class="charts-grid">
     <div class="chart-card" style="grid-column:1/-1">
-      <h3>Part Events per Day by Type</h3>
+      <h3>每日 Part 事件数（按类型）</h3>
       <div class="chart-wrap h260"><canvas id="chart-partlog-time"></canvas></div>
     </div>
     <div class="chart-card">
-      <h3>Part Event Type Distribution</h3>
+      <h3>Part 事件类型分布</h3>
       <div class="chart-wrap h260"><canvas id="chart-partlog-type"></canvas></div>
     </div>
   </div>
 </section>
 
-<!-- ── DICTIONARIES ── -->
+<!-- ── 字典 ── -->
 <section id="sec-dicts">
-  <h2>📖 Dictionaries</h2>
+  <h2>📖 字典</h2>
   <div class="charts-grid">
     <div class="chart-card">
-      <h3>Status Distribution</h3>
+      <h3>状态分布</h3>
       <div class="chart-wrap h200"><canvas id="chart-dict-status"></canvas></div>
     </div>
     <div class="chart-card">
-      <h3>Bytes Allocated per Dictionary</h3>
+      <h3>各字典分配字节数</h3>
       <div class="chart-wrap h300"><canvas id="chart-dict-bytes"></canvas></div>
     </div>
     <div class="chart-card" style="grid-column:1/-1">
-      <h3>Lifetime Configuration — min &amp; max (seconds)</h3>
+      <h3>生存时间配置 — 最小与最大（秒）</h3>
       <div class="chart-wrap h200"><canvas id="chart-dict-lifetime"></canvas></div>
     </div>
   </div>
-  <div class="sub-title">Dictionary Details</div>
+  <div class="sub-title">字典详情</div>
   <div class="tbl-wrap"><div id="tbl-dicts"></div></div>
 </section>
 
-<!-- ── CRASH LOG ── -->
+<!-- ── 崩溃日志 ── -->
 <section id="sec-crashlog" style="display:none">
-  <h2>💥 Crash Log</h2>
+  <h2>💥 崩溃日志</h2>
   <div class="tbl-wrap"><div id="tbl-crash-log"></div></div>
 </section>
 
-<!-- ── PENDING WORK ── -->
+<!-- ── 待处理工作 ── -->
 <section id="sec-pending">
-  <h2>⏳ Pending Operations</h2>
+  <h2>⏳ 待处理操作</h2>
   <div class="charts-grid">
     <div class="chart-card">
-      <h3>Pending Mutations</h3>
+      <h3>待处理 mutation</h3>
       <div class="tbl-wrap"><div id="tbl-mutations"></div></div>
     </div>
     <div class="chart-card">
-      <h3>Detached Parts</h3>
+      <h3>分离 part</h3>
       <div class="tbl-wrap"><div id="tbl-detached"></div></div>
     </div>
   </div>
 </section>
 
-<!-- ── REPLICATION QUEUE ── -->
+<!-- ── 复制队列 ── -->
 <section id="sec-replication">
-  <h2>🔄 Replication Queue</h2>
+  <h2>🔄 复制队列</h2>
   <div class="tbl-wrap"><div id="tbl-replication"></div></div>
-  <div class="sub-title">Background pools (<span data-win="7d">last 7 days</span>, hourly average tasks vs pool size)</div>
-  <p class="host-note" id="pools-note">Each pool fails differently when pinned at its size. <b>Fetch</b>: a queue with no queue — a fetch that finds no free slot is dropped and retried later, silently; on a SharedMergeTree replica that is parts-propagation lag (alert <code>fetch_pool_saturated</code>). <b>Schedule</b>: periodic tasks are not lost but late — parts-set updates, replication queue processing, cleanup wait for a slot; tens of thousands of replicated tables pin it first (<code>schedule_pool_saturated</code>). <b>Merge / mutation</b>: merges wait and parts accumulate — the classic too-many-parts build-up (HC-2.7). Dashed line = the pool size; the series is the worst replica's hourly average.</p>
+  <div class="sub-title">后台池（<span data-win="7d">最近 7 天</span>，每小时平均任务数与池大小）</div>
+  <p class="host-note" id="pools-note">每个池在达到容量上限时的失败方式各不相同。<b>Fetch</b>：队列本身没有队列 — 取任务时找不到空闲槽位会被静默丢弃并稍后重试；在 SharedMergeTree 副本上，这表现为 parts 传播滞后（告警 <code>fetch_pool_saturated</code>）。<b>Schedule</b>：周期性任务不会丢失，但会延迟 — parts 集合更新、复制队列处理和清理都在等待槽位；数万张复制表会最先占满它（<code>schedule_pool_saturated</code>）。<b>Merge / mutation</b>：merge 等待、part 不断累积 — 典型的 part 过多堆积（HC-2.7）。虚线 = 池大小；曲线是最差副本的每小时平均值。</p>
   <div class="charts-grid" id="pools-charts">
     <div class="chart-card">
-      <h3>Fetch pool (BackgroundFetchesPoolTask)</h3>
+      <h3>Fetch 池（BackgroundFetchesPoolTask）</h3>
       <div class="chart-wrap h260"><canvas id="chart-pool-fetch"></canvas></div>
     </div>
     <div class="chart-card">
-      <h3>Schedule pool (BackgroundSchedulePoolTask)</h3>
+      <h3>Schedule 池（BackgroundSchedulePoolTask）</h3>
       <div class="chart-wrap h260"><canvas id="chart-pool-schedule"></canvas></div>
     </div>
     <div class="chart-card">
-      <h3>Merge / mutation pool (BackgroundMergesAndMutationsPoolTask)</h3>
+      <h3>Merge / mutation 池（BackgroundMergesAndMutationsPoolTask）</h3>
       <div class="chart-wrap h260"><canvas id="chart-pool-merge"></canvas></div>
     </div>
   </div>
 </section>
 
-<!-- ── CLUSTERS ── -->
+<!-- ── 集群 ── -->
 <section id="sec-clusters" style="display:none">
-  <h2>🌐 Cluster Nodes</h2>
+  <h2>🌐 集群节点</h2>
   <div class="tbl-wrap"><div id="tbl-clusters"></div></div>
 </section>
 
-<!-- ── REPLICAS HEALTH ── -->
+<!-- ── 副本健康 ── -->
 <section id="sec-replicas" style="display:none">
-  <h2>🔁 Replicas Health</h2>
+  <h2>🔁 副本健康</h2>
   <div class="charts-grid">
     <div class="chart-card">
-      <h3>Replication Delay Distribution</h3>
+      <h3>复制延迟分布</h3>
       <div class="chart-wrap h260"><canvas id="chart-replica-delay"></canvas></div>
     </div>
     <div class="chart-card">
-      <h3>Queue Size by Table (top 15)</h3>
+      <h3>各表队列大小（前 15）</h3>
       <div class="chart-wrap h260"><canvas id="chart-replica-queue"></canvas></div>
     </div>
   </div>
-  <div class="sub-title">Replica Details</div>
+  <div class="sub-title">副本详情</div>
   <p class="host-note" id="replicas-scope"></p>
   <div class="tbl-wrap"><div id="tbl-replicas"></div></div>
   <div class="pagination" id="replicas-pagination"></div>
 </section>
 
-<!-- ── KEEPER HEALTH ── -->
+<!-- ── Keeper健康 ── -->
 <section id="sec-keeper" style="display:none">
-  <h2>🔑 Keeper Health (<span data-win="7d">last 7 days</span>)</h2>
+  <h2>🔑 Keeper 健康（<span data-win="7d">最近 7 天</span>）</h2>
   <div id="keeper-health-body" style="display:none">
-  <p class="host-note">Two counters per hour decide the verdict: <b>transactions</b> (work Keeper completed for this server) and <b>hardware exceptions</b> (connection loss, session expiry, operation timeout). More than 1000 exceptions while traffic holds is a <b>blip</b> — a session lost and re-established. Exceptions while traffic drops below half of the 7-day median means Keeper was <b>unavailable</b> to this server: inserts fail with 999/319, merges are not scheduled, DDL stalls, and TOO_MANY_PARTS follows.</p>
+  <p class="host-note">每小时有两个计数器决定判定：<b>事务数</b>（Keeper 为此服务器完成的工作）和<b>硬件异常数</b>（连接丢失、会话过期、操作超时）。流量保持时异常超过 1000 次记为 <b>blip</b> — 会话丢失后重新建立。流量降到 7 天中位数一半以下时出现异常，说明 Keeper 对此服务器<b>不可用</b>：插入以 999/319 失败，merge 不再调度，DDL 停滞，随后出现 TOO_MANY_PARTS。</p>
   <div class="tbl-wrap"><div id="tbl-keeper-verdict"></div></div>
   <div class="charts-grid">
     <div class="chart-card" style="grid-column:1/-1">
-      <h3>Keeper transactions per hour (work completed)</h3>
+      <h3>每小时 Keeper 事务数（已完成工作）</h3>
       <div class="chart-wrap h260"><canvas id="chart-keeper-traffic"></canvas></div>
     </div>
     <div class="chart-card" style="grid-column:1/-1">
-      <h3>Keeper hardware exceptions per hour (connection loss, session expiry, timeouts) — bars coloured by verdict</h3>
+      <h3>每小时 Keeper 硬件异常数（连接丢失、会话过期、超时）— 柱条按判定着色</h3>
       <div class="chart-wrap h260"><canvas id="chart-keeper-exceptions"></canvas></div>
     </div>
     <div class="chart-card">
-      <h3>Mean Keeper request latency per hour (ms)</h3>
-      <p class="host-note">ZooKeeperWaitMicroseconds / ZooKeeperTransactions. Latency rising in the hours <i>before</i> the exceptions means Keeper was saturated first.</p>
+      <h3>每小时 Keeper 请求平均延迟（ms）</h3>
+      <p class="host-note">ZooKeeperWaitMicroseconds / ZooKeeperTransactions。异常出现<i>之前</i>的几个小时里延迟上升，说明 Keeper 先被压满了。</p>
       <div class="chart-wrap h260"><canvas id="chart-keeper-latency"></canvas></div>
     </div>
     <div class="chart-card">
-      <h3>Keeper-dependent errors per hour</h3>
+      <h3>每小时依赖 Keeper 的错误数</h3>
       <p class="host-note" id="keeper-errors-source"></p>
       <div class="chart-wrap h260"><canvas id="chart-keeper-errors"></canvas></div>
     </div>
   </div>
   </div>
   <div id="keeper-members-block" style="display:none">
-    <div class="sub-title">Keeper members — what each member reports about itself (keeper/&lt;member&gt;.txt)</div>
-    <p class="host-note">Role, Raft log position and snapshot settings from each member's four-letter replies. The ⛔ / ⚠ marks follow the analysis skill's checks (HC-3.18–3.20; hover for the reason): a member whose log ends before the leader's first retained entry can rejoin only through a full snapshot, and a snapshot over 2 GiB sent unchunked (<code>snapshot_transfer_chunk_size = 0</code>) fails — set it, and <code>nuraft_snapshot_sync_ctx_timeout_ms</code>, before a member falls behind (P-61).</p>
+    <div class="sub-title">Keeper 成员 — 各成员自报信息（keeper/&lt;member&gt;.txt）</div>
+    <p class="host-note">来自各成员 four-letter 回复的角色、Raft 日志位置和快照设置。⛔ / ⚠ 标记遵循分析 skill 的检查（HC-3.18–3.20；悬停查看原因）：日志末尾早于 leader 最早保留条目的成员只能通过完整快照重新加入；超过 2 GiB 的快照若未分块发送（<code>snapshot_transfer_chunk_size = 0</code>）会失败 — 在成员落后之前设置该参数及 <code>nuraft_snapshot_sync_ctx_timeout_ms</code>（P-61）。</p>
     <div id="keeper-leaderless"></div>
     <div class="tbl-wrap"><div id="tbl-keeper-members"></div></div>
   </div>
   <div id="keeper-connections-block" style="display:none">
-  <div class="sub-title">Keeper connections (system.zookeeper_connection)</div>
+  <div class="sub-title">Keeper 连接（system.zookeeper_connection）</div>
   <div class="tbl-wrap"><div id="tbl-keeper-connection"></div></div>
   </div>
 </section>
 
-<!-- ── DISK USAGE ── -->
+<!-- ── 磁盘使用 ── -->
 <section id="sec-disks">
-  <h2>💾 Disk Usage</h2>
+  <h2>💾 磁盘使用</h2>
   <div class="charts-grid">
     <div class="chart-card" style="grid-column:1/-1">
-      <h3>Free vs Used Space per Disk</h3>
+      <h3>各磁盘可用与已用空间</h3>
       <div class="chart-wrap h220"><canvas id="chart-disk-usage"></canvas></div>
     </div>
   </div>
-  <div class="sub-title">Disk Details</div>
+  <div class="sub-title">磁盘详情</div>
   <div class="tbl-wrap"><div id="tbl-disks"></div></div>
 </section>
 
-<!-- ── LOGS ── -->
+<!-- ── 日志 ── -->
 <section id="sec-logs" style="display:none">
-  <h2>📜 Logs</h2>
+  <h2>📜 日志</h2>
   <p class="host-note" id="logs-scope"></p>
   <div class="filter-bar">
-    <input type="text" id="log-search" placeholder="Search message or logger…" oninput="logsFilter()">
-    <select id="log-level-filter" onchange="logsFilter()"><option value="">All levels</option></select>
+    <input type="text" id="log-search" placeholder="搜索消息或 logger…" oninput="logsFilter()">
+    <select id="log-level-filter" onchange="logsFilter()"><option value="">所有级别</option></select>
     <span class="count-badge" id="log-count"></span>
   </div>
   <div class="tbl-wrap"><div id="tbl-logs"></div></div>
   <div class="pagination" id="log-pagination"></div>
 </section>
 
-<!-- ── COLLECTED FILES ── -->
+<!-- ── 已采集文件 ── -->
 <section id="sec-files" style="display:none">
-  <h2>📁 Collected Files</h2>
+  <h2>📁 已采集文件</h2>
   <p class="host-note" id="files-scope"></p>
   <div class="filter-bar">
-    <input type="text" id="file-search" placeholder="Filter by name…" oninput="filesFilter()">
-    <select id="file-group-filter" onchange="filesFilter()"><option value="">All folders</option></select>
+    <input type="text" id="file-search" placeholder="按名称筛选…" oninput="filesFilter()">
+    <select id="file-group-filter" onchange="filesFilter()"><option value="">所有文件夹</option></select>
     <span class="count-badge" id="file-count"></span>
   </div>
   <div class="tbl-wrap"><div id="tbl-files"></div></div>
-  <p class="host-note">Links open the file from the extracted bundle, beside this page. Nothing here is embedded — the raw server logs alone are tail-copied at up to 50&nbsp;MiB each, which would make this page unopenable.</p>
+  <p class="host-note">链接会从本页旁边的解压 bundle 中打开文件。这里不内嵌任何内容 — 仅原始服务器日志每个就以最多 50&nbsp;MiB 尾部拷贝，内嵌会让本页无法打开。</p>
 </section>
 
-<!-- ── SERVER ERRORS ── -->
+<!-- ── 服务器错误 ── -->
 <section id="sec-server-errors">
-  <h2>🛑 Server Error Counters</h2>
+  <h2>🛑 服务器错误计数器</h2>
   <div class="charts-grid">
     <div class="chart-card" style="grid-column:1/-1">
-      <h3>Top 20 Error Codes (cumulative since last restart)</h3>
+      <h3>前 20 个错误码（自上次重启以来累计）</h3>
       <div class="chart-wrap h300"><canvas id="chart-server-errors"></canvas></div>
     </div>
   </div>
-  <div class="sub-title">High Part-Count Partitions (&gt;100 parts — potential code 252 TOO_MANY_PARTS risk)</div>
+  <div class="sub-title">part 数过多的分区（&gt;100 个 part — 存在 code 252 TOO_MANY_PARTS 风险）</div>
   <div class="tbl-wrap"><div id="tbl-high-parts"></div></div>
-  <div class="sub-title" style="margin-top:18px">TTL Activity (<span data-win="3d">last 7 days</span>)</div>
+  <div class="sub-title" style="margin-top:18px">TTL 活动（<span data-win="3d">最近 7 天</span>）</div>
   <div class="tbl-wrap"><div id="tbl-ttl-activity"></div></div>
 </section>
 
-<!-- ── ASYNC INSERTS ── -->
+<!-- ── 异步插入 ── -->
 <section id="sec-async-inserts" style="display:none">
-  <h2>⚡ Async Insert Activity (last 24 h)</h2>
+  <h2>⚡ 异步插入活动（最近 24 小时）</h2>
   <div class="charts-grid">
     <div class="chart-card" style="grid-column:1/-1">
-      <h3>Async Flush Count per Hour by Status</h3>
+      <h3>每小时异步 flush 次数（按状态）</h3>
       <div class="chart-wrap h260"><canvas id="chart-async-inserts"></canvas></div>
     </div>
   </div>
@@ -2447,49 +2447,49 @@ footer{text-align:center;color:var(--ink-muted);font-size:var(--click-font-size-
 </section>
 
 </main>
-<footer>Generated by ClickHouse Diagnostic Tool &mdash; requires Chart.js CDN</footer>
+<footer>由 ClickHouse 诊断工具生成 &mdash; 需要 Chart.js CDN</footer>
 
 <script>
 const DATA = /*DATA*/null;
 
-// ── palette ──────────────────────────────────────────────────────────────────
+// ── 调色板 ────────────────────────────────────────────────────────────────
 //
-// Five categorical slots, every hex a Click UI token. The set is deliberately
-// MODE-INVARIANT — the same five work on the light card (#ffffff) and the dark
-// card (#1F1F1C) — which is what lets a theme switch be a Chart.update() rather
-// than a teardown and rebuild.
+// 五个分类槽位，每个十六进制值都是一个Click UI token。该集合刻意
+// 与模式无关 — 同样五种在浅色卡片（#ffffff）和深色
+// 卡片（#1F1F1C）上都可用 — 这使主题切换只需Chart.update()，
+// 而不是拆除重建。
 //
-// Validated, not eyeballed (dataviz validate_palette.js, both modes):
-//   lightness band PASS · chroma floor PASS · contrast >=3:1 PASS
-//   adjacent CVD dE 20.1 (target >=8) · normal-vision dE 31.3 (floor >=15)
-// All-pairs forms (scatter, donut, small multiples) only clear the gates for
-// the FIRST THREE slots, so those forms fold past three — see foldSeries.
+// 经过验证，而非凭眼估（dataviz validate_palette.js，两种模式）：
+//   亮度带 PASS · 色度下限 PASS · 对比度>=3:1 PASS
+//   相邻CVD dE 20.1（目标>=8） · 正常视觉dE 31.3（下限>=15）
+// 全配对形式（散点、环形、小倍数）只对
+// 前三个槽位通过门槛，因此这些形式超过三个就折叠 — 见foldSeries。
 //
-// Do not extend this array. A sixth generated hue is indistinguishable from an
-// existing slot under CVD; the tail folds into OTHER instead. Slots are
-// assigned by entity index and never by rank, so filtering cannot repaint the
-// survivors.
+// 不要扩展此数组。第六个生成的色相在CVD下与
+// 现有槽位无法区分；尾部改为折叠进OTHER。槽位按
+// 实体索引分配而从不按排名，因此过滤不会重绘
+// 幸存者。
 const C = [
-  '#089B83',  // 1 teal     — teal.600
-  '#AA00FF',  // 2 violet   — violet.500
-  '#B28800',  // 3 amber    — sunrise.600
-  '#CC0099',  // 4 fuchsia  — fuchsia.600
-  '#959900'   // 5 olive    — brand.600
+  '#089B83',  // 1 青绿     — teal.600
+  '#AA00FF',  // 2 紫罗兰   — violet.500
+  '#B28800',  // 3 琥珀    — sunrise.600
+  '#CC0099',  // 4 品红  — fuchsia.600
+  '#959900'   // 5 橄榄    — brand.600
 ];
-const OTHER = '#808691';        // slate.500 — the de-emphasis / folded-tail gray
-const ALL_PAIRS_CAP = 3;        // scatter/donut/small-multiple ceiling
+const OTHER = '#808691';        // slate.500 — 弱化/折叠尾部的灰色
+const ALL_PAIRS_CAP = 3;        // scatter/donut/small-multiple上限
 
-// Ordinal ramp for ordered buckets (delay bands). One hue, monotone lightness,
-// stepped per mode so the pale end still clears 2:1 on its own surface —
-// validated with validate_palette.js --ordinal in both modes. This is the one
-// palette that is NOT mode-invariant, so it repaints on a theme switch.
+// 有序分桶（延迟区间）的序数色阶。单色相、单调亮度，
+// 按模式分级，使浅色端在自身表面上仍能达到2:1 —
+// 已用validate_palette.js --ordinal在两种模式下验证。这是唯一与模式
+// 相关的调色板，因此主题切换时会重绘。
 const ORDINAL = {
   light:['#6D9BF3','#437EEF','#1D64EC','#104EC6','#0D3E9B'],  // info.300→700
   dark: ['#A1BEF7','#6D9BF3','#437EEF','#1D64EC','#104EC6']   // info.200→600
 };
 
-// Status ramp. Reserved meaning — never a series colour, and never carried by
-// hue alone (every use ships an icon + label).
+// 状态色阶。保留含义 — 从不用作数据序列颜色，也从不只靠
+// 色相表达（每次使用都配有图标+标签）。
 const STATUS = {
   critical:'#f10000',  // danger.500
   warning: '#F55A00',  // warning.500
@@ -2503,11 +2503,11 @@ const DICT_STATUS_COLOR = {
   NOT_LOADED:STATUS.neutral, UNKNOWN:STATUS.info
 };
 
-// Slot by index — folds instead of cycling.
+// 按索引取槽位 — 折叠而不是循环。
 const slot = (i) => i < C.length ? C[i] : OTHER;
 
-// Keep the top 'cap' categories by weight and fold the rest into "Other", so a
-// chart never needs a sixth hue. Returns the surviving category order.
+// 按权重保留前'cap'个类别，将其余折叠进"Other"，使
+// 图表永远不需要第六个色相。返回幸存类别的顺序。
 function foldSeries(cats, weight, cap){
   cap = cap || C.length;
   if(cats.length <= cap) return cats;
@@ -2517,7 +2517,7 @@ function foldSeries(cats, weight, cap){
   return ordered;
 }
 
-// ── theme ─────────────────────────────────────────────────────────────────────
+// ── 主题 ──────────────────────────────────────────────────────────────────
 const themeVar = (n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
 const CHARTS = [];
 function mkChart(el, cfg){
@@ -2527,17 +2527,17 @@ function mkChart(el, cfg){
   return c;
 }
 
-// Chart.js reads these at draw time, so retheming the axes, ticks, legend and
-// grid is a defaults swap plus an update — no chart is rebuilt.
+// Chart.js在绘制时读取这些值，因此重新设置坐标轴、刻度、图例和
+// 网格的主题只需替换默认值加一次update — 没有图表被重建。
 function applyChartTheme(){
   const ink=themeVar('--ink-muted'), stroke=themeVar('--stroke');
   Chart.defaults.color        = ink;
   Chart.defaults.borderColor  = stroke;
   Chart.defaults.font.family  = themeVar('--click-font-regular');
   Chart.defaults.font.size    = 11;
-  // Grid and axis lines are chrome, not data — they take the stroke token and
-  // sit behind the marks. Without this Chart.js falls back to defaults.color
-  // and paints a near-white grid straight over the series in dark mode.
+  // 网格和坐标轴线是界面外框，不是数据 — 它们采用stroke token
+  // 并位于标记之后。否则Chart.js会回退到defaults.color，
+  // 在深色模式下把近白色网格直接画在序列上。
   Chart.defaults.scale.grid.color       = stroke;
   Chart.defaults.scale.grid.tickColor   = stroke;
   Chart.defaults.scale.grid.drawTicks   = false;
@@ -2554,8 +2554,8 @@ function applyChartTheme(){
   Chart.defaults.plugins.tooltip.bodyColor       = themeVar('--ink');
   Chart.defaults.plugins.tooltip.borderColor     = stroke;
   Chart.defaults.plugins.tooltip.borderWidth     = 1;
-  // Thin marks, with the 4px radius on the data end only (the baseline end
-  // stays square so the bar reads as anchored).
+  // 细标记，仅在数据端使用4px圆角（基线端
+  // 保持方角，使柱子读起来像有锚点）。
   Chart.defaults.datasets.bar.maxBarThickness = 22;
   Chart.defaults.datasets.bar.borderSkipped   = 'start';
   Chart.defaults.datasets.bar.borderRadius    = 4;
@@ -2564,8 +2564,8 @@ function applyChartTheme(){
   Chart.defaults.elements.point.hoverRadius   = 6;
 }
 
-// The 2px spacer between touching fills is painted in the surface colour, so it
-// is the one series-side value that has to follow the theme.
+// 相接填充之间的2px间隔以表面色绘制，因此它
+// 是唯一必须跟随主题的序列侧值。
 function repaintSurfaceGaps(){
   applyChartTheme();
   const surf=themeVar('--surface-card'), ink=themeVar('--ink-muted'),
@@ -2606,13 +2606,13 @@ function setTheme(t){
   document.documentElement.setAttribute('data-cui-theme', t);
   try{ localStorage.setItem('chdiag-theme', t); }catch(e){}
   const btn=document.getElementById('theme-toggle');
-  if(btn) btn.textContent = t==='dark' ? '☀ Light' : '☾ Dark';
-  // repaintSurfaceGaps re-applies Chart defaults and updates every chart —
-  // one pass, not the double layout+paint this used to do.
+  if(btn) btn.textContent = t==='dark' ? '☀ 浅色' : '☾ 深色';
+  // repaintSurfaceGaps重新应用Chart默认值并更新每个图表 —
+  // 一趟完成，而不是过去的两趟布局+绘制。
   repaintSurfaceGaps();
 }
 
-// ── helpers ───────────────────────────────────────────────────────────────────
+// ── 辅助函数 ──────────────────────────────────────────────────────────────
 function fmt(n){
   if(n==null||n==='')return '—';
   if(typeof n==='number'){
@@ -2625,46 +2625,46 @@ function fmt(n){
   return String(n);
 }
 
-// The full normalized_query_hash. It arrives as a string precisely so it can be
-// shown and copied whole — truncating it to the last 8 digits (what this used
-// to do) made it useless for grepping query_log, which is the one thing a
-// reader wants a hash for.
+// 完整的normalized_query_hash。它以字符串形式到达，正是为了能
+// 整体显示和复制 — 截断到最后8位（过去的行为）
+// 会使它无法用于grep query_log，而这正是读者
+// 想要hash的唯一用途。
 function fullHash(h){ return String(h==null?'':h); }
 
-// A one-line fingerprint of the query for an axis label. Collapses the SQL onto
-// a single line and clips it; the whole statement is a click away, and the full
-// hash is always in the tooltip, so nothing is lost by clipping here.
+// 用于轴标签的查询单行指纹。将SQL折叠到
+// 一行并裁剪；完整语句一键可达，完整
+// hash始终在提示框中，因此这里裁剪不会丢失信息。
 function queryLabel(r, max){
   const q=String(r.sample_query||'').replace(/\s+/g,' ').trim();
   if(!q || q==='(redacted in gov mode)') return fullHash(r.hash);
   return q.length>max ? q.slice(0,max-1)+'…' : q;
 }
 
-// Show the full SQL for a clicked bar underneath its chart.
+// 在图表下方显示所点击柱条的完整SQL。
 function bindQueryPeek(chart, rows, peekId){
   const el=document.getElementById(peekId);
   if(!chart||!el)return;
   const has=rows.some(r=>r.sample_query && r.sample_query!=='(redacted in gov mode)');
   if(!has)return;
-  el.textContent='Click a bar to show the query behind it.';
+  el.textContent='点击柱条显示对应查询。';
   el.style.display='';
   chart.options.onClick=(evt,els)=>{
     if(!els||!els.length)return;
     const r=rows[els[0].index];
     el.textContent='-- normalized_query_hash: '+fullHash(r.hash)
-      +'   user: '+(r.user||'?')+'   executions: '+(r.executions||'?')
-      +'\n-- one representative execution; literals differ between runs\n\n'
+      +'   用户: '+(r.user||'?')+'   执行次数: '+(r.executions||'?')
+      +'\n-- 一次代表性执行；两次运行的字面量可能不同\n\n'
       +String(r.sample_query||'').trim();
   };
   chart.canvas.style.cursor='pointer';
   chart.update('none');
 }
 
-// pivot [{timeF, catF, valF}] → Chart.js datasets.
+// 透视 [{timeF, catF, valF}] → Chart.js 数据集。
 //
-// Categories past the palette length fold into "Other" rather than cycling a
-// sixth hue, and each category keeps its slot regardless of magnitude so the
-// colour follows the entity and not its rank.
+// 超过调色板长度的类别折叠进"Other"，而不是循环第六个
+// 色相；每个类别不论大小都保留其槽位，使
+// 颜色跟随实体而不是其排名。
 function pivot(rows,tf,cf,vf){
   const times=[...new Set(rows.map(r=>r[tf]))].sort();
   const raw=[...new Set(rows.map(r=>r[cf]))];
@@ -2681,7 +2681,7 @@ function pivot(rows,tf,cf,vf){
   return{
     labels:times,
     datasets:cats.map((c,i)=>({
-      label:c===''?'(unknown)':c,
+      label:c===''?'(未知)':c,
       backgroundColor:c==='Other'?OTHER:slot(i),
       borderColor:c==='Other'?OTHER:slot(i),
       borderWidth:1.5,
@@ -2691,7 +2691,7 @@ function pivot(rows,tf,cf,vf){
   };
 }
 
-// Give a stacked chart the 2px surface spacer between touching segments.
+// 为堆叠图表在相接分段之间提供2px表面间隔。
 function stackWithGaps(d){
   const surf=themeVar('--surface-card');
   d.datasets.forEach(ds=>{
@@ -2704,32 +2704,81 @@ function stackWithGaps(d){
   return d;
 }
 
-// render a plain HTML table (with optional row-class callback)
-// Escape everything that reaches the DOM as text.
+// 渲染普通HTML表格（可选的row-class回调）
+// 转义所有以文本形式到达DOM的内容。
 //
-// Cell values here are customer-controlled: SQL text, exception messages,
-// table and column names, and now whole log lines. Interpolating those raw
-// (which this did) means a message containing a quote breaks the title
-// attribute and one containing markup is parsed as markup. Nothing in the
-// bundle is trusted input just because it came from the customer's own server.
+// 这里的单元格值由客户控制：SQL文本、异常消息、
+// 表和列名，现在还有整行日志。原样插值这些内容
+// （过去如此）意味着含引号的消息会破坏title
+// 属性，含标记的内容会被当作标记解析。bundle中的
+// 任何内容都不会仅仅因为来自客户自己的服务器就被当作可信输入。
 function esc(v){
   return String(v??'')
     .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
     .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
 
-// render a plain HTML table (with optional row-class callback).
+// 可见的表头。键本身仍是数据键：rowClass
+// 回调和htmlCols按英文名称查找它们，因此这里只翻译
+// 渲染出的标签。
+const COL_LABELS={
+  setting:'设置', value:'值', status:'状态', note:'备注',
+  hostname:'主机名', database:'数据库', name:'名称', table:'表', table_name:'表名',
+  engine:'引擎', total_rows:'总行数', size:'大小', size_uncompressed:'未压缩大小',
+  partition_key:'分区键', sorting_key:'排序键', storage_policy:'存储策略',
+  parts:'part 数', compressed_size:'压缩后大小', compression_ratio:'压缩比',
+  pid:'PID', rss:'RSS', threads:'线程数', state:'状态', command:'命令',
+  executions:'执行次数', avg_duration_ms:'平均耗时（ms）', p95_duration_ms:'P95 耗时（ms）',
+  max_duration_ms:'最大耗时（ms）', min_duration_ms:'最小耗时（ms）',
+  avg_memory:'平均内存', max_memory:'最大内存', errors:'错误数',
+  error_type:'错误类型', tables_touched:'涉及的表', user:'用户',
+  first_seen:'首次出现', last_seen:'最后出现', sample_exception:'示例异常',
+  ts:'时间', level:'级别', logger_name:'logger 名称', message:'消息',
+  query_kind:'查询类型', avg_read_mb:'平均读取（MB）', avg_memory_mb:'平均内存（MB）',
+  total_read_gb:'总读取（GB）', total_memory_gb:'总内存（GB）', error_count:'错误数',
+  sample_query:'示例查询', hash:'hash',
+  exception_code:'异常码', count:'数量', msg:'消息',
+  event_type:'事件类型', merge_reason:'合并原因', events:'事件数',
+  total_size:'总大小', day:'日期',
+  file:'文件', kind:'类型', event_time:'事件时间', signal:'信号', thread_id:'线程 ID',
+  query_id:'查询 ID', version:'版本', mutation_id:'mutation ID', parts_to_do:'待处理 part 数',
+  create_time:'创建时间', reasons:'原因', type:'类型', executing:'正在执行', last_exception:'最后异常',
+  cluster:'集群', shard:'分片', replica:'副本', host_name:'主机名', errors_count:'错误数',
+  is_readonly:'只读', is_session_expired:'会话已过期', is_leader:'Leader',
+  queue_size:'队列大小', inserts_in_queue:'队列中的插入', merges_in_queue:'队列中的合并',
+  future_parts:'未来 part', parts_to_check:'待检查 part', absolute_delay:'绝对延迟',
+  active_replicas:'活动副本', total_replicas:'总副本',
+  verdict:'判定', hours:'小时数', first:'首次', last:'最后', meaning:'含义',
+  hour:'小时', flushes:'flush 次数', total_bytes:'总字节', avg_flush_ms:'平均 flush（ms）',
+  partition_id:'分区 ID', parts_count:'part 数',
+  bytes_allocated_human:'已分配字节', element_count:'元素数', load_factor:'负载因子',
+  query_count:'查询数', hit_rate_pct:'命中率（%）', found_rate_pct:'找到率（%）',
+  key_names:'键名', key_types:'键类型', attribute_names:'属性名', attribute_types:'属性类型',
+  lifetime_min:'最小生存时间', lifetime_max:'最大生存时间', loading_start_time:'加载开始时间',
+  last_update:'最后更新', loading_duration_s:'加载耗时（s）',
+  origin:'来源', comment:'注释', uuid:'UUID', source:'来源',
+  free_space_human:'可用空间', total_space_human:'总空间', free_pct:'可用比例', path:'路径',
+  member:'成员', ensemble:'集合',
+  'Raft log first → last':'Raft 日志首 → 末',
+  'committed / leader':'已提交 / Leader',
+  'latest snapshot':'最新快照',
+  'chunk size':'分块大小',
+  'snapshot format':'快照格式',
+  'on disk (snapshots / log)':'磁盘占用（快照 / 日志）'
+};
+
+// 渲染普通HTML表格（可选的row-class回调）。
 //
-// htmlCols names the columns whose values are markup THIS FILE built (a status
-// badge, a link) and must not be escaped. Everything else is escaped. Passing a
-// customer-controlled column in htmlCols is a bug.
+// htmlCols指定其值是THIS FILE构建的标记（状态
+// 徽章、链接）且不得转义的列。其他所有内容都会被转义。将
+// 客户控制的列传入htmlCols是一个bug。
 function renderTable(id, rows, cols, rowClass, htmlCols){
   const el=document.getElementById(id);
   if(!el)return;
-  if(!rows||rows.length===0){el.innerHTML='<p class="no-data">No data</p>';return;}
+  if(!rows||rows.length===0){el.innerHTML='<p class="no-data">暂无数据</p>';return;}
   const keys=cols||Object.keys(rows[0]);
   const raw=new Set(htmlCols||[]);
-  let h='<table class="dt"><thead><tr>'+keys.map(k=>'<th>'+esc(k)+'</th>').join('')+'</tr></thead><tbody>';
+  let h='<table class="dt"><thead><tr>'+keys.map(k=>'<th>'+esc(COL_LABELS[k]||k)+'</th>').join('')+'</tr></thead><tbody>';
   rows.forEach(r=>{
     const cls=rowClass?rowClass(r):'';
     h+='<tr'+(cls?' class="'+esc(cls)+'"':'')+'>'
@@ -2742,14 +2791,14 @@ function renderTable(id, rows, cols, rowClass, htmlCols){
   el.innerHTML=h;
 }
 
-// format status badges for dictionaries
+// 为字典格式化状态徽章
 function dictStatusBadge(status){
   const cl={'LOADED':'ok-badge','FAILED':'err-badge','LOADING':'warn-badge',
             'NOT_LOADED':'warn-badge'}[status]||'warn-badge';
   return '<span class="'+cl+'">'+esc(status)+'</span>';
 }
 
-// ── searchable tables explorer ────────────────────────────────────────────────
+// ── 可搜索的表浏览器 ──────────────────────────────────────────────────────
 (function(){
   const PAGE=50;
   let allData=[], filtered=[], page=0;
@@ -2762,21 +2811,21 @@ function dictStatusBadge(status){
     const cnt=document.getElementById('tbl-count');
     if(!el)return;
     if(!filtered.length){
-      el.innerHTML='<p class="no-data">No tables match</p>';
-      pg.innerHTML=''; cnt.textContent='0 tables';
+      el.innerHTML='<p class="no-data">没有匹配的表</p>';
+      pg.innerHTML=''; cnt.textContent='0 张表';
       return;
     }
     const start=page*PAGE, end=Math.min(start+PAGE,filtered.length);
     const slice=filtered.slice(start,end);
     let h='<table class="dt"><thead><tr>'
-      +COLS.map(k=>'<th>'+esc(k)+'</th>').join('')+'</tr></thead><tbody>';
+      +COLS.map(k=>'<th>'+esc(COL_LABELS[k]||k)+'</th>').join('')+'</tr></thead><tbody>';
     slice.forEach(r=>{
-      // database / table_name / partition_key / sorting_key are customer DDL.
+      // database / table_name / partition_key / sorting_key是客户DDL。
       h+='<tr>'+COLS.map(k=>'<td title="'+esc(r[k])+'">'+esc(r[k])+'</td>').join('')+'</tr>';
     });
     h+='</tbody></table>';
     el.innerHTML=h;
-    cnt.textContent=filtered.length+' / '+allData.length+' tables';
+    cnt.textContent=filtered.length+' / '+allData.length+' 张表';
     const total=Math.ceil(filtered.length/PAGE);
     if(total<=1){pg.innerHTML='';return;}
     let phtml='';
@@ -2806,7 +2855,7 @@ function dictStatusBadge(status){
   window._tablesInit=function(data){
     allData=data||[];
     filtered=[...allData];
-    // populate dropdowns
+    // 填充下拉框
     const dbSel=document.getElementById('tbl-db-filter');
     const engSel=document.getElementById('tbl-engine-filter');
     [...new Set(allData.map(r=>r.database))].sort().forEach(d=>{
@@ -2819,88 +2868,88 @@ function dictStatusBadge(status){
   };
 })();
 
-// ── alerts renderer ───────────────────────────────────────────────────────────
+// ── 告警渲染器 ────────────────────────────────────────────────────────────
 //
-// How much of one alert is shown before the reader has to ask for more. A
-// ClickHouse exception embeds its stack trace in the message text: one
-// measured in a real bundle ran 1764 characters over 15 lines, of which the
-// first 216 were the actual error. replication_queue_errors returns up to 50
-// such rows and keeper_health up to 168, so rendering every message in full
-// buried the rest of the page under stack frames.
-const ALERT_HEAD_CHARS=260;   // inline length of one instance line
-const ALERT_ROWS_SHOWN=5;     // instances listed before the rest collapse
+// 一条告警在读者需要请求更多之前显示多少内容。ClickHouse
+// 异常会在消息文本中嵌入堆栈跟踪：在真实bundle中实测一条
+// 在15行中长达1764个字符，其中
+// 前216个是实际错误。replication_queue_errors最多返回50
+// 条这样的行，keeper_health最多168条，因此完整渲染每条消息
+// 会把页面其余部分埋在堆栈帧之下。
+const ALERT_HEAD_CHARS=260;   // 一行实例的内联长度
+const ALERT_ROWS_SHOWN=5;     // 其余折叠前列出的实例数
 
 const ALERT_STACK_RE=/\s*Stack trace \(when copying this message[\s\S]*$/;
-// Every ClickHouse exception ends with the build it came from. It is the same
-// string on every row and the dashboard header already states the version, so
-// it is dropped from the inline line and kept in the full text.
+// 每个ClickHouse异常都以产生它的构建版本结尾。它在每一行都是相同的
+// 字符串，而dashboard头部已经说明了版本，因此
+// 从内联行中去掉它，保留在完整文本中。
 const ALERT_VERSION_RE=/\s*\(version [0-9][^)]*\([^)]*\)\)[\s,.;]*$/;
 
-// alertMessageParts splits a substituted message into the line shown inline
-// and the complete text kept for the disclosure. Returns truncated=false when
-// nothing was actually dropped, so a short message gets no useless toggle.
+// alertMessageParts将替换后的消息拆分为内联显示的行
+// 和为折叠保留的完整文本。没有实际丢弃内容时
+// 返回truncated=false，因此短消息不会得到无用的切换按钮。
 function alertMessageParts(msg){
   const full=String(msg==null?'':msg);
   const flat=full.replace(/\s+/g,' ').trim();
   let head=full.replace(ALERT_STACK_RE,'').replace(/\s+/g,' ').trim()
                .replace(ALERT_VERSION_RE,'').replace(/[\s,;]+$/,'');
   if(head.length>ALERT_HEAD_CHARS){
-    // ALERT_HEAD_CHARS is inclusive of the ellipsis: slice one short so the
-    // no-space fallback below yields 260 characters, not 261.
+    // ALERT_HEAD_CHARS包含省略号：少切一个字符，使
+    // 下面的无空格回退得到260个字符而不是261个。
     const cut=head.slice(0,ALERT_HEAD_CHARS-1);
     const sp=cut.lastIndexOf(' ');
     head=(sp>ALERT_HEAD_CHARS*0.6?cut.slice(0,sp):cut)+'\u2026';
   }
   if(!head) head=flat;
-  // truncated drives the toggle: offer it only when the inline line is not
-  // already the whole message, so a short single-line message gets no useless
-  // disclosure. Comparing against the flat message rather than a
-  // version-stripped copy also covers the degenerate case where the message
-  // is NOTHING BUT a version suffix: stripping empties head, the fallback
-  // above restores it, and head===flat then correctly reports that there is
-  // nothing to reveal.
+  // truncated驱动切换按钮：仅当内联行还不是
+  // 整条消息时才提供，因此短的单行消息不会得到无用的
+  // 折叠披露。与扁平消息比较而不是与
+  // 去版本副本比较，还覆盖了消息
+  // 只有版本后缀的退化情况：剥离会清空head，上面的回退
+  // 会恢复它，此时head===flat正确地报告
+  // 没有可揭示的内容。
   return {head:head, full:full, truncated:head!==flat, hasStack:ALERT_STACK_RE.test(full)};
 }
 
-// alertDisclosure renders the "show the rest" toggle for one message.
+// alertDisclosure为一条消息渲染"显示其余内容"切换按钮。
 function alertDisclosure(parts){
   if(!parts.truncated) return '';
-  const label=parts.hasStack?'full message and stack trace':'full message';
+  const label=parts.hasStack?'完整消息和堆栈跟踪':'完整消息';
   return '<details class="alert-more"><summary>'+label+'</summary>'
         +'<pre class="alert-full">'+esc(parts.full)+'</pre></details>';
 }
 
-// alertRowLine renders one instance: the rule's message template with this
-// row's values substituted. The template is ours, the values are customer
-// data (table names, partition ids, raw server text), so the whole line is
-// escaped.
-// The SQL a customer can run on their own cluster to see where a displayed
-// alert comes from: the rule's query exactly as it ran (placeholders already
-// expanded for this bundle's mode), then the rule's follow-up queries.
-// Collapsed: one summary line in the card until it is opened.
+// alertRowLine渲染一个实例：规则的message模板替换为
+// 本行的值。模板是我们的，值由客户控制
+// （表名、分区id、原始服务器文本），因此整行
+// 都会被转义。
+// 客户可在自己的集群上运行以查看所显示告警来源的SQL：
+// 规则查询本来的运行原样（占位符已按本bundle的模式
+// 展开），然后是规则的后续查询。
+// 折叠：打开前卡片中只有一行摘要。
 function alertQueries(a){
   const qs=[];
-  if(a.query) qs.push({title:'The query that raised this alert',query:a.query});
+  if(a.query) qs.push({title:'触发此告警的查询',query:a.query});
   (a.investigate||[]).forEach(q=>qs.push(q));
   if(!qs.length) return '';
-  return '<details class="alert-more alert-queries"><summary>queries to run on your cluster ('+qs.length+')</summary>'
+  return '<details class="alert-more alert-queries"><summary>可在你的集群上运行的查询（'+qs.length+'）</summary>'
     +qs.map(q=>'<div class="alert-q"><div class="alert-q-title">'+esc(q.title)
-      +' <button type="button" class="alert-copy">copy</button></div>'
+      +' <button type="button" class="alert-copy">复制</button></div>'
       +'<pre class="alert-full alert-sql">'+esc(q.query)+'</pre></div>').join('')
     +'</details>';
 }
-// Copy: the Clipboard API where the page is a secure context, otherwise
-// select the text and fall back to execCommand — a dashboard opened from
-// file:// is not a secure context in every browser.
+// 复制：页面处于安全上下文时用Clipboard API，否则
+// 选中文本并回退到execCommand — 从file://打开的
+// dashboard并非在每个浏览器中都是安全上下文。
 document.addEventListener('click',function(e){
   const b=e.target&&e.target.closest?e.target.closest('.alert-copy'):null;
   if(!b) return;
   const pre=b.closest('.alert-q').querySelector('.alert-sql');
-  const done=function(){b.textContent='copied';setTimeout(function(){b.textContent='copy';},1500);};
+  const done=function(){b.textContent='已复制';setTimeout(function(){b.textContent='复制';},1500);};
   const fallback=function(){
     const r=document.createRange();r.selectNodeContents(pre);
     const sel=window.getSelection();sel.removeAllRanges();sel.addRange(r);
-    try{document.execCommand('copy')?done():(b.textContent='selected — press Ctrl+C');}catch(_){b.textContent='selected — press Ctrl+C';}
+    try{document.execCommand('copy')?done():(b.textContent='已选中 — 按 Ctrl+C');}catch(_){b.textContent='已选中 — 按 Ctrl+C';}
   };
   if(navigator.clipboard&&window.isSecureContext){navigator.clipboard.writeText(pre.textContent).then(done,fallback);}
   else fallback();
@@ -2916,48 +2965,48 @@ function renderAlerts(){
   const alerts=DATA.alerts||[];
   const fired=alerts.filter(a=>(a.rows&&a.rows.length>0)||a.error);
   const skipped=alerts.filter(a=>a.skipped);
-  // Mirror alert.Summarize exactly: "evaluated" excludes BOTH skipped and
-  // errored rules, so this number can never disagree with the CLI's.
-  // (Today the banner using it only renders when erroredRules is empty, so
-  // the subtraction is a no-op there — but keeping two different
-  // definitions of one number is how the "11 fired" bug happened.)
+  // 完全镜像alert.Summarize："evaluated"同时排除跳过和
+  // 出错的规则，因此此数字绝不会与CLI的不一致。
+  // （目前使用它的横幅只在erroredRules为空时渲染，所以
+  // 那里的减法是空操作 — 但让同一个数字保留两种不同
+  // 定义正是"11 fired"bug的来源。）
   const evaluated=alerts.length-skipped.length-alerts.filter(a=>a.error).length;
   const skipNote=skipped.length
-    ? '<div class="alert-skipped">ℹ️ '+skipped.length+' rule(s) not applicable on this server: '+skipped.map(a=>esc(a.name)+(a.skip_reason?' ('+esc(a.skip_reason)+')':'')).join(', ')+'</div>'
+    ? '<div class="alert-skipped">ℹ️ '+skipped.length+' 条规则在此服务器上不适用：'+skipped.map(a=>esc(a.name)+(a.skip_reason?' ('+esc(a.skip_reason)+')':'')).join(', ')+'</div>'
     : '';
   const panel=document.getElementById('alerts-panel');
   const bar=document.getElementById('alerts-summary-bar');
   const navLink=document.getElementById('nav-alerts');
 
-  // summary chips. Rules that ERRORED are counted separately from real
-  // findings — bucketing them by severity would report e.g. a missing
-  // SELECT grant as N critical/warning production problems.
+  // 摘要标签。ERRORED的规则与实际finding分开计数 —
+  // 按严重级别归类会把例如缺失
+  // SELECT grant报告成N个严重/警告生产问题。
   const counts={critical:0,warning:0,info:0};
   const erroredRules=fired.filter(a=>a.error);
   fired.filter(a=>!a.error).forEach(a=>{const s=a.severity||'warning';if(counts[s]!==undefined)counts[s]++;});
-  // The badge counts real findings only. Including errored rules would
-  // render a red "11" identical to eleven critical findings when the true
-  // state is one permissions problem — the same conflation the CLI's
-  // fired/errored split removed. Broken rules get the ⚠ chip instead.
+  // 徽章只统计真实finding。包括出错规则会
+  // 渲染出一个红色的"11"，与十一个严重finding完全相同，而真实
+  // 状态只是一个权限问题 — 这正是CLI的
+  // fired/errored拆分所消除的混淆。损坏的规则改为显示⚠标签。
   const total=counts.critical+counts.warning+counts.info;
 
-  // badge the nav link
+  // 为导航链接加徽章
   if(total>0){
-    navLink.innerHTML='Alerts <span style="background:var(--status-critical);color:#fff;border-radius:var(--click-radii-full);padding:1px 7px;font-size:var(--click-font-size-0);font-weight:var(--click-font-weight-3);margin-left:4px">'+total+'</span>';
+    navLink.innerHTML='告警 <span style="background:var(--status-critical);color:#fff;border-radius:var(--click-radii-full);padding:1px 7px;font-size:var(--click-font-size-0);font-weight:var(--click-font-weight-3);margin-left:4px">'+total+'</span>';
   }
 
-  // summary bar
+  // 摘要栏
   let barHtml='';
-  if(counts.critical) barHtml+='<span class="alert-summary-chip chip-critical">🔴 '+counts.critical+' Critical</span>';
-  if(counts.warning)  barHtml+='<span class="alert-summary-chip chip-warning">🟡 '+counts.warning+' Warning</span>';
-  if(counts.info)     barHtml+='<span class="alert-summary-chip chip-info">🔵 '+counts.info+' Info</span>';
-  if(erroredRules.length) barHtml+='<span class="alert-summary-chip chip-error">⚠ '+erroredRules.length+' Could not run</span>';
+  if(counts.critical) barHtml+='<span class="alert-summary-chip chip-critical">🔴 '+counts.critical+' 严重</span>';
+  if(counts.warning)  barHtml+='<span class="alert-summary-chip chip-warning">🟡 '+counts.warning+' 警告</span>';
+  if(counts.info)     barHtml+='<span class="alert-summary-chip chip-info">🔵 '+counts.info+' 信息</span>';
+  if(erroredRules.length) barHtml+='<span class="alert-summary-chip chip-error">⚠ '+erroredRules.length+' 无法运行</span>';
   if(bar) bar.innerHTML=barHtml?'<div class="alert-summary-bar">'+barHtml+'</div>':'';
 
   if(!panel) return;
 
   if(!fired.length){
-    panel.innerHTML='<div class="alert-ok">✅ '+evaluated+' alert rule(s) evaluated — no issues detected</div>'+skipNote;
+    panel.innerHTML='<div class="alert-ok">✅ '+evaluated+' 条告警规则已评估 — 未发现问题</div>'+skipNote;
     return;
   }
 
@@ -2968,65 +3017,65 @@ function renderAlerts(){
   let html='';
   sorted.forEach(a=>{
     const sev=a.severity||'warning';
-    // A rule whose QUERY broke is not a severity-N finding — show ⚠ so it
-    // can't be misread as a red critical at the top of the list.
+    // QUERY出错的规则不是级别N的finding — 显示⚠，使
+    // 它不会被误读为列表顶部的红色严重项。
     const icon=a.error?'⚠':(SEV_ICON[sev]||'🟡');
     const cls=a.error?'alert-error':'alert-'+sev;
     const cnt=a.error?'error':(a.rows||[]).length;
-    const cntLabel=a.error?'query error':cnt+' instance'+(cnt===1?'':'s');
+    const cntLabel=a.error?'查询错误':cnt+' 个实例';
 
     html+='<div class="alert-item '+cls+'">';
     html+='<div class="alert-header">';
     html+=icon+' <span class="alert-title">'+esc(a.title||a.name)+'</span>';
     html+='<span class="alert-count badge-'+(a.error?'error':sev)+'">'+cntLabel+'</span>';
     if((a.tags||[]).length) html+='<span class="alert-tags">'+a.tags.map(t=>'<span class="alert-tag">'+esc(t)+'</span>').join('')+'</span>';
-    html+='</div>'; // header
+    html+='</div>'; // 头部
 
     if(a.description){
-      // The rule descriptions are deliberately long — an explanation followed
-      // by what to check next. The first paragraph is the explanation; the
-      // rest is guidance the reader wants only once the alert is worth
-      // following, so it collapses.
+      // 规则描述刻意冗长 — 先是解释，接着
+      // 是下一步该检查什么。第一段是解释；
+      // 其余是读者只有在告警值得跟进时才需要的指导，
+      // 因此折叠。
       const d=a.description.trim();
       const brk=d.indexOf('\n\n');
       const first=(brk>0?d.slice(0,brk):d).trim();
       html+='<div class="alert-desc">'+esc(first).replace(/\n/g,'<br>');
       if(brk>0){
-        html+='<details class="alert-more"><summary>more about this rule</summary>'
+        html+='<details class="alert-more"><summary>关于此规则的更多信息</summary>'
              +'<div class="alert-desc-rest">'+esc(d.slice(brk).trim()).replace(/\n/g,'<br>')+'</div></details>';
       }
       html+='</div>';
     }
 
     if(a.error){
-      // a.error is raw server exception text — customer-influenced, and it
-      // carries a stack trace as often as a row message does.
+      // a.error是原始服务器异常文本 — 受客户影响，且它
+      // 和行消息一样经常携带堆栈跟踪。
       const ep=alertMessageParts(a.error);
       html+='<div class="alert-err-msg">⚠ '+esc(ep.head)+alertDisclosure(ep)+'</div>';
     } else if(a.message&&(a.rows||[]).length){
-      // keeper_health can return one row per hour of a 7-day window; only the
-      // first few are listed, the rest stay one click away.
+      // keeper_health在7天窗口中可能每小时返回一行；只列出
+      // 前几行，其余点一下就可见。
       const rows=a.rows||[];
       const shown=rows.slice(0,ALERT_ROWS_SHOWN), hidden=rows.slice(ALERT_ROWS_SHOWN);
       html+='<ul class="alert-messages">'+shown.map(r=>alertRowLine(a,r)).join('')+'</ul>';
       if(hidden.length){
-        html+='<details class="alert-more"><summary>'+hidden.length+' more instance'+(hidden.length===1?'':'s')+'</summary>'
+        html+='<details class="alert-more"><summary>'+hidden.length+' 个实例</summary>'
              +'<ul class="alert-messages">'+hidden.map(r=>alertRowLine(a,r)).join('')+'</ul></details>';
       }
     }
 
     html+=alertQueries(a);
-    html+='</div>'; // item
+    html+='</div>'; // 条目
   });
   panel.innerHTML=html+skipNote;
 }
 
-// ── main init ─────────────────────────────────────────────────────────────────
-// Adaptive duration helper used by every duration axis / tooltip in
-// the Query Analysis section. The original requirement: render in
-// seconds when the value is short, switch to minutes once the peak
-// crosses 200 seconds, so a long-running query doesn't show up as
-// "180000 ms" in a tooltip.
+// ── 主初始化 ──────────────────────────────────────────────────────────────
+// 查询分析部分每个耗时轴/提示框都使用的自适应耗时helper。
+// 原始需求：值较小时以秒渲染，
+// 峰值超过200秒后切换为分钟，
+// 使长时间运行的查询不会在提示框中显示为
+// "180000 ms"。
 function pickDurationUnit(maxMs){
   if(maxMs > 200000){
     return {factor: 1/60000, label: 'min', precision: 2};
@@ -3038,10 +3087,10 @@ function fmtDuration(ms, unit){
   return (Number(ms) * unit.factor).toFixed(unit.precision) + ' ' + unit.label;
 }
 
-// pickByteUnit chooses MiB / GiB / TiB based on the largest value in
-// the series. KiB is skipped because at the scale ClickHouse reports
-// (read_bytes, memory_usage) a per-execution metric below 1 MiB is
-// usually noise and would look like "0.001 MB" anyway.
+// pickByteUnit根据序列中的最大值选择MiB / GiB / TiB。
+// 跳过KiB，因为在ClickHouse报告的
+// 规模（read_bytes、memory_usage）下，低于1 MiB的每次执行指标
+// 通常是噪声，反正会显示成"0.001 MB"。
 function pickByteUnit(maxBytes){
   if(maxBytes >= 1024**4) return {factor: 1/(1024**4), label:'TiB', precision:2};
   if(maxBytes >= 1024**3) return {factor: 1/(1024**3), label:'GiB', precision:2};
@@ -3052,16 +3101,16 @@ function fmtBytes(b, unit){
   return (Number(b) * unit.factor).toFixed(unit.precision) + ' ' + unit.label;
 }
 
-// renderQaScatter draws a per-execution scatter for one numeric metric
-// off the qa_executions array. Five charts in the Query Analysis
-// section share this shape — colour-coded success vs failure, tooltip
-// shows query_id + hostname + the metric in human units.
+// renderQaScatter从qa_executions数组为一个数值指标绘制
+// 每次执行的散点图。查询分析部分有五个图表
+// 共享此形状 — 成功与失败用颜色区分，提示框
+// 显示query_id + hostname + 人类可读单位的指标。
 //
-// opts:
-//   ySelect(row) → number     project a metric from one execution
-//   yUnit(maxVal) → unit obj  pick the axis unit ({factor,label,precision})
-//   yLabel(unit)  → string    title for the Y axis
-//   yFmt(value, unit) → string formatter for tooltip
+// 选项：
+//   ySelect(row) → number     从一次执行投影一个指标
+//   yUnit(maxVal) → unit obj  选择轴单位（{factor,label,precision}）
+//   yLabel(unit)  → string    Y轴标题
+//   yFmt(value, unit) → string 提示框格式化器
 function renderQaScatter(canvasId, rows, opts){
   const succ=[], fail=[];
   let maxY=0;
@@ -3077,11 +3126,11 @@ function renderQaScatter(canvasId, rows, opts){
   mkChart(document.getElementById(canvasId),{
     type:'scatter',
     data:{datasets:[
-      // Outcome is a state, not an identity, so it wears the reserved status
-      // ramp — and the failure marks carry a distinct glyph so the meaning
-      // never rests on colour alone.
-      {label:'succeeded',data:succ,backgroundColor:STATUS.good,borderColor:STATUS.good,pointRadius:4},
-      {label:'failed',data:fail,backgroundColor:STATUS.critical,borderColor:STATUS.critical,pointRadius:5,pointStyle:'crossRot'}
+      // 结果是状态而非身份，因此使用保留的状态
+      // 色阶 — 失败标记还带有独特字形，使含义
+      // 从不只靠颜色。
+      {label:'成功',data:succ,backgroundColor:STATUS.good,borderColor:STATUS.good,pointRadius:4},
+      {label:'失败',data:fail,backgroundColor:STATUS.critical,borderColor:STATUS.critical,pointRadius:5,pointStyle:'crossRot'}
     ]},
     options:{responsive:true,maintainAspectRatio:false,
       plugins:{
@@ -3089,14 +3138,14 @@ function renderQaScatter(canvasId, rows, opts){
         tooltip:{callbacks:{label:c=>{
           const p=c.raw;
           const when=new Date(p.x).toISOString().replace('T',' ').replace(/\..*/,'');
-          const lines=[when+' · '+opts.yFmt(p.y,u),'query_id: '+(p.query_id||''),'host: '+(p.hostname||'')];
+          const lines=[when+' · '+opts.yFmt(p.y,u),'query_id：'+(p.query_id||''),'主机：'+(p.hostname||'')];
           if(Number(p.exception_code)!==0) lines.push('exception_code: '+p.exception_code);
           return lines;
         }}}
       },
       scales:{
         x:{type:'linear',
-          title:{display:true,text:'event_time (UTC)'},
+          title:{display:true,text:'event_time（UTC）'},
           ticks:{callback:v=>new Date(v).toISOString().replace('T',' ').replace(/\..*/,'').slice(5,16)}},
         y:{type:'linear',beginAtZero:true,
           title:{display:true,text:opts.yLabel(u)},
@@ -3105,14 +3154,14 @@ function renderQaScatter(canvasId, rows, opts){
   });
 }
 
-// ── query analysis renderer ───────────────────────────────────────────────────
+// ── 查询分析渲染器 ────────────────────────────────────────────────────────
 function renderQueryAnalysis(){
   if(!DATA.qa_enabled) return;
   document.getElementById('sec-qa').style.display='';
   document.getElementById('nav-qa').style.display='';
 
-  // Focus query SQL text — only when not in gov mode (the query text
-  // contains real database/table names that gov-mode hashes elsewhere).
+  // 焦点查询SQL文本 — 仅在非gov模式下（查询文本
+  // 包含gov模式在其他地方哈希的真实数据库/表名）。
   if(DATA.qa_mode !== 'gov'){
     const txt=(((DATA.qa_details||[])[0])||{}).query;
     if(txt){
@@ -3121,94 +3170,94 @@ function renderQueryAnalysis(){
     }
   }
 
-  // Focus card — what the analysis is scoped to and which execution
-  // the single-id queries (ProfileEvents, text_log, tables, parts)
-  // were filtered against. In hash-only mode this is the slowest
-  // execution for the hash (auto-derived in the pre-flight); in
-  // --query-id mode it's the user-supplied UUID.
+  // 焦点卡片 — 分析的范围，以及单id查询
+  // （ProfileEvents、text_log、tables、parts）
+  // 过滤所依据的执行。仅hash模式下这是该hash最慢的
+  // 执行（在预检中自动推导）；在
+  // --query-id模式下则是用户提供的UUID。
   const det=(DATA.qa_details||[])[0]||{};
   const fast=(DATA.qa_fast_slow||[])[0]||{};
   const focus=document.getElementById('qa-focus');
   let h='<div class="alert-header">';
-  h+='<span class="alert-title">Focus query_id: '+esc(DATA.qa_query_id||'(none)')+'</span>';
+  h+='<span class="alert-title">焦点 query_id：'+esc(DATA.qa_query_id||'（无）')+'</span>';
   h+='<span class="alert-tags"><span class="alert-tag">hash '+esc(DATA.qa_hash||'')+'</span>';
-  h+='<span class="alert-tag">window '+esc(DATA.qa_from||'')+' → '+esc(DATA.qa_to||'')+'</span></span>';
+  h+='<span class="alert-tag">窗口 '+esc(DATA.qa_from||'')+' → '+esc(DATA.qa_to||'')+'</span></span>';
   h+='</div>';
   if(det.query_kind){
     h+='<div class="alert-desc">';
-    h+='kind: <b>'+esc(det.query_kind)+'</b> · user: <b>'+esc(det.user||'?')+'</b> · duration: <b>'+fmt(det.query_duration_ms)+' ms</b>';
-    h+=' · read: <b>'+fmt(det.read_rows)+' rows / '+esc(det.memory_usage_human||'?')+'</b>';
+    h+='类型：<b>'+esc(det.query_kind)+'</b> · 用户：<b>'+esc(det.user||'?')+'</b> · 耗时：<b>'+fmt(det.query_duration_ms)+' ms</b>';
+    h+=' · 读取：<b>'+fmt(det.read_rows)+' 行 / '+esc(det.memory_usage_human||'?')+'</b>';
     if(det.exception_code && Number(det.exception_code)!==0){
-      h+=' · <span style="color:var(--status-critical-ink)">exception '+esc(det.exception_code)+'</span>';
+      h+=' · <span style="color:var(--status-critical-ink)">异常 '+esc(det.exception_code)+'</span>';
     }
     h+='</div>';
   }
   if(fast.slow_query_id){
     h+='<div class="alert-desc">';
-    h+='hash executions: <b>'+fmt(fast.executions)+'</b> · ';
-    // query_id is CLIENT-settable: a customer can name a query
-    // '<img onerror=...>' and the slowest-execution pick lands it here.
-    h+='slowest: <b>'+fmt(fast.slow_duration_ms)+' ms</b> (<code>'+esc(fast.slow_query_id)+'</code>) · ';
-    h+='fastest: <b>'+fmt(fast.fast_duration_ms)+' ms</b> (<code>'+esc(fast.fast_query_id)+'</code>)';
+    h+='hash 执行次数：<b>'+fmt(fast.executions)+'</b> · ';
+    // query_id可由CLIENT设置：客户可以把查询命名为
+    // '<img onerror=...>'，而最慢执行的选择会把它带到这里。
+    h+='最慢：<b>'+fmt(fast.slow_duration_ms)+' ms</b> (<code>'+esc(fast.slow_query_id)+'</code>) · ';
+    h+='最快：<b>'+fmt(fast.fast_duration_ms)+' ms</b> (<code>'+esc(fast.fast_query_id)+'</code>)';
     if(Number(fast.fast_duration_ms)>0){
       const ratio=(Number(fast.slow_duration_ms)/Number(fast.fast_duration_ms)).toFixed(1);
-      h+=' → <b>'+ratio+'×</b> slower';
+      h+=' → 慢 <b>'+ratio+'×</b>';
     }
     h+='</div>';
   }
   focus.innerHTML=h;
 
-  // ── Per-execution scatters ────────────────────────────────────────────────
-  // Five charts (duration, memory, user CPU, read rows, read bytes)
-  // share the same shape: one dot per execution, x = event_time,
-  // y = the metric for that execution, succ = green dot, fail = red
-  // cross. Built off DATA.qa_executions so we never need a separate
-  // SQL aggregation for any of these — the executions_timeline query
-  // already carries every column we need.
+  // ── 每次执行散点图 ────────────────────────────────────────────────────────
+  // 五个图表（耗时、内存、用户CPU、读取行数、读取字节）
+  // 共享相同形状：每次执行一个点，x = event_time，
+  // y = 该次执行的指标，succ = 绿点，fail = 红色
+  // 叉。基于DATA.qa_executions构建，因此这些都不需要单独的
+  // SQL聚合 — executions_timeline查询
+  // 已携带我们需要的每一列。
   const execs=DATA.qa_executions||[];
   if(execs.length){
     renderQaScatter('chart-qa-scatter', execs, {
       ySelect: r => Number(r.query_duration_ms),
       yUnit:   max => pickDurationUnit(max),
-      yLabel:  u => 'duration (' + u.label + ')',
+      yLabel:  u => '耗时（' + u.label + '）',
       yFmt:    (v,u) => fmtDuration(v,u),
     });
     renderQaScatter('chart-qa-mem', execs, {
       ySelect: r => Number(r.memory_usage),
       yUnit:   max => pickByteUnit(max),
-      yLabel:  u => 'memory (' + u.label + ')',
+      yLabel:  u => '内存（' + u.label + '）',
       yFmt:    (v,u) => fmtBytes(v,u),
     });
     renderQaScatter('chart-qa-cpu', execs, {
-      ySelect: r => Number(r.user_cpu_us||0) / 1e6,    // µs → sec
+      ySelect: r => Number(r.user_cpu_us||0) / 1e6,    // 微秒 → 秒
       yUnit:   () => ({factor:1, label:'sec', precision:3}),
-      yLabel:  () => 'user CPU (sec)',
-      yFmt:    v => v.toFixed(3) + ' sec',
+      yLabel:  () => '用户 CPU（秒）',
+      yFmt:    v => v.toFixed(3) + ' 秒',
     });
     renderQaScatter('chart-qa-rrows', execs, {
       ySelect: r => Number(r.read_rows),
       yUnit:   () => ({factor:1, label:'rows', precision:0}),
-      yLabel:  () => 'read rows',
-      yFmt:    v => fmt(v) + ' rows',
+      yLabel:  () => '读取行数',
+      yFmt:    v => fmt(v) + ' 行',
     });
     renderQaScatter('chart-qa-rbytes', execs, {
       ySelect: r => Number(r.read_bytes),
       yUnit:   max => pickByteUnit(max),
-      yLabel:  u => 'read (' + u.label + ')',
+      yLabel:  u => '读取（' + u.label + '）',
       yFmt:    (v,u) => fmtBytes(v,u),
     });
   }
 
-  // ── Minute-bucketed count charts ──────────────────────────────────────────
+  // ── 按分钟分桶的计数图表 ─────────────────────────────────────────────────
   const sum=DATA.qa_summary||[];
   if(sum.length){
     const labels=sum.map(r=>r.time_bucket);
     mkChart(document.getElementById('chart-qa-execs'),{
       type:'bar',
       data:{labels,datasets:[
-        {label:'succeeded',data:sum.map(r=>Number(r.succeeded)),
+        {label:'成功',data:sum.map(r=>Number(r.succeeded)),
           backgroundColor:STATUS.good,borderColor:STATUS.good,borderWidth:1,borderRadius:4,stack:'s'},
-        {label:'failed',data:sum.map(r=>Number(r.failed)),
+        {label:'失败',data:sum.map(r=>Number(r.failed)),
           backgroundColor:STATUS.critical,borderColor:STATUS.critical,borderWidth:1,borderRadius:4,stack:'s'}
       ]},
       options:{responsive:true,maintainAspectRatio:false,
@@ -3231,12 +3280,12 @@ function renderQueryAnalysis(){
     });
   }
 
-  // Top ProfileEvents for the focus (slowest) execution.
+  // 焦点（最慢）执行的Top ProfileEvents。
   const pe=(DATA.qa_profile||[]).slice(0,30);
   if(pe.length){
     mkChart(document.getElementById('chart-qa-profile'),{
       type:'bar',
-      data:{labels:pe.map(r=>r.metric),datasets:[{label:'value',data:pe.map(r=>Number(r.value)),
+      data:{labels:pe.map(r=>r.metric),datasets:[{label:'值',data:pe.map(r=>Number(r.value)),
         backgroundColor:C[0],borderColor:C[0],borderWidth:1,borderRadius:4}]},
       options:{indexAxis:'y',responsive:true,maintainAspectRatio:false,
         plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>' '+fmt(c.raw)}}},
@@ -3244,16 +3293,16 @@ function renderQueryAnalysis(){
     });
   }
 
-  // Fast vs Slow comparison — top 30 by |delta|.
+  // 快 vs 慢比较 — 按|delta|取前30。
   const cmp=(DATA.qa_pe_compare||[]).slice(0,30);
   if(cmp.length){
     mkChart(document.getElementById('chart-qa-compare'),{
       type:'bar',
       data:{labels:cmp.map(r=>r.metric),datasets:[
-        // Which execution, not good-vs-bad: identity, so categorical slots.
-        {label:'slow',data:cmp.map(r=>Number(r.slow_value)),
+        // 哪次执行，而非好与坏：身份，因此用分类槽位。
+        {label:'慢',data:cmp.map(r=>Number(r.slow_value)),
           backgroundColor:C[0],borderColor:C[0],borderWidth:1,borderRadius:4},
-        {label:'fast',data:cmp.map(r=>Number(r.fast_value)),
+        {label:'快',data:cmp.map(r=>Number(r.fast_value)),
           backgroundColor:C[1],borderColor:C[1],borderWidth:1,borderRadius:4}
       ]},
       options:{indexAxis:'y',responsive:true,maintainAspectRatio:false,
@@ -3262,7 +3311,7 @@ function renderQueryAnalysis(){
     });
   }
 
-  // Detail tables
+  // 明细表
   renderTable('tbl-qa-host',DATA.qa_by_host||[],
     ['hostname','executions','avg_duration_ms','p95_duration_ms','max_duration_ms','min_duration_ms','avg_memory','max_memory','errors'],
     r=>Number(r.errors||0)>0?'error-row':'');
@@ -3277,14 +3326,14 @@ function renderQueryAnalysis(){
 }
 
 document.addEventListener('DOMContentLoaded',function(){
-  // Theme first: Chart.defaults must be right before the first chart is built.
+  // 主题优先：Chart.defaults必须在构建第一个图表前设置正确。
   applyChartTheme();
   const _tbtn=document.getElementById('theme-toggle');
   if(_tbtn){
-    _tbtn.textContent = currentTheme()==='dark' ? '\u2600 Light' : '\u263e Dark';
+    _tbtn.textContent = currentTheme()==='dark' ? '\u2600 浅色' : '\u263e 深色';
     _tbtn.addEventListener('click',()=>setTheme(currentTheme()==='dark'?'light':'dark'));
   }
-  // Follow the OS while the viewer has not stamped an explicit preference.
+  // 在查看者未写入显式偏好时跟随操作系统。
   if(window.matchMedia){
     window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change',()=>{
       let stamped=null; try{ stamped=localStorage.getItem('chdiag-theme'); }catch(e){}
@@ -3292,20 +3341,20 @@ document.addEventListener('DOMContentLoaded',function(){
     });
   }
 
-  if(!DATA){document.body.innerHTML='<p style="padding:40px;color:red">No embedded data.</p>';return;}
+  if(!DATA){document.body.innerHTML='<p style="padding:40px;color:red">没有内嵌数据。</p>';return;}
 
   renderAlerts();
   renderQueryAnalysis();
 
-  // Publish the sticky band's real height so anchor offsets and the
-  // scroll-spy threshold follow it instead of hardcoding a guess. Re-measured
-  // on resize because the header's meta column wraps at narrow widths.
-  // Observe rather than measure once: the band's height changes AFTER this
-  // runs (hdr-meta's two lines land below, nav links for optional sections
-  // un-hide, the webfont swaps) and again whenever the viewport resizes and
-  // the header's meta column rewraps. Measuring a single time read 104px for
-  // a band that settles at ~123px, which left anchor jumps tucking each
-  // heading under the nav.
+  // 发布吸顶条带的真实高度，使锚点偏移和
+  // 滚动监听阈值跟随它，而不是硬编码猜测。在
+  // 尺寸变化时重新测量，因为header的meta列在窄宽度下会换行。
+  // 观察而不是只测量一次：条带高度在此运行之后
+  // 仍会变化（hdr-meta的两行落在下方，可选分节的导航链接
+  // 取消隐藏，网页字体切换），以及每当视口调整大小、
+  // header的meta列重新换行时。只测量一次会读到104px，
+  // 而条带最终稳定在约123px，导致锚点跳转把每个
+  // 标题塞到nav下方。
   const topbar=document.querySelector('.topbar');
   let topbarH=124;
   function measureTopbar(){
@@ -3323,16 +3372,16 @@ document.addEventListener('DOMContentLoaded',function(){
     window.addEventListener('resize', measureTopbar, {passive:true});
   }
 
-  // nav active highlight on scroll — "you are here" in the sticky band.
+  // 滚动时高亮活动nav — 吸顶条带中的"你在这里"。
   //
-  // Only RENDERED sections may win. Every optional panel starts at
-  // display:none, and a non-rendered element reports
-  // getBoundingClientRect().top = 0, which passes the "its top is above the
-  // line" test on every scroll. The last such section in the document
-  // therefore won every pass — on a typical bundle that is sec-async-inserts,
-  // whose nav link is hidden too, so the band showed no highlight at all.
-  // getClientRects() is empty for anything not rendered, and the list is
-  // rebuilt each pass because panels un-hide after their data renders.
+  // 只有RENDERED的分节才能胜出。每个可选面板初始都是
+  // display:none，未渲染的元素报告
+  // getBoundingClientRect().top = 0，这在每次滚动时都能通过
+  // "其顶部在线上方"的测试。因此文档中最后一个这样的分节
+  // 在每一趟中都胜出 — 在典型bundle中那是sec-async-inserts，
+  // 其导航链接也隐藏，因此条带完全不高亮。
+  // 对任何未渲染内容，getClientRects()为空，而列表每趟
+  // 都会重建，因为面板会在数据渲染后取消隐藏。
   const navLinks=[...document.querySelectorAll('nav a')];
   const navFor={};
   navLinks.forEach(a=>{navFor[a.getAttribute('href')]=a;});
@@ -3343,17 +3392,17 @@ document.addEventListener('DOMContentLoaded',function(){
   function syncNav(){
     const secs=spySections();
     if(!secs.length) return;
-    // A section counts as current once its top reaches the underside of the
-    // band, so the highlight matches what the reader can actually see. The
-    // tolerance clears the subpixel gap an anchor jump leaves, which lands a
-    // heading at exactly scroll-margin-top.
+    // 一个分节的顶部到达条带下沿时才算当前，
+    // 使高亮与读者实际看到的一致。
+    // 容差消除了锚点跳转留下的亚像素间隙，该跳转会把
+    // 标题正好落在scroll-margin-top处。
     const line=topbarH+16;
-    // Default to the first section: at the very top of the page nothing has
-    // crossed the line yet, and a blank band is what this replaced.
+    // 默认使用第一个分节：在页面最顶部还没有任何分节
+    // 越过该线，而空白条带正是这里要替换掉的。
     let cur=secs[0].id;
     secs.forEach(s=>{if(s.getBoundingClientRect().top<=line)cur=s.id;});
-    // At the end of the page a short final section can never reach the line,
-    // so the last one wins once the scroll cannot go further.
+    // 在页面末尾，较短的最后一个分节永远无法到达该线，
+    // 因此当滚动无法继续时由最后一个胜出。
     if(Math.ceil(window.innerHeight+window.scrollY)>=document.documentElement.scrollHeight-2){
       cur=secs[secs.length-1].id;
     }
@@ -3362,56 +3411,56 @@ document.addEventListener('DOMContentLoaded',function(){
       a.classList.toggle('active',on);
       if(on) a.setAttribute('aria-current','true'); else a.removeAttribute('aria-current');
     });
-    // The header button carries the current section's name for when the
-    // sidebar is hidden — the "you are here" the highlighted link provides
-    // while it is shown. First text node only: the Alerts link also carries
-    // a count badge, and "Alerts 1" is not a section name.
+    // header按钮携带当前分节名称，供侧栏隐藏时使用 —
+    // 即侧栏显示时高亮链接提供的"你在这里"。只取第一个
+    // 文本节点：Alerts链接还带有计数徽章，
+    // 而"Alerts 1"不是分节名称。
     const curLink=navFor['#'+cur];
     const label=document.getElementById('nav-current');
     const name=curLink?(curLink.firstChild&&curLink.firstChild.nodeType===3?curLink.firstChild.textContent:curLink.textContent).trim():'';
     if(label && name && label.textContent!==name) label.textContent=name;
-    // Keep the highlighted link in view inside a sidebar shorter than its
-    // list. Only when the current section changes: a scroll pass runs per
-    // frame and scrolling the list on every one would fight the reader.
+    // 在比列表短的侧栏中保持高亮链接可见。
+    // 仅在当前分节变化时：滚动趟每帧运行，
+    // 每趟都滚动列表会与读者对抗。
     if(curLink && cur!==lastCur){
       lastCur=cur;
       if(curLink.getClientRects().length) curLink.scrollIntoView({block:'nearest'});
     }
   }
   let lastCur=null;
-  // Called straight from the listener rather than coalesced through
-  // requestAnimationFrame. The pass is ~20 getBoundingClientRect reads with
-  // no writes, the browser already caps scroll events at the frame rate, and
-  // rAF would make the highlight depend on a repaint — which never happens
-  // under a headless --virtual-time-budget, so the behaviour could not be
-  // tested. Reading live keeps the MATH right when a disclosure expands and
-  // shifts every section below it (a cached offset table would not) — but
-  // the pass still has to be triggered, and opening a <details> is neither
-  // a scroll nor a resize. Left alone, the highlight named the pre-expansion
-  // section until the reader scrolled. So the page's own height is observed:
-  // any content change that moves a section — a disclosure, a table filter,
-  // a panel un-hiding after its data renders — re-runs the pass.
+  // 直接从监听器调用，而不是通过requestAnimationFrame
+  // 合并。该趟约20次getBoundingClientRect读取，没有
+  // 写入，浏览器已将滚动事件限制在帧率，而
+  // rAF会让高亮依赖一次重绘 — 这在无头--virtual-time-budget下
+  // 从不发生，因此行为无法
+  // 测试。实时读取能在折叠展开
+  // 并移动其下每个分节时保持MATH正确（缓存的偏移表则不能）—
+  // 但该趟仍必须被触发，而打开<details>既不是
+  // 滚动也不是尺寸变化。若不管它，高亮会一直指向展开前的
+  // 分节，直到读者滚动。因此观察页面自身高度：
+  // 任何移动分节的内容变化 — 折叠、表格过滤、
+  // 面板在数据渲染后取消隐藏 — 都会重新运行该趟。
   window.addEventListener('scroll',syncNav,{passive:true});
   window.addEventListener('resize',syncNav,{passive:true});
   const mainEl=document.querySelector('main');
   if(window.ResizeObserver && mainEl){
     new ResizeObserver(syncNav).observe(mainEl);
   }
-  // toggle does not bubble, but a capturing listener at the document still
-  // sees it — the explicit hook for the disclosure case, and the fallback
-  // where ResizeObserver is missing.
+  // toggle不冒泡，但document上的捕获监听器仍能
+  // 看到它 — 这是折叠场景的显式钩子，也是
+  // 缺少ResizeObserver时的回退。
   document.addEventListener('toggle',syncNav,true);
-  // Once now for the initial highlight, once after load — optional panels
-  // un-hide as their data renders, which changes which sections exist.
+  // 现在一次用于初始高亮，加载后一次 — 可选面板
+  // 会随数据渲染而取消隐藏，从而改变存在的分节。
   syncNav();
   window.addEventListener('load',syncNav);
 
-  // Sidebar toggle. The arrow in the header hides and shows the sidebar;
-  // the choice is remembered like the theme, so a reader who prefers the
-  // full width keeps it across bundles. Below 900px the sidebar overlays
-  // the content, so picking a section there hides it again. Focus follows
-  // the panel: into the current section's link on show, back to the arrow
-  // on hide, so keyboard readers never lose their place.
+  // 侧栏切换。header中的箭头隐藏和显示侧栏；
+  // 该选择像主题一样被记住，因此偏好全宽的读者
+  // 可跨bundle保持。低于900px时侧栏覆盖
+  // 内容，因此在那里选择分节会再次隐藏它。焦点跟随
+  // 面板：显示时进入当前分节的链接，隐藏时回到箭头，
+  // 使键盘读者永不丢失位置。
   (function(){
     const nav=document.getElementById('main-nav');
     const toggle=document.getElementById('nav-toggle');
@@ -3422,7 +3471,7 @@ document.addEventListener('DOMContentLoaded',function(){
     function reflect(){
       const shown=isShown();
       toggle.setAttribute('aria-expanded',shown?'true':'false');
-      toggle.setAttribute('aria-label',shown?'Hide section sidebar':'Show section sidebar');
+      toggle.setAttribute('aria-label',shown?'隐藏分节侧栏':'显示分节侧栏');
     }
     function setNav(shown,remember){
       root.classList.toggle('nav-collapsed',!shown);
@@ -3435,37 +3484,37 @@ document.addEventListener('DOMContentLoaded',function(){
         toggle.focus({preventScroll:true});
       }
     }
-    reflect(); // the bootstrap script may have collapsed it before this ran
+    reflect(); // 引导脚本可能在此运行前已将其折叠
     toggle.addEventListener('click',()=>setNav(!isShown(),true));
     nav.addEventListener('click',e=>{ if(e.target.closest('a')&&narrow()) setNav(false,false); });
     document.addEventListener('keydown',e=>{ if(e.key==='Escape'&&isShown()&&narrow()) setNav(false,false); });
   })();
 
-  // header
-  // The deployment type sits with the version it qualifies — "[cloud]
-  // Version: 26.6.2191" — rather than beside the title, because the mode
-  // says which system tables were collected, not what the page is.
+  // 头部
+  // 部署类型与它所限定的版本放在一起 — "[cloud]
+  // Version: 26.6.2191" — 而不是标题旁，因为mode
+  // 说明采集了哪些system表，而不是页面是什么。
   document.getElementById('hdr-meta').innerHTML=
-    'Generated: '+esc(DATA.generated_at)+'<br>'
+    '生成时间：'+esc(DATA.generated_at)+'<br>'
     +'<span class="badge badge-'+esc(DATA.mode)+'">'+esc(DATA.mode)+'</span>'
-    +' Version: '+esc(DATA.version||'N/A')
-    // Which node the system tables describe, and how long it had been up:
-    // a bundle read against the wrong host, or a node restarted just before
-    // collection, has to be visible before any chart is.
-    +(DATA.node?'<br>Node: '+esc(DATA.node)+(DATA.uptime?' &middot; up '+esc(DATA.uptime)+' at collection':''):'')
-    +(DATA.collection?'<br>Collection: '+esc(DATA.collection):'');
+    +' 版本：'+esc(DATA.version||'N/A')
+    // system表描述的是哪个节点，以及它已运行多久：
+    // 针对错误主机的bundle，或在采集前刚重启的节点，
+    // 必须在任何图表之前可见。
+    +(DATA.node?'<br>节点：'+esc(DATA.node)+(DATA.uptime?' &middot; 采集时已运行 '+esc(DATA.uptime):''):'')
+    +(DATA.collection?'<br>采集：'+esc(DATA.collection):'');
 
-  // Panel headings say the window the data covers. Built from the collected
-  // files, that is the collectors' window (-from/-to, an essential run's
-  // 1 day, a 3-day part log); the live fallback keeps the default text.
+  // 面板标题说明数据覆盖的窗口。从已采集文件构建时，
+  // 那是collector的窗口（-from/-to、essential运行的
+  // 1天、3天的part日志）；实时回退保持默认文本。
   document.querySelectorAll('[data-win]').forEach(function(el){
     const w=(DATA.windows||{})[el.getAttribute('data-win')];
     if(w) el.textContent=w;
   });
 
-  // What kind of diagnostic this is: an essential collection (a struggling
-  // server, or -collect essential) has 1-day windows and fewer files, and
-  // the reader has to know that before reading any absence as health.
+  // 这是哪种诊断：essential采集（挣扎中的
+  // 服务器，或-collect essential）有1天窗口和更少文件，
+  // 读者必须在把任何缺失读成健康之前知道这一点。
   (function(){
     const c=DATA.collect||{}; const el=document.getElementById('collect-banner');
     if(!el||!c.kind) return;
@@ -3473,49 +3522,49 @@ document.addEventListener('DOMContentLoaded',function(){
     let h;
     if(c.kind==='essential'){
       el.classList.add('essential');
-      h='<b>⚠ Essential diagnostic</b> — '+esc(c.summary||'')
-        +'<br><span class="muted">Only the cheap, decisive tables were collected, with 1-day windows. '
-        +(sc.length?esc(String(sc.length))+' collector(s) skipped ('+sc.slice(0,12).map(esc).join(', ')+(sc.length>12?', …':'')+'). ':'')
-        +(sp.length?'Panels not built: '+sp.map(esc).join(', ')+'. ':'')
-        +'Missing data here is not evidence of health. Re-run with <code>-collect full</code> once the node is healthy for the complete picture.</span>';
+      h='<b>⚠ 精简诊断（essential）</b> — '+esc(c.summary||'')
+        +'<br><span class="muted">仅采集了开销低且关键的 table，窗口为 1 天。'
+        +(sc.length?esc(String(sc.length))+' 个 collector 被跳过（'+sc.slice(0,12).map(esc).join(', ')+(sc.length>12?', …':'')+'）。':'')
+        +(sp.length?'未构建的面板：'+sp.map(esc).join(', ')+'。':'')
+        +'此处数据缺失并不能证明系统健康。待节点恢复后，用 <code>-collect full</code> 重新运行以获得完整视图。</span>';
     } else {
-      h='<b>Full diagnostic</b> — '+esc(c.summary||'')
-        +(sc.length?'<br><span class="muted">'+esc(String(sc.length))+' collector(s) skipped (time budget): '+sc.slice(0,12).map(esc).join(', ')+'.</span>':'')
-        +(sp.length?'<br><span class="muted">Panels without their data: '+sp.map(esc).join(', ')+' — missing data here is not evidence of health.</span>':'');
+      h='<b>完整诊断（full）</b> — '+esc(c.summary||'')
+        +(sc.length?'<br><span class="muted">'+esc(String(sc.length))+' 个 collector 因时间预算被跳过：'+sc.slice(0,12).map(esc).join(', ')+'。</span>':'')
+        +(sp.length?'<br><span class="muted">缺少数据的面板：'+sp.map(esc).join(', ')+' — 此处数据缺失并不能证明系统健康。</span>':'');
     }
     el.innerHTML=h; el.style.display='';
   })();
 
-  // stats
-  // esc() on both arguments: every caller currently passes a number, a
-  // version string or a joined load average, so nothing renders differently
-  // today — but a stat tile is a general helper and the escape-by-default
-  // contract has to hold at the helper, not at each call site.
+  // 统计
+  // 两个参数都esc()：目前每个调用者传的都是数字、
+  // 版本字符串或拼接的负载均值，因此今天渲染没有差异 —
+  // 但stat tile是通用helper，默认转义
+  // 契约必须在helper处成立，而不是在每个调用点。
   const tile=(v,l)=>'<div class="stat-card"><div class="val'
     +(String(v).length>14?' val-sm':String(v).length>8?' val-md':'')
     +'">'+esc(v)+'</div><div class="lbl">'+esc(l)+'</div></div>';
   const sg=document.getElementById('stats-grid');
   sg.innerHTML=[
-    // A stat tile is a hero figure: long strings (uptime, long versions) step
-    // down a size instead of wrapping the headline onto three lines.
-    tile(DATA.version||'N/A','Server Version'),
-    tile(DATA.uptime||'N/A','Uptime'),
-    tile(fmt(DATA.total_databases),'Databases'),
-    tile(fmt(DATA.total_tables),'Tables'),
-    tile(fmt(DATA.active_parts),'Active Parts'),
-    tile(DATA.total_size||'N/A','Total Data Size'),
+    // stat tile是主视觉数字：长字符串（运行时间、长版本号）会
+    // 降一档字号，而不是把标题折成三行。
+    tile(DATA.version||'N/A','服务器版本'),
+    tile(DATA.uptime||'N/A','运行时间'),
+    tile(fmt(DATA.total_databases),'数据库'),
+    tile(fmt(DATA.total_tables),'表'),
+    tile(fmt(DATA.active_parts),'活动 part'),
+    tile(DATA.total_size||'N/A','数据总大小'),
   ].join('');
 
-  // ── Host facts (from host_info.json; absent when host-info was skipped) ──
+  // ── Host facts（来自host_info.json；跳过host-info时不存在） ──
   (function(){
     const hi=DATA.host_info;
     if(!hi)return;
     document.getElementById('host-block').style.display='';
 
     const os=hi.os||{}, cpu=hi.cpu||{}, mem=hi.memory||{};
-    // Null/empty means the collector could not read the field; 0 is a real
-    // reading (swap_total_bytes is 0 on hosts with swap disabled) and must
-    // render as 0.00 GiB, not as missing.
+    // null/空表示collector无法读取该字段；0是真实
+    // 读数（禁用swap的主机上swap_total_bytes为0），必须
+    // 渲染为0.00 GiB，而不是缺失。
     const gib=b=>(b==null||b==='')?'—':(Number(b)/1073741824).toFixed(2)+' GiB';
     const dur=sec=>{
       sec=Number(sec||0); if(!sec)return '—';
@@ -3523,33 +3572,33 @@ document.addEventListener('DOMContentLoaded',function(){
       return (d?d+'d ':'')+(h?h+'h ':'')+m+'m';
     };
 
-    // The host's own headline numbers, appended to the existing KPI row so the
-    // reader sees server and machine together.
-    if(cpu.logical_cpus) sg.innerHTML+=tile(String(cpu.logical_cpus),'Logical CPUs');
-    if(mem.total_bytes)  sg.innerHTML+=tile(gib(mem.total_bytes),'Host RAM');
+    // 主机自身的概要数字，追加到现有KPI行，
+    // 使读者同时看到服务器和机器。
+    if(cpu.logical_cpus) sg.innerHTML+=tile(String(cpu.logical_cpus),'逻辑 CPU');
+    if(mem.total_bytes)  sg.innerHTML+=tile(gib(mem.total_bytes),'主机内存');
     if(cpu.load_avg_1_5_15 && cpu.load_avg_1_5_15.length)
-      sg.innerHTML+=tile(cpu.load_avg_1_5_15.join(' / '),'Load 1/5/15m');
+      sg.innerHTML+=tile(cpu.load_avg_1_5_15.join(' / '),'负载 1/5/15m');
 
-    // Machine facts. A definition-style table rather than more tiles: these are
-    // strings to read once, not magnitudes to compare.
+    // 机器信息。用定义风格表格而不是更多tile：这些是
+    // 读一次的字符串，而不是用来比较的量级。
     const osRows=[
-      ['hostname',os.hostname],
-      ['os',[os.distro,os.distro_version].filter(Boolean).join(' ')],
-      ['kernel',os.kernel_version],
-      ['architecture',os.arch],
-      ['host uptime',dur(os.uptime_seconds)],
-      ['cpu model',cpu.model_name],
-      ['vector flags',(cpu.notable_flags||[]).join(', ')],
-      ['memory total',gib(mem.total_bytes)],
-      ['memory available',gib(mem.available_bytes)],
-      ['page cache',gib(mem.cached_bytes)],
-      ['swap total',gib(mem.swap_total_bytes)],
-      ['collected at',hi.collected_at]
+      ['主机名',os.hostname],
+      ['操作系统',[os.distro,os.distro_version].filter(Boolean).join(' ')],
+      ['内核',os.kernel_version],
+      ['架构',os.arch],
+      ['主机运行时间',dur(os.uptime_seconds)],
+      ['CPU 型号',cpu.model_name],
+      ['向量指令标志',(cpu.notable_flags||[]).join(', ')],
+      ['内存总量',gib(mem.total_bytes)],
+      ['可用内存',gib(mem.available_bytes)],
+      ['页缓存',gib(mem.cached_bytes)],
+      ['交换分区总量',gib(mem.swap_total_bytes)],
+      ['采集时间',hi.collected_at]
     ].filter(r=>r[1]!==undefined && r[1]!=='' && r[1]!==null)
      .map(r=>({setting:r[0],value:r[1]}));
     renderTable('tbl-host-os',osRows,['setting','value']);
 
-    // Tunables carry a status, so they get an icon + word as well as a colour.
+    // 可调参数带有状态，因此除颜色外还有图标+文字。
     const ICON={ok:'\u2713 ok',warning:'\u26a0 warning',info:'\u2013',unknown:'? unknown'};
     const checks=(DATA.host_checks||[]).map(c=>({
       setting:c.setting,
@@ -3566,17 +3615,17 @@ document.addEventListener('DOMContentLoaded',function(){
     }));
     renderTable('tbl-host-procs',procs,['pid','rss','threads','state','command']);
 
-    // A section that could not be read is never left looking healthy.
+    // 无法读取的部分绝不能看起来健康。
     const notes=hi.notes||[];
     if(notes.length){
-      // Notes are free text built from OS errors and paths — the one source
-      // of the three that is not a fixed enum, so escape each before joining.
+      // Notes是由OS错误和路径构建的自由文本 — 三种来源中
+      // 唯一不是固定枚举的，因此在拼接前逐个转义。
       document.getElementById('host-notes').innerHTML=
-        '<div class="alert-skipped">\u2139 host facts partially unavailable: '+notes.map(esc).join('; ')+'</div>';
+        '<div class="alert-skipped">\u2139 host facts 部分不可用：'+notes.map(esc).join('; ')+'</div>';
     }
   })();
 
-  // ── Storage: size by database (horizontal bar) ───────────────────────────
+  // ── 存储：按数据库的大小（水平柱） ───────────────────────────────────────
   (function(){
     const rows=DATA.storage_by_db||[];
     if(!rows.length)return;
@@ -3585,11 +3634,11 @@ document.addEventListener('DOMContentLoaded',function(){
       data:{
         labels:rows.map(r=>r.database),
         datasets:[{
-          label:'Compressed (bytes)',
+          label:'压缩后（字节）',
           data:rows.map(r=>r.bytes_total),
-          // Nominal categories: one series, one colour. A hue per bar would
-          // re-encode bar length in colour and spend the identity channel on
-          // nothing.
+          // 名义类别：一个序列，一种颜色。每根柱子一个色相
+          // 会用颜色重新编码柱长，白白浪费身份
+          // 通道。
           backgroundColor:C[0],borderColor:C[0],borderWidth:1,borderRadius:4
         }]
       },
@@ -3597,24 +3646,24 @@ document.addEventListener('DOMContentLoaded',function(){
         indexAxis:'y',responsive:true,maintainAspectRatio:false,
         plugins:{legend:{display:false},tooltip:{callbacks:{label:ctx=>{
           const r=rows[ctx.dataIndex];
-          return[' Size: '+r.size_human,' Rows: '+fmt(r.rows),' Compression: '+r.compression_ratio+'x'];
+          return[' 大小：'+r.size_human,' 行数：'+fmt(r.rows),' 压缩比：'+r.compression_ratio+'x'];
         }}}},
         scales:{x:{ticks:{callback:v=>v>=1e9?(v/1e9).toFixed(1)+'G':v>=1e6?(v/1e6).toFixed(1)+'M':v>=1e3?(v/1e3).toFixed(0)+'K':v}}}
       }
     });
   })();
 
-  // ── Storage: engine distribution (doughnut) ──────────────────────────────
+  // ── 存储：引擎分布（环形图） ─────────────────────────────────────────────
   (function(){
     const rows=DATA.engines_dist||[];
     if(!rows.length)return;
-    // A bar, not a doughnut: the reader's job here is comparing counts, and a
-    // ring makes close values indistinguishable. It also sidesteps the
-    // all-pairs colour cap a doughnut would impose.
+    // 用柱而不是环形：读者在这里的任务是比较计数，而
+    // 环会让接近的值难以区分。它还避开了
+    // 环形图会带来的全配对颜色上限。
     mkChart(document.getElementById('chart-engines'),{
       type:'bar',
       data:{labels:rows.map(r=>r.engine),
-        datasets:[{label:'Tables',data:rows.map(r=>r.count),
+        datasets:[{label:'表',data:rows.map(r=>r.count),
           backgroundColor:C[0],borderColor:C[0],borderWidth:1,borderRadius:4}]},
       options:{indexAxis:'y',responsive:true,maintainAspectRatio:false,
         plugins:{legend:{display:false}},
@@ -3622,14 +3671,14 @@ document.addEventListener('DOMContentLoaded',function(){
     });
   })();
 
-  // top tables
+  // 最大表
   renderTable('tbl-top-tables',DATA.top_tables||[],
     ['database','table','parts','total_rows','compressed_size','compression_ratio']);
 
-  // ── Tables explorer ───────────────────────────────────────────────────────
+  // ── 表浏览器 ─────────────────────────────────────────────────────────────
   window._tablesInit(DATA.tables_list||[]);
 
-  // ── Query: over time (line) ───────────────────────────────────────────────
+  // ── 查询：随时间（折线） ─────────────────────────────────────────────────
   (function(){
     const rows=DATA.query_by_time||[];
     if(!rows.length)return;
@@ -3644,28 +3693,28 @@ document.addEventListener('DOMContentLoaded',function(){
     });
   })();
 
-  // ── Query: count by kind (bar) ────────────────────────────────────────────
+  // ── 查询：按类型计数（柱） ───────────────────────────────────────────────
   (function(){
     const rows=DATA.query_by_kind||[];
     if(!rows.length)return;
     mkChart(document.getElementById('chart-query-kind'),{
       type:'bar',
-      data:{labels:rows.map(r=>r.query_kind||'unknown'),
-        datasets:[{label:'Count',data:rows.map(r=>r.count),
+      data:{labels:rows.map(r=>r.query_kind||'未知'),
+        datasets:[{label:'数量',data:rows.map(r=>r.count),
           backgroundColor:C[0],borderColor:C[0],borderWidth:1,borderRadius:4}]},
       options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{y:{beginAtZero:true}}}
     });
   })();
 
-  // ── Query: avg duration and avg memory by kind — TWO single-axis charts ──
+  // ── 查询：按类型的平均耗时和平均内存 — 两个单轴图表 ──
   //
-  // These were one chart with a second y-axis (ms on the left, MB on the
-  // right). Two scales on one plot align arbitrarily, so the picture invents a
-  // correlation the data does not contain. Same measures, one axis each.
+  // 这些过去是一个带第二y轴的图表（左边ms，右边
+  // MB）。同一图上两个刻度会任意对齐，因此图像会虚构
+  // 数据中并不存在的相关性。相同度量，各用一个轴。
   (function(){
     const rows=DATA.query_by_kind||[];
     if(!rows.length)return;
-    const labels=rows.map(r=>r.query_kind||'unknown');
+    const labels=rows.map(r=>r.query_kind||'未知');
     const one=(canvas,label,vals,axis)=>mkChart(document.getElementById(canvas),{
       type:'bar',
       data:{labels:labels,datasets:[{label:label,data:vals,
@@ -3674,11 +3723,11 @@ document.addEventListener('DOMContentLoaded',function(){
         plugins:{legend:{display:false}},
         scales:{y:{beginAtZero:true,title:{display:true,text:axis}}}}
     });
-    one('chart-query-duration','Avg duration',rows.map(r=>r.avg_duration_ms),'ms');
-    one('chart-query-memory','Avg memory',rows.map(r=>r.avg_memory_mb),'MB');
+    one('chart-query-duration','平均耗时',rows.map(r=>r.avg_duration_ms),'ms');
+    one('chart-query-memory','平均内存',rows.map(r=>r.avg_memory_mb),'MB');
   })();
 
-  // ── Deep dive: slowest queries (horizontal bar) ───────────────────────────
+  // ── 深入分析：最慢查询（水平柱） ─────────────────────────────────────────
   (function(){
     const rows=DATA.query_slow||[];
     if(!rows.length)return;
@@ -3688,8 +3737,8 @@ document.addEventListener('DOMContentLoaded',function(){
       data:{
         labels:labels,
         datasets:[
-          {label:'Avg Duration (ms)',data:rows.map(r=>r.avg_duration_ms),backgroundColor:C[0],borderColor:C[0],borderWidth:1,borderRadius:4},
-          {label:'Max Duration (ms)',data:rows.map(r=>r.max_duration_ms),backgroundColor:C[1],borderColor:C[1],borderWidth:1,borderRadius:4}
+          {label:'平均耗时（ms）',data:rows.map(r=>r.avg_duration_ms),backgroundColor:C[0],borderColor:C[0],borderWidth:1,borderRadius:4},
+          {label:'最大耗时（ms）',data:rows.map(r=>r.max_duration_ms),backgroundColor:C[1],borderColor:C[1],borderWidth:1,borderRadius:4}
         ]
       },
       options:{
@@ -3702,18 +3751,18 @@ document.addEventListener('DOMContentLoaded',function(){
           },
           afterLabel:ctx=>{
             const r=rows[ctx.dataIndex];
-            return['Executions: '+r.executions,'Errors: '+r.errors,
-                   'Avg Read: '+r.avg_read_mb+' MB','Avg Mem: '+r.avg_memory_mb+' MB',
+            return['执行次数：'+r.executions,'错误：'+r.errors,
+                   '平均读取：'+r.avg_read_mb+' MB','平均内存：'+r.avg_memory_mb+' MB',
                    'hash: '+fullHash(r.hash)];
           }
         }}},
-        scales:{x:{beginAtZero:true,title:{display:true,text:'milliseconds'}}}
+        scales:{x:{beginAtZero:true,title:{display:true,text:'毫秒'}}}
       }
     });
     bindQueryPeek(ch,rows,'peek-slow-queries');
   })();
 
-  // ── Deep dive: heaviest reads (horizontal bar) ────────────────────────────
+  // ── 深入分析：最大读取量（水平柱） ───────────────────────────────────────
   (function(){
     const rows=DATA.query_heavy||[];
     if(!rows.length)return;
@@ -3723,11 +3772,11 @@ document.addEventListener('DOMContentLoaded',function(){
       data:{
         labels:labels,
         datasets:[{
-          label:'Avg Read (MB)',
+          label:'平均读取（MB）',
           data:rows.map(r=>r.avg_read_mb),
-          // Nominal categories: one series, one colour. A hue per bar would
-          // re-encode bar length in colour and spend the identity channel on
-          // nothing.
+          // 名义类别：一个序列，一种颜色。每根柱子一个色相
+          // 会用颜色重新编码柱长，白白浪费身份
+          // 通道。
           backgroundColor:C[0],borderColor:C[0],borderWidth:1,borderRadius:4
         }]
       },
@@ -3738,21 +3787,21 @@ document.addEventListener('DOMContentLoaded',function(){
             const r=rows[ctx[0].dataIndex];
             return r.query_kind+' · '+r.user;
           },
-          label:ctx=>' Avg Read: '+ctx.raw+' MB',
+          label:ctx=>' 平均读取：'+ctx.raw+' MB',
           afterLabel:ctx=>{
             const r=rows[ctx.dataIndex];
-            return['Executions: '+r.executions,'Total Read: '+r.total_read,
-                   'Avg Duration: '+r.avg_duration_ms+' ms',
+            return['执行次数：'+r.executions,'总读取：'+r.total_read,
+                   '平均耗时：'+r.avg_duration_ms+' ms',
                    'hash: '+fullHash(r.hash)];
           }
         }}},
-        scales:{x:{beginAtZero:true,title:{display:true,text:'MB per query (avg)'}}}
+        scales:{x:{beginAtZero:true,title:{display:true,text:'每查询 MB（平均）'}}}
       }
     });
     bindQueryPeek(ch,rows,'peek-heavy-reads');
   })();
 
-  // ── Deep dive: user activity (grouped bar) ────────────────────────────────
+  // ── 深入分析：用户活动（分组柱） ─────────────────────────────────────────
   (function(){
     const rows=DATA.query_by_user||[];
     if(!rows.length)return;
@@ -3761,9 +3810,9 @@ document.addEventListener('DOMContentLoaded',function(){
       data:{
         labels:rows.map(r=>r.user),
         datasets:[
-          {label:'Executions',data:rows.map(r=>r.executions),backgroundColor:C[0],borderColor:C[0],borderWidth:1,borderRadius:4},
-          // Errors is a state, so it keeps the reserved critical token.
-          {label:'Errors',data:rows.map(r=>r.error_count),backgroundColor:STATUS.critical,borderColor:STATUS.critical,borderWidth:1,borderRadius:4}
+          {label:'执行次数',data:rows.map(r=>r.executions),backgroundColor:C[0],borderColor:C[0],borderWidth:1,borderRadius:4},
+          // 错误是状态，因此保留预留的critical token。
+          {label:'错误',data:rows.map(r=>r.error_count),backgroundColor:STATUS.critical,borderColor:STATUS.critical,borderWidth:1,borderRadius:4}
         ]
       },
       options:{
@@ -3773,7 +3822,7 @@ document.addEventListener('DOMContentLoaded',function(){
           afterLabel:ctx=>{
             if(ctx.datasetIndex!==0)return;
             const r=rows[ctx.dataIndex];
-            return['Avg Duration: '+r.avg_duration_ms+' ms','Total Read: '+r.total_read_gb+' GB','Total Memory: '+r.total_memory_gb+' GB'];
+            return['平均耗时：'+r.avg_duration_ms+' ms','总读取：'+r.total_read_gb+' GB','总内存：'+r.total_memory_gb+' GB'];
           }
         }}},
         scales:{y:{beginAtZero:true}}
@@ -3781,40 +3830,40 @@ document.addEventListener('DOMContentLoaded',function(){
     });
   })();
 
-  // slow query table
+  // 慢查询表
   renderTable('tbl-slow-queries',DATA.query_slow||[],
     ['query_kind','user','executions','avg_duration_ms','max_duration_ms','avg_read_mb','avg_memory_mb','errors','hash','sample_query'],
     r=>r.errors>0?'alert-row':'');
 
-  // user summary table
+  // 用户摘要表
   renderTable('tbl-user-summary',DATA.query_by_user||[],
     ['user','executions','avg_duration_ms','total_read_gb','total_memory_gb','error_count'],
     r=>r.error_count>0?'alert-row':'');
 
-  // ── Exceptions ────────────────────────────────────────────────────────────
+  // ── 异常 ──────────────────────────────────────────────────────────────────
   (function(){
     const rows=DATA.exceptions||[];
     if(!rows.length){
-      document.getElementById('chart-exceptions').parentElement.innerHTML='<p class="no-data">No exceptions in the last 7 days</p>';
+      document.getElementById('chart-exceptions').parentElement.innerHTML='<p class="no-data">最近 7 天没有异常</p>';
       return;
     }
     mkChart(document.getElementById('chart-exceptions'),{
       type:'bar',
       data:{
-        labels:rows.map(r=>'Code '+r.exception_code),
-        datasets:[{label:'Count',data:rows.map(r=>r.count),
+        labels:rows.map(r=>'错误码 '+r.exception_code),
+        datasets:[{label:'数量',data:rows.map(r=>r.count),
           backgroundColor:C[0],borderColor:C[0],borderWidth:1,borderRadius:4}]
       },
       options:{
         indexAxis:'y',responsive:true,maintainAspectRatio:false,
-        plugins:{legend:{display:false},tooltip:{callbacks:{label:ctx=>' Count: '+ctx.raw}}},
+        plugins:{legend:{display:false},tooltip:{callbacks:{label:ctx=>' 数量：'+ctx.raw}}},
         scales:{x:{beginAtZero:true}}
       }
     });
   })();
   renderTable('tbl-exceptions',DATA.exceptions||[],['exception_code','count','msg']);
 
-  // ── Part log: over time (stacked bar) ────────────────────────────────────
+  // ── Part日志：随时间（堆叠柱） ───────────────────────────────────────────
   (function(){
     const rows=DATA.part_log_by_time||[];
     if(!rows.length)return;
@@ -3829,12 +3878,12 @@ document.addEventListener('DOMContentLoaded',function(){
     });
   })();
 
-  // ── Part log: by type (horizontal bar) ───────────────────────────────────
+  // ── Part日志：按类型（水平柱） ──────────────────────────────────────────
   //
-  // Was a doughnut over up to ~8 event types. Part events span orders of
-  // magnitude (NewPart dwarfs everything), which a ring renders as one slice
-  // and a sliver; bars keep the comparison readable and lift the three-slot
-  // all-pairs colour cap that a ring imposes.
+  // 过去是对最多约8种事件类型的环形图。Part事件跨几个数量级
+  // （NewPart使其他一切相形见绌），环形图会把它渲染成一个扇区
+  // 和一条细线；柱状图保持比较可读，并解除了环形图
+  // 施加的三槽位全配对颜色上限。
   (function(){
     const rows=[...(DATA.part_log_by_type||[])].sort((a,b)=>Number(b.count||0)-Number(a.count||0));
     if(!rows.length)return;
@@ -3842,33 +3891,33 @@ document.addEventListener('DOMContentLoaded',function(){
       type:'bar',
       data:{
         labels:rows.map(r=>r.event_type),
-        datasets:[{label:'Events',data:rows.map(r=>r.count),
+        datasets:[{label:'事件数',data:rows.map(r=>r.count),
           backgroundColor:C[0],borderColor:C[0],borderWidth:1,borderRadius:4}]
       },
       options:{indexAxis:'y',responsive:true,maintainAspectRatio:false,
         plugins:{legend:{display:false},tooltip:{callbacks:{label:ctx=>
-          [' Events: '+fmt(Number(rows[ctx.dataIndex].count||0)),
-           ' Size: '+(rows[ctx.dataIndex].total_size||'—')]}}},
+          [' 事件数：'+fmt(Number(rows[ctx.dataIndex].count||0)),
+           ' 大小：'+(rows[ctx.dataIndex].total_size||'—')]}}},
         scales:{x:{beginAtZero:true}}}
     });
   })();
 
-  // ── Dictionaries ──────────────────────────────────────────────────────────
+  // ── 字典 ──────────────────────────────────────────────────────────────────
   (function(){
     const rows=DATA.dictionaries||[];
     if(!rows.length){
       ['chart-dict-status','chart-dict-bytes','chart-dict-lifetime'].forEach(id=>{
         const el=document.getElementById(id);
-        if(el)el.parentElement.innerHTML='<p class="no-data">No dictionaries</p>';
+        if(el)el.parentElement.innerHTML='<p class="no-data">没有字典</p>';
       });
-      document.getElementById('tbl-dicts').innerHTML='<p class="no-data">No dictionaries</p>';
+      document.getElementById('tbl-dicts').innerHTML='<p class="no-data">没有字典</p>';
       return;
     }
 
-    // Rows are now per-(dict, pod) — cloud mode uses clusterAllReplicas
-    // so a dict loaded on 3 replicas shows 3 rows. Aggregate to per-dict
-    // for the charts where rendering N copies would be misleading, but
-    // keep the raw per-pod rows for the table.
+    // 现在行是按(dict, pod)的 — cloud模式使用clusterAllReplicas，
+    // 因此在3个副本上加载的dict显示3行。对于渲染N份会误导的
+    // 图表，聚合到按dict；但为表格保留
+    // 原始的按pod行。
     const byDict={};
     rows.forEach(r=>{
       const k=r.database+'.'+r.name;
@@ -3886,41 +3935,41 @@ document.addEventListener('DOMContentLoaded',function(){
     });
     const dicts=Object.values(byDict);
 
-    // Status pie — count of (dict × pod) slots per status. A dict
-    // LOADED on 3 pods and NOT_LOADED on 1 contributes 3+1 slots, so
-    // operators can see the cluster-wide loading coverage.
+    // 状态饼图 — 每个状态的(dict × pod)槽位计数。一个在3个pod上
+    // LOADED、在1个pod上NOT_LOADED的dict贡献3+1个槽位，
+    // 使操作者能看到集群范围的加载覆盖。
     const statusMap={};
     rows.forEach(r=>{statusMap[r.status]=(statusMap[r.status]||0)+1;});
     const statLabels=Object.keys(statusMap);
-    // A bar, not a pie: with two or three states a ring is decoration, and the
-    // count is what the operator reads. Fill stays on the reserved status ramp
-    // and the state is spelled out on the axis, so nothing rides on hue alone.
+    // 用柱而不是饼图：只有两三种状态时环形只是装饰，而
+    // 操作者读的是计数。填充保持保留状态色阶，
+    // 状态在轴上明确写出，因此没有任何东西只靠色相表达。
     statLabels.sort((a,b)=>statusMap[b]-statusMap[a]);
     mkChart(document.getElementById('chart-dict-status'),{
       type:'bar',
       data:{
         labels:statLabels,
-        datasets:[{label:'pod-slots',data:statLabels.map(s=>statusMap[s]),
+        datasets:[{label:'pod 槽位',data:statLabels.map(s=>statusMap[s]),
           backgroundColor:statLabels.map(s=>DICT_STATUS_COLOR[s]||STATUS.neutral),
           borderColor:statLabels.map(s=>DICT_STATUS_COLOR[s]||STATUS.neutral),
           borderWidth:1,borderRadius:4}]
       },
       options:{indexAxis:'y',responsive:true,maintainAspectRatio:false,
         plugins:{legend:{display:false},tooltip:{callbacks:{
-          label:ctx=>' '+ctx.parsed.x+' pod-slots'}}},
+          label:ctx=>' '+ctx.parsed.x+' 个 pod 槽位'}}},
         scales:{x:{beginAtZero:true,ticks:{precision:0}}}}
     });
 
-    // Bytes allocated — max across pods per dict (same dict has very
-    // similar bytes on every pod that loaded it; using max avoids
-    // visually shrinking a dict that's NOT_LOADED on one replica).
+    // 已分配字节 — 每个dict跨pod的最大值（同一dict在加载它的每个pod上
+    // 字节非常相似；用max可避免在视觉上缩小
+    // 在某个副本上NOT_LOADED的dict）。
     const topDicts=[...dicts].sort((a,b)=>b.bytes_max-a.bytes_max).slice(0,15);
     mkChart(document.getElementById('chart-dict-bytes'),{
       type:'bar',
       data:{
         labels:topDicts.map(d=>d.key),
         datasets:[{
-          label:'max bytes_allocated across pods',
+          label:'各 pod 最大 bytes_allocated',
           data:topDicts.map(d=>d.bytes_max),
           backgroundColor:C[0],borderColor:C[0],borderWidth:1,borderRadius:4
         }]
@@ -3929,14 +3978,14 @@ document.addEventListener('DOMContentLoaded',function(){
         indexAxis:'y',responsive:true,maintainAspectRatio:false,
         plugins:{legend:{display:false},tooltip:{callbacks:{label:ctx=>{
           const d=topDicts[ctx.dataIndex];
-          return [' '+d.bytes_max_human, ' loaded on '+d.loaded_pods+' / '+d.total_pods+' pods'];
+          return [' '+d.bytes_max_human, ' 已加载于 '+d.loaded_pods+' / '+d.total_pods+' 个 pod'];
         }}}},
         scales:{x:{ticks:{callback:v=>v>=1e9?(v/1e9).toFixed(1)+'G':v>=1e6?(v/1e6).toFixed(1)+'M':v>=1e3?(v/1e3).toFixed(0)+'K':v}}}
       }
     });
 
-    // Lifetime is per-definition (same value on every pod), so use the
-    // deduped per-dict view.
+    // 生存时间按定义（每个pod值相同），因此使用
+    // 去重后的按dict视图。
     const lifeRows=dicts.filter(d=>d.lifetime_max>0||d.lifetime_min>0).slice(0,20);
     if(lifeRows.length){
       mkChart(document.getElementById('chart-dict-lifetime'),{
@@ -3944,26 +3993,26 @@ document.addEventListener('DOMContentLoaded',function(){
         data:{
           labels:lifeRows.map(d=>d.name),
           datasets:[
-            {label:'Lifetime Min (s)',data:lifeRows.map(d=>d.lifetime_min),backgroundColor:C[0],borderColor:C[0],borderWidth:1,borderRadius:4},
-            {label:'Lifetime Max (s)',data:lifeRows.map(d=>d.lifetime_max),backgroundColor:C[1],borderColor:C[1],borderWidth:1,borderRadius:4}
+            {label:'最小生存时间（s）',data:lifeRows.map(d=>d.lifetime_min),backgroundColor:C[0],borderColor:C[0],borderWidth:1,borderRadius:4},
+            {label:'最大生存时间（s）',data:lifeRows.map(d=>d.lifetime_max),backgroundColor:C[1],borderColor:C[1],borderWidth:1,borderRadius:4}
           ]
         },
         options:{
           responsive:true,maintainAspectRatio:false,
           interaction:{mode:'index',intersect:false},
           plugins:{legend:{position:'top'}},
-          scales:{x:{ticks:{maxRotation:45}},y:{beginAtZero:true,title:{display:true,text:'seconds'}}}
+          scales:{x:{ticks:{maxRotation:45}},y:{beginAtZero:true,title:{display:true,text:'秒'}}}
         }
       });
     } else {
-      document.getElementById('chart-dict-lifetime').parentElement.innerHTML='<p class="no-data">No lifetime data</p>';
+      document.getElementById('chart-dict-lifetime').parentElement.innerHTML='<p class="no-data">没有生存时间数据</p>';
     }
 
-    // Dictionary detail table — per-(dict, pod) rows so the operator
-    // can see which pod each runtime stat came from. Columns ordered:
-    // identity → topology → sizing → activity → schema → lifecycle →
-    // errors → metadata. Long-text columns last; the table wrapper
-    // already overflow-x's, so horizontal scroll is expected.
+    // 字典明细表 — 按(dict, pod)的行，使操作者
+    // 能看到每个运行时统计来自哪个pod。列顺序：
+    // 身份 → 拓扑 → 大小 → 活动 → 模式 → 生命周期 →
+    // 错误 → 元数据。长文本列最后；表格包装器
+    // 已有overflow-x，因此横向滚动是预期的。
     const el=document.getElementById('tbl-dicts');
     const cols=['hostname','database','name','status','type','source',
                 'bytes_allocated_human','element_count','load_factor',
@@ -3972,12 +4021,12 @@ document.addEventListener('DOMContentLoaded',function(){
                 'lifetime_min','lifetime_max',
                 'loading_start_time','last_update','loading_duration_s',
                 'last_exception','origin','comment','uuid'];
-    let h='<table class="dt"><thead><tr>'+cols.map(k=>'<th>'+esc(k)+'</th>').join('')+'</tr></thead><tbody>';
+    let h='<table class="dt"><thead><tr>'+cols.map(k=>'<th>'+esc(COL_LABELS[k]||k)+'</th>').join('')+'</tr></thead><tbody>';
     rows.forEach(r=>{
       const isFailed=r.status==='FAILED'||String(r.last_exception||'').length>1;
       h+='<tr'+(isFailed?' class="error-row"':r.status==='LOADING'?' class="alert-row"':'')+'>';
       cols.forEach(k=>{
-        // name / last_exception / origin / comment / source are customer data.
+        // name / last_exception / origin / comment / source是客户数据。
         if(k==='status') h+='<td>'+dictStatusBadge(r[k])+'</td>';
         else h+='<td title="'+esc(r[k])+'">'+esc(r[k])+'</td>';
       });
@@ -3987,7 +4036,7 @@ document.addEventListener('DOMContentLoaded',function(){
     el.innerHTML=h;
   })();
 
-  // ── Crash log ─────────────────────────────────────────────────────────────
+  // ── 崩溃日志 ─────────────────────────────────────────────────────────────
   (function(){
     const rows=DATA.crash_log||[];
     if(rows.length>0){
@@ -3999,7 +4048,7 @@ document.addEventListener('DOMContentLoaded',function(){
     }
   })();
 
-  // ── Pending work ──────────────────────────────────────────────────────────
+  // ── 待处理工作 ───────────────────────────────────────────────────────────
   renderTable('tbl-mutations',DATA.mutations||[],
     ['database','table','mutation_id','parts_to_do','create_time','command']);
   renderTable('tbl-detached',DATA.detached||[],
@@ -4008,7 +4057,7 @@ document.addEventListener('DOMContentLoaded',function(){
     ['table','type','executing','last_exception'],
     r=>r.last_exception&&r.last_exception.length>1?'error-row':'');
 
-  // ── Clusters (cloud only) ────────────────────────────────────────────────
+  // ── 集群（仅cloud） ───────────────────────────────────────────────────
   if(DATA.mode==='cloud'&&(DATA.clusters||[]).length>0){
     document.getElementById('sec-clusters').style.display='';
     document.getElementById('nav-clusters').style.display='';
@@ -4017,21 +4066,21 @@ document.addEventListener('DOMContentLoaded',function(){
       r=>r.errors_count&&r.errors_count!=='0'?'alert-row':'');
   }
 
-  // ── Replicas health ───────────────────────────────────────────────────────
+  // ── 副本健康 ─────────────────────────────────────────────────────────────
   (function(){
     const allRows=DATA.replicas||[];
     if(!allRows.length)return;
     document.getElementById('sec-replicas').style.display='';
     document.getElementById('nav-replicas').style.display='';
-    // Attention first: read-only, then more than 60 s behind, then the rest —
-    // each group in the SQL's delay order (Array.prototype.sort is stable).
-    // Sorting only by delay, as the SQL does, could push a read-only table
-    // with a small delay off page 1 of the details table. The charts are
-    // order-insensitive, so they use the same array.
+    // 需关注者优先：只读，然后落后超过60秒，然后其余 —
+    // 每组内保持SQL的延迟顺序（Array.prototype.sort是稳定的）。
+    // 只按延迟排序（如SQL所做）可能把延迟很小的只读表
+    // 挤出明细表第1页。图表对顺序不敏感，
+    // 因此它们使用同一数组。
     const rank=r=>r.is_readonly?2:(Number(r.absolute_delay||0)>60?1:0);
     const rows=[...allRows].sort((a,b)=>rank(b)-rank(a));
 
-    // delay distribution (bar)
+    // 延迟分布（柱）
     const delayBuckets={'0s':0,'<10s':0,'<60s':0,'<5m':0,'≥5m':0};
     rows.forEach(r=>{
       const d=Number(r.absolute_delay||0);
@@ -4043,19 +4092,19 @@ document.addEventListener('DOMContentLoaded',function(){
     });
     const bLabels=Object.keys(delayBuckets);
     const bData=bLabels.map(k=>delayBuckets[k]);
-    // Delay bands are ORDERED, so they take a one-hue ordinal ramp. The old
-    // green→yellow→red rainbow spent five hues re-encoding an order the axis
-    // already spells out, and read as a status scale it is not.
+    // 延迟区间是ORDERED的，因此采用单色相序数色阶。旧的
+    // 绿→黄→红彩虹用了五个色相重新编码轴
+    // 已明确写出的顺序，而且读起来像状态色阶，但它并不是。
     const bColors=(ORDINAL[currentTheme()]||ORDINAL.light).slice(0,bLabels.length);
     mkChart(document.getElementById('chart-replica-delay'),{
       type:'bar',
-      data:{labels:bLabels,datasets:[{label:'Replicas',data:bData,
+      data:{labels:bLabels,datasets:[{label:'副本',data:bData,
         backgroundColor:bColors,borderColor:bColors,borderWidth:1,borderRadius:4,_ordinal:true}]},
       options:{responsive:true,maintainAspectRatio:false,
         plugins:{legend:{display:false}},scales:{y:{beginAtZero:true,ticks:{stepSize:1}}}}
     });
 
-    // queue size horizontal bar (top 15)
+    // 队列大小水平柱（前15）
     const topQ=[...rows].sort((a,b)=>Number(b.queue_size||0)-Number(a.queue_size||0)).slice(0,15);
     if(topQ.some(r=>Number(r.queue_size||0)>0)){
       mkChart(document.getElementById('chart-replica-queue'),{
@@ -4063,9 +4112,9 @@ document.addEventListener('DOMContentLoaded',function(){
         data:{
           labels:topQ.map(r=>r.database+'.'+r.table),
           datasets:[
-            {label:'Queue Size',data:topQ.map(r=>r.queue_size||0),backgroundColor:C[0],borderColor:C[0],borderWidth:1,borderRadius:4},
-            {label:'Inserts In Queue',data:topQ.map(r=>r.inserts_in_queue||0),backgroundColor:C[1],borderColor:C[1],borderWidth:1,borderRadius:4},
-            {label:'Merges In Queue',data:topQ.map(r=>r.merges_in_queue||0),backgroundColor:C[2],borderColor:C[2],borderWidth:1,borderRadius:4}
+            {label:'队列大小',data:topQ.map(r=>r.queue_size||0),backgroundColor:C[0],borderColor:C[0],borderWidth:1,borderRadius:4},
+            {label:'队列中的插入',data:topQ.map(r=>r.inserts_in_queue||0),backgroundColor:C[1],borderColor:C[1],borderWidth:1,borderRadius:4},
+            {label:'队列中的合并',data:topQ.map(r=>r.merges_in_queue||0),backgroundColor:C[2],borderColor:C[2],borderWidth:1,borderRadius:4}
           ]
         },
         options:{indexAxis:'y',responsive:true,maintainAspectRatio:false,
@@ -4073,13 +4122,13 @@ document.addEventListener('DOMContentLoaded',function(){
           plugins:{legend:{position:'top'}},scales:{x:{beginAtZero:true}}}
       });
     } else {
-      document.getElementById('chart-replica-queue').parentElement.innerHTML='<p class="no-data">No queue entries</p>';
+      document.getElementById('chart-replica-queue').parentElement.innerHTML='<p class="no-data">没有队列条目</p>';
     }
 
-    // Replica Details is one row per replicated table — 25 000 rows on a
-    // large SharedMergeTree cluster. The charts above use every row; the
-    // table shows 50 at a time. Rows arrive ordered by absolute_delay DESC,
-    // is_readonly DESC, so page 1 is the replicas that need attention.
+    // 副本明细每张复制表一行 — 在大型SharedMergeTree集群上
+    // 有25 000行。上面的图表使用每一行；
+    // 表格一次显示50行。行按absolute_delay DESC、
+    // is_readonly DESC到达，因此第1页是需要关注的副本。
     const REPLICA_PAGE=50;
     let rpage=0;
     const rcols=['database','table','is_readonly','is_session_expired','is_leader',
@@ -4088,9 +4137,9 @@ document.addEventListener('DOMContentLoaded',function(){
     const rclass=r=>r.is_readonly?'error-row':(Number(r.absolute_delay||0)>60?'alert-row':'');
     const attention=rows.filter(r=>rclass(r)).length;
     document.getElementById('replicas-scope').textContent=
-      rows.length+' replicated table'+(rows.length===1?'':'s')+' on this server'
-      +(attention?' — '+attention+' read-only or more than 60 s behind, listed first':' — none read-only or behind')
-      +(rows.length>REPLICA_PAGE?'; '+REPLICA_PAGE+' per page, sorted by delay.':'.');
+      rows.length+' 张复制表（此服务器）'
+      +(attention?' — '+attention+' 个只读或落后超过 60 秒，已排在前面':' — 没有只读或落后的副本')
+      +(rows.length>REPLICA_PAGE?'；每页 '+REPLICA_PAGE+' 个，按延迟排序。':'。');
     function renderReplicas(){
       const start=rpage*REPLICA_PAGE;
       renderTable('tbl-replicas',rows.slice(start,start+REPLICA_PAGE),rcols,rclass);
@@ -4107,40 +4156,40 @@ document.addEventListener('DOMContentLoaded',function(){
     renderReplicas();
   })();
 
-  // ── Keeper health ─────────────────────────────────────────────────────────
+  // ── Keeper健康 ───────────────────────────────────────────────────────────
   //
-  // Same verdict rule as alerts/keeper_health.yaml and the skill's HC-3.8, so
+  // 与alerts/keeper_health.yaml和skill的HC-3.8相同的判定规则，因此
 
-  // ── background pools ──────────────────────────────────────────────────────
-  // One chart per pool, each with its size as a dashed reference: the
-  // question is "how close to the size, for how many hours", not the level
-  // itself. Hours at or above 90 % of the size are counted in the tooltip
-  // and the card title; below 3 in the last 24 h nothing is flagged.
+  // ── 后台池 ───────────────────────────────────────────────────────────────
+  // 每个池一个图表，每个都以池大小作为虚线参考：
+  // 问题在于"有多少小时接近该大小"，而不是水平
+  // 本身。达到或超过大小90 %的小时数会在提示框
+  // 和卡片标题中统计；最近24小时内少于3个则不标记。
   {
     const ph=DATA.pools_hourly||[], sizes=DATA.pool_sizes||{};
     const N=v=>Number(v||0), T=t=>Date.parse(String(t).replace(' ','T')+'Z');
     if(!ph.length){
-      document.getElementById('pools-charts').innerHTML='<p class="no-data">metric_log is not available on this server (pool occupancy comes from CurrentMetric_Background*PoolTask)</p>';
+      document.getElementById('pools-charts').innerHTML='<p class="no-data">此服务器上没有 metric_log（池占用来自 CurrentMetric_Background*PoolTask）</p>';
     }else{
       const labels=ph.map(r=>r.time);
       const warn=themeVar('--status-warning')||C[2];
       [['fetch','fetch_tasks',0.9],['schedule','schedule_tasks',0.95],['merge','merge_tasks',0.9]].forEach(([k,col,pct])=>{
         const vals=ph.map(r=>N(r[col])), size=N(sizes[k]);
-        // The last 24 CLOCK hours, anchored on the newest sample: metric_log
-        // has gaps (downtime, a disabled hour), so the last 24 rows can reach
-        // back days and flag a pool the live alert (now() - 24 h) finds clean.
-        // Parsed as UTC on both sides so the browser's zone cancels out.
-        // Anchor: the server's now() at collection (pools_now); older
-        // payloads without it fall back to the newest sample.
+        // 最近24个CLOCK小时，锚定在最新样本上：metric_log
+        // 有间隙（停机、某小时被禁用），因此最近24行可能回溯
+        // 数天，并标记实时告警（now() - 24 h）认为干净的池。
+        // 两边都按UTC解析，使浏览器时区抵消。
+        // 锚点：采集时服务器的now()（pools_now）；没有它的旧
+        // payload回退到最新样本。
         const anchor=DATA.pools_now?T(DATA.pools_now):T(labels[labels.length-1]);
         const cut=anchor-24*3600e3;
         const last24=ph.filter(r=>T(r.time)>cut).map(r=>N(r[col])), sat=size?last24.filter(v=>v>=pct*size).length:0;
         const el=document.getElementById('chart-pool-'+k);
         const title=el.parentElement.parentElement.querySelector('h3');
-        if(size) title.textContent+=' — size '+size+(sat>=3?' — saturated '+sat+' of the last '+last24.length+' h':'');
+        if(size) title.textContent+=' — 大小 '+size+(sat>=3?' — 最近 '+last24.length+' 小时中有 '+sat+' 小时饱和':'');
         if(sat>=3) el.parentElement.parentElement.classList.add('alert-card');
-        const ds=[{label:'avg tasks / h (max over replicas)',data:vals,borderColor:sat>=3?warn:C[0],backgroundColor:sat>=3?warn:C[0],tension:0.2,pointRadius:0,borderWidth:2}];
-        if(size) ds.push({label:'pool size',data:vals.map(()=>size),borderColor:OTHER,borderDash:[6,4],pointRadius:0,borderWidth:1});
+        const ds=[{label:'每小时平均任务数（各副本最大值）',data:vals,borderColor:sat>=3?warn:C[0],backgroundColor:sat>=3?warn:C[0],tension:0.2,pointRadius:0,borderWidth:2}];
+        if(size) ds.push({label:'池大小',data:vals.map(()=>size),borderColor:OTHER,borderDash:[6,4],pointRadius:0,borderWidth:1});
         mkChart(el,{type:'line',data:{labels,datasets:ds},
           options:{responsive:true,maintainAspectRatio:false,interaction:{mode:'index',intersect:false},
             plugins:{legend:{position:'top'}},
@@ -4149,7 +4198,7 @@ document.addEventListener('DOMContentLoaded',function(){
     }
   }
 
-  // the dashboard, the alert and the pre-pass never disagree about an hour.
+  // dashboard、告警和预检永远不会对某一小时产生分歧。
   (function(){
     const rows=DATA.keeper_metric_hourly||[];
     if(!rows.length)return;
@@ -4160,13 +4209,13 @@ document.addEventListener('DOMContentLoaded',function(){
     const N=v=>Number(v||0);
     const labels=rows.map(r=>r.time);
     const tx=rows.map(r=>N(r.transactions)), hw=rows.map(r=>N(r.hw_exceptions));
-    // Median = the upper-middle sample, the same estimator as
-    // quantileExactHigh(0.5) in alerts/keeper_health.yaml and tx_vals[len//2]
-    // in inspect_bundle.py. In cloud mode the rows here are pooled across
-    // replicas (keeperMetricSQL groups by hour only), while the alert groups
-    // by hostName() — so the verdicts can differ and a single replica's
-    // outage can be averaged away in this panel. Tracked for a per-replica
-    // panel; until then the alert is the authority.
+    // 中位数 = 偏上的中间样本，与
+    // alerts/keeper_health.yaml中的quantileExactHigh(0.5)和
+    // inspect_bundle.py中的tx_vals[len//2]使用相同估计器。cloud模式下这里的行
+    // 跨副本合池（keeperMetricSQL只按小时分组），而告警按
+    // hostName()分组 — 因此判定可能不同，单副本的
+    // 故障可能在此面板中被平均掉。已记录为后续按副本
+    // 面板；在此之前以告警为准。
     const sorted=[...tx].sort((a,b)=>a-b);
     const med=sorted[Math.floor(sorted.length/2)]||0;
     const verdict=rows.map((r,i)=>{
@@ -4181,58 +4230,58 @@ document.addEventListener('DOMContentLoaded',function(){
       const hrs=labels.filter((_,i)=>verdict[i]===v);
       return {verdict:v,hours:hrs.length,
         first:hrs[0]||'—',last:hrs[hrs.length-1]||'—',
-        meaning:v==='UNAVAILABLE'?'> 1000 hardware exceptions/h and traffic < 50% of median — sessions expiring, work not completing'
-               :v==='blip'?'> 1000 hardware exceptions/h with traffic ≥ 50% of median — session lost and re-established'
-               :'traffic < 10% of median with no exceptions — server idle, or no Keeper session (check ZooKeeperSession)'};
+        meaning:v==='UNAVAILABLE'?'> 每小时 1000 次以上硬件异常且流量低于中位数 50% — 会话过期，工作无法完成'
+               :v==='blip'?'> 每小时 1000 次以上硬件异常且流量 ≥ 中位数 50% — 会话丢失后重新建立'
+               :'流量低于中位数 10% 且无异常 — 服务器空闲，或没有 Keeper 会话（检查 ZooKeeperSession）'};
     }).filter(x=>x.hours>0);
     renderTable('tbl-keeper-verdict',
       summary.length?summary:[{verdict:'ok',hours:rows.length,first:labels[0],last:labels[labels.length-1],
-        meaning:'no hour with > 1000 hardware exceptions; median traffic '+fmt(med)+' transactions/h'}],
+        meaning:'没有任何小时出现 > 1000 次硬件异常；中位流量 '+fmt(med)+' 事务/小时'}],
       ['verdict','hours','first','last','meaning'],
       r=>r.verdict==='UNAVAILABLE'?'error-row':(r.verdict==='blip'?'alert-row':''));
-    // Two single-axis charts that share the x labels (a dual axis would invent
-    // a correlation): traffic as a line with the median drawn as a reference,
-    // exceptions as bars coloured by the hour's verdict.
+    // 两个共享x标签的单轴图表（双轴会虚构
+    // 相关性）：流量为折线并画出中位数参考，
+    // 异常为按时段判定着色的柱。
     const crit=themeVar('--status-critical')||C[1], warn=themeVar('--status-warning')||C[2];
     const bars=verdict.map(v=>v==='UNAVAILABLE'?crit:(v==='blip'?warn:OTHER));
     const verdictTip={callbacks:{afterBody:items=>{
       const i=items[0].dataIndex;
-      return [' verdict: '+verdict[i]+(med?' ('+Math.round(100*tx[i]/med)+'% of median traffic)':'')];}}};
+      return [' 判定：'+verdict[i]+(med?'（中位流量的 '+Math.round(100*tx[i]/med)+'%）':'')];}}};
     mkChart(document.getElementById('chart-keeper-traffic'),{
       type:'line',
       data:{labels,datasets:[
-        {label:'Transactions / h',data:tx,borderColor:C[0],backgroundColor:C[0],tension:0.2,pointRadius:0,borderWidth:2},
-        {label:'7-day median',data:tx.map(()=>med),borderColor:OTHER,borderDash:[6,4],pointRadius:0,borderWidth:1}]},
+        {label:'事务/小时',data:tx,borderColor:C[0],backgroundColor:C[0],tension:0.2,pointRadius:0,borderWidth:2},
+        {label:'7 天中位数',data:tx.map(()=>med),borderColor:OTHER,borderDash:[6,4],pointRadius:0,borderWidth:1}]},
       options:{responsive:true,maintainAspectRatio:false,interaction:{mode:'index',intersect:false},
         plugins:{legend:{position:'top'},tooltip:verdictTip},
         scales:{x:{ticks:{maxTicksLimit:14,maxRotation:45}},y:{beginAtZero:true}}}
     });
     mkChart(document.getElementById('chart-keeper-exceptions'),{
       type:'bar',
-      data:{labels,datasets:[{label:'Hardware exceptions / h',data:hw,backgroundColor:bars,borderColor:bars,borderWidth:1}]},
+      data:{labels,datasets:[{label:'硬件异常/小时',data:hw,backgroundColor:bars,borderColor:bars,borderWidth:1}]},
       options:{responsive:true,maintainAspectRatio:false,interaction:{mode:'index',intersect:false},
         plugins:{legend:{display:false},tooltip:verdictTip},
         scales:{x:{ticks:{maxTicksLimit:14,maxRotation:45}},y:{beginAtZero:true}}}
     });
-    // keeper_wait_available is the Go side's hasColumn() verdict. Absent key
-    // (older bundle) falls back to treating the column as present, so the
-    // message never claims "no Keeper requests" about data that lacks the flag.
+    // keeper_wait_available是Go侧hasColumn()的判定。key缺失
+    // （旧bundle）时回退为将该列视为存在，因此消息
+    // 绝不会对缺少该标志的数据声称"没有Keeper请求"。
     const waitCol=DATA.keeper_wait_available!==false;
     if(waitCol&&rows.some(r=>N(r.wait_us)>0)){
       const lat=rows.map((r,i)=>tx[i]?N(r.wait_us)/tx[i]/1000:0);
       mkChart(document.getElementById('chart-keeper-latency'),{
         type:'line',
-        data:{labels,datasets:[{label:'mean ms / request',data:lat,borderColor:C[1],backgroundColor:C[1],tension:0.2,pointRadius:0,borderWidth:2}]},
+        data:{labels,datasets:[{label:'平均 ms/请求',data:lat,borderColor:C[1],backgroundColor:C[1],tension:0.2,pointRadius:0,borderWidth:2}]},
         options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},
           scales:{x:{ticks:{maxTicksLimit:10,maxRotation:45}},y:{beginAtZero:true}}}
       });
     }else{
       document.getElementById('chart-keeper-latency').parentElement.innerHTML='<p class="no-data">'+(waitCol
-        ?'No Keeper wait time recorded in this window — this server completed no Keeper requests (not a replicated/shared setup, or Keeper was never contacted)'
-        :'ZooKeeperWaitMicroseconds is not exported by this version')+'</p>';
+        ?'此窗口内没有记录到 Keeper 等待时间 — 此服务器没有完成任何 Keeper 请求（不是复制/共享部署，或从未联系过 Keeper）'
+        :'此版本未导出 ZooKeeperWaitMicroseconds')+'</p>';
     }
     const er=DATA.keeper_errors_hourly||[];
-    document.getElementById('keeper-errors-source').textContent='Source: '+(DATA.keeper_errors_source||'');
+    document.getElementById('keeper-errors-source').textContent='来源：'+(DATA.keeper_errors_source||'');
     if(er.length){
       const d=pivot(er,'time','code_name','count');
       stackWithGaps(d);
@@ -4243,19 +4292,19 @@ document.addEventListener('DOMContentLoaded',function(){
           scales:{x:{stacked:true,ticks:{maxTicksLimit:10,maxRotation:45}},y:{stacked:true,beginAtZero:true}}}
       });
     }else{
-      document.getElementById('chart-keeper-errors').parentElement.innerHTML='<p class="no-data">No 999 / 242 / 319 / 571 / 252 in the last 7 days</p>';
+      document.getElementById('chart-keeper-errors').parentElement.innerHTML='<p class="no-data">最近 7 天没有 999 / 242 / 319 / 571 / 252</p>';
     }
     const cn=DATA.keeper_connection||[];
     if(cn.length){
       renderTable('tbl-keeper-connection',cn,null,r=>String(r.is_expired)==='1'?'error-row':'');
     }else{
-      document.getElementById('tbl-keeper-connection').innerHTML='<p class="no-data">system.zookeeper_connection is not available (ClickHouse &lt; 23.8)</p>';
+      document.getElementById('tbl-keeper-connection').innerHTML='<p class="no-data">system.zookeeper_connection 不可用（ClickHouse &lt; 23.8）</p>';
     }
   })();
 
-  // Keeper members: what each member reported about itself (keeper/*.txt),
-  // with the pre-pass's verdicts computed by the same rules in Go. Its own
-  // visibility: a bundle can carry the files without the hourly metrics.
+  // Keeper成员：每个成员自报的信息（keeper/*.txt），
+  // 预检的判定由Go中的相同规则计算。它有自己的
+  // 可见性：bundle可以携带这些文件而不带每小时指标。
   (function(){
     const ms=DATA.keeper_members||[];
     if(!ms.length)return;
@@ -4265,8 +4314,8 @@ document.addEventListener('DOMContentLoaded',function(){
     const ll=DATA.keeper_leaderless||[];
     if(ll.length){
       document.getElementById('keeper-leaderless').innerHTML='<div class="alert-err-msg">⛔ '
-        +ll.map(e=>esc(e==='default'?'Keeper':'ensemble '+e)).join(', ')
-        +': no member in this bundle is serving — no leader among them; members outside the bundle may still hold a quorum (HC-3.18)</div>';
+        +ll.map(e=>esc(e==='default'?'Keeper':'集合 '+e)).join(', ')
+        +'：此 bundle 中没有任何成员在提供服务 — 成员之间没有 leader；bundle 之外的成员仍可能构成法定人数（HC-3.18）</div>';
     }
     const N=v=>v==null?'—':esc(String(v));
     const B=v=>{if(v==null)return '—';let n=Number(v),u=['B','KiB','MiB','GiB','TiB'],i=0;while(n>=1024&&i<u.length-1){n/=1024;i++;}return esc((i?n.toFixed(2):String(n))+' '+u[i]);};
@@ -4292,7 +4341,7 @@ document.addEventListener('DOMContentLoaded',function(){
     renderTable('tbl-keeper-members',rows,cols,r=>r['Raft log first → last'].indexOf('needs a full snapshot')>=0?'error-row':'',cols);
   })();
 
-  // ── Disk usage ────────────────────────────────────────────────────────────
+  // ── 磁盘使用 ─────────────────────────────────────────────────────────────
   (function(){
     const rows=DATA.disks||[];
     const WARN_PCT=15, CRIT_PCT=5;
@@ -4300,19 +4349,19 @@ document.addEventListener('DOMContentLoaded',function(){
       mkChart(document.getElementById('chart-disk-usage'),{
         type:'bar',
         data:{
-          // In cloud mode system.disks fans out, so the same disk appears
-          // once per replica (measured 11 disks → 33 rows on 3 replicas).
-          // Qualify the label with the short hostname, matching the
-          // hostname column the table below now shows — otherwise the
-          // chart is 33 bars under 11 duplicate labels.
+          // cloud模式下system.disks会扇出，因此同一磁盘
+          // 每个副本出现一次（3副本上测得11个磁盘 → 33行）。
+          // 用短主机名限定标签，与下面表格现在显示的
+          // hostname列一致 — 否则图表就是11个重复标签下的
+          // 33根柱子。
           labels:rows.map(r=>r.hostname?r.name+' @ '+String(r.hostname).split('.')[0]:r.name),
           datasets:[
-            {label:'Used',data:rows.map(r=>Number(r.total_space||0)-Number(r.free_space||0)),
+            {label:'已用',data:rows.map(r=>Number(r.total_space||0)-Number(r.free_space||0)),
               backgroundColor:rows.map(r=>Number(r.free_pct||100)<CRIT_PCT?STATUS.critical:Number(r.free_pct||100)<WARN_PCT?STATUS.warning:C[0]),
               borderColor:rows.map(r=>Number(r.free_pct||100)<CRIT_PCT?STATUS.critical:Number(r.free_pct||100)<WARN_PCT?STATUS.warning:C[0]),
               borderWidth:1,borderRadius:4},
-            {label:'Free',data:rows.map(r=>Number(r.free_space||0)),
-              // Free space is the remainder, not a "good" state — recessive gray.
+            {label:'可用',data:rows.map(r=>Number(r.free_space||0)),
+              // 可用空间是剩余量，不是"好"状态 — 弱化灰色。
               backgroundColor:OTHER,borderColor:OTHER,borderWidth:1,borderRadius:4}
           ]
         },
@@ -4323,8 +4372,8 @@ document.addEventListener('DOMContentLoaded',function(){
             label:ctx=>{
               const r=rows[ctx.dataIndex];
               const host=r.hostname?' ('+String(r.hostname).split('.')[0]+')':'';
-              if(ctx.datasetIndex===0)return' Used: '+r.total_space_human+' total, '+r.free_pct+'% free'+host;
-              return' Free: '+r.free_space_human+host;
+              if(ctx.datasetIndex===0)return' 已用：'+r.total_space_human+' 总量，'+r.free_pct+'% 可用'+host;
+              return' 可用：'+r.free_space_human+host;
             }
           }}},
           scales:{x:{stacked:true},y:{stacked:true,beginAtZero:true,
@@ -4337,15 +4386,15 @@ document.addEventListener('DOMContentLoaded',function(){
       r=>Number(r.free_pct||100)<CRIT_PCT?'error-row':Number(r.free_pct||100)<WARN_PCT?'alert-row':'');
   })();
 
-  // ── Server errors ─────────────────────────────────────────────────────────
+  // ── 服务器错误 ───────────────────────────────────────────────────────────
   (function(){
     const rows=(DATA.server_errors||[]).slice(0,20);
     if(rows.length){
       mkChart(document.getElementById('chart-server-errors'),{
         type:'bar',
         data:{
-          labels:rows.map(r=>r.name||'code '+r.code),
-          datasets:[{label:'Total count (since restart)',
+          labels:rows.map(r=>r.name||'错误码 '+r.code),
+          datasets:[{label:'总次数（自重启以来）',
             data:rows.map(r=>r.value),
             backgroundColor:C[0],borderColor:C[0],borderWidth:1,borderRadius:4}]
         },
@@ -4353,13 +4402,13 @@ document.addEventListener('DOMContentLoaded',function(){
           plugins:{legend:{display:false},tooltip:{callbacks:{
             afterLabel:ctx=>{
               const r=rows[ctx.dataIndex];
-              return['Code: '+r.code,'Last seen: '+r.last_error_time,'Msg: '+(r.last_error_message||'').slice(0,120)];
+              return['错误码：'+r.code,'最后出现：'+r.last_error_time,'消息：'+(r.last_error_message||'').slice(0,120)];
             }
           }}},
           scales:{x:{beginAtZero:true}}}
       });
     } else {
-      document.getElementById('chart-server-errors').parentElement.innerHTML='<p class="no-data">No server errors recorded</p>';
+      document.getElementById('chart-server-errors').parentElement.innerHTML='<p class="no-data">没有记录到服务器错误</p>';
     }
 
     renderTable('tbl-high-parts',DATA.high_part_count||[],
@@ -4370,11 +4419,11 @@ document.addEventListener('DOMContentLoaded',function(){
       ['day','event_type','merge_reason','events','total_size']);
   })();
 
-  // ── Logs ──────────────────────────────────────────────────────────────────
+  // ── 日志 ──────────────────────────────────────────────────────────────────
   //
-  // Bounded structured rows searchable in-page; the complete raw files are
-  // linked under Collected Files. Paginated because the row cap bounds the
-  // payload, not the DOM — 1000 rows of <tr> is what makes a page crawl.
+  // 可在页面内搜索的有界结构化行；完整原始文件
+  // 链接在“已采集文件”下。分页是因为行数上限约束的是
+  // payload而不是DOM — 1000行<tr>正是让页面爬行的原因。
   (function(){
     const rows=DATA.text_log||[];
     if(!rows.length) return;
@@ -4383,8 +4432,8 @@ document.addEventListener('DOMContentLoaded',function(){
 
     const cap=DATA.text_log_row_cap||rows.length;
     document.getElementById('logs-scope').textContent=
-      'Warning and worse (Warning, Error, Critical, Fatal) from system.text_log, last 24 h, newest first'
-      +(rows.length>=cap?' — capped at the most recent '+cap+' rows; the complete raw files are under Collected Files.':'.');
+      '来自 system.text_log 的 Warning 及更严重级别（Warning、Error、Critical、Fatal），最近 24 小时，最新在前'
+      +(rows.length>=cap?' — 上限为最近 '+cap+' 行；完整原始文件见“已采集文件”。':'。');
 
     const sel=document.getElementById('log-level-filter');
     [...new Set(rows.map(r=>r.level))].sort().forEach(l=>{
@@ -4394,7 +4443,7 @@ document.addEventListener('DOMContentLoaded',function(){
     const PAGE=100;
     let filtered=rows.slice(), page=0;
     const BADGE={Fatal:'err-badge',Critical:'err-badge',Error:'err-badge',Warning:'warn-badge'};
-    // Level is a state: status ramp plus the word itself, never colour alone.
+    // 级别是状态：状态色阶加上文字本身，绝不只靠颜色。
     const cell=r=>({
       event_time:r.event_time,
       level:'<span class="'+(BADGE[r.level]||'warn-badge')+'">'+esc(r.level)+'</span>',
@@ -4405,9 +4454,9 @@ document.addEventListener('DOMContentLoaded',function(){
     function render(){
       const cnt=document.getElementById('log-count');
       const pg=document.getElementById('log-pagination');
-      cnt.textContent=filtered.length+' / '+rows.length+' entries';
+      cnt.textContent=filtered.length+' / '+rows.length+' 条';
       if(!filtered.length){
-        document.getElementById('tbl-logs').innerHTML='<p class="no-data">No entries match</p>';
+        document.getElementById('tbl-logs').innerHTML='<p class="no-data">没有匹配的条目</p>';
         pg.innerHTML=''; return;
       }
       const start=page*PAGE;
@@ -4436,22 +4485,22 @@ document.addEventListener('DOMContentLoaded',function(){
     render();
   })();
 
-  // ── Schema graph ─────────────────────────────────────────────────────────
+  // ── 模式关系图 ───────────────────────────────────────────────────────────
   //
-  // Present only when the generator wrote schema_graph.html. The frame's src
-  // is assigned on the first click (from the nav link or the button), never
-  // at load, so a reader who does not open the tab downloads nothing extra.
+  // 仅当生成器写入了schema_graph.html时存在。框架的src
+  // 在首次点击时（来自导航链接或按钮）赋值，绝不在
+  // 加载时，因此不打开标签页的读者不会额外下载任何内容。
   (function(){
     const sg=DATA.schema_graph;
     if(!sg||!sg.file) return;
     document.getElementById('sec-schema').style.display='';
     document.getElementById('nav-schema').style.display='';
-    const bits=[sg.tables+' table(s)', sg.databases+' database(s)'];
-    if(sg.mvs) bits.push(sg.mvs+' materialized view(s)');
-    if(sg.refreshable) bits.push(sg.refreshable+' refreshable');
-    if(sg.dictionaries) bits.push(sg.dictionaries+' dictionar'+(sg.dictionaries===1?'y':'ies'));
+    const bits=[sg.tables+' 张表', sg.databases+' 个数据库'];
+    if(sg.mvs) bits.push(sg.mvs+' 个 materialized view');
+    if(sg.refreshable) bits.push(sg.refreshable+' 个可刷新视图');
+    if(sg.dictionaries) bits.push(sg.dictionaries+' 个字典');
     document.getElementById('schema-count').textContent=bits.join(' · ');
-    document.getElementById('schema-note').textContent='Interactive map of how data flows between tables, built from system.tables, system.columns, system.dictionaries and system.view_refreshes at collection time (system databases excluded).';
+    document.getElementById('schema-note').textContent='以交互方式展示表之间数据流向的关系图，采集时由 system.tables、system.columns、system.dictionaries 和 system.view_refreshes 构建（不含 system 数据库）。';
     document.getElementById('schema-open').href=sg.file;
     const frame=document.getElementById('schema-frame');
     const wrap=document.getElementById('schema-frame-wrap');
@@ -4462,17 +4511,17 @@ document.addEventListener('DOMContentLoaded',function(){
       loaded=true;
       frame.src=sg.file;
       wrap.style.display='';
-      btn.textContent='Loaded';
+      btn.textContent='已加载';
       btn.disabled=true;
     }
     btn.addEventListener('click', load);
     document.getElementById('nav-schema').addEventListener('click', load);
   })();
 
-  // ── Collected files ───────────────────────────────────────────────────────
+  // ── 已采集文件 ───────────────────────────────────────────────────────────
   //
-  // An index of the rest of the bundle, not a copy of it. Every artifact the
-  // run wrote gets a row and a relative link; the browser opens the file.
+  // 是bundle其余部分的索引，而不是副本。本轮写入的每个
+  // 产物都得到一行和一个相对链接；由浏览器打开文件。
   (function(){
     const files=DATA.bundle_files||[];
     if(!files.length) return;
@@ -4486,20 +4535,20 @@ document.addEventListener('DOMContentLoaded',function(){
       return (i?b.toFixed(1):b)+' '+u[i];
     };
     document.getElementById('files-scope').textContent=
-      files.length+' files collected, '+human(total)+' in total.';
+      files.length+' 个文件，共 '+human(total)+'。';
 
     const sel=document.getElementById('file-group-filter');
-    // '' is the 'All folders' sentinel, so the root group gets '/' as its
-    // option value or selecting '(bundle root)' would filter nothing.
+    // ''是'All folders'哨兵，因此根组以'/'作为
+    // option值，否则选择'(bundle root)'会什么都不过滤。
     [...new Set(files.map(f=>f.group))].sort().forEach(g=>{
-      sel.innerHTML+='<option value="'+esc(g||'/')+'">'+esc(g||'(bundle root)')+'</option>';
+      sel.innerHTML+='<option value="'+esc(g||'/')+'">'+esc(g||'（bundle 根目录）')+'</option>';
     });
 
     let filtered=files.slice();
-    // The link is markup this file builds; the filename inside it is escaped,
-    // and each path segment is percent-encoded so a space, '#' or '?' in a
-    // name cannot break the href (encodeURI leaves '#'/'?' alone — they would
-    // become a bogus fragment/query and 404 against the extracted bundle).
+    // 链接是本文件构建的标记；其中的文件名已转义，
+    // 每个路径段都经过百分号编码，因此名称中的空格、'#'或'?'
+    // 不会破坏href（encodeURI不处理'#'/'?' — 它们会
+    // 变成虚假的fragment/query，并在解压的bundle上404）。
     const row=f=>({
       file:'<a href="'+f.href.split('/').map(encodeURIComponent).join('/')+'" target="_blank" rel="noopener">'+esc(f.file)+'</a>',
       kind:f.kind||'\u2014',
@@ -4508,7 +4557,7 @@ document.addEventListener('DOMContentLoaded',function(){
 
     function render(){
       document.getElementById('file-count').textContent=
-        filtered.length+' / '+files.length+' files';
+        filtered.length+' / '+files.length+' 个文件';
       renderTable('tbl-files',filtered.map(row),['file','kind','size'],null,['file']);
     }
     window.filesFilter=function(){
@@ -4523,7 +4572,7 @@ document.addEventListener('DOMContentLoaded',function(){
     render();
   })();
 
-  // ── Async inserts (non-gov only) ──────────────────────────────────────────
+  // ── 异步插入（仅非gov） ──────────────────────────────────────────────────
   (function(){
     const rows=DATA.async_inserts||[];
     if(!rows.length)return;
@@ -4546,7 +4595,7 @@ document.addEventListener('DOMContentLoaded',function(){
 </body>
 </html>`
 
-// nonNil keeps an empty list a JSON [] instead of null for the template.
+// nonNil使空列表在模板中保持为JSON []而不是null。
 func nonNil(xs []string) []string {
 	if xs == nil {
 		return []string{}

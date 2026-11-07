@@ -1,15 +1,15 @@
 -- tier: essential
 -- needs: keeper
--- 24.3 override of the 23.8 file: adds xid, last_zxid_seen and
--- availability_zone. xid is the session's request counter (Int32); at 2^31
--- the client renews the session, which shows up as a burst of hardware
--- exceptions and a reconnect on every replica whose counter wraps — every
--- ~63 h at 8–12k transactions/s. (2^31 - xid) / (transactions per second)
--- is the headroom; the alert keeper_xid_renewal_due computes it. Cheap:
--- one row per Keeper connection.
--- Gov: name and host hashed as in the 23.8 file; availability_zone names
--- customer infrastructure and is hashed too; xid and last_zxid_seen are
--- counters.
+-- 24.3 对 23.8 文件的覆盖：增加 xid、last_zxid_seen 和
+-- availability_zone。xid 是会话的请求计数器（Int32）；到 2^31
+-- 客户端会续期会话，表现为一批硬件异常以及每个计数器回绕的副本
+-- 重连 —— 在 8–12k 事务/秒下大约每 ~63 小时一次。
+-- (2^31 - xid) / （每秒事务数）就是余量；
+-- alert keeper_xid_renewal_due 会计算它。代价很低：
+-- 每个 Keeper 连接一行。
+-- Gov：name 和 host 像 23.8 文件一样哈希；availability_zone 指名
+-- 客户基础设施，也会哈希；xid 和 last_zxid_seen 是
+-- 计数器。
 SELECT
     hex(SHA256(concat(name, '%salt%'))) AS name,
     hex(SHA256(concat(host, '%salt%'))) AS host,

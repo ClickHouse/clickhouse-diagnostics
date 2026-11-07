@@ -5,7 +5,7 @@ select
     type,
     position,
     default_kind,
-    -- Booleans, not identifiers: safe to ship raw.
+    -- 布尔值，不是标识符：可以原样收集。
     is_in_primary_key,
     is_in_sorting_key,
     is_in_partition_key,

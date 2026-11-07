@@ -8,11 +8,11 @@ import (
 	"testing"
 )
 
-// ReadMembers turns keeper/<member>.txt into one row per member for the
-// dashboard, with the same verdicts as the pre-pass checks (HC-3.18-3.20):
-// a truncated reply is not evidence, members are compared only within one
-// ensemble and only against an observed leader, the snapshot format is
-// judged against each member's own version.
+// ReadMembers 将 keeper/<member>.txt 转换为 dashboard 的每成员一行，
+// 判定与预检检查一致（HC-3.18-3.20）：
+// 截断的回复不构成证据，成员只在一个 ensemble 内比较，
+// 且只与观察到的 leader 比较，快照格式按每个成员
+// 自身的版本判断。
 
 type fileSpec struct {
 	name, ens                          string
@@ -84,23 +84,23 @@ func TestReadMembers_IncidentShape(t *testing.T) {
 	ms := byName(incident(t))
 	a, c := ms["keeper-a"], ms["keeper-c"]
 	if a.State != "serving" || a.Role != "leader" || a.Version != "26.8.17.4" || a.Ensemble != "default" {
-		t.Errorf("leader row = %+v", a)
+		t.Errorf("leader 行 = %+v", a)
 	}
 	if a.LastLogIdx == nil || *a.LastLogIdx != 9002500000 || a.SnapshotSize == nil || *a.SnapshotSize != 2400000000 || a.ChunkSize == nil || *a.ChunkSize != 0 {
-		t.Errorf("leader numbers = %+v", a)
+		t.Errorf("leader 数值 = %+v", a)
 	}
 	if c.State != "not serving" || !hasFlag(c, "HC-3.18", "warning") {
-		t.Errorf("keeper-c must be not serving with a warning: %+v", c)
+		t.Errorf("keeper-c 必须是 not serving 并带 warning：%+v", c)
 	}
 	if !hasFlag(c, "HC-3.19", "critical") {
-		t.Errorf("keeper-c is behind the leader's retained log: %+v", c.Flags)
+		t.Errorf("keeper-c 落后于 leader 保留的日志：%+v", c.Flags)
 	}
 	for _, n := range []string{"keeper-a", "keeper-b"} {
 		if !hasFlag(ms[n], "HC-3.20", "critical") || !hasFlag(ms[n], "HC-3.20", "warning") {
-			t.Errorf("%s: want the unchunked >2 GiB snapshot (critical) and the pinned format 6 on 26.8 (warning): %+v", n, ms[n].Flags)
+			t.Errorf("%s：期望未分块 >2 GiB 快照（critical）以及 26.8 上钉死的 format 6（warning）：%+v", n, ms[n].Flags)
 		}
 		if hasFlag(ms[n], "HC-3.19", "critical") {
-			t.Errorf("%s is up to date", n)
+			t.Errorf("%s 是最新的", n)
 		}
 	}
 }
@@ -115,7 +115,7 @@ func TestReadMembers_HealthyEnsembleHasNoFlags(t *testing.T) {
 	}
 	for _, m := range ReadMembers(writeMemberFiles(t, specs)) {
 		if len(m.Flags) != 0 {
-			t.Errorf("%s flagged in a healthy ensemble: %+v", m.Member, m.Flags)
+			t.Errorf("%s 在健康 ensemble 中被标记：%+v", m.Member, m.Flags)
 		}
 	}
 }
@@ -127,7 +127,7 @@ func TestReadMembers_NoLeaderNoSnapshotVerdict(t *testing.T) {
 	}))
 	for _, m := range ms {
 		if hasFlag(m, "HC-3.19", "critical") {
-			t.Errorf("no leader answered, yet %s was declared behind it", m.Member)
+			t.Errorf("没有 leader 应答，却把 %s 判定为落后于它", m.Member)
 		}
 	}
 }
@@ -140,7 +140,7 @@ func TestReadMembers_TruncatedReplyIsNotEvidence(t *testing.T) {
 	})))
 	b := ms["keeper-b"]
 	if b.LastLogIdx != nil || hasFlag(b, "HC-3.19", "critical") || b.State != "probe failed" {
-		t.Errorf("a truncated lgif must not be read: %+v", b)
+		t.Errorf("截断的 lgif 绝不能读取：%+v", b)
 	}
 }
 
@@ -150,7 +150,7 @@ func TestReadMembers_EnsemblesAreNotCompared(t *testing.T) {
 		{name: "zk-aux", ens: "aux_zk", isro: "rw", lgif: logInfo(10, 500), srvr: "Mode: follower", mntr: "zk_server_state\tfollower\nzk_latest_snapshot_size\t1000", conf: "snapshot_transfer_chunk_size=0", dirs: "snapshot_dir_size: 0"},
 	})))
 	if len(ms["zk-aux"].Flags) != 0 || len(ms["keeper-a"].Flags) != 0 {
-		t.Errorf("two ensembles were compared: %+v / %+v", ms["keeper-a"].Flags, ms["zk-aux"].Flags)
+		t.Errorf("两个 ensemble 被比较了：%+v / %+v", ms["keeper-a"].Flags, ms["zk-aux"].Flags)
 	}
 }
 
@@ -160,19 +160,19 @@ func TestReadMembers_FormatPerMemberVersion(t *testing.T) {
 		{name: "keeper-b", isro: "rw", lgif: logInfo(1, 100), srvr: "ClickHouse Keeper version: v26.8.17.4\nMode: follower", mntr: "zk_server_state\tfollower", conf: "write_snapshot_version=6", dirs: "snapshot_dir_size: 0"},
 	})))
 	if !hasFlag(ms["keeper-a"], "HC-3.20", "info") || hasFlag(ms["keeper-a"], "HC-3.20", "warning") || !hasFlag(ms["keeper-b"], "HC-3.20", "warning") {
-		t.Errorf("format 6: info on 26.7 (the default), warning on 26.8 (pinned): %+v / %+v", ms["keeper-a"].Flags, ms["keeper-b"].Flags)
+		t.Errorf("format 6：26.7 上是 info（默认值），26.8 上是 warning（被钉死）：%+v / %+v", ms["keeper-a"].Flags, ms["keeper-b"].Flags)
 	}
 }
 
 func TestReadMembers_NoFilesNoRows(t *testing.T) {
 	if ms := ReadMembers(t.TempDir()); len(ms) != 0 {
-		t.Errorf("no keeper/ directory must give no rows: %+v", ms)
+		t.Errorf("没有 keeper/ 目录时必须没有行：%+v", ms)
 	}
 }
 
-// Leaderless names the ensembles the pre-pass calls critical under HC-3.18:
-// two or more members answering "not serving" themselves and none serving.
-// Collector-side failures never count.
+// Leaderless 列出预检脚本在 HC-3.18 下判为 critical 的 ensemble：
+// 两个或更多成员自己回答 "not serving" 且没有成员在服务。
+// 采集器侧的失败绝不计数。
 func TestLeaderless(t *testing.T) {
 	m := func(name, state string) Member { return Member{Member: name, Ensemble: "default", State: state} }
 	cases := []struct {
@@ -183,17 +183,17 @@ func TestLeaderless(t *testing.T) {
 		{[]Member{m("a", "serving"), m("b", "not serving"), m("c", "not serving")}, 0},
 		{[]Member{m("a", "probe failed"), m("b", "probe failed")}, 0},
 		{[]Member{m("a", "not serving")}, 0},
-		{[]Member{{Member: "a", State: "not serving"}, {Member: "b", State: "not serving"}}, 0}, // ensemble unknown
+		{[]Member{{Member: "a", State: "not serving"}, {Member: "b", State: "not serving"}}, 0}, // ensemble 未知
 	}
 	for i, c := range cases {
 		if got := Leaderless(c.ms); len(got) != c.want {
-			t.Errorf("case %d: Leaderless = %v, want %d ensemble(s)", i, got, c.want)
+			t.Errorf("case %d：Leaderless = %v，期望 %d 个 ensemble", i, got, c.want)
 		}
 	}
 }
 
-// Files from before the ensemble line: each member is judged on its own, so
-// two members' logs are never compared.
+// 早于 ensemble 行的文件：每个成员按自身判断，
+// 因此两个成员的日志绝不会被比较。
 func TestReadMembers_NoEnsembleLineSkipsCrossMemberChecks(t *testing.T) {
 	ms := ReadMembers(writeMemberFiles(t, []fileSpec{
 		{name: "keeper-a", ens: "-", isro: "rw", lgif: logInfo(9000000000, 9002500000), srvr: "Mode: leader", mntr: "zk_server_state\tleader", conf: "snapshot_transfer_chunk_size=1", dirs: "snapshot_dir_size: 0"},
@@ -201,18 +201,18 @@ func TestReadMembers_NoEnsembleLineSkipsCrossMemberChecks(t *testing.T) {
 	}))
 	for _, m := range ms {
 		if hasFlag(m, "HC-3.19", "critical") {
-			t.Errorf("without ensemble identity %s was compared with another member's log", m.Member)
+			t.Errorf("没有 ensemble 标识，%s 却被与另一个成员的日志比较了", m.Member)
 		}
 	}
 }
 
-// mntr reports the build suffix (v26.7.17.7-stable-<git hash>); the panel
-// shows the version number.
+// mntr 报告构建后缀（v26.7.17.7-stable-<git hash>）；面板
+// 显示版本号。
 func TestReadMembers_VersionWithoutBuildSuffix(t *testing.T) {
 	ms := ReadMembers(writeMemberFiles(t, []fileSpec{{name: "keeper-a", isro: "rw", lgif: logInfo(1, 2), srvr: "Mode: leader",
 		mntr: "zk_version\tv26.7.17.7-stable-7abaef160cefd843cdcbbc980c8fcae258bb392c\nzk_server_state\tleader", conf: "x=1", dirs: "snapshot_dir_size: 0"}}))
 	if ms[0].Version != "26.7.17.7" {
-		t.Errorf("Version = %q, want 26.7.17.7", ms[0].Version)
+		t.Errorf("Version = %q，期望 26.7.17.7", ms[0].Version)
 	}
 }
 
@@ -224,11 +224,11 @@ func TestReadMembers_ZooKeeperNotServing(t *testing.T) {
 	}))
 	for _, m := range ms {
 		if m.State != "not serving" {
-			t.Errorf("%s: state %q, want not serving for ZooKeeper's wording", m.Member, m.State)
+			t.Errorf("%s：state %q，ZooKeeper 的措辞应判为 not serving", m.Member, m.State)
 		}
 	}
 	if len(Leaderless(ms)) != 1 {
-		t.Errorf("two ZooKeeper members not serving and none serving: Leaderless = %v", Leaderless(ms))
+		t.Errorf("两个 ZooKeeper 成员 not serving 且无成员服务：Leaderless = %v", Leaderless(ms))
 	}
 }
 
@@ -240,7 +240,7 @@ func TestReadMembers_TwoLeadersNoSnapshotVerdict(t *testing.T) {
 	}))
 	for _, m := range ms {
 		if hasFlag(m, "HC-3.19", "critical") {
-			t.Errorf("two leaders: no member may be declared behind \"the leader\", got %s", m.Member)
+			t.Errorf("两个 leader：任何成员都不能被判定为落后于“该 leader”，得到 %s", m.Member)
 		}
 	}
 }

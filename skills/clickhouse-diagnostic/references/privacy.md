@@ -1,56 +1,56 @@
-# Privacy — what a bundle reveals and what may leave the machine
+# 隐私——bundle会暴露什么、什么可以离开本机
 
-A diagnostic bundle is **evidence about someone's production system**. The collector never reads customer *rows*, but several `system` tables describe customer data in free text. Treat the extracted bundle and everything derived from it as confidential until the owner says otherwise.
+诊断bundle是**关于他人生产系统的证据**。collector从不读取客户的*行数据*，但有多张`system`表会以自由文本描述客户数据。在所有者另有指示之前，把解压后的bundle及由其派生的一切都视为机密。
 
-## What is in the bundle even after sanitisation (cloud / onprem modes)
+## 即使经过sanitisation（脱敏）后bundle中仍有什么（cloud / onprem模式）
 
-| Identifier class | Where it appears |
+| 标识符类别 | 出现位置 |
 |---|---|
-| Hostnames, IPs, ports, cluster topology, replica/shard macros | `system.clusters`, `system.replication_queue.replica_name`, `configuration/` (`<remote_servers>`, `<zookeeper>`, `<macros>`, `<interserver_http_host>`), `host_info.os.hostname`, `logs/` |
-| Database, table, column, dictionary, disk and storage-policy names | almost every file; `system.tables.create_table_query` carries the full DDL including comments and defaults |
-| SQL text (500 chars per query pattern) and full SQL in `query_analysis/` | `system.query_log_details_7_days.query`, `query_details`, `failed_queries.sample_query`, `executions_timeline` |
-| Exception messages — often embed literal values, paths, hostnames | `query_log_details.exception`, `system.errors.last_error_message`, `replication_queue.last_exception`, `dictionaries.last_exception`, `part_log.exception` |
-| Server log lines (raw queries, table names, paths, client addresses) | `system.text_log`, `text_log_<ts>`, `logs/*.log` |
-| Process command lines, mount points, kernel banner | `host_info.top_processes_by_rss`, `host_info.disks`, `host_info.os` |
-| User names and client addresses | `system.processes`, `query_log_details.user`, `system.clusters.user` |
-| Stack traces (function names, build id) | `system.stack_trace`, `system.crash_log` |
+| 主机名、IP、端口、集群拓扑、replica/shard宏 | `system.clusters`、`system.replication_queue.replica_name`、`configuration/`（`<remote_servers>`、`<zookeeper>`、`<macros>`、`<interserver_http_host>`）、`host_info.os.hostname`、`logs/` |
+| 数据库、表、列、字典、磁盘和存储策略名称 | 几乎所有文件；`system.tables.create_table_query`包含完整DDL，含注释和默认值 |
+| SQL文本（每个查询模式500字符）以及`query_analysis/`中的完整SQL | `system.query_log_details_7_days.query`、`query_details`、`failed_queries.sample_query`、`executions_timeline` |
+| 异常消息——常内嵌字面量、路径、主机名 | `query_log_details.exception`、`system.errors.last_error_message`、`replication_queue.last_exception`、`dictionaries.last_exception`、`part_log.exception` |
+| 服务器日志行（原始查询、表名、路径、客户端地址） | `system.text_log`、`text_log_<ts>`、`logs/*.log` |
+| 进程命令行、挂载点、内核banner | `host_info.top_processes_by_rss`、`host_info.disks`、`host_info.os` |
+| 用户名和客户端地址 | `system.processes`、`query_log_details.user`、`system.clusters.user` |
+| 堆栈跟踪（函数名、build id） | `system.stack_trace`、`system.crash_log` |
 
-What sanitisation **does** remove from `configuration/`: passwords, hashes, tokens, keys, secrets, PEM blocks, long hex/base64 blobs, credentials in URLs. It does **not** remove identifiers. Assume a config file identifies the organisation immediately.
+sanitisation **确实会**从`configuration/`中移除：密码、哈希、token、密钥、secret、PEM块、长hex/base64数据块、URL中的凭据。它**不会**移除标识符。假设任何配置文件都会立即暴露组织身份。
 
-Gov mode hashes database/table/user/host names and withholds text, logs, host facts and config. It is the right choice when the bundle must cross an organisational boundary.
+gov模式会对数据库/表/用户/主机名做哈希，并隐去文本、日志、host facts（主机信息）和配置。当bundle必须跨越组织边界时，这是正确的选择。
 
-## Rules for the assistant
+## 对助手的规则
 
-1. **Analysis stays local.** Read the bundle from disk. Do not upload it, paste large excerpts into web services, or send it to any API that is not the one you are already running in. Never run `curl`/`wget` with bundle content.
-2. **Quote the minimum.** In findings, cite `file → column → value` for the few rows that carry the evidence (3–10 rows), truncate query text to 150–300 characters, and never paste whole files or `configuration/` XML.
-3. **Never paste verbatim** `configuration/`, `logs/`, `host_info.json`, `system.stack_trace`, `system.crash_log.trace_full`, or `create_table_query` blocks into anything that leaves the machine (chat transcripts that are shared, tickets, pastebins). Summarise, or redact first.
-4. **Gov artefacts:** the `*_gov_name_mapping.csv` and the salt must never leave the customer's machine. Never ask for the salt. If the user offers the mapping CSV, use it locally only to label findings.
-5. **Redact before sharing.** When the user wants to send the summary to someone else (support ticket, colleague, forum), run the checklist below and replace identifiers with placeholders (`<db>`, `<table>`, `<host-1>`, `<user>`).
-6. **Do not correlate across bundles from different organisations.** Each bundle is analysed on its own.
-7. **Do not fabricate identifiers.** If a name is hashed or withheld, say so — never guess a table name from a hash or a query fragment.
+1. **分析留在本地。** 从磁盘读取bundle。不要上传它，不要把大段摘录粘贴到Web服务，也不要把它发送给你当前正在运行之外的任何API。绝不要用bundle内容运行`curl`/`wget`。
+2. **最小化引用。** 在findings中，对承载证据的少数几行（3–10行）引用`file → column → value`，查询文本截断到150–300字符，绝不粘贴整个文件或`configuration/` XML。
+3. **绝不逐字粘贴** `configuration/`、`logs/`、`host_info.json`、`system.stack_trace`、`system.crash_log.trace_full`或`create_table_query`块到任何会离开本机的内容中（会被分享的聊天记录、工单、pastebin）。先总结，或先脱敏。
+4. **gov产物：** `*_gov_name_mapping.csv`和salt绝不能离开客户的机器。绝不要索取salt。如果用户提供映射CSV，只在本地用它标注findings。
+5. **分享前先脱敏。** 当用户想把摘要发给别人（支持工单、同事、论坛）时，执行下面的检查清单，并把标识符替换为占位符（`<db>`、`<table>`、`<host-1>`、`<user>`）。
+6. **不要跨不同组织的bundle做关联。** 每份bundle都要单独分析。
+7. **不要编造标识符。** 如果名称被哈希或隐去，就照实说明——绝不要从哈希或查询片段猜测表名。
 
-## Redaction checklist (before any text leaves the machine)
+## 脱敏检查清单（任何文本离开本机之前）
 
-Search the draft for and replace:
+在草稿中搜索并替换：
 
-- Hostnames / FQDNs / IPs / ports: `[a-z0-9-]+\.[a-z0-9.-]+`, `\b\d{1,3}(\.\d{1,3}){3}\b`
-- Database/table/column names that are not `system.*`
-- User names (`default` is fine; anything else is not)
-- Query text beyond the shape needed to explain the finding (keep `SELECT ... FROM <table> WHERE <col> = ? GROUP BY ...` shapes; drop literals)
-- Exception messages containing literals, paths or hostnames
-- Paths under `/var/lib/clickhouse`, mount points, device names
-- Anything from `configuration/` other than setting names and numeric values
-- The bundle's own timestamps are fine; the organisation name (often visible in database names or `os.hostname`) is not
+- 主机名 / FQDN / IP / 端口：`[a-z0-9-]+\.[a-z0-9.-]+`、`\b\d{1,3}(\.\d{1,3}){3}\b`
+- 不属于`system.*`的数据库/表/列名
+- 用户名（`default`可以；其他都不行）
+- 超出解释finding所需形态的查询文本（保留`SELECT ... FROM <table> WHERE <col> = ? GROUP BY ...`这类形态；去掉字面量）
+- 含字面量、路径或主机名的异常消息
+- `/var/lib/clickhouse`下的路径、挂载点、设备名
+- `configuration/`中除设置名和数值以外的任何内容
+- bundle自身的时间戳可以保留；组织名称（常出现在数据库名或`os.hostname`中）不行
 
-## What is safe to share as-is
+## 可以原样分享的内容
 
-- The health scorecard (area → status → one-line evidence with numbers)
-- Setting names and their values (`parts_to_throw_insert = 3000`, `max_memory_usage = 10 GiB`)
-- Error codes, names and counts
-- Part counts, sizes, durations, rates, percentages
-- ClickHouse version and the public changelog/issue links you cite
-- Recommendations phrased in terms of settings, patterns and public documentation
+- 健康scorecard（区域 → 状态 → 带数字的一行证据）
+- 设置名及其值（`parts_to_throw_insert = 3000`、`max_memory_usage = 10 GiB`）
+- 错误码、名称和计数
+- part（数据分片）数量、大小、时长、速率、百分比
+- ClickHouse版本，以及你引用的公开changelog/issue链接
+- 以设置、模式和公开文档表述的建议
 
-## When the user is ClickHouse support
+## 当用户是ClickHouse支持人员时
 
-The same rules apply; the bundle owner's consent covers ClickHouse support systems only. Do not copy bundle content into public GitHub issues, community Slack, or LLM services outside the company boundary.
+同样适用这些规则；bundle所有者的同意只覆盖ClickHouse支持系统。不要将bundle内容复制到公开GitHub issue、社区Slack或公司边界之外的LLM服务中。

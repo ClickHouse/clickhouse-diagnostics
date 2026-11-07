@@ -35,35 +35,34 @@ import (
 	"clickhouse-diagnostic/internal/collection"
 )
 
-// schemaGraphFile is the page's file name inside the run folder, next to
-// dashboard.html. Referenced from the dashboard's Schema tab and excluded from
-// the Collected Files index like dashboard.html itself.
+// schemaGraphFile 是页面在运行目录中、dashboard.html 旁边的文件名。
+// 它由 dashboard 的 Schema 标签页引用，并像 dashboard.html 本身一样
+// 从 Collected Files 索引中排除。
 const schemaGraphFile = "schema_graph.html"
 
-// schemaSysFilter excludes server-internal databases: they carry hundreds of
-// tables that describe the server, not the customer's pipeline, and they are
-// the bulk of the payload on a small deployment.
+// schemaSysFilter 排除服务器内部数据库：它们带有数百张描述服务器本身的表，
+// 而不是客户的 pipeline，并且在小规模部署上占据 payload 的大部分。
 const schemaSysFilter = "database NOT IN ('system', 'INFORMATION_SCHEMA', 'information_schema')"
 
-// collectSchemaGraph runs the five queries the live schema page runs and
-// returns the payload for schema_graph.html, or nil when system.tables could
-// not be read at all (nothing to draw). Column names match the live page's
-// queries so the ported JS reads them unchanged.
+// collectSchemaGraph 运行在线 schema 页面运行的那五个查询，并返回
+// schema_graph.html 的 payload；当 system.tables 完全无法读取时返回 nil
+// （没有可绘制的内容）。列名与在线页面的查询一致，
+// 因此移植后的 JS 可以原样读取它们。
 func (g *Generator) collectSchemaGraph(version string) map[string]interface{} {
-	// target_database / target_table (26.6) name the table an MV writes to —
-	// including the implicit .inner_id.<uuid> target of an MV declared with an
-	// ENGINE, which dependencies_* does not carry. Older servers get empty
-	// strings and the graph falls back to the dependency arrays.
+	// target_database / target_table（26.6）指明 MV 写入的目标表——
+	// 包括用 ENGINE 声明的 MV 隐式的 .inner_id.<uuid> 目标，
+	// dependencies_* 不会携带它。较旧的服务器得到空字符串，
+	// 图会回退到依赖数组。
 	targetCols := "'' AS target_database, '' AS target_table"
 	if g.hasColumn("tables", "target_table") {
 		targetCols = "target_database, target_table"
 	}
-	// The CREATE statement is pretty-printed by the server when it can be:
-	// formatQueryOrNull (24.x; formatQuery itself is 23.11) re-serialises the
-	// DDL one clause per line, and returns NULL rather than failing for a
-	// statement it cannot parse — 1 of 201 system DDLs on a 26.7 test server
-	// did, which is why the plain formatQuery is not used: one such row would
-	// fail the whole query. Older servers ship the single-line original.
+	// 服务器会尽可能对 CREATE 语句做 pretty-print：
+	// formatQueryOrNull（24.x；formatQuery 本身是 23.11）会重新序列化
+	// DDL，每个子句一行，并且对无法解析的语句返回 NULL 而不是失败——
+	// 在一台 26.7 测试服务器上 201 条 system DDL 中有 1 条如此，
+	// 这就是不使用普通 formatQuery 的原因：这样的一行会让整个查询失败。
+	// 较旧的服务器输出单行原始语句。
 	ddlCol := "create_table_query"
 	ddlFormatted := g.probe("fn:formatQueryOrNull",
 		"SELECT count() FROM system.functions WHERE name = 'formatQueryOrNull'")
@@ -80,8 +79,8 @@ func (g *Generator) collectSchemaGraph(version string) map[string]interface{} {
 		FROM system.tables
 		WHERE %s
 		ORDER BY database, name`, ddlCol, targetCols, schemaSysFilter))
-	// The four key roles are independent flags — a column can be in the
-	// sorting key AND the partition key — so all four travel, not one OR.
+	// 四个键角色是相互独立的标志——一个列可以同时属于
+	// 排序键和分区键——因此四个标志都要带出来，而不是一个 OR。
 	columns := g.safeQuery("schema_columns", fmt.Sprintf(`
 		SELECT database, table, name, type,
 		       (is_in_primary_key OR is_in_sorting_key) AS is_key,
@@ -97,17 +96,15 @@ func (g *Generator) collectSchemaGraph(version string) map[string]interface{} {
 	if g.hasTable("data_skipping_indices") {
 		indices = g.safeQuery("schema_indices", fmt.Sprintf(schemaIndicesSQL, schemaSysFilter))
 	}
-	// Definitions are shared across replicas but STATUS is not: a dictionary
-	// LOADED here can be FAILED on another pod, and a graph built from one
-	// connection would show it healthy. So the mode-aware reference fans out
-	// in cloud and the query folds the per-replica rows back to one node per
-	// dictionary, keeping the worst status and its exception. Every status
-	// is kept — the live page drops FAILED / FAILED_AND_RELOADING, but in a
-	// diagnostic bundle a failed dictionary is the node to look at first.
+	// 定义在所有 replica 之间共享，但 STATUS 不是：一个在这里 LOADED 的
+	// 字典在另一个 pod 上可能是 FAILED，而通过单个连接构建的图会把它
+	// 显示为健康。因此模式感知的引用在 cloud 中扇出，查询把各 replica
+	// 的行折叠为每个字典一行，保留最差状态及其异常。所有状态都会保留——
+	// 在线页面会丢弃 FAILED / FAILED_AND_RELOADING，但在
+	// 诊断 bundle 中，失败的字典正是第一个要看的节点。
 	dicts := g.safeQuery("schema_dictionaries", schemaDictionariesSQL(g.sysTable("dictionaries")))
-	// Decide only now whether there is anything to draw: a server whose only
-	// user objects are dictionaries declared in config has no system.tables
-	// rows for them, and the page builds their nodes from this result.
+	// 现在才决定是否有可绘制的内容：如果服务器的唯一用户对象是配置中
+	// 声明的字典，system.tables 中就没有它们的行，页面会从这个结果构建节点。
 	if !schemaGraphHasContent(tables, dicts) {
 		return nil
 	}
@@ -116,15 +113,14 @@ func (g *Generator) collectSchemaGraph(version string) map[string]interface{} {
 		refreshes = g.safeQuery("schema_refreshes", schemaRefreshesSQL(g.sysTable("view_refreshes")))
 	}
 
-	// Credentials in DDL. Servers >= 23.x mask engine secrets as '[HIDDEN]'
-	// themselves; older ones ship them verbatim, and no server masks an AWS
-	// key id or a password in a SETTINGS clause. The same redactor the JSONL
-	// collectors run through is applied here, so the sidebar's CREATE
-	// statement can never show more than the bundle does.
+	// DDL 中的凭据。服务器 >= 23.x 会自己把引擎密钥掩码为 '[HIDDEN]'；
+	// 较旧的会原样输出，而且没有服务器会掩码 SETTINGS 子句中的 AWS
+	// key id 或密码。这里应用与 JSONL collector 相同的脱敏器，
+	// 因此侧边栏的 CREATE 语句永远不会比 bundle 显示得更多。
 	n := redactSchemaRecords(tables, "create_table_query", "engine_full")
 	n += redactSchemaRecords(dicts, "source", "last_exception")
 	if n > 0 {
-		fmt.Printf("  [dashboard] schema graph: %d credential(s) replaced with [HIDDEN]\n", n)
+		fmt.Printf("  [dashboard] 模式关系图：%d 处凭据已替换为 [HIDDEN]\n", n)
 	}
 
 	return map[string]interface{}{
@@ -142,16 +138,15 @@ func (g *Generator) collectSchemaGraph(version string) map[string]interface{} {
 	}
 }
 
-// schemaDictionariesSQL reads every dictionary regardless of status through
-// ref — the mode-aware table reference, clusterAllReplicas in cloud — and
-// folds the per-replica rows into one per dictionary. The fold keeps the
-// WORST status and the exception that goes with it: FAILED on any replica
-// outranks LOADED elsewhere, so a graph built through one pod still shows
-// the failure. Definition columns are identical on every replica, so any()
-// is exact for them. On a single server the GROUP BY is a no-op. A
-// dictionary declared in server config (XML) has database = ” and no
-// system.tables row; the page adds a node for it from this result. System
-// databases are excluded like every other schema query.
+// schemaDictionariesSQL 通过 ref 读取所有字典，不论状态——
+// ref 是模式感知的表引用，在 cloud 中是 clusterAllReplicas——
+// 并把各 replica 的行折叠为每个字典一行。折叠保留
+// 最差状态及与之对应的异常：任意 replica 上的 FAILED
+// 优先于其他位置的 LOADED，因此通过一个 pod 构建的图仍然会显示
+// 失败。定义列在每个 replica 上完全相同，所以对它们来说 any()
+// 是精确的。在单个服务器上 GROUP BY 是空操作。在服务器配置（XML）
+// 中声明的字典 database = ” 且没有 system.tables 行；页面会从这个
+// 结果中为它添加节点。系统数据库像其他所有 schema 查询一样被排除。
 func schemaDictionariesSQL(ref string) string {
 	return fmt.Sprintf(`
 		SELECT database, name,
@@ -172,22 +167,21 @@ func schemaDictionariesSQL(ref string) string {
 		ORDER BY database, name`, ref, schemaSysFilter)
 }
 
-// schemaIndicesSQL lists data-skipping indices per table. Definition columns
-// only, read directly in every mode: they are identical on every replica.
-// %s is the system-database filter.
+// schemaIndicesSQL 按表列出跳数索引（data-skipping indices）。只包含定义列，
+// 在所有模式下直接读取：它们在每个 replica 上完全相同。
+// %s 是系统数据库过滤器。
 const schemaIndicesSQL = `
 		SELECT database, table, name, type, expr, granularity
 		FROM system.data_skipping_indices
 		WHERE %s
 		ORDER BY database, table, name`
 
-// schemaRefreshesSQL reads system.view_refreshes through the mode-aware table
-// reference — clusterAllReplicas in cloud — and folds the per-replica rows
-// into one per view. In a replicated database the refresh runs on ONE
-// replica: it reports Running / Scheduled, the others report
-// RunningOnAnotherReplica, so the informative row is the one that is not
-// that. hasTable is cloud-aware too, so reading only the local table here
-// would answer for one replica while claiming the cluster.
+// schemaRefreshesSQL 通过模式感知的表引用读取 system.view_refreshes——
+// 在 cloud 中是 clusterAllReplicas——并把各 replica 的行折叠为每个视图一行。
+// 在复制数据库中，刷新只在一个 replica 上运行：它报告 Running / Scheduled，
+// 其他 replica 报告 RunningOnAnotherReplica，因此有信息量的行是
+// 不是该状态的那一行。hasTable 也是 cloud 感知的，因此这里只读取本地表
+// 会只为单个 replica 作答，却声称代表整个 cluster。
 func schemaRefreshesSQL(ref string) string {
 	return fmt.Sprintf(`
 		SELECT database, view,
@@ -199,22 +193,22 @@ func schemaRefreshesSQL(ref string) string {
 		GROUP BY database, view`, ref)
 }
 
-// schemaGraphHasContent says whether the payload would draw at least one
-// node. Tables alone, dictionaries alone, or both; an empty pair means the
-// page is not written and the dashboard shows no Schema tab.
+// schemaGraphHasContent 说明 payload 是否会绘制出至少一个节点。
+// 仅表、仅字典，或两者都有；空对意味着页面不会被写入，
+// dashboard 也不会显示 Schema 标签页。
 func schemaGraphHasContent(tables, dicts []map[string]interface{}) bool {
 	return len(tables) > 0 || len(dicts) > 0
 }
 
-// redactDictionaryPanel scrubs the dashboard's own Dictionaries panel rows —
-// source can embed a connection string with a password on servers below
-// 23.x, and last_exception can quote one.
+// redactDictionaryPanel 清理 dashboard 自己的 Dictionaries 面板行——
+// 在 23.x 以下的服务器上，source 可能内嵌带密码的连接串，
+// last_exception 也可能引用一个。
 func redactDictionaryPanel(rows []map[string]interface{}) int {
 	return redactSchemaRecords(rows, "source", "last_exception")
 }
 
-// redactSchemaRecords runs RedactSQLText over the named string fields of every
-// record in place and returns the number of replacements.
+// redactSchemaRecords 对每条记录中指定的字符串字段原地运行 RedactSQLText，
+// 并返回替换次数。
 func redactSchemaRecords(rows []map[string]interface{}, fields ...string) int {
 	total := 0
 	for _, r := range rows {
@@ -233,8 +227,8 @@ func redactSchemaRecords(rows []map[string]interface{}, fields ...string) int {
 	return total
 }
 
-// schemaGraphSummary is what dashboard.html embeds about the graph page: the
-// file to load and enough counts to describe it before anyone opens it.
+// schemaGraphSummary 是 dashboard.html 嵌入的关于图页面的信息：
+// 要加载的文件，以及足以在任何人打开它之前描述它的计数。
 func schemaGraphSummary(sg map[string]interface{}) map[string]interface{} {
 	tables, _ := sg["tables"].([]map[string]interface{})
 	columns, _ := sg["columns"].([]map[string]interface{})
@@ -263,49 +257,48 @@ func schemaGraphSummary(sg map[string]interface{}) map[string]interface{} {
 	}
 }
 
-// buildSchemaGraphHTML serialises the payload into the graph page. json.Marshal
-// HTML-escapes <, > and & by default, so a create_table_query containing
-// "</script>" (a comment, a string literal) cannot terminate the inline script.
+// buildSchemaGraphHTML 把 payload 序列化进图页面。json.Marshal
+// 默认对 <、> 和 & 做 HTML 转义，因此包含 "</script>" 的
+// create_table_query（注释、字符串字面量）无法终止内联脚本。
 func buildSchemaGraphHTML(data map[string]interface{}) string {
 	b, _ := json.Marshal(data)
 	return strings.Replace(schemaGraphTemplate, "/*DATA*/null", string(b), 1)
 }
 
-// schemaGraphTemplate is the complete page: its own head, the token layer it
-// shares with dashboard.html, and the graph's CSS/markup/script.
+// schemaGraphTemplate 是完整页面：它自己的 head、与 dashboard.html
+// 共享的 token 层，以及图的 CSS/标记/脚本。
 var schemaGraphTemplate = schemaGraphHead + themeTokensCSS + schemaGraphTail
 
 const schemaGraphHead = `<!DOCTYPE html>
 <!--
-  Table dependency graph for a clickhouse-diagnostic bundle.
+  clickhouse-diagnostic bundle 的表依赖关系图。
 
   Adapted from ClickHouse programs/server/schema.html
   (https://github.com/ClickHouse/ClickHouse/blob/master/programs/server/schema.html)
   Copyright ClickHouse, Inc. Licensed under the Apache License, Version 2.0.
-  Modified to render from JSON embedded at collection time: no server, no
-  network, no credentials. See internal/dashboard/schema_graph.go.
+  改为从采集时嵌入的 JSON 渲染：无服务器、无网络、无凭据。
+  参见 internal/dashboard/schema_graph.go。
 -->
-<html lang="en">
+<html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Schema Graph — ClickHouse Diagnostic</title>
+<title>模式关系图 — ClickHouse 诊断</title>
 <script>
-// Stamp the theme before first paint. The key is the one dashboard.html
-// writes, and file:// documents in one folder share localStorage, so the graph
-// opens in whatever theme the dashboard is showing.
+// 在首次绘制前写入主题。这个 key 就是 dashboard.html
+// 写入的那个，同一文件夹下的 file:// 文档共享 localStorage，因此图会以
+// dashboard 正在显示的主题打开。
 try{var _t=localStorage.getItem("chdiag-theme");if(_t)document.documentElement.setAttribute("data-cui-theme",_t);}catch(e){}
 </script>
 <style>
 `
 
 const schemaGraphTail = `
-/* ── schema.html's own palette, expressed in the shared tokens ─────────────
-   The live page defines colours directly; here every base colour is a token
-   so light/dark follow the dashboard, and only the engine palette — the
-   meaning-bearing node colours — keeps its own values (light and dark). The
-   edge colour is --edge rather than the dashboard's hyperlink token, --link, which
-   the sidebar's cross-references reuse as-is. */
+/* ── schema.html 自带的调色板，用共享 token 表达 ─────────────────────────────
+   在线页面直接定义颜色；这里每个基础色都是一个 token，
+   这样浅色/深色跟随 dashboard，只有引擎调色板——那些承载含义的节点颜色——
+   保留自己的取值（浅色和深色）。边颜色使用 --edge 而不是 dashboard 的
+   超链接 token --link，侧边栏的交叉引用会原样复用它。 */
 :root{
   --color:var(--ink);
   --background:var(--surface-page);
@@ -519,38 +512,38 @@ body{font-family:var(--click-font-regular);margin:0;padding:0;background:var(--b
 <body>
 
 <div class="header">
-  <h1><span class="brand">ClickHouse</span>Schema Graph <span class="meta" id="hdr-meta"></span></h1>
+  <h1><span class="brand">ClickHouse</span>模式关系图 <span class="meta" id="hdr-meta"></span></h1>
   <div class="controls">
-    <a id="back-link" href="dashboard.html">← Dashboard</a>
-    <button id="theme-toggle" class="theme-toggle" type="button" aria-label="Toggle colour theme"></button>
+    <a id="back-link" href="dashboard.html">← 仪表盘</a>
+    <button id="theme-toggle" class="theme-toggle" type="button" aria-label="切换配色主题"></button>
   </div>
 </div>
 
 <div class="container">
   <div class="section">
     <div class="filter-row">
-      <input id="search" type="text" placeholder="🔍 Search table or column…" spellcheck="false">
-      <select id="db-filter"><option value="">All databases</option></select>
-      <button id="toggle-columns" class="btn-toggle active" type="button">Columns</button>
-      <button id="relayout" class="btn btn-secondary" type="button">Re-layout</button>
+      <input id="search" type="text" placeholder="🔍 搜索表或列…" spellcheck="false">
+      <select id="db-filter"><option value="">所有数据库</option></select>
+      <button id="toggle-columns" class="btn-toggle active" type="button">列</button>
+      <button id="relayout" class="btn btn-secondary" type="button">重新布局</button>
       <span id="status"></span>
     </div>
     <div class="legend">
-      <span class="legend-item"><span class="legend-swatch" style="background:var(--header-mt)"></span>MergeTree / Table</span>
-      <span class="legend-item"><span class="legend-swatch" style="background:var(--header-mv)"></span>Materialized View</span>
-      <span class="legend-item"><span class="legend-swatch" style="background:var(--header-rmv)"></span>Refreshable MV</span>
-      <span class="legend-item"><span class="legend-swatch" style="background:var(--header-dict)"></span>Dictionary</span>
+      <span class="legend-item"><span class="legend-swatch" style="background:var(--header-mt)"></span>MergeTree / 表</span>
+      <span class="legend-item"><span class="legend-swatch" style="background:var(--header-mv)"></span>物化视图</span>
+      <span class="legend-item"><span class="legend-swatch" style="background:var(--header-rmv)"></span>可刷新 MV</span>
+      <span class="legend-item"><span class="legend-swatch" style="background:var(--header-dict)"></span>字典</span>
       <span class="legend-item"><span class="legend-swatch" style="background:var(--header-distributed)"></span>Distributed</span>
-      <span class="legend-item"><span class="legend-swatch" style="background:var(--header-view)"></span>View</span>
-      <span class="legend-item"><span class="legend-line" style="background:var(--edge-mv)"></span>MV flow</span>
-      <span class="legend-item"><span class="legend-line" style="background:var(--edge-dict)"></span>Dictionary source</span>
-      <span class="legend-item"><span class="legend-line" style="background:var(--edge-distributed)"></span>Distributed shard</span>
-      <span class="legend-item" title="system.tables lists no dependency for refreshable MVs, plain views or Distributed tables; these edges come from the FROM / JOIN clauses and the Distributed engine arguments in the DDL"><span class="legend-line dashed"></span>inferred from DDL</span>
-      <span class="legend-item" style="margin-left:.6rem"><span class="legend-col column-name key-primary">col</span>primary key</span>
-      <span class="legend-item"><span class="legend-col column-name key-sorting">col</span>sorting key</span>
-      <span class="legend-item"><span class="legend-col column-name key-partition">col</span>partition key</span>
-      <span class="legend-item"><span class="legend-col column-name key-sampling">col</span>sampling key</span>
-      <span class="legend-item"><span class="legend-col column-name default">col</span>has default</span>
+      <span class="legend-item"><span class="legend-swatch" style="background:var(--header-view)"></span>视图</span>
+      <span class="legend-item"><span class="legend-line" style="background:var(--edge-mv)"></span>MV 流向</span>
+      <span class="legend-item"><span class="legend-line" style="background:var(--edge-dict)"></span>字典来源</span>
+      <span class="legend-item"><span class="legend-line" style="background:var(--edge-distributed)"></span>Distributed 分片</span>
+      <span class="legend-item" title="system.tables 不会为可刷新 MV、普通视图或 Distributed 表列出依赖；这些边来自 DDL 中的 FROM / JOIN 子句和 Distributed 引擎参数"><span class="legend-line dashed"></span>由 DDL 推断</span>
+      <span class="legend-item" style="margin-left:.6rem"><span class="legend-col column-name key-primary">col</span>主键</span>
+      <span class="legend-item"><span class="legend-col column-name key-sorting">col</span>排序键</span>
+      <span class="legend-item"><span class="legend-col column-name key-partition">col</span>分区键</span>
+      <span class="legend-item"><span class="legend-col column-name key-sampling">col</span>采样键</span>
+      <span class="legend-item"><span class="legend-col column-name default">col</span>有默认值</span>
     </div>
   </div>
 
@@ -562,8 +555,8 @@ body{font-family:var(--click-font-regular);margin:0;padding:0;background:var(--b
         </div>
       </div>
       <div id="empty">
-        The bundle has no user tables to draw (the system and INFORMATION_SCHEMA databases are excluded).
-        <div class="hint">Click a node to see its details, drag a node to move it.</div>
+        bundle 中没有可绘制的用户表（已排除 system 和 INFORMATION_SCHEMA 数据库）。
+        <div class="hint">点击节点查看详情，拖动节点可移动位置。</div>
       </div>
     </div>
   </div>
@@ -575,9 +568,9 @@ body{font-family:var(--click-font-regular);margin:0;padding:0;background:var(--b
 </aside>
 
 <div id="zoom-controls">
-  <button id="zoom-out" title="Zoom out" type="button">−</button>
-  <button id="zoom-reset" title="Reset zoom" type="button">⌂</button>
-  <button id="zoom-in" title="Zoom in" type="button">+</button>
+  <button id="zoom-out" title="缩小" type="button">−</button>
+  <button id="zoom-reset" title="重置缩放" type="button">⌂</button>
+  <button id="zoom-in" title="放大" type="button">+</button>
 </div>
 
 <script>
@@ -587,12 +580,11 @@ const DATA = /*DATA*/null;
 
 const $ = id => document.getElementById(id);
 
-// ── theme ─────────────────────────────────────────────────────────────────────
-// Shared with dashboard.html through the same localStorage key. When this
-// page is inside the dashboard's iframe the two documents are separate
-// (opaque) origins under file:// and cannot script each other, but they DO
-// share localStorage, so the dashboard's toggle reaches us as a 'storage'
-// event and ours reaches it the same way.
+// ── 主题 ─────────────────────────────────────────────────────────────────────
+// 通过同一个 localStorage key 与 dashboard.html 共享。当此页面位于
+// dashboard 的 iframe 内时，在 file:// 下两个文档是分离的（不透明）
+// 源，无法互相脚本化，但它们确实共享 localStorage，因此 dashboard 的
+// 切换会以 'storage' 事件到达我们这里，我们的切换也以同样方式到达它。
 function currentTheme() {
     const stamped = document.documentElement.getAttribute('data-cui-theme');
     if (stamped) return stamped;
@@ -600,7 +592,7 @@ function currentTheme() {
 }
 function applyTheme(t) {
     document.documentElement.setAttribute('data-cui-theme', t);
-    $('theme-toggle').textContent = t === 'dark' ? '☀ Light' : '☾ Dark';
+    $('theme-toggle').textContent = t === 'dark' ? '☀ 浅色' : '☾ 深色';
 }
 function setTheme(t) {
     applyTheme(t);
@@ -610,8 +602,8 @@ applyTheme(currentTheme());
 $('theme-toggle').onclick = () => setTheme(currentTheme() === 'dark' ? 'light' : 'dark');
 window.addEventListener('storage', e => { if (e.key === 'chdiag-theme' && e.newValue) applyTheme(e.newValue); });
 
-// Inside the dashboard's frame the back link would navigate the frame onto a
-// second copy of the dashboard; hide it there.
+// 在 dashboard 的 frame 内，返回链接会把 frame 导航到 dashboard 的
+// 第二份副本上；在那里隐藏它。
 if (window.self !== window.top) $('back-link').style.display = 'none';
 
 const state = {
@@ -634,17 +626,16 @@ function setStatus(text, isError) {
     $('status').classList.toggle('error', !!isError);
 }
 
-/// Unambiguous composite key for a (database, table) pair. We cannot use
-/// db + '.' + t because both halves are arbitrary ClickHouse identifiers (any
-/// byte is legal in a backquoted name), so the resulting string is not
-/// invertible — a database called a.b and a table called c would collide with
-/// database a and table b.c. JSON.stringify on a two-element array gives a
-/// one-to-one encoding regardless of the characters inside.
+/// 为 (database, table) 对生成无歧义的复合 key。我们不能用
+/// db + '.' + t，因为两半都是任意的 ClickHouse 标识符（反引号名称中
+/// 任何字节都合法），所以得到的字符串不可逆——名为 a.b 的数据库
+/// 和名为 c 的表会与数据库 a 和表 b.c 冲突。对双元素数组做
+/// JSON.stringify 可得到一一对应的编码，无论内部字符是什么。
 function tableKey(db, t) { return JSON.stringify([db, t]); }
 
-/// Mirrors backQuoteIfNeed in ClickHouse (src/IO/WriteHelpers.h): bare identifier
-/// when it matches [A-Za-z_][A-Za-z0-9_]* and is not a reserved word, otherwise
-/// backquoted with the same character set the server escapes.
+/// 镜像 ClickHouse 中的 backQuoteIfNeed（src/IO/WriteHelpers.h）：当标识符
+/// 匹配 [A-Za-z_][A-Za-z0-9_]* 且不是保留字时使用裸标识符，否则用
+/// 服务器转义的同一字符集加反引号。
 const QUOTED_NAME_RESERVED = /^(distinct|all|table|select|from|values)$/i;
 const QUOTED_NAME_ESCAPE = { '\\': '\\\\', '` + "`" + `': '\\` + "`" + `', '\b': '\\b', '\f': '\\f',
                              '\n': '\\n', '\r': '\\r', '\t': '\\t', '\0': '\\0' };
@@ -654,11 +645,11 @@ function backQuoteIfNeed(s) {
 }
 function quotedFullName(db, t) { return backQuoteIfNeed(db) + '.' + backQuoteIfNeed(t); }
 
-/// The refresh schedule of a refreshable MV lives only in its DDL —
-/// system.view_refreshes has no interval column. REFRESH EVERY|AFTER <interval>
-/// [OFFSET <interval>] [RANDOMIZE FOR <interval>], read up to the clause that
-/// follows it. Works on both the server's single-line DDL and the
-/// formatQuery() form, where the clause sits on its own line.
+/// 可刷新 MV 的刷新计划只存在于它的 DDL 中——
+/// system.view_refreshes 没有 interval 列。REFRESH EVERY|AFTER <interval>
+/// [OFFSET <interval>] [RANDOMIZE FOR <interval>]，读取到紧随其后的子句为止。
+/// 既适用于服务器的单行 DDL，也适用于 formatQuery() 形式，
+/// 后者的子句独占一行。
 function parseRefresh(ddl) {
     if (!ddl) return null;
     const m = /\bREFRESH\s+(EVERY|AFTER)\s+([\s\S]*?)(?=\s+(?:APPEND\b|TO\b|DEPENDS\b|ENGINE\b|AS\b|SETTINGS\b|COMMENT\b|DEFINER\b|SQL\b)|\s*\(|\s*$)/i.exec(ddl);
@@ -680,9 +671,9 @@ function fmtSchedule(sc) {
     return s;
 }
 
-/// Dictionary LIFETIME: system.dictionaries.lifetime_min/max are populated only
-/// once the dictionary has loaded (a FAILED one reads 0/0), so the DDL's
-/// LIFETIME(MIN a MAX b) / LIFETIME(n) is the fallback.
+/// 字典 LIFETIME：system.dictionaries.lifetime_min/max 只在字典加载后
+/// 才有值（FAILED 的字典读作 0/0），因此 DDL 中的
+/// LIFETIME(MIN a MAX b) / LIFETIME(n) 是回退方案。
 function dictLifetime(n) {
     const d = n.dict || {};
     const mn = Number(d.lifetime_min) || 0, mx = Number(d.lifetime_max) || 0;
@@ -698,8 +689,8 @@ function fmtLifetime(lt) {
     return 'LIFETIME ' + lt.max + 's';
 }
 
-/// Key roles of a column. Independent flags: a column can be in the sorting
-/// key and the partition key at once. Older payloads carry only is_key.
+/// 列的键角色。相互独立的标志：一个列可以同时在排序键
+/// 和分区键中。较旧的 payload 只携带 is_key。
 function colRoles(c) {
     const on = v => v === 1 || v === true;
     const roles = [];
@@ -718,10 +709,9 @@ function applyColRoles(el, c) {
     return roles;
 }
 
-/// Syntax highlighting for the CREATE statement in the sidebar: a small
-/// tokenizer that emits <span>s by class — keywords, types, strings, numbers,
-/// comments, and the '[HIDDEN]' credential token. Text goes through
-/// textContent only; nothing customer-controlled reaches innerHTML.
+/// 侧边栏中 CREATE 语句的语法高亮：一个小型分词器，按 class 输出
+/// <span>——关键字、类型、字符串、数字、注释，以及 '[HIDDEN]' 凭据 token。
+/// 文本只经过 textContent；任何客户可控的内容都不会进入 innerHTML。
 const SQL_KEYWORDS = new Set(('CREATE TABLE MATERIALIZED VIEW DICTIONARY DATABASE IF NOT EXISTS OR REPLACE TEMPORARY ON CLUSTER ENGINE ORDER BY PRIMARY KEY PARTITION SAMPLE SETTINGS TTL AS SELECT FROM WHERE GROUP HAVING JOIN INNER LEFT RIGHT FULL OUTER CROSS ANY ALL ASOF USING LIMIT OFFSET UNION DISTINCT WITH TO APPEND REFRESH EVERY AFTER RANDOMIZE FOR DEPENDS INDEX TYPE GRANULARITY PROJECTION CODEC DEFAULT ALIAS EPHEMERAL COMMENT LIFETIME MIN MAX LAYOUT SOURCE RANGE DEFINER SQL SECURITY INVOKER NONE NULL AND IN LIKE ILIKE BETWEEN CASE WHEN THEN ELSE END INTERVAL ASC DESC NULLS FIRST LAST ARRAY GLOBAL PREWHERE FINAL ONLY DELETE WHERE TRUE FALSE TABLES').split(' '));
 const SQL_TYPES = /^(U?Int(8|16|32|64|128|256)|Float(32|64)|BFloat16|Decimal(32|64|128|256)?|String|FixedString|Date(32)?|DateTime(64)?|Time(64)?|UUID|IPv[46]|Bool|Boolean|Enum(8|16)?|LowCardinality|Nullable|Array|Map|Tuple|Nested|JSON|Object|Variant|Dynamic|Nothing|Interval\w*|AggregateFunction|SimpleAggregateFunction|Point|Ring|Polygon|MultiPolygon|LineString|MultiLineString|QBit)$/;
 const SQL_TOKEN = /(--[^\n]*)|(\/\*[\s\S]*?\*\/)|('(?:\\.|''|[^'\\])*'?)|(` + "`" + `[^` + "`" + `]*` + "`" + `?)|(\b\d+(?:\.\d+)?(?:e[+-]?\d+)?\b)|([A-Za-z_][A-Za-z0-9_]*)|(\s+)|(.)/g;
@@ -747,14 +737,13 @@ function highlightSQL(pre, text) {
     }
 }
 
-/// Source tables a view reads, taken from the DDL when the server's dependency
-/// arrays do not say. They do not for a refreshable MV (it does not fire on
-/// insert, so it is not registered as the source's dependent), for a plain
-/// View, or for a Distributed table (whose local table is an engine argument).
-/// Every "FROM x" / "JOIN x" in the statement — string literals removed first,
-/// ARRAY JOIN and table functions ("name(") skipped, an unqualified name
-/// resolved to the view's own database. Edges built from this are drawn dashed
-/// and labelled as inferred, because the text is evidence, not metadata.
+/// 视图读取的源表，在服务器的依赖数组未说明时从 DDL 中取得。
+/// 对于可刷新 MV（它不在 insert 时触发，因此不会注册为源的依赖项）、
+/// 普通 View，或 Distributed 表（其本地表是引擎参数）来说，
+/// 依赖数组不会说明。语句中的每个 "FROM x" / "JOIN x"——先移除字符串
+/// 字面量，跳过 ARRAY JOIN 和表函数（"name("），未限定名称解析到
+/// 视图自己的数据库。由此构建的边画成虚线并标记为推断，
+/// 因为文本是证据，不是元数据。
 function parseSourceTables(ddl, defaultDb) {
     if (!ddl) return [];
     const at = ddl.search(/\bAS\s+(?:\(\s*)?(?:WITH|SELECT)\b/i);
@@ -776,10 +765,9 @@ function parseSourceTables(ddl, defaultDb) {
     return [...out];
 }
 
-/// Distributed('cluster', 'db', 'table'[, sharding_key[, policy]]) — the local
-/// table the Distributed table fans out to. When that table lives on this
-/// server it gets a dashed edge; on a remote-only cluster there is no node and
-/// nothing is drawn.
+/// Distributed('cluster', 'db', 'table'[, sharding_key[, policy]])——Distributed
+/// 表扇出到的本地表。当该表位于此服务器上时，它得到一条虚线边；
+/// 在仅远程的 cluster 上没有节点，什么也不绘制。
 function parseDistributedSource(engineFull, defaultDb) {
     const m = /\bDistributed\s*\(\s*'[^']*'\s*,\s*'([^']*)'\s*,\s*'([^']*)'/i.exec(engineFull || '');
     if (!m) return null;
@@ -797,18 +785,18 @@ function engineKind(engine) {
     return 'other';
 }
 
-/// Short engine label for node headers — full engine names like
-/// "MaterializedView" hide the actual table name in the header.
+/// 节点头部的简短引擎标签——像 "MaterializedView" 这样的完整引擎名
+/// 会在头部遮住实际的表名。
 function engineLabel(n) {
     if (n.kind === 'rmv') return 'RMV';
     if (n.kind === 'mv') return 'MV';
     return n.engine || '';
 }
 
-// ── load from the embedded payload ────────────────────────────────────────────
-// This is where the live page ran five queries against the server. The same
-// five result sets are embedded at collection time; the column names match
-// the live queries, so everything downstream reads them unchanged.
+// ── 从内嵌 payload 加载 ────────────────────────────────────────────────────────
+// 在线页面原本在这里针对服务器运行五个查询。同样的
+// 五个结果集在采集时嵌入；列名与在线查询一致，
+// 因此下游的一切都原样读取它们。
 function loadFromBundle() {
     const d = DATA || {};
     const tables = d.tables || [];
@@ -835,14 +823,14 @@ function loadFromBundle() {
     for (const x of dicts) {
         const k = tableKey(x.database, x.name);
         state.dictSources.set(k, x);
-        /// A dictionary declared in server config (XML) lives in system.dictionaries
-        /// with database = '' and has no system.tables row, so it would have no node.
-        /// Give it one, labelled as config-defined; it has no dependency arrays, so it
-        /// draws without edges — its source text is still in the sidebar.
+        /// 在服务器配置（XML）中声明的字典位于 system.dictionaries，
+        /// database = '' 且没有 system.tables 行，因此它不会有节点。
+        /// 给它一个节点，标记为配置定义；它没有依赖数组，所以
+        /// 不带边绘制——其来源文本仍在侧边栏中。
         if (!tableKeys.has(k)) {
             state.tables.push({
                 database: x.database || '(config)', name: x.name,
-                engine: 'Dictionary', engine_full: 'Dictionary (declared in server config)',
+                engine: 'Dictionary', engine_full: '字典（在服务器配置中声明）',
                 create_table_query: '', sorting_key: '', primary_key: '', partition_key: '', sampling_key: '',
                 total_rows: null, total_bytes: null, comment: '',
                 target_database: '', target_table: '',
@@ -858,11 +846,11 @@ function loadFromBundle() {
 
     const meta = [];
     if (d.version) meta.push('ClickHouse ' + d.version);
-    if (d.generated_at) meta.push('collected ' + d.generated_at);
+    if (d.generated_at) meta.push('采集于 ' + d.generated_at);
     $('hdr-meta').textContent = meta.length ? '· ' + meta.join(' · ') : '';
 
-    setStatus(tables.length + ' tables, ' + columns.length + ' columns from the bundle'
-        + (d.has_target === false ? ' · MV targets inferred (server < 26.6)' : ''));
+    setStatus(tables.length + ' 张表，' + columns.length + ' 列（来自 bundle）'
+        + (d.has_target === false ? ' · MV 目标为推断（服务器 < 26.6）' : ''));
     buildGraph();
     updateDbFilter();
     render();
@@ -915,8 +903,8 @@ function buildGraph() {
         nodesByDb.get(t.database).push(node);
     }
 
-    /// Edges: for each table, draw arrows source -> target.
-    /// Use loading_dependencies (depends_on) and dependents (already gives forward direction).
+    /// 边：为每张表绘制 source -> target 的箭头。
+    /// 使用 loading_dependencies（depends_on）和 dependents（已经给出正向方向）。
     const edges = [];
     const seen = new Set();
     const inferred = new Set();
@@ -931,7 +919,7 @@ function buildGraph() {
     }
 
     for (const node of nodes.values()) {
-        /// MV/RMV: SELECT FROM dependsOn, write to dependents
+        /// MV/RMV：从 dependsOn SELECT，写入 dependents
         const isMv = node.kind === 'mv' || node.kind === 'rmv';
         for (const dep of node.dependsOn) {
             if (isMv) addEdge(dep, node.key, 'mv');
@@ -940,7 +928,7 @@ function buildGraph() {
             else addEdge(dep, node.key, 'normal');
         }
         for (const dep of node.dependents) {
-            /// "Tables that depend on me"; for MV the target table is here.
+            /// “依赖我的表”；对 MV 来说目标表在这里。
             if (isMv) addEdge(node.key, dep, 'mv');
             else if (nodes.get(dep) && (nodes.get(dep).kind === 'mv' || nodes.get(dep).kind === 'rmv'))
                 addEdge(node.key, dep, 'mv');
@@ -951,18 +939,18 @@ function buildGraph() {
             else
                 addEdge(node.key, dep, 'normal');
         }
-        /// MV -> destination table. Exposed by system.tables.target_table (26.6+),
-        /// covering both the explicit TO target and the implicit .inner_id.* table
-        /// created by MATERIALIZED VIEW ... ENGINE = ... AS SELECT ...
+        /// MV -> 目标表。由 system.tables.target_table（26.6+）暴露，
+        /// 覆盖显式 TO 目标以及由
+        /// MATERIALIZED VIEW ... ENGINE = ... AS SELECT ... 创建的隐式 .inner_id.* 表
         if (isMv && node.targetTable) {
             addEdge(node.key, tableKey(node.targetDatabase || node.database, node.targetTable), 'mv');
         }
     }
 
-    /// Second pass, after every metadata edge is in (addEdge keeps the first of a
-    /// pair, so metadata wins): what the DDL says a view reads, and the local
-    /// table behind a Distributed table. Refreshable MVs and plain Views have
-    /// empty dependency arrays on the server, so without this they float free.
+    /// 第二遍，在所有元数据边都加入之后（addEdge 保留一对中的第一条，
+    /// 因此元数据优先）：DDL 说视图读取什么，以及 Distributed 表
+    /// 背后的本地表。可刷新 MV 和普通 View 在服务器上的依赖数组为空，
+    /// 因此没有这一步它们会自由漂浮。
     for (const node of nodes.values()) {
         if (node.kind === 'mv' || node.kind === 'rmv' || node.kind === 'view') {
             for (const src of parseSourceTables(node.createQuery, node.database)) {
@@ -983,7 +971,7 @@ function buildGraph() {
 function updateDbFilter() {
     const sel = $('db-filter');
     const cur = sel.value;
-    sel.innerHTML = '<option value="">All databases</option>';
+    sel.innerHTML = '<option value="">所有数据库</option>';
     const dbs = Array.from(state.nodesByDb.keys()).sort();
     for (const db of dbs) {
         const o = document.createElement('option');
@@ -995,10 +983,10 @@ function updateDbFilter() {
     state.dbFilter = sel.value;
 }
 
-/// Compute longest-path layering for a subgraph (one database).
+/// 为子图（一个数据库）计算最长路径分层。
 function layoutDatabase(dbNodes, edges) {
     const inDb = new Set(dbNodes.map(n => n.key));
-    /// Restrict edges to within database; cross-DB edges are drawn but ignored for layering.
+    /// 将边限制在数据库内部；跨库边会被绘制，但在分层时忽略。
     const adjOut = new Map();
     const adjIn = new Map();
     for (const n of dbNodes) { adjOut.set(n.key, []); adjIn.set(n.key, []); }
@@ -1009,7 +997,7 @@ function layoutDatabase(dbNodes, edges) {
         }
     }
 
-    /// Longest-path layering (topological), tolerate cycles by capping depth.
+    /// 最长路径分层（拓扑），通过限制深度来容忍环。
     const depth = new Map();
     const visiting = new Set();
     function dfs(k, stack) {
@@ -1029,7 +1017,7 @@ function layoutDatabase(dbNodes, edges) {
     }
     for (const n of dbNodes) dfs(n.key, new Set([n.key]));
 
-    /// Group by depth.
+    /// 按深度分组。
     const layers = new Map();
     let maxDepth = 0;
     for (const n of dbNodes) {
@@ -1039,7 +1027,7 @@ function layoutDatabase(dbNodes, edges) {
         if (d > maxDepth) maxDepth = d;
     }
 
-    /// Order within layer alphabetically initially, then apply barycenter for crossing reduction.
+    /// 层内先按字母顺序排序，然后应用重心法减少交叉。
     for (const arr of layers.values()) arr.sort((a, b) => a.name.localeCompare(b.name));
 
     for (let iter = 0; iter < 8; iter++) {
@@ -1078,8 +1066,8 @@ function estimateNodeSize(node) {
     return { w, h };
 }
 
-/// Find connected components in nodeSet, treating state.edges as undirected
-/// for grouping. Each returned component is the list of node keys.
+/// 在 nodeSet 中查找连通分量，分组时把 state.edges 当作无向边。
+/// 返回的每个分量都是节点 key 列表。
 function connectedComponentsIn(nodeSet) {
     const adj = new Map();
     for (const k of nodeSet) adj.set(k, []);
@@ -1107,27 +1095,26 @@ function connectedComponentsIn(nodeSet) {
     return comps;
 }
 
-/// Layout strategy:
-///   1. Each database gets one section holding all of its tables. Multi-node
-///      dependency chains are laid out as layered graphs and stacked top-to-bottom,
-///      deepest first — the longest MV graph rises to the top.
-///   2. A database's standalone (single-node) tables are packed into a grid directly
-///      below its chains, grouped by engine kind and sorted by db.name.
-///   3. Database sections are then ordered the same way and wrap to fill the viewport.
+/// 布局策略：
+///   1. 每个数据库得到一个区块，容纳其所有表。多节点依赖链
+///      按分层图布局并自上而下堆叠，最深的在前——最长的 MV 图升到顶部。
+///   2. 数据库的独立（单节点）表直接紧挨在其链下方打包成网格，
+///      按引擎种类分组，并按 db.name 排序。
+///   3. 数据库区块随后以同样的方式排序，并换行以填满视口。
 function layoutAll() {
     const visibleDbs = Array.from(state.nodesByDb.keys())
         .filter(db => !state.dbFilter || state.dbFilter === db)
         .sort();
 
     const LAYER_W = 260;
-    const NODE_GAP_X = 60;     /// horizontal gap between layers (= length of inter-layer arrow)
-    const NODE_GAP_Y = 36;     /// vertical gap between nodes inside a column / grid row
-    const CHAIN_GAP_Y = 60;    /// vertical gap between stacked chains in the same DB section
+    const NODE_GAP_X = 60;     /// 层之间的水平间距（= 层间箭头长度）
+    const NODE_GAP_Y = 36;     /// 列 / 网格行内节点之间的垂直间距
+    const CHAIN_GAP_Y = 60;    /// 同一 DB 区块中堆叠链之间的垂直间距
     const DB_PADDING = 16;
-    const DB_PADDING_TOP = 32; /// space for the section label
+    const DB_PADDING_TOP = 32; /// 区块标签的空间
     const DB_GAP = 28;
 
-    /// Pre-size nodes (estimate; the real height is measured after the first render).
+    /// 预先估算节点尺寸（估算；真实高度在首次渲染后测量）。
     for (const n of state.nodes.values()) {
         const s = estimateNodeSize(n);
         n.w = s.w;
@@ -1152,7 +1139,7 @@ function layoutAll() {
         }
         if (!chains.length && !singles.length) continue;
 
-        /// 1) Layered layout per chain; chains stacked top-to-bottom.
+        /// 1) 对每条链做分层布局；链自上而下堆叠。
         const chainLayouts = [];
         for (const comp of chains) {
             const compNodes = comp.map(k => state.nodes.get(k));
@@ -1191,8 +1178,8 @@ function layoutAll() {
         }
         const chainsBlockH = chains.length ? Math.max(0, curY - CHAIN_GAP_Y) : 0;
 
-        /// 2) Independent tables of this database, packed into a grid below its
-        ///    chains, grouped by engine kind and sorted by db.name within a group.
+        /// 2) 这个数据库的独立表，打包成网格放在其链下方，
+        ///    按引擎种类分组，组内按 db.name 排序。
         let singlesBlockH = 0;
         if (singles.length) {
             const kindOrder = ['mt', 'view', 'mv', 'rmv', 'dict', 'distributed', 'other'];
@@ -1203,9 +1190,9 @@ function layoutAll() {
                 return a.key.localeCompare(b.key);
             });
 
-            /// Column count grows ~sqrt with the table count, so a database with many
-            /// independent tables forms a compact block instead of one tall column —
-            /// capped so a single section never grows wider than the viewport.
+            /// 列数随表数量大致按 sqrt 增长，因此有许多独立表的数据库
+            /// 会形成紧凑的块，而不是一个高列——
+            /// 有上限，使单个区块永远不会宽于视口。
             const maxCols = Math.max(1,
                 Math.floor((viewportW - DB_PADDING * 2 + NODE_GAP_X) / (LAYER_W + NODE_GAP_X)));
             const cols = Math.max(1, Math.min(maxCols, Math.round(Math.sqrt(singles.length * 1.6))));
@@ -1237,13 +1224,13 @@ function layoutAll() {
         });
     }
 
-    /// Order DB sections: longest top chain first, then by size, then alpha.
+    /// 排序 DB 区块：最长的顶部链优先，然后按大小，然后按字母。
     dbSections.sort((a, b) =>
         (b.sortDepth - a.sortDepth) ||
         (b.sortSize - a.sortSize) ||
         a.db.localeCompare(b.db));
 
-    /// Pack DB sections in a wrapping grid that fills viewport width.
+    /// 将 DB 区块打包进一个换行网格，填满视口宽度。
     let cursorX = MARGIN, cursorY = MARGIN, rowH = 0;
     const placed = [];
     for (const s of dbSections) {
@@ -1289,7 +1276,7 @@ function fmtRows(n) {
 function render() {
     const canvas = $('canvas');
     const svg = $('links-svg');
-    /// Remove existing nodes/sections (keep svg).
+    /// 移除已有的节点/区块（保留 svg）。
     Array.from(canvas.querySelectorAll('.node, .db-group')).forEach(e => e.remove());
 
     if (!state.tables.length) {
@@ -1346,8 +1333,8 @@ function render() {
         const nameEl = document.createElement('span');
         nameEl.className = 'node-name';
         nameEl.title = n.displayName;
-        /// Every node lives inside its own database section, so the header shows
-        /// just the table name; the fully-qualified name is on hover and in the sidebar.
+        /// 每个节点都位于自己的数据库区块内，因此头部只显示
+        /// 表名；完全限定名在悬停提示和侧边栏中。
         nameEl.textContent = n.name;
         const kindEl = document.createElement('span');
         kindEl.className = 'node-kind';
@@ -1381,31 +1368,31 @@ function render() {
                 more.className = 'column';
                 more.style.color = 'var(--muted)';
                 more.style.fontStyle = 'italic';
-                more.textContent = '… ' + (n.columns.length - maxShow) + ' more';
+                more.textContent = '… 另有 ' + (n.columns.length - maxShow) + ' 个';
                 cols.appendChild(more);
             }
             el.appendChild(cols);
         }
 
-        /// The grey ribbon: rows and size for tables that hold data; the refresh
-        /// schedule for a refreshable MV (34 of them all on EVERY 2 MINUTE with no
-        /// RANDOMIZE is a finding you want to read off the picture); LIFETIME for
-        /// a dictionary; the number of skip indices.
+        /// 灰色条带：持有数据的表的行数和大小；可刷新 MV 的刷新
+        /// 计划（34 个全部是 EVERY 2 MINUTE 且没有
+        /// RANDOMIZE，这是你想从图上直接读出的发现）；字典的 LIFETIME；
+        /// 跳数索引数量。
         const ribbon = [];
         if (n.totalRows && Number(n.totalRows) > 0) {
-            ribbon.push(['', fmtRows(n.totalRows) + ' rows']);
+            ribbon.push(['', fmtRows(n.totalRows) + ' 行']);
             if (fmtBytes(n.totalBytes)) ribbon.push(['', fmtBytes(n.totalBytes)]);
         }
         if (n.kind === 'rmv' && n.schedule) {
             const cls = 'sched' + (n.schedule.randomize ? '' : ' no-jitter');
-            ribbon.push([cls, fmtSchedule(n.schedule), n.schedule.randomize ? '' : 'no RANDOMIZE FOR — every copy of this schedule fires at the same instant']);
+            ribbon.push([cls, fmtSchedule(n.schedule), n.schedule.randomize ? '' : '没有 RANDOMIZE FOR — 该调度的每个副本会在同一时刻触发']);
         }
         if (n.kind === 'dict') {
             const lt = fmtLifetime(dictLifetime(n));
             if (lt) ribbon.push(['life', lt]);
         }
         if (n.indices && n.indices.length) {
-            ribbon.push(['idx', n.indices.length + ' skip ' + (n.indices.length === 1 ? 'index' : 'indices'),
+            ribbon.push(['idx', n.indices.length + ' 个跳数索引',
                 n.indices.map(ix => ix.name + ' ' + ix.type + '(' + ix.expr + ')').join('\n')]);
         }
         if (ribbon.length) {
@@ -1425,10 +1412,10 @@ function render() {
             e.stopPropagation();
             selectNode(n.key);
         });
-        /// Keyboard: a node is a button — Tab reaches it, Enter or Space opens it.
+        /// 键盘：节点是一个按钮——Tab 可以到达它，Enter 或 Space 打开它。
         el.tabIndex = 0;
         el.setAttribute('role', 'button');
-        el.setAttribute('aria-label', n.displayName + ', ' + (engineLabel(n) || n.engine || 'table'));
+        el.setAttribute('aria-label', n.displayName + ', ' + (engineLabel(n) || n.engine || '表'));
         el.addEventListener('keydown', e => {
             if (e.key === 'Enter' || e.key === ' ') {
                 e.preventDefault();
@@ -1444,7 +1431,7 @@ function render() {
         maxY = Math.max(maxY, n.y + n.h);
     }
 
-    /// Now after nodes are in DOM, measure actual heights (column lists can vary slightly).
+    /// 现在节点已进入 DOM，测量实际高度（列列表可能略有变化）。
     for (const el of canvas.querySelectorAll('.node')) {
         const k = el.dataset.key;
         const node = state.nodes.get(k);
@@ -1456,9 +1443,9 @@ function render() {
         }
     }
 
-    /// Update section bounds based on actual node sizes. Resolve nodes via the
-    /// section index stamped on each .db-group so the box is sized from exactly
-    /// the nodes the layout assigned to that section.
+    /// 根据实际节点尺寸更新区块边界。通过每个 .db-group 上
+    /// 标记的区块索引来解析节点，这样框的大小正好来自
+    /// 布局分配给该区块的那些节点。
     for (const g of canvas.querySelectorAll('.db-group')) {
         const idx = Number(g.dataset.sectionIndex);
         const section = state.sections[idx];
@@ -1500,7 +1487,7 @@ function drawEdges() {
         }
     }
 
-    /// Build adjacency for highlighting.
+    /// 构建邻接关系用于高亮。
     const incoming = new Map(), outgoing = new Map();
     for (const e of state.edges) {
         if (!visible.has(e.from) || !visible.has(e.to)) continue;
@@ -1523,7 +1510,7 @@ function drawEdges() {
         path.setAttribute('data-to', e.to);
         if (e.inferred) {
             const t = document.createElementNS('http://www.w3.org/2000/svg', 'title');
-            t.textContent = 'inferred from the DDL (FROM / JOIN, or the Distributed engine arguments) — system.tables lists no dependency here';
+            t.textContent = '由 DDL 推断（FROM / JOIN，或 Distributed 引擎参数）— system.tables 未在此列出依赖';
             path.appendChild(t);
         }
 
@@ -1535,7 +1522,7 @@ function drawEdges() {
         path.setAttribute('d', 'M ' + x1 + ' ' + y1 + ' C ' + (x1 + dx) + ' ' + y1 + ', ' + (x2 - dx) + ' ' + y2 + ', ' + (x2 - 8) + ' ' + y2);
         svg.appendChild(path);
 
-        /// Arrowhead.
+        /// 箭头。
         const ah = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
         ah.setAttribute('class', 'arrowhead ' + kindClass.replace(' inferred', ''));
         ah.setAttribute('data-from', e.from);
@@ -1596,7 +1583,7 @@ function selectNode(key) {
 function inferredNote() {
     const sp = document.createElement('span');
     sp.className = 'inferred-note';
-    sp.textContent = '· inferred from the DDL';
+    sp.textContent = '· 由 DDL 推断';
     return sp;
 }
 
@@ -1609,34 +1596,34 @@ function showSidebar(key) {
 
     const tbl = document.createElement('table');
     const rows = [
-        ['Database', n.database],
-        ['Name', n.name],
-        ['Engine', n.engineFull || n.engine],
+        ['数据库', n.database],
+        ['名称', n.name],
+        ['引擎', n.engineFull || n.engine],
     ];
-    if (n.partitionKey) rows.push(['Partition by', n.partitionKey]);
-    if (n.sortingKey) rows.push(['Order by', n.sortingKey]);
-    if (n.primaryKey && n.primaryKey !== n.sortingKey) rows.push(['Primary key', n.primaryKey]);
-    if (n.samplingKey) rows.push(['Sample by', n.samplingKey]);
-    if (n.totalRows && Number(n.totalRows) > 0) rows.push(['Rows', fmtRows(n.totalRows)]);
-    if (n.totalBytes && Number(n.totalBytes) > 0) rows.push(['Bytes', fmtBytes(n.totalBytes)]);
-    if (n.comment) rows.push(['Comment', n.comment]);
+    if (n.partitionKey) rows.push(['分区键', n.partitionKey]);
+    if (n.sortingKey) rows.push(['排序键', n.sortingKey]);
+    if (n.primaryKey && n.primaryKey !== n.sortingKey) rows.push(['主键', n.primaryKey]);
+    if (n.samplingKey) rows.push(['采样键', n.samplingKey]);
+    if (n.totalRows && Number(n.totalRows) > 0) rows.push(['行数', fmtRows(n.totalRows)]);
+    if (n.totalBytes && Number(n.totalBytes) > 0) rows.push(['字节数', fmtBytes(n.totalBytes)]);
+    if (n.comment) rows.push(['注释', n.comment]);
     if (n.schedule) {
-        rows.push(['Refresh schedule', n.schedule.kind + ' ' + n.schedule.interval]);
-        if (n.schedule.offset) rows.push(['Refresh offset', n.schedule.offset]);
-        rows.push(['Refresh jitter', n.schedule.randomize ? 'RANDOMIZE FOR ' + n.schedule.randomize : 'none — fires exactly on schedule']);
+        rows.push(['刷新计划', n.schedule.kind + ' ' + n.schedule.interval]);
+        if (n.schedule.offset) rows.push(['刷新偏移', n.schedule.offset]);
+        rows.push(['刷新抖动', n.schedule.randomize ? 'RANDOMIZE FOR ' + n.schedule.randomize : '无 — 严格按计划触发']);
     }
     if (n.refresh) {
-        rows.push(['Refresh status', n.refresh.status]);
-        if (n.refresh.last_success_time) rows.push(['Last refresh', n.refresh.last_success_time]);
-        if (n.refresh.next_refresh_time) rows.push(['Next refresh', n.refresh.next_refresh_time]);
-        if (n.refresh.exception) rows.push(['Refresh error', n.refresh.exception]);
+        rows.push(['刷新状态', n.refresh.status]);
+        if (n.refresh.last_success_time) rows.push(['上次刷新', n.refresh.last_success_time]);
+        if (n.refresh.next_refresh_time) rows.push(['下次刷新', n.refresh.next_refresh_time]);
+        if (n.refresh.exception) rows.push(['刷新错误', n.refresh.exception]);
     }
     if (n.dict) {
         const lt = dictLifetime(n);
-        if (lt) rows.push(['Dictionary lifetime', lt.min && lt.min !== lt.max ? lt.min + '–' + lt.max + ' s (random within the range)' : lt.max + ' s']);
-        if (n.dict.status) rows.push(['Dictionary status', n.dict.status]);
-        if (n.dict.source) rows.push(['Dictionary source', n.dict.source]);
-        if (n.dict.last_exception) rows.push(['Dictionary error', n.dict.last_exception]);
+        if (lt) rows.push(['字典生存时间', lt.min && lt.min !== lt.max ? lt.min + '–' + lt.max + ' s（在范围内随机）' : lt.max + ' s']);
+        if (n.dict.status) rows.push(['字典状态', n.dict.status]);
+        if (n.dict.source) rows.push(['字典来源', n.dict.source]);
+        if (n.dict.last_exception) rows.push(['字典错误', n.dict.last_exception]);
     }
     for (const [k, v] of rows) {
         const tr = document.createElement('tr');
@@ -1649,7 +1636,7 @@ function showSidebar(key) {
 
     if (n.columns.length) {
         const h = document.createElement('h3');
-        h.textContent = 'Columns (' + n.columns.length + ')';
+        h.textContent = '列（' + n.columns.length + '）';
         c.appendChild(h);
         const ct = document.createElement('table');
         for (const col of n.columns) {
@@ -1681,7 +1668,7 @@ function showSidebar(key) {
     const outs = (state._outgoing && state._outgoing.get(key)) || [];
     if (ins.length) {
         const h = document.createElement('h3');
-        h.textContent = 'Reads from (' + ins.length + ')';
+        h.textContent = '读取自（' + ins.length + '）';
         c.appendChild(h);
         const wrap = document.createElement('div');
         wrap.className = 'related-table';
@@ -1698,7 +1685,7 @@ function showSidebar(key) {
     }
     if (outs.length) {
         const h = document.createElement('h3');
-        h.textContent = 'Writes to / depended on by (' + outs.length + ')';
+        h.textContent = '写入 / 被依赖于（' + outs.length + '）';
         c.appendChild(h);
         const wrap = document.createElement('div');
         wrap.className = 'related-table';
@@ -1714,7 +1701,7 @@ function showSidebar(key) {
 
     if (n.indices && n.indices.length) {
         const h = document.createElement('h3');
-        h.textContent = 'Skip indices (' + n.indices.length + ')';
+        h.textContent = '跳数索引（' + n.indices.length + '）';
         c.appendChild(h);
         const it = document.createElement('table');
         for (const ix of n.indices) {
@@ -1731,13 +1718,12 @@ function showSidebar(key) {
 
     if (n.createQuery) {
         const h = document.createElement('h3');
-        h.textContent = 'CREATE statement';
+        h.textContent = 'CREATE 语句';
         c.appendChild(h);
         const pre = document.createElement('pre');
-        /// Pretty-printed by the server (formatQueryOrNull, one clause per line)
-        /// when the version has it; highlighted here. Credentials in engine
-        /// arguments read '[HIDDEN]': masked by the server on >= 23.x, and by
-        /// the collector's redactor for anything older or missed.
+        /// 当版本支持时由服务器 pretty-print（formatQueryOrNull，每个子句一行）；
+        /// 这里做高亮。引擎参数中的凭据显示为 '[HIDDEN]'：>= 23.x 由服务器掩码，
+        /// 更旧或遗漏的则由 collector 的脱敏器处理。
         highlightSQL(pre, n.createQuery);
         c.appendChild(pre);
     }
@@ -1767,7 +1753,7 @@ function attachDrag(el, node) {
             window.removeEventListener('mousemove', onMove);
             window.removeEventListener('mouseup', onUp);
             if (dragging) {
-                /// Suppress the click after a drag.
+                /// 拖拽后抑制点击。
                 const stopClick = (ev) => { ev.stopPropagation(); el.removeEventListener('click', stopClick, true); };
                 el.addEventListener('click', stopClick, true);
             }
@@ -1801,7 +1787,7 @@ $('viewport').addEventListener('click', clearHighlight);
 window.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') clearHighlight();
 });
-/// The layout depends on the viewport width; redo it when the frame is resized.
+/// 布局依赖视口宽度；frame 大小改变时重做。
 let resizeTimer;
 window.addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(render, 150); });
 

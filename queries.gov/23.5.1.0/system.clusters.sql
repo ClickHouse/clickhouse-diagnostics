@@ -1,10 +1,10 @@
--- 23.5+ variant: includes database_shard_name, database_replica_name and name (added to system.clusters in 23.5).
--- is_active is deliberately NOT selected: asking for it (or for
--- replication_lag, recovery_time, unsynced_after_recovery,
--- is_shared_catalog_cluster) makes the server ask every Replicated-database
--- replica for its status, with no filter able to stop it — 45–205 s per run
--- on a server with thousands of Replicated databases. Replica health of
--- Replicated databases is in system.database_replicas (25.9+). See the root file for the 22.8 baseline.
+-- 23.5+ 变体：包含 database_shard_name、database_replica_name 和 name（23.5 加入 system.clusters）。
+-- 有意不选择 is_active：请求它（或请求
+-- replication_lag、recovery_time、unsynced_after_recovery、
+-- is_shared_catalog_cluster）会让服务器向每个 Replicated 数据库
+-- 副本询问状态，任何过滤都阻止不了 —— 在拥有数千个 Replicated 数据库
+-- 的服务器上每次运行 45–205 秒。Replicated 数据库的副本健康信息在
+-- system.database_replicas（25.9+）。22.8 基线见根目录文件。
 SELECT
     hex(SHA256(concat(cluster, '%salt%'))) AS cluster,
     shard_num,

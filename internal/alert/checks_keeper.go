@@ -8,9 +8,9 @@ import (
 	"clickhouse-diagnostic/internal/bundle"
 )
 
-// Keeper, background-pool and part-propagation checks. Onprem and gov read
-// the single-host hourly metric_log_7_days; cloud reads the per-host
-// metric_log_by_host_3_days, so a cloud baseline spans 3 days, not 7.
+// Keeper、后台池和 part 传播相关的 check。onprem 和 gov 读取单主机的
+// 每小时 metric_log_7_days；cloud 读取按主机划分的 metric_log_by_host_3_days，
+// 因此 cloud 的基线跨度是 3 天而不是 7 天。
 
 func init() {
 	RegisterCheck("keeper_health", func(b *bundle.Bundle, mode string) ([]row, error) { return checkKeeperHours(b, mode, true) })
@@ -25,15 +25,15 @@ func init() {
 	RegisterCheck("parts_propagation_lag", checkPartsPropagationLag)
 }
 
-// hostHour is one hourly metric_log bucket of one host.
+// hostHour 是一台主机的一个每小时 metric_log 桶。
 type hostHour struct {
 	host string
 	hour time.Time
 	r    bundle.Row
 }
 
-// metricHours returns the hourly metric_log buckets inside the window, per
-// host: cloud from the per-host file, onprem/gov from the single-host one.
+// metricHours 返回窗口内每台主机的每小时 metric_log 桶：
+// cloud 来自按主机划分的文件，onprem/gov 来自单主机文件。
 func metricHours(b *bundle.Bundle, mode string, window time.Duration) ([]hostHour, error) {
 	collector := "system.metric_log_7_days"
 	if mode == "cloud" {
@@ -63,9 +63,9 @@ func metricHours(b *bundle.Bundle, mode string, window time.Duration) ([]hostHou
 	return out, nil
 }
 
-// keeper_health (degraded) / keeper_connection_blips: hours with > 1000
-// Keeper hardware exceptions, split by whether the host's transactions fell
-// under half of its usual (median) hour.
+// keeper_health（degraded）/ keeper_connection_blips：Keeper 硬件异常
+// 超过 1000 的小时，按该主机的事务量是否低于其通常（中位数）小时的一半
+// 来区分。
 func checkKeeperHours(b *bundle.Bundle, mode string, degraded bool) ([]row, error) {
 	hours, err := metricHours(b, mode, 7*24*time.Hour)
 	if err != nil {
@@ -111,12 +111,12 @@ func maxf(a, b float64) float64 {
 	return b
 }
 
-// poolSizes is each host's configured pool size. Cloud: the live limit in
-// the per-host metric file (max over the window); a host without it falls
-// back to server_settings. Onprem/gov: server_settings from 23.3, where the
-// pool sizes moved — system.settings there still lists the names with the
-// old session defaults, the wrong size — and system.settings below 23.3.
-// The source file missing is NotCollected, never a size of zero.
+// poolSizes 是每台主机配置的池大小。Cloud：按主机指标文件中的实时上限
+// （窗口内的最大值）；缺少该值的主机回退到 server_settings。Onprem/gov：
+// 23.3 起用 server_settings，因为池大小在那里迁移了 —— 那里的
+// system.settings 仍以旧的会话默认值列出这些名称，而那是错误的大小 ——
+// 23.3 以下则用 system.settings。源文件缺失会得到 NotCollected，
+// 绝不会得到大小为 0。
 func poolSizes(b *bundle.Bundle, mode string, hours []hostHour, setting, sizeCol string) (map[string]float64, error) {
 	sizes := map[string]float64{}
 	for _, h := range hours {
@@ -127,8 +127,8 @@ func poolSizes(b *bundle.Bundle, mode string, hours []hostHour, setting, sizeCol
 			}
 		}
 	}
-	// Only once every bucket is folded: a host whose first hour lacks the
-	// size but a later one has it needs no fallback.
+	// 等所有桶都折叠完再看：如果一台主机的第一个小时缺少池大小、
+	// 但后面的小时有，则无需回退。
 	need := false
 	for _, s := range sizes {
 		if s == 0 {
@@ -162,8 +162,8 @@ func poolSizes(b *bundle.Bundle, mode string, hours []hostHour, setting, sizeCol
 	return sizes, nil
 }
 
-// fetch_pool_saturated / schedule_pool_saturated: hosts whose pool averaged
-// at least frac of its size for 3 or more of the last 24 hours.
+// fetch_pool_saturated / schedule_pool_saturated：在最近 24 小时中，
+// 池的平均占用至少有 3 个小时达到其大小的 frac 倍的主机。
 func checkPoolSaturated(b *bundle.Bundle, mode, taskCol, setting, sizeCol string, frac float64) ([]row, error) {
 	hours, err := metricHours(b, mode, 24*time.Hour)
 	if err != nil {
@@ -214,8 +214,8 @@ func checkPoolSaturated(b *bundle.Bundle, mode, taskCol, setting, sizeCol string
 
 const xidMax = 2147483647
 
-// keeper_xid_renewal_due: a single live Keeper session whose xid, at the
-// Keeper request rate of the last 24 hours, reaches 2^31 within a day.
+// keeper_xid_renewal_due：某个存活的单个 Keeper 会话，其 xid 按最近 24 小时
+// 的 Keeper 请求速率计算，会在一天内达到 2^31。
 func checkKeeperXid(b *bundle.Bundle, mode string) ([]row, error) {
 	conns, err := b.Rows("system.zookeeper_connection")
 	if err != nil {
@@ -250,9 +250,8 @@ func checkKeeperXid(b *bundle.Bundle, mode string) ([]row, error) {
 			c.xid = x
 		}
 	}
-	// Covered time is the SQL's dateDiff(min(event_time), max(event_time)):
-	// the first sample of the earliest bucket to the last of the latest,
-	// gaps between buckets included.
+	// 覆盖时长是 SQL 的 dateDiff(min(event_time), max(event_time))：
+	// 从最早桶的第一个采样到最晚桶的最后一个采样，包含桶之间的间隙。
 	_, loc, err := collectedAt(b)
 	if err != nil {
 		return nil, err
@@ -304,16 +303,16 @@ func checkKeeperXid(b *bundle.Bundle, mode string) ([]row, error) {
 	return out, nil
 }
 
-// parts_propagation_lag (cloud): replicas ≥ 32 blocks behind the newest
-// replica on a partition, or missing a partition written in the last day.
-// system.parts_max_block_by_replica holds every lagging (host, partition)
-// row, with the partition's replicas_missing_partition on each.
+// parts_propagation_lag（cloud）：在某个分区上落后最新 replica 至少 32 个块，
+// 或缺少最近一天写入的某个分区的 replica。
+// system.parts_max_block_by_replica 保存每个落后的 (host, partition) 行，
+// 并逐行带上该分区的 replicas_missing_partition。
 func checkPartsPropagationLag(b *bundle.Bundle, mode string) ([]row, error) {
 	rows, err := b.Rows("system.parts_max_block_by_replica")
 	if err != nil {
 		return nil, err
 	}
-	now, loc, err := collectedAt(b) // a live parts snapshot: -to does not move it
+	now, loc, err := collectedAt(b) // 实时的 parts 快照：-to 不会移动它
 	if err != nil {
 		return nil, err
 	}

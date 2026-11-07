@@ -22,10 +22,10 @@ func TestSharedMergeTreeHint(t *testing.T) {
 	for _, c := range cases {
 		got := sharedMergeTreeHint(c.mode, c.value)
 		if (got != "") != c.want {
-			t.Errorf("mode=%q value=%q: got %q, want hint=%v", c.mode, c.value, got, c.want)
+			t.Errorf("mode=%q value=%q：得到 %q，期望 hint=%v", c.mode, c.value, got, c.want)
 		}
 		if got != "" && !strings.Contains(got, "-mode cloud") {
-			t.Errorf("hint must name the alternative mode: %q", got)
+			t.Errorf("hint 必须指明替代模式：%q", got)
 		}
 	}
 }

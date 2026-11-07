@@ -1,7 +1,7 @@
 -- tier: essential
--- Which policies exist and which disks back them. Together with system.disks.type
--- (ObjectStorage vs Local) this says whether table data lives on S3/Azure/GCS —
--- the precondition for every "file doesn't exist / key does not exist" finding.
+-- 存在哪些策略以及它们由哪些磁盘支撑。结合 system.disks.type
+-- （ObjectStorage 与 Local）可说明表数据是否位于 S3/Azure/GCS——
+-- 这是每个“文件不存在 / key 不存在”finding 的前提。
 SELECT
     policy_name,
     volume_name,

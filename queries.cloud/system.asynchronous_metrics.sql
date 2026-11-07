@@ -1,6 +1,6 @@
 -- tier: essential
--- Per-replica server gauges (Uptime, replica delay/queue, part counts, cache
--- bytes, memory). Per-core rows are dropped.
+-- 每个副本的服务器指标（Uptime、副本延迟/队列、part 数量、缓存
+-- 字节数、内存）。按核心的行会被丢弃。
 SELECT
     hostName() AS hostname,
     metric,

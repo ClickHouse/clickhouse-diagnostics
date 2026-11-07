@@ -1,25 +1,23 @@
 name: detached_parts_exist
-title: "Detached parts found"
+title: "发现detached part"
 severity: info
 description: |
-  There are parts in the detached/ folder of one or more tables.
-  Parts end up detached after failed merges, manual detach operations,
-  or replication conflicts. They consume disk space but are not served
-  to queries. Review the 'reason' column to decide whether each part can
-  be safely dropped (ALTER TABLE … DROP DETACHED PART) or re-attached.
-# Scans per-table data: not run in an essential collection.
+  一个或多个表的detached/目录中存在part。part会在merge失败、手动detach操作
+  或replication冲突后进入detached状态。它们占用磁盘空间，但不参与查询服务。
+  查看'reason'列，判断每个part是可以安全删除
+  （ALTER TABLE … DROP DETACHED PART）还是重新挂载。
+# 扫描逐表数据：在essential采集中不运行。
 tier: full
 tags:
   - storage
   - parts
   - maintenance
 
-# Root variant for the oldest supported servers (22.8–22.10):
-# detached_parts.bytes_on_disk was added in 22.11 — see
-# 22.11.1.0/detached_parts_exist.yaml for the variant that reports size.
-# Evaluated by the Go check over the files already collected (no second
-# query to the server). query: below is the same test in SQL, for the
-# customer to run live; the check mirrors it.
+# 根变体，适用于支持的最旧服务器（22.8–22.10）：
+# detached_parts.bytes_on_disk在22.11中加入——报告大小的变体见
+# 22.11.1.0/detached_parts_exist.yaml。
+# 由Go check在已采集的文件上评估（不会再次查询服务器）。下方query:是同一
+# 测试的SQL版本，供客户在线执行；check镜像同一逻辑。
 check: go:detached_parts_exist
 source:
   - system.detached_parts
@@ -36,4 +34,4 @@ query: |
   GROUP BY database, table
   ORDER BY detached_count DESC
 
-message: "{database}.{table} has {detached_count} detached part(s) (reason(s): {reasons})"
+message: "{database}.{table}有{detached_count}个detached part（原因：{reasons}）"

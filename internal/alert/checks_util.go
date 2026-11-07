@@ -9,12 +9,11 @@ import (
 	"clickhouse-diagnostic/internal/bundle"
 )
 
-// Shared helpers for the Go checks: they recreate, over the collected
-// files, the few SQL functions the rules used.
+// Go check 共用的辅助函数：它们在已采集的文件上，
+// 重新实现规则曾用到的那几个 SQL 函数。
 
-// serverClock returns the instant the log windows end — the server's now()
-// at collection, or the explicit -to when that is earlier: the log files
-// stop there — and the server timezone.
+// serverClock 返回日志窗口结束的时刻 —— 采集时服务器的 now()，
+// 若显式 -to 更早则为该 -to（日志文件到那里为止）—— 以及服务器时区。
 func serverClock(b *bundle.Bundle) (time.Time, *time.Location, error) {
 	now, loc, err := collectedAt(b)
 	if err != nil {
@@ -26,17 +25,16 @@ func serverClock(b *bundle.Bundle) (time.Time, *time.Location, error) {
 	return now, loc, nil
 }
 
-// collectedAt is the server's now() when it was collected
-// (system.version collected_at), for ages read off live snapshots
-// (mutations, parts) — which -to does not move — and the server timezone
-// every DateTime in the files is written in.
+// collectedAt 是采集时服务器的 now()（system.version 的 collected_at），
+// 用于从实时快照（mutations、parts）读取的时长 —— -to 不会移动它 ——
+// 以及文件中每个 DateTime 写入所用的服务器时区。
 func collectedAt(b *bundle.Bundle) (time.Time, *time.Location, error) {
 	rows, err := b.Rows("system.version")
 	if err != nil {
 		return time.Time{}, nil, err
 	}
 	if len(rows) == 0 || rows[0].Str("collected_at") == "" {
-		return time.Time{}, nil, fmt.Errorf("system.version has no collected_at (collected by an older version of the tool)")
+		return time.Time{}, nil, fmt.Errorf("system.version 没有 collected_at（由旧版工具采集）")
 	}
 	loc := time.UTC
 	if tz := rows[0].Str("timezone"); tz != "" {
@@ -46,12 +44,12 @@ func collectedAt(b *bundle.Bundle) (time.Time, *time.Location, error) {
 	}
 	now, err := time.ParseInLocation("2006-01-02 15:04:05", rows[0].Str("collected_at"), loc)
 	if err != nil {
-		return time.Time{}, nil, fmt.Errorf("system.version collected_at: %w", err)
+		return time.Time{}, nil, fmt.Errorf("system.version collected_at 解析失败: %w", err)
 	}
 	return now, loc, nil
 }
 
-// serverHost is the host the onprem/gov files describe (hashed in gov).
+// serverHost 是 onprem/gov 文件所描述的主机（gov 中为哈希值）。
 func serverHost(b *bundle.Bundle) string {
 	if rows, err := b.Rows("system.version"); err == nil && len(rows) > 0 {
 		return rows[0].Str("hostname")
@@ -59,8 +57,8 @@ func serverHost(b *bundle.Bundle) string {
 	return ""
 }
 
-// serverAtLeast reports whether system.version is at least major.minor
-// (false when unknown).
+// serverAtLeast 报告 system.version 是否至少为 major.minor
+// （未知时返回 false）。
 func serverAtLeast(b *bundle.Bundle, major, minor int) bool {
 	rows, err := b.Rows("system.version")
 	if err != nil || len(rows) == 0 {
@@ -73,8 +71,8 @@ func serverAtLeast(b *bundle.Bundle, major, minor int) bool {
 	return ma > major || (ma == major && mi >= minor)
 }
 
-// parseTime reads a DateTime string from a collected row in the server's
-// timezone; ok=false when empty or malformed.
+// parseTime 按服务器时区解析采集行中的 DateTime 字符串；
+// 为空或格式错误时返回 ok=false。
 func parseTime(s string, loc *time.Location) (time.Time, bool) {
 	for _, layout := range []string{"2006-01-02 15:04:05", "2006-01-02 15:04:05.000000", "2006-01-02T15:04:05"} {
 		if t, err := time.ParseInLocation(layout, s, loc); err == nil {
@@ -84,16 +82,16 @@ func parseTime(s string, loc *time.Location) (time.Time, bool) {
 	return time.Time{}, false
 }
 
-// dateDiffHours is ClickHouse dateDiff('hour', a, b): the number of hour
-// boundaries crossed, not the elapsed hours rounded.
+// dateDiffHours 等价于 ClickHouse dateDiff('hour', a, b)：跨越的小时边界数，
+// 而不是四舍五入后的经过小时数。
 func dateDiffHours(a, b time.Time) int64 {
 	ta := a.Truncate(time.Hour)
 	tb := b.Truncate(time.Hour)
 	return int64(tb.Sub(ta) / time.Hour)
 }
 
-// formatReadableSize is ClickHouse formatReadableSize: powers of 1024,
-// two decimals ("100.00 B", "1.50 GiB").
+// formatReadableSize 等价于 ClickHouse formatReadableSize：以 1024 为底，
+// 保留两位小数（"100.00 B"、"1.50 GiB"）。
 func formatReadableSize(n float64) string {
 	units := []string{"B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB"}
 	i := 0
@@ -104,13 +102,13 @@ func formatReadableSize(n float64) string {
 	return fmt.Sprintf("%.2f %s", n, units[i])
 }
 
-// roundTo is ClickHouse round(x, d) on a Float64: nearest, ties to even.
+// roundTo 等价于 Float64 上的 ClickHouse round(x, d)：就近舍入，平局取偶。
 func roundTo(x float64, d int) float64 {
 	p := math.Pow(10, float64(d))
 	return math.RoundToEven(x*p) / p
 }
 
-// medianHigh is quantileExactHigh(0.5): the upper median.
+// medianHigh 等价于 quantileExactHigh(0.5)：上中位数。
 func medianHigh(xs []float64) float64 {
 	if len(xs) == 0 {
 		return 0
@@ -120,5 +118,5 @@ func medianHigh(xs []float64) float64 {
 	return s[len(s)/2]
 }
 
-// row builds a result row (column → value) in the shape the message uses.
+// row 按规则消息使用的形态构建结果行（列 → 值）。
 type row = map[string]interface{}

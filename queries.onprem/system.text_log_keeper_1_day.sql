@@ -1,10 +1,10 @@
 -- tier: essential
--- Keeper session markers per hour, all levels, over the last day: when did the
--- session expire, when was it finalized, when did the server reconnect and to
--- which Keeper host (the example keeps the "Connected to ZooKeeper at host:port"
--- line). These lines are Information/Debug level, so the Warning-and-worse
--- text_log slice never contains them. Pairs with metric_log ZooKeeper counters
--- (health-checks HC-3.8, the Keeper health test).
+-- 过去一天中按小时统计的 Keeper 会话标记，涵盖所有级别：会话何时过期、
+-- 何时被 finalize、服务器何时重连以及连接到哪个
+-- Keeper 主机（示例会保留 "Connected to ZooKeeper at host:port"
+-- 这一行）。这些行是 Information/Debug 级别，所以 Warning 及更严重的
+-- text_log 切片永远不含它们。可与 metric_log 的 ZooKeeper 计数器配合
+-- 使用（健康检查 HC-3.8，即 Keeper 健康测试）。
 SELECT
     toStartOfHour(event_time)          AS time,
     multiIf(message LIKE '%Session expired%',                      'session_expired',

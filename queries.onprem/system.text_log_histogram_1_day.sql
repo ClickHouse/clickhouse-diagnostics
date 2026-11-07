@@ -1,10 +1,10 @@
 -- tier: essential
--- Warning-and-worse log volume per hour, level and logger CLASS over the last
--- day, with one example line. The logger name is normalised to its class
--- ("db.t (uuid)(PartsUpdateElection)" → PartsUpdateElection, "DDLWorker(db)" →
--- DDLWorker) so 25 000 tables do not become 25 000 rows. This is the file that
--- says WHEN errors started and WHICH component; system.text_log (2000 rows)
--- only shows the newest lines.
+-- 过去一天中按小时、level 和 logger 类别统计的 Warning 及更严重日志量，
+-- 附带一行示例。logger 名称会被归一化成它的类别
+-- （"db.t (uuid)(PartsUpdateElection)" → PartsUpdateElection、"DDLWorker(db)" →
+-- DDLWorker），这样 25 000 张表不会变成 25 000 行。这个文件回答
+-- 错误是从何时开始的、来自哪个组件；system.text_log（2000 行）
+-- 只展示最新的行。
 SELECT
     toStartOfHour(event_time)          AS time,
     level,

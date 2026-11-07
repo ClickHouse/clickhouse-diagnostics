@@ -1,6 +1,6 @@
 -- needs: keeper
--- Gov: hosts, cluster, query text and exception text are hashed; status,
--- exception_code and timings stay readable.
+-- Gov：主机、集群、查询文本和异常文本会被哈希；status、
+-- exception_code 和时序保持可读。
 SELECT
     entry,
     entry_version,

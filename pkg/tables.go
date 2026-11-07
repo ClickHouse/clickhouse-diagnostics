@@ -7,30 +7,28 @@ import (
 	"strings"
 )
 
-// reSystemTable matches direct `system.<table>` references anywhere in
-// a SQL string. The word-boundary at the end keeps it from matching
-// `system.parts_something` partially — `[a-z_]+` is greedy.
+// reSystemTable 匹配 SQL 字符串中任意位置直接引用的 `system.<table>`。
+// 末尾的单词边界可避免部分匹配到 `system.parts_something`——
+// `[a-z_]+` 是贪婪匹配。
 var reSystemTable = regexp.MustCompile(`(?i)\bsystem\.[a-z_][a-z0-9_]*\b`)
 
-// reMergeTable matches the `merge(<db>, '<pattern>')` table function
-// used by a couple of queries that aggregate across versioned tables
-// (e.g. clusterAllReplicas wrapping `merge(system, '^asynchronous_insert_log')`).
-// The table name itself is a regex pattern, so we just report it
-// verbatim — the operator reading the dry-run knows what to read.
+// reMergeTable 匹配 `merge(<db>, '<pattern>')` 表函数，
+// 少数查询会用它在带版本的表上聚合
+// （例如 clusterAllReplicas 包裹 `merge(system, '^asynchronous_insert_log')`）。
+// 表名本身就是一个正则表达式，因此这里原样报告——
+// 阅读 dry-run 输出的运维人员知道该读什么。
 var reMergeTable = regexp.MustCompile(`(?i)merge\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*,\s*'([^']+)'\s*\)`)
 
-// ExtractTables returns a sorted, de-duplicated list of system table
-// references found inside sql. It covers:
+// ExtractTables 返回在 sql 中找到的 system 表引用的去重排序列表。
+// 覆盖范围：
 //
-//   - Direct references:           system.parts, system.query_log, …
-//   - clusterAllReplicas wrappers: extracted via the inner system.X
-//     (this regex doesn't care about the outer call; it matches the
-//     inner reference directly).
-//   - merge() patterns:            "<db>.* matching '<pattern>'"
+//   - 直接引用：           system.parts、system.query_log、……
+//   - clusterAllReplicas 包裹：通过内层的 system.X 提取
+//     （这个正则不关心中间的调用，它直接匹配内层引用）。
+//   - merge() 模式：            "<db>.* matching '<pattern>'"
 //
-// Used by --dry-run to label each printed query with the system tables
-// it would touch. Best-effort — a hand-rolled SQL parser is overkill
-// for the queries this tool generates.
+// 供 --dry-run 为每条打印的查询标注它会访问的 system 表。
+// 尽力而为——对于本工具生成的查询，手写 SQL 解析器过于小题大做。
 func ExtractTables(sql string) []string {
 	seen := map[string]struct{}{}
 	for _, m := range reSystemTable.FindAllString(sql, -1) {

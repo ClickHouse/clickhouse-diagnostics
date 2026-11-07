@@ -10,7 +10,7 @@ import (
 	"clickhouse-diagnostic/pkg"
 )
 
-// Manager orchestrates query finding, selection, and execution
+// Manager 负责编排查询的发现、选择和执行
 type Manager struct {
 	finder   *Finder
 	selector *Selector
@@ -25,44 +25,44 @@ type Manager struct {
 	keeperDn string
 }
 
-// WithKeeperDown passes the no-Keeper-session reason to the executor.
+// WithKeeperDown 把无 Keeper 会话的原因传给 executor。
 func (m *Manager) WithKeeperDown(reason string) *Manager {
 	m.keeperDn = reason
 	return m
 }
 
-// WithDetachedScope passes the detached-parts scope to the executor.
+// WithDetachedScope 把 detached part 的查询范围传给 executor。
 func (m *Manager) WithDetachedScope(scope, qualified string) *Manager {
 	m.scope = [2]string{scope, qualified}
 	return m
 }
 
-// WithWatchdog passes the collection-mode watchdog to the executor.
+// WithWatchdog 把采集模式 watchdog 传给 executor。
 func (m *Manager) WithWatchdog(w *collectmode.Watchdog) *Manager {
 	m.watch = w
 	return m
 }
 
-// WithMaxLookback caps every query's default window (essential: 1 day).
+// WithMaxLookback 为每个查询的默认窗口设上限（essential：1 天）。
 func (m *Manager) WithMaxLookback(d time.Duration) *Manager {
 	m.lookback = d
 	return m
 }
 
-// WithMode sets the topology mode used for {sys.<table>} expansion.
+// WithMode 设置用于 {sys.<table>} 展开的拓扑模式。
 func (m *Manager) WithMode(mode string) *Manager {
 	m.mode = mode
 	return m
 }
 
-// WithWindow overrides the time window of every query that declares one.
+// WithWindow 覆盖每个声明了时间窗口的查询的窗口。
 func (m *Manager) WithWindow(from, to time.Time) *Manager {
 	m.from, m.to = from, to
 	return m
 }
 
-// WithOutputFormat sets the serialisation format for query results.
-// WithRecorder attaches the execution-log recorder passed on to the executor.
+// WithOutputFormat 设置查询结果的序列化格式。
+// WithRecorder 挂接执行日志记录器，并传给 executor。
 func (m *Manager) WithRecorder(r *runlog.Recorder) *Manager {
 	m.rec = r
 	return m
@@ -73,7 +73,7 @@ func (m *Manager) WithOutputFormat(f OutputFormat) *Manager {
 	return m
 }
 
-// NewManager creates a new query manager
+// NewManager 创建一个新的查询管理器
 func NewManager() *Manager {
 	return &Manager{
 		finder:   NewFinder(),
@@ -82,44 +82,44 @@ func NewManager() *Manager {
 	}
 }
 
-// ExecuteQueries finds, selects, and executes queries for the given ClickHouse instance.
-// salt, when non-empty (gov mode), is substituted into the '%salt%' placeholder
-// of .sql files just before they are sent to ClickHouse.
-// Returns the path to the specific folder where results were saved.
+// ExecuteQueries 为给定的 ClickHouse 实例发现、选择并执行查询。
+// 当 salt 非空（gov 模式）时，它会在 .sql 文件发送给 ClickHouse 之前
+// 替换其中的 '%salt%' 占位符。
+// 返回保存结果的具体目录路径。
 func (m *Manager) ExecuteQueries(client *pkg.ClickHouseClient, queriesDir string, serverVersion internal.Version, outputDir, salt string) (string, error) {
-	// Validate query directory
+	// 校验查询目录
 	if err := m.finder.ValidateQueryDirectory(queriesDir); err != nil {
-		return "", fmt.Errorf("query directory validation failed: %w", err)
+		return "", fmt.Errorf("查询目录校验失败：%w", err)
 	}
 
-	// Find all compatible queries
+	// 查找所有兼容的查询
 	allQueries, err := m.finder.FindCompatibleQueries(queriesDir, serverVersion)
 	if err != nil {
-		return "", fmt.Errorf("error finding query files: %w", err)
+		return "", fmt.Errorf("查找查询文件失败：%w", err)
 	}
 
 	if len(allQueries) == 0 {
-		return "", fmt.Errorf("no suitable query files found in '%s' or its subdirectories", queriesDir)
+		return "", fmt.Errorf("在 '%s' 或其子目录中未找到合适的查询文件", queriesDir)
 	}
 
-	// Select highest priority queries
+	// 选择优先级最高的查询
 	selectedQueries := m.selector.SelectHighestPriorityQueries(allQueries)
 
-	fmt.Printf("Found %d unique query files to execute\n", len(selectedQueries))
+	fmt.Printf("找到 %d 个待执行的唯一查询文件\n", len(selectedQueries))
 
-	// Execute the selected queries and get the specific output directory
+	// 执行选中的查询，并获得具体的输出目录
 	executor := NewExecutor(client).WithSalt(salt).WithOutputFormat(m.format).
 		WithWindow(m.from, m.to).WithMode(m.mode).WithRecorder(m.rec).
 		WithWatchdog(m.watch).WithMaxLookback(m.lookback).WithDetachedScope(m.scope[0], m.scope[1]).WithKeeperDown(m.keeperDn)
 	finalOutputDir, err := executor.ExecuteQueries(selectedQueries, outputDir)
 	if err != nil {
-		return "", fmt.Errorf("error executing queries: %w", err)
+		return "", fmt.Errorf("执行查询失败：%w", err)
 	}
 
 	return finalOutputDir, nil
 }
 
-// GetQuerySummary returns a summary of available queries
+// GetQuerySummary 返回可用查询的汇总
 func (m *Manager) GetQuerySummary(queriesDir string, serverVersion internal.Version) (map[string]int, error) {
 	allQueries, err := m.finder.FindCompatibleQueries(queriesDir, serverVersion)
 	if err != nil {

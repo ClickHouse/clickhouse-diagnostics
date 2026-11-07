@@ -1,51 +1,51 @@
 -- tier: essential
--- system.server_settings first appeared in 23.3, so this collector
--- lives only in a version directory and has no root counterpart: on an
--- older server the finder skips it instead of failing the run. Gated at
--- 23.3.1.0, the release that added the table: background_*_pool_size moved
--- here from system.settings in 23.3, and system.settings keeps listing the
--- names with their old session defaults, so a 23.3 bundle without this file
--- would read the wrong pool sizes.
+-- system.server_settings 首次出现于 23.3，所以这个采集器
+-- 只存在于版本目录中，没有根目录对应文件：在旧服务器上
+-- finder 会跳过它，而不是让整次运行失败。门槛设为
+-- 23.3.1.0，即加入该表的版本：background_*_pool_size 在 23.3
+-- 从 system.settings 移到这里，而 system.settings 仍会以旧的会话
+-- 默认值列出这些名称，所以没有本文件的 23.3 bundle
+-- 会读到错误的池大小。
 --
--- Server-level settings — max_server_memory_usage, the background
--- pools, the paths. system.settings covers the session; this covers
--- the process, and the two answer different questions.
+-- 服务器级设置 —— max_server_memory_usage、后台
+-- 池、路径。system.settings 覆盖会话；这里覆盖
+-- 进程，二者回答的是不同问题。
 --
--- Gov: nothing here is hashed — not the setting names, not the values.
--- Names are ClickHouse constants, and a hashed value would have no
--- decoder anywhere, because the gov name mapping
--- (internal/gov_mapping.go) is built from system.tables and so covers
--- database and table names only. Support would receive 64 hex
--- characters and no way back.
+-- Gov：这里没有任何东西被哈希 —— 设置名和值都没有。
+-- 名称是 ClickHouse 常量，而被哈希的值在任何地方
+-- 都没有解码器，因为 gov 名称映射
+-- （internal/gov_mapping.go）由 system.tables 构建，只覆盖
+-- 数据库和表名。支持人员会收到 64 个十六进制
+-- 字符，却无从还原。
 --
--- The handful of values that name customer infrastructure are REMOVED
--- instead, which is both safer and far easier to reason about than
--- salting them: a removed value cannot leak and needs no key to read.
--- 'REMOVED' is the same sentinel the config sanitizer uses for redacted
--- credentials (internal/collection/heuristics.go). The setting name,
--- `default` and `changed` all survive, so the archive still shows THAT
--- a path was customised without showing what it is — which is the part
--- a support engineer actually needs.
+-- 少数指名客户基础设施的值会被 REMOVED
+-- 替代，这比给它们加盐更安全，也更容易推理：
+-- 被移除的值不可能泄露，也不需要密钥才能读取。
+-- 'REMOVED' 与配置脱敏器用于已脱敏凭据的哨兵值
+-- 相同（internal/collection/heuristics.go）。设置名、
+-- `default` 和 `changed` 都会保留，所以归档仍能表明
+-- 某条路径被定制过，却不显示它是什么 —— 这正是
+-- 支持工程师实际需要的部分。
 --
--- Keyed on the VALUE's shape rather than on a list of setting names,
--- because the names follow no convention: `config-file`,
--- `include_from`, `logger.log` and `logger.errorlog` are all
--- filesystem paths with no "path" in the name, so a name-based
--- allowlist drops precisely the settings nobody thinks of. Any
--- absolute path or URL goes, plus the customer-chosen names that are
--- neither. There is no `type = 'String'` guard because none is needed:
--- checked on 26.7, every row the shape test matches is already String
--- (17/17), so leaving the guard off also covers a URI-typed setting
--- without ever matching a number.
+-- 依据值的形状而不是设置名列表来判定，
+-- 因为名称不遵循任何约定：`config-file`、
+-- `include_from`、`logger.log` 和 `logger.errorlog` 都是
+-- 文件系统路径，名称里却没有 "path"，所以基于名称的
+-- 允许列表恰恰会漏掉没人想得到的设置。任何
+-- 绝对路径或 URL 都会隐藏，再加上那些两者都不是的
+-- 客户自选名称。没有 `type = 'String'` 守卫，因为不需要：
+-- 在 26.7 上检查过，形状测试匹配的每一行都已经是 String
+-- （17/17），所以不加守卫也能覆盖 URI 类型的设置，
+-- 同时永远不会匹配到数字。
 --
--- `default` is ClickHouse's own compiled-in default, not the
--- customer's, so it stays readable — that is what makes `changed = 1`
--- with a REMOVED value legible at all.
+-- `default` 是 ClickHouse 自己编译进去的默认值，不是
+-- 客户的，所以它保持可读 —— 正因如此，值为 REMOVED 时
+-- `changed = 1` 才仍然可读。
 --
--- An empty value stays empty rather than becoming REMOVED. There is
--- nothing to remove, and 'REMOVED' would imply a path was configured
--- where none is: interserver_http_host is unset on a stock server and
--- reading "not configured" is the useful, harmless answer.
+-- 空值保持为空，而不是变成 REMOVED。这里
+-- 没有什么可移除，而 'REMOVED' 会暗示配置了一条
+-- 并不存在的路径：stock 服务器上 interserver_http_host 未设置，
+-- 读到“未配置”才是有用且无害的答案。
 SELECT
     name,
     if(identifying AND value != '', 'REMOVED', value) AS value,

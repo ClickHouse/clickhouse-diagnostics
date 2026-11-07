@@ -1,12 +1,12 @@
 -- tier: essential
--- Failed queries per hour and error code, counted once per query.
--- query_log_details_7_days repeats a query once per table it touched (LEFT
--- ARRAY JOIN tables), so a count read off it is either doubled or, de-
--- duplicated, merges two executions of one pattern on different tables;
--- the exception alerts (high_exception_rate, keeper_exception_spike,
--- too_many_simultaneous_queries) read this exact count instead. Only failed
--- rows are read; one day covers their 24-hour look-back.
--- Gov: no exception text (it embeds identifiers and literals).
+-- 每小时、按错误码统计的失败查询，每个查询只计一次。
+-- query_log_details_7_days 会按查询触及的每张表重复一次（LEFT
+-- ARRAY JOIN tables），所以从它那里读到的计数要么翻倍，要么去重后
+-- 把同一模式在不同表上的两次执行合并；
+-- 异常告警（high_exception_rate、keeper_exception_spike、
+-- too_many_simultaneous_queries）改为读取这里的精确计数。只读取失败
+-- 行；一天足以覆盖它们 24 小时的回看窗口。
+-- Gov：不含异常文本（它会嵌入标识符和字面量）。
 SELECT
     toStartOfHour(event_time)  AS time,
     type,

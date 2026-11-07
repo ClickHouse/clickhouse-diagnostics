@@ -1,16 +1,16 @@
--- Refreshable materialized views (REFRESH EVERY … / AFTER …) run on a schedule
--- instead of on insert, so query_views_log never sees them and system.tables
--- cannot tell them from an ordinary MV. This is the only table that says whether
--- a refresh is Scheduled / Running / Disabled, when it last succeeded and what
--- the last failure was. The schema graph colours these views differently.
+-- 可刷新 materialized view（物化视图）（REFRESH EVERY … / AFTER …）按计划运行，
+-- 而不是在插入时运行，因此 query_views_log 永远看不到它们，system.tables
+-- 也无法把它们与普通 MV 区分开。这是唯一能说明
+-- 一次刷新是 Scheduled / Running / Disabled、上次成功时间以及
+-- 上次失败内容的表。schema graph（模式关系图）会以不同颜色标记这些视图。
 --
--- No root file: the table arrived with refreshable MVs in 23.12, so this rung is
--- simply skipped on older servers rather than failing there.
+-- 没有根文件：该表随 23.12 的可刷新 MV 一起出现，因此在更旧的服务器上
+-- 会直接跳过，而不是失败。
 --
--- State table, not a log: there is no hostname column, so the replica is
--- labelled with hostName() as every other cloud state collector does. One row
--- per (replica, view) — in a replicated database each replica reports the
--- shared schedule from its own point of view.
+-- 状态表，不是日志：没有 hostname 列，因此副本用
+-- hostName() 标记，和其他所有 cloud 状态采集器一样。
+-- 每个（replica, view）一行——在 replicated database 中，每个副本报告
+-- 自己视角下的共享计划。
 SELECT
     hostName() AS hostname,
     database,

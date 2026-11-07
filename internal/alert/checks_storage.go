@@ -9,9 +9,8 @@ import (
 	"clickhouse-diagnostic/internal/bundle"
 )
 
-// Storage, parts, crash and replication-state checks. Each mirrors the SQL
-// of its rule file (still in the YAML as `query:`, for the customer) over
-// the collected files.
+// 存储、part、崩溃和复制状态相关的 check。每一个都在已采集的文件上
+// 复现其规则文件的 SQL（该 SQL 仍以 `query:` 形式留在 YAML 中，供客户使用）。
 
 func init() {
 	RegisterCheck("disk_space_low", checkDiskSpaceLow)
@@ -26,21 +25,21 @@ func init() {
 
 var systemDBs = map[string]bool{"system": true, "information_schema": true, "INFORMATION_SCHEMA": true}
 
-// disk_space_low: disks under 15 % free that hold table data (the disks of
-// the storage policies user tables use; every disk when that is unknown).
+// disk_space_low：可用空间低于 15% 且存放表数据的磁盘
+// （即用户表所用存储策略对应的磁盘；无法确定时则为所有磁盘）。
 func checkDiskSpaceLow(b *bundle.Bundle, mode string) ([]row, error) {
 	disks, err := b.Rows("system.disks")
 	if err != nil {
 		return nil, err
 	}
-	// Data disks: policies used by non-system tables → their disks. When
-	// tables or storage_policies were not collected (an essential run) the
-	// set is empty and every disk counts, like the rule's empty(dd.names).
+	// 数据磁盘：非 system 表所用的存储策略 → 它们的磁盘。当 tables 或
+	// storage_policies 未被采集（essential 运行）时，集合为空，
+	// 此时所有磁盘都计入，这与规则的 empty(dd.names) 一致。
 	data := map[string]bool{}
 	if tables, err := b.Rows("system.tables"); err == nil {
 		policies := map[string]bool{}
 		for _, t := range tables {
-			// gov hashes database names: is_system_db carries the fact
+			// gov 会哈希 database 名称：is_system_db 承载了该事实
 			system := systemDBs[t.Str("database")] || t.Int("is_system_db") == 1
 			if !system && t.Str("storage_policy") != "" {
 				policies[t.Str("storage_policy")] = true
@@ -79,7 +78,7 @@ func checkDiskSpaceLow(b *bundle.Bundle, mode string) ([]row, error) {
 	return out, nil
 }
 
-// too_many_parts: partitions with more than 300 active parts.
+// too_many_parts：活跃 part 超过 300 个的分区。
 func checkTooManyParts(b *bundle.Bundle, mode string) ([]row, error) {
 	parts, err := b.Rows("system.parts_by_partition")
 	if err != nil {
@@ -95,8 +94,8 @@ func checkTooManyParts(b *bundle.Bundle, mode string) ([]row, error) {
 	return out, nil
 }
 
-// large_parts: active parts above 150 GiB. system.parts keeps the 50 000
-// largest parts, so every such part is in the file.
+// large_parts：超过 150 GiB 的活跃 part。system.parts 保留最大的
+// 50 000 个 part，因此每个这么大的 part 都在文件中。
 func checkLargeParts(b *bundle.Bundle, mode string) ([]row, error) {
 	parts, err := b.Rows("system.parts")
 	if err != nil {
@@ -121,8 +120,8 @@ func checkLargeParts(b *bundle.Bundle, mode string) ([]row, error) {
 	return out, nil
 }
 
-// detached_parts_exist: detached parts per table (the collector already
-// applies the same scope and skips the system databases).
+// detached_parts_exist：每张表的 detached part（collector 已经应用了
+// 相同的范围并跳过 system 数据库）。
 func checkDetachedParts(b *bundle.Bundle, mode string) ([]row, error) {
 	rows, err := b.Rows("system.detached_parts")
 	if err != nil {
@@ -137,10 +136,10 @@ func checkDetachedParts(b *bundle.Bundle, mode string) ([]row, error) {
 	}
 	byTable := map[string]*agg{}
 	var order []string
-	// Cloud reads every replica: a part on shared storage is listed once
-	// per replica, with the same path. Count it once, as the rule's
-	// single-replica read does. Elsewhere one host lists each part once
-	// (and may hold two of one block range, the _tryN copies).
+	// Cloud 会读取每个 replica：共享存储上的同一个 part 会按每个 replica
+	// 各列一次，路径相同。只计一次，与规则的单副本读取一致。在其他环境中，
+	// 一台主机对每个 part 只列一次（同一条块范围可能有两个，
+	// 即 _tryN 拷贝）。
 	parts := map[string]bool{}
 	for _, r := range rows {
 		if systemDBs[r.Str("database")] {
@@ -186,10 +185,10 @@ func checkDetachedParts(b *bundle.Bundle, mode string) ([]row, error) {
 	return out, nil
 }
 
-// crash_log_entries: the latest 20 crashes. In cloud, a missing file is
-// ambiguous (the fan-out fails when any replica never crashed), so
-// system.crash_log_presence decides: no replica has the table → not
-// applicable; some do → their crashes could not be read, which is surfaced.
+// crash_log_entries：最近 20 次崩溃。在 cloud 中，文件缺失是有歧义的
+// （只要有一个 replica 从未崩溃，扇出就会失败），因此由
+// system.crash_log_presence 判定：没有任何 replica 拥有该表 → 不适用；
+// 有些拥有 → 它们的崩溃无法读取，这会明确暴露出来。
 func checkCrashLog(b *bundle.Bundle, mode string) ([]row, error) {
 	rows, err := b.Rows("system.crash_log")
 	var nc *bundle.NotCollected
@@ -205,9 +204,9 @@ func checkCrashLog(b *bundle.Bundle, mode string) ([]row, error) {
 			}
 		}
 		if len(with) == 0 {
-			return nil, &bundle.NotCollected{Collector: "system.crash_log", State: "not collected", Reason: "no replica has system.crash_log (none has crashed)"}
+			return nil, &bundle.NotCollected{Collector: "system.crash_log", State: "not collected", Reason: "没有副本拥有 system.crash_log（没有任何副本崩溃过）"}
 		}
-		return nil, fmt.Errorf("system.crash_log exists on %d replica(s) (%s) but could not be read: %v", len(with), strings.Join(with, ", "), err)
+		return nil, fmt.Errorf("system.crash_log 存在于 %d 个副本（%s），但无法读取：%v", len(with), strings.Join(with, ", "), err)
 	}
 	if err != nil {
 		return nil, err
@@ -224,7 +223,7 @@ func checkCrashLog(b *bundle.Bundle, mode string) ([]row, error) {
 	return out, nil
 }
 
-// replication_queue_errors: entries with an exception, newest 50.
+// replication_queue_errors：带异常的条目，最新的 50 条。
 func checkReplicationQueueErrors(b *bundle.Bundle, mode string) ([]row, error) {
 	rows, err := b.Rows("system.replication_queue")
 	if err != nil {
@@ -248,14 +247,14 @@ func checkReplicationQueueErrors(b *bundle.Bundle, mode string) ([]row, error) {
 	return out, nil
 }
 
-// mutation_running_too_long: unfinished mutations older than 3 hours (by
-// dateDiff('hour'), boundaries crossed), not being killed (24.1+).
+// mutation_running_too_long：运行超过 3 小时（按 dateDiff('hour')，
+// 即跨越的小时边界）仍未完成、且未被终止（24.1+）的 mutation。
 func checkMutationsTooLong(b *bundle.Bundle, mode string) ([]row, error) {
 	rows, err := b.Rows("system.mutations")
 	if err != nil {
 		return nil, err
 	}
-	now, loc, err := collectedAt(b) // a live snapshot: -to does not age it
+	now, loc, err := collectedAt(b) // 实时快照：-to 不会影响它的时长计算
 	if err != nil {
 		return nil, err
 	}
@@ -266,7 +265,7 @@ func checkMutationsTooLong(b *bundle.Bundle, mode string) ([]row, error) {
 			continue
 		}
 		k := r.Str("database") + "\x00" + r.Str("table") + "\x00" + r.Str("mutation_id")
-		if seen[k] { // cloud: every replica lists the same mutation
+		if seen[k] { // cloud：每个 replica 都会列出同一个 mutation
 			continue
 		}
 		created, ok := parseTime(r.Str("create_time"), loc)
@@ -285,9 +284,9 @@ func checkMutationsTooLong(b *bundle.Bundle, mode string) ([]row, error) {
 	return out, nil
 }
 
-// replica_readonly: read-only replicated tables, with active/total replicas
-// from the Keeper-backed file when it was collected ("?" otherwise — it is
-// skipped when Keeper is down, which is when replicas go read-only).
+// replica_readonly：只读的复制表，并在收集到由 Keeper 支撑的文件时
+// 带上活跃/总 replica 数（否则为 "?" —— 当 Keeper 宕机时该文件会被跳过，
+// 而 Keeper 宕机正是 replica 变为只读的时候）。
 func checkReplicaReadonly(b *bundle.Bundle, mode string) ([]row, error) {
 	rows, err := b.Rows("system.replicas")
 	if err != nil {

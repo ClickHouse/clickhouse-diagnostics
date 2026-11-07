@@ -53,7 +53,7 @@ func TestBuildHTML_SampleData(t *testing.T) {
 		"query_heavy": []map[string]interface{}{
 			{"hash": "98765432109876543210", "query_kind": "Select", "user": "analyst", "executions": 120, "avg_read_mb": 820.0, "total_read": "98.40 GiB", "avg_duration_ms": 1800,
 				"sample_query": "SELECT * FROM analytics.sessions FINAL WHERE user_id IN (SELECT user_id FROM production.events) ORDER BY started_at DESC"},
-			// No sample_query: the label must fall back to the FULL hash, never a truncated one.
+			// 没有 sample_query：标签必须回退到完整的 hash，绝不能是截断后的。
 			{"hash": "12345678901234567890", "query_kind": "Select", "user": "default", "executions": 500, "avg_read_mb": 350.5, "total_read": "175.25 GiB", "avg_duration_ms": 4200},
 		},
 		"query_by_user": []map[string]interface{}{
@@ -100,7 +100,7 @@ func TestBuildHTML_SampleData(t *testing.T) {
 		"clusters":          []map[string]interface{}{},
 	}
 
-	// Add mock alert results (one fired, one not)
+	// 添加模拟的 alert 结果（一个 fired，一个未 fired）
 	firedAt := time.Now().UTC().Format(time.RFC3339)
 	data["alerts"] = []alert.Result{
 		{
@@ -119,9 +119,9 @@ func TestBuildHTML_SampleData(t *testing.T) {
 			Rows:     []map[string]interface{}{},
 			FiredAt:  firedAt,
 		},
-		// A skipped (not-applicable) rule: its table doesn't exist on this
-		// server. Must NOT count as evaluated and must render in the
-		// muted "not applicable" note, not as a fired/passed check.
+		// 一条 skipped（不适用）的规则：它的表在这台服务器上不存在。
+		// 不能算作已评估，并且必须渲染到弱化的“不适用”提示中，
+		// 而不是作为 fired/passed 检查。
 		{
 			Name:    "text_log_alert",
 			Title:   "Text log errors",
@@ -133,9 +133,9 @@ func TestBuildHTML_SampleData(t *testing.T) {
 
 	html := buildHTML(data)
 
-	// structural checks
+	// 结构性检查
 	mustContain := []string{
-		"ClickHouse Diagnostic Dashboard",
+		"ClickHouse 诊断仪表盘",
 		"chart.js",
 		"const DATA =",
 		"tables_list",
@@ -154,89 +154,89 @@ func TestBuildHTML_SampleData(t *testing.T) {
 		"sec-crashlog",
 		"tablesFilter",
 		"24.8.5.115",
-		// alerts
+		// 告警
 		"sec-alerts",
 		"renderAlerts",
 		"alerts-panel",
 		"crash_log_entries",
-		// skipped (not-applicable) alert plumbing: the JS filter, the
-		// muted note style, and the skipped rule's payload fields.
+		// skipped（不适用）alert 的机制：JS 过滤器、
+		// 弱化提示样式，以及 skipped 规则的 payload 字段。
 		"a.skipped",
 		"alert-skipped",
-		"not applicable",
+		"不适用",
 		`"skipped":true`,
 		"text_log_alert",
 	}
 	for _, want := range mustContain {
 		if !strings.Contains(html, want) {
-			t.Errorf("generated HTML missing expected string: %q", want)
+			t.Errorf("生成的 HTML 缺少预期字符串：%q", want)
 		}
 	}
 
-	// verify embedded JSON is valid
+	// 验证嵌入的 JSON 有效
 	start := strings.Index(html, "const DATA = ") + len("const DATA = ")
 	end := strings.Index(html[start:], ";\n")
 	if end < 0 {
-		t.Fatal("could not find DATA assignment end")
+		t.Fatal("找不到 DATA 赋值的结尾")
 	}
 	jsonStr := html[start : start+end]
 	var out map[string]interface{}
 	if err := json.Unmarshal([]byte(jsonStr), &out); err != nil {
-		t.Fatalf("embedded DATA is not valid JSON: %v", err)
+		t.Fatalf("嵌入的 DATA 不是有效 JSON：%v", err)
 	}
 
-	// check key data is present in JSON
+	// 检查 JSON 中存在关键数据
 	for _, key := range []string{"tables_list", "query_slow", "dictionaries", "crash_log", "alerts"} {
 		if _, ok := out[key]; !ok {
-			t.Errorf("DATA JSON missing key %q", key)
+			t.Errorf("DATA JSON 缺少键 %q", key)
 		}
 	}
 
-	// check alert data is present and correct
+	// 检查 alert 数据存在且正确
 	alertsRaw, ok := out["alerts"]
 	if !ok {
-		t.Fatal("alerts key missing from DATA")
+		t.Fatal("DATA 中缺少 alerts 键")
 	}
 	alertsSlice, ok := alertsRaw.([]interface{})
 	if !ok {
-		t.Fatalf("alerts is not a slice, got %T", alertsRaw)
+		t.Fatalf("alerts 不是 slice，得到 %T", alertsRaw)
 	}
 	if len(alertsSlice) != 3 {
-		t.Errorf("expected 3 alert results (fired + clean + skipped), got %d", len(alertsSlice))
+		t.Errorf("期望 3 条 alert 结果（fired + clean + skipped），得到 %d", len(alertsSlice))
 	}
 
 	if err := os.WriteFile("/tmp/dashboard_test.html", []byte(html), 0644); err == nil {
-		t.Logf("Dashboard written to /tmp/dashboard_test.html for manual review")
+		t.Logf("Dashboard 已写入 /tmp/dashboard_test.html，供人工审阅")
 	}
 }
 
 func TestTablesListSQL_Modes(t *testing.T) {
-	// system.tables and system.parts are shared across replicas in cloud,
-	// so no mode should wrap them with clusterAllReplicas.
+	// 在 cloud 模式下，system.tables 和 system.parts 在各 replica 之间共享，
+	// 因此任何模式都不应把它们包进 clusterAllReplicas。
 	for _, mode := range []string{"cloud", "onprem", "gov"} {
 		g := &Generator{mode: mode}
 		sql := g.tablesListSQL()
 		if sql == "" {
-			t.Errorf("mode %q returned empty tablesListSQL", mode)
+			t.Errorf("模式 %q 返回了空的 tablesListSQL", mode)
 		}
 		if strings.Contains(sql, "clusterAllReplicas") {
-			t.Errorf("mode %q should not use clusterAllReplicas for shared tables", mode)
+			t.Errorf("模式 %q 不应为共享表使用 clusterAllReplicas", mode)
 		}
 	}
 }
 
 func TestSysTable_CloudSharedVsPerReplica(t *testing.T) {
 	g := &Generator{mode: "cloud"}
-	// per-replica tables → wrapped
+	// 每 replica 的表 → 包裹
 	if got := g.sysTable("query_log"); got != "clusterAllReplicas(default, system.query_log)" {
-		t.Errorf("query_log: got %q", got)
+		t.Errorf("query_log：得到 %q", got)
 	}
-	// shared tables → plain
+	// 共享表 → 原样
 	if got := g.sysTable("parts"); got != "system.parts" {
-		t.Errorf("parts: got %q", got)
+		t.Errorf("parts：得到 %q", got)
 	}
 	if got := g.sysTable("tables"); got != "system.tables" {
-		t.Errorf("tables: got %q", got)
+		t.Errorf("tables：得到 %q", got)
 	}
 }
 
@@ -244,19 +244,19 @@ func TestDictionariesSQL_GovOmitsException(t *testing.T) {
 	govGen := &Generator{mode: "gov"}
 	sql := govGen.dictionariesSQL()
 	if strings.Contains(sql, "last_exception") && !strings.Contains(sql, "'' AS last_exception") {
-		t.Error("gov mode should not expose last_exception directly")
+		t.Error("gov 模式不应直接暴露 last_exception")
 	}
 
 	cloudGen := &Generator{mode: "cloud"}
 	sql2 := cloudGen.dictionariesSQL()
 	if !strings.Contains(sql2, "last_exception") {
-		t.Error("non-gov mode should include last_exception")
+		t.Error("非 gov 模式应包含 last_exception")
 	}
 }
 
-// Row counts must not be rendered with the byte formatter. formatReadableSize
-// turned diag_demo.events (1,992,000 rows) into the string "1.90 MiB" in both
-// the Tables Explorer and the Top Tables panel.
+// 行数不能用字节格式化器渲染。formatReadableSize
+// 曾把 diag_demo.events（1,992,000 行）变成字符串 "1.90 MiB"，Tables Explorer
+// 和 Top Tables 面板都是如此。
 func TestRowCountsUseQuantityFormatter(t *testing.T) {
 	g := &Generator{mode: "onprem"}
 	for name, sql := range map[string]string{
@@ -264,42 +264,41 @@ func TestRowCountsUseQuantityFormatter(t *testing.T) {
 		"topTablesSQL":  g.topTablesSQL(),
 	} {
 		if !strings.Contains(sql, "formatReadableQuantity") {
-			t.Errorf("%s: row count must use formatReadableQuantity, got:\n%s", name, sql)
+			t.Errorf("%s：行数必须使用 formatReadableQuantity，得到：\n%s", name, sql)
 		}
 		if strings.Contains(sql, "formatReadableSize(sum(rows))") ||
 			strings.Contains(sql, "formatReadableSize(coalesce(p.total_rows") {
-			t.Errorf("%s: row count is still formatted as bytes", name)
+			t.Errorf("%s：行数仍然被格式化为字节", name)
 		}
 	}
 }
 
-// error_count was structurally unreachable: it counted exception_code != 0
-// inside a WHERE type = 'QueryFinish' window, and a failed query is never
-// logged as QueryFinish.
+// error_count 在结构上不可达：它在 WHERE type = 'QueryFinish' 的窗口内统计
+// exception_code != 0，而失败的查询永远不会被记录为 QueryFinish。
 func TestQueryByUserSQL_CountsExceptionRows(t *testing.T) {
 	sql := (&Generator{mode: "onprem"}).queryByUserSQL()
 
 	for _, want := range []string{"ExceptionWhileProcessing", "ExceptionBeforeStart"} {
 		if !strings.Contains(sql, want) {
-			t.Errorf("query_by_user must include %s rows or error_count is always 0:\n%s", want, sql)
+			t.Errorf("query_by_user 必须包含 %s 行，否则 error_count 永远是 0：\n%s", want, sql)
 		}
 	}
 	if strings.Contains(sql, "AND type = 'QueryFinish'") {
-		t.Error("query_by_user must not scope the whole window to QueryFinish")
+		t.Error("query_by_user 不能把整个窗口限定为 QueryFinish")
 	}
-	// The cost aggregates must still be QueryFinish-only so their meaning is
-	// unchanged by widening the window.
+	// 开销聚合必须仍然只统计 QueryFinish，这样放宽窗口
+	// 不会改变它们的含义。
 	for _, want := range []string{
 		"countIf(type = 'QueryFinish') AS executions",
 		"sumIf(read_bytes, type = 'QueryFinish')",
 		"sumIf(memory_usage, type = 'QueryFinish')",
 	} {
 		if !strings.Contains(sql, want) {
-			t.Errorf("query_by_user lost QueryFinish scoping on cost aggregate %q:\n%s", want, sql)
+			t.Errorf("query_by_user 在开销聚合 %q 上丢失了 QueryFinish 限定：\n%s", want, sql)
 		}
 	}
-	// avgIf over an all-failure user yields nan, which does not survive JSON.
+	// 对全失败的用户使用 avgIf 会得到 nan，而 nan 无法在 JSON 中保留。
 	if strings.Contains(sql, "avgIf(query_duration_ms") {
-		t.Error("use sum/greatest(count,1) instead of avgIf: avgIf yields nan for an all-failure user")
+		t.Error("用 sum/greatest(count,1) 替代 avgIf：对全失败的用户，avgIf 会得到 nan")
 	}
 }

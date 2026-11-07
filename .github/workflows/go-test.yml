@@ -1,10 +1,9 @@
-# Runs the Go test suite on every push and pull request.
+# 在每次 push 和 pull request 时运行 Go 测试套件。
 #
-# Until this workflow existed, `go test` had never run in CI: the repo's
-# guards (gov PII leak checks, version-ladder monotonicity, window pinning,
-# collector mode gating, …) only ran on whichever machine happened to run
-# them locally. The tests ARE the review contract for this repo — this
-# makes them gate merges.
+# 在此 workflow 存在之前，`go test` 从未在 CI 中运行过：仓库的各项
+# 守卫（gov PII 泄漏检查、版本阶梯单调性、窗口固定、
+# collector 模式门控等）只在碰巧本地运行它们的机器上执行。
+# 测试就是本仓库的审查契约——此 workflow 让它们成为合并门禁。
 name: Go tests
 
 on:
@@ -29,7 +28,7 @@ jobs:
         run: |
           out=$(gofmt -l ./cmd ./internal ./pkg)
           if [ -n "$out" ]; then
-            echo "gofmt needed on:" && echo "$out" && exit 1
+            echo "以下文件需要 gofmt：" && echo "$out" && exit 1
           fi
 
       - name: go vet
@@ -38,7 +37,7 @@ jobs:
       - name: go test
         run: go test ./...
 
-      - name: go build (all platforms we release)
+      - name: go build（我们发布的所有平台）
         run: |
           for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64; do
             GOOS=${target%/*} GOARCH=${target#*/} go build ./... || exit 1

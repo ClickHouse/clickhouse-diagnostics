@@ -9,21 +9,19 @@ import (
 	"clickhouse-diagnostic/internal/alert"
 )
 
-// keeperIncidentFixture is a dashboard payload shaped like a real Keeper
-// outage on a self-hosted SharedMergeTree cluster, with every identifier
-// replaced: 48 hours of Keeper counters in which the ensemble lost quorum at
-// 13:00 on day two, sessions expired for eight hours, merges stopped, one
-// insert-heavy table hit TOO_MANY_PARTS, and reads failed with
-// FILE_DOESNT_EXIST after recovery. The numbers are the incident's; the names
-// are not. It exists so the Keeper Health panel and the Keeper alerts can be
-// looked at without a live outage:
+// keeperIncidentFixture 是一个 dashboard payload，形似自建 SharedMergeTree
+// 集群上一次真实的 Keeper 故障，并替换了所有标识符：48 小时的 Keeper 计数器，
+// 其中集群在第二天 13:00 失去 quorum，session 过期持续八小时，merge 停止，
+// 一张写入密集的表触发了 TOO_MANY_PARTS，恢复后读取又因
+// FILE_DOESNT_EXIST 失败。数字来自该事件，名称不是。它的存在是为了在没有
+// 实时故障的情况下查看 Keeper Health 面板和 Keeper 告警：
 //
 //	DASHBOARD_PREVIEW_DIR=/tmp go test ./internal/dashboard -run TestBuildHTML_KeeperIncidentPreview
 //
-// writes /tmp/keeper_incident_preview.html (Chart.js from CDN, as always).
+// 写入 /tmp/keeper_incident_preview.html（一如既往，Chart.js 来自 CDN）。
 func keeperIncidentFixture() map[string]interface{} {
-	// hour → (transactions, hardware exceptions), day one is a quiet baseline
-	// with one blip at 09:00, day two is the outage.
+	// 小时 →（transactions, hardware exceptions），第一天是安静的基线，
+	// 09:00 有一次轻微抖动，第二天是故障。
 	type h struct {
 		t      string
 		tx, hw int64
@@ -49,7 +47,7 @@ func keeperIncidentFixture() map[string]interface{} {
 	}
 	metric := make([]map[string]interface{}, 0, len(hours))
 	for _, x := range hours {
-		// mean latency ≈ 2 ms in quiet hours, rising with the exceptions
+		// 安静时段平均延迟约 2 ms，随异常增多而上升
 		latency := int64(2000)
 		if x.hw > 0 {
 			latency = 2000 + x.hw/2000
@@ -84,10 +82,9 @@ func keeperIncidentFixture() map[string]interface{} {
 			"pct_of_usual": x.tx * 100 / 28010220,
 		})
 	}
-	// A real ClickHouse exception, anonymised: the frames are public source
-	// paths, the table and replica are invented. This is what made the alert
-	// panel unreadable before the messages collapsed — 1764 characters over
-	// 15 lines per row, of which the first 216 are the error.
+	// 一个真实的 ClickHouse 异常，已匿名化：栈帧来自公开源码路径，
+	// 表和 replica 是虚构的。这正是消息折叠前让 alert 面板难以阅读的原因——
+	// 每行 15 行共 1764 个字符，其中前 216 个是错误信息。
 	trace := "Code: 999. Coordination::Exception: Session expired. (KEEPER_EXCEPTION) (version 26.2.1.390 (official build)), " +
 		"Stack trace (when copying this message, always include the lines below):\n\n" +
 		"0. ./ci/tmp/build/./src/Common/Exception.cpp:141:1: DB::Exception::Exception(DB::Exception::MessageMasked&&, int, bool) @ 0x000000001373469f\n" +
@@ -156,9 +153,8 @@ func keeperIncidentFixture() map[string]interface{} {
 		"uptime": "1 hours 51 minutes", "total_databases": 410, "total_tables": 33882, "active_parts": 50000, "total_size": "28.40 TiB",
 		"alerts":               alerts,
 		"keeper_metric_hourly": metric,
-		// collect() sets these from hasColumn(); the fixture states them
-		// explicitly so the latency panel exercises the "column present"
-		// path rather than relying on the absent-key default.
+		// collect() 通过 hasColumn() 设置这些值；fixture 显式声明它们，
+		// 以便延迟面板走“列存在”路径，而不是依赖缺键时的默认值。
 		"keeper_wait_available":    true,
 		"keeper_session_available": true,
 		"keeper_errors_hourly":     errors,
@@ -182,12 +178,12 @@ func keeperIncidentFixture() map[string]interface{} {
 	}
 }
 
-// TestBuildHTML_KeeperIncidentPreview renders the incident fixture and, when
-// DASHBOARD_PREVIEW_DIR is set, writes the page there for a human to open.
+// TestBuildHTML_KeeperIncidentPreview 渲染该故障 fixture，并在设置了
+// DASHBOARD_PREVIEW_DIR 时把页面写入该目录，供人工打开。
 func TestBuildHTML_KeeperIncidentPreview(t *testing.T) {
 	fx := keeperIncidentFixture()
-	// The preview dashboard's Schema tab opens the preview graph written by
-	// TestBuildSchemaGraphHTML_Preview next to it (make dashboard-preview runs both).
+	// 预览 dashboard 的 Schema 标签页会打开 TestBuildSchemaGraphHTML_Preview
+	// 写在其旁边的预览图（make dashboard-preview 会同时运行两者）。
 	sg := schemaGraphSummary(schemaGraphFixture())
 	sg["file"] = "schema_graph_preview.html"
 	fx["schema_graph"] = sg
@@ -197,7 +193,7 @@ func TestBuildHTML_KeeperIncidentPreview(t *testing.T) {
 		`"keeper_connection_blips"`, `"merges_stalled"`, `keeper-3.example.internal`,
 	} {
 		if !strings.Contains(html, want) {
-			t.Errorf("preview page missing %q", want)
+			t.Errorf("预览页缺少 %q", want)
 		}
 	}
 	if dir := os.Getenv("DASHBOARD_PREVIEW_DIR"); dir != "" {
@@ -205,6 +201,6 @@ func TestBuildHTML_KeeperIncidentPreview(t *testing.T) {
 		if err := os.WriteFile(dst, []byte(html), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		t.Logf("preview written: %s", dst)
+		t.Logf("预览已写入：%s", dst)
 	}
 }

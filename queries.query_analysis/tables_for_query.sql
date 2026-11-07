@@ -1,11 +1,11 @@
--- Current DDL + size for the tables the focus query touched.
--- The query_log.tables array reports `database.table` strings; we
--- split on '.' and look up each name in system.tables.
--- Run when --query-id is set.
+-- 目标查询涉及的表当前的 DDL + 大小。
+-- query_log.tables 数组报告 `database.table` 字符串；我们
+-- 按 '.' 拆分，并在 system.tables 中查找每个名称。
+-- 当设置了 --query-id 时运行。
 --
--- Root variant for the oldest supported servers (22.8+):
--- system.tables.total_bytes_uncompressed was added in 23.12 — see
--- 23.12.1.0/ for the variant that includes the uncompressed size.
+-- 面向最旧受支持服务器（22.8+）的根变体：
+-- system.tables.total_bytes_uncompressed 在 23.12 新增——包含未压缩大小的
+-- 变体见 23.12.1.0/。
 WITH tables_for_query AS (
     SELECT
         splitByChar('.', t)[1]                              AS db,
@@ -24,10 +24,10 @@ SELECT
     t.engine                                                AS engine,
     t.total_rows                                            AS total_rows,
     formatReadableSize(t.total_bytes)                       AS size,
-    -- total_bytes_uncompressed was added to system.tables in 23.12; the
-    -- dashboard renders a size_uncompressed column, so emit a placeholder
-    -- here to keep it present (the 23.12.1.0/ variant fills in the real
-    -- value).
+    -- total_bytes_uncompressed 在 23.12 加入 system.tables；
+    -- dashboard 会渲染 size_uncompressed 列，因此在此处发出一个占位符
+    -- 以保持该列存在（23.12.1.0/ 变体会填入实际的
+    -- 值）。
     'n/a'                                                   AS size_uncompressed,
     t.partition_key                                         AS partition_key,
     t.sorting_key                                           AS sorting_key,

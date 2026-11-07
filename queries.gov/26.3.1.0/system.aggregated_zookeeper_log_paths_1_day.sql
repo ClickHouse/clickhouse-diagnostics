@@ -1,30 +1,30 @@
--- Which Keeper paths took the load over the last day, and which are growing
--- — gov variant. Paths name databases, tables and replicas, so none of that
--- leaves the server: each path is reduced to its SHAPE (segments that are
--- ClickHouse's own Keeper vocabulary are kept, purely numeric ones become N,
--- everything else becomes *) plus path_id, a salted hash of the normalised
--- path that tells two tables of the same shape apart without naming them.
--- The 50 classes with the most requests plus the 50 with the most net creates
--- (creates − removes), one row each. Built from
--- system.aggregated_zookeeper_log (on by default since 25.9).
---   ops         every request on the class, sub-requests inside Multi
---               included; in_multi the part that came inside Multi / MultiRead
---   creates / removes / net_creates   SUCCESSFUL create and remove requests
---               (a CreateIfNotExists answered ZNODEEXISTS or a Remove answered
---               ZNONODE changes nothing and is not counted). net_creates is a
---               request balance, not a znode count: one RemoveRecursive deletes
---               a whole subtree. A class with creates far above removes is
---               consistent with growth — confirm with zk_znode_count in
---               keeper/<member>.txt
---   avg_latency_us  weighted, standalone requests only
---   raw_paths   how many distinct paths the class merges
--- Multi / MultiRead envelopes carry no path and are left out.
--- Operations are compared by Enum16 code, not name — the query check refuses
--- the word CREATE anywhere outside comments: creates = Create (1),
--- CreateIfNotExists (502); removes = Remove (2), RemoveRecursive (503),
--- TryRemove (505); reads = Exists (3), Get (4), List (12), FilteredList
--- (500), FilteredListWithStatsAndData (506), ListRecursive (507).
--- Version-only (26.3+, needs `is_subrequest`): older servers skip this file.
+-- 最近一天哪些 Keeper 路径承担了负载，哪些在增长
+-- —— gov 变体。路径会指名数据库、表和副本，所以这些都不能
+-- 离开服务器：每条路径被归约为它的形状（属于 ClickHouse
+-- 自身 Keeper 词汇的段保留，纯数字段变为 N，
+-- 其余变为 *），再加上 path_id，即规范化路径的加盐哈希，
+-- 它能区分同形状的两张表而不点名它们。
+-- 取请求最多的 50 个类别加上净创建最多的 50 个
+-- （creates − removes），每类一行。构建自
+-- system.aggregated_zookeeper_log（自 25.9 默认开启）。
+--   ops         该类上的所有请求，包含 Multi 内部的子请求；
+--               in_multi 是来自 Multi / MultiRead 内部的部分
+--   creates / removes / net_creates   成功的创建和删除请求
+--               （CreateIfNotExists 返回 ZNODEEXISTS，或 Remove 返回
+--               ZNONODE，都不改变任何东西，不计入）。net_creates 是
+--               请求收支，不是 znode 数量：一次 RemoveRecursive 会删除
+--               整棵子树。creates 远高于 removes 的类别
+--               与增长一致 —— 用 keeper/<member>.txt 中的
+--               zk_znode_count 确认
+--   avg_latency_us  加权，仅独立请求
+--   raw_paths   该类合并了多少条不同路径
+-- Multi / MultiRead 信封不携带路径，已排除。
+-- 操作按 Enum16 代码比较，而不是按名称 —— 查询检查会拒绝
+-- 注释之外任何位置出现 CREATE 一词：creates = Create (1)、
+-- CreateIfNotExists (502)；removes = Remove (2)、RemoveRecursive (503)、
+-- TryRemove (505)；reads = Exists (3)、Get (4)、List (12)、FilteredList
+-- (500)、FilteredListWithStatsAndData (506)、ListRecursive (507)。
+-- 仅版本目录（26.3+，需要 `is_subrequest`）：旧服务器跳过本文件。
 SELECT shape, path_id, ops, in_multi, creates, removes, net_creates, reads, avg_latency_us, raw_paths
 FROM
 (

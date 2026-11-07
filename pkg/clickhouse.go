@@ -11,19 +11,19 @@ import (
 	"time"
 )
 
-// DefaultQueryTimeout bounds each query server-side. It is deliberately
-// lower than the HTTP client timeout: when the server enforces the limit
-// the query fails with a clean Code: 159 that lands in the customer's
-// query_log, whereas a client-side timeout just drops the connection and
-// leaves the server executing.
+// DefaultQueryTimeout 在服务端限制每条查询。它刻意
+// 低于 HTTP 客户端超时：当服务器执行该限制时，
+// 查询会以干净的 Code: 159 失败并落入客户的
+// query_log，而客户端超时只会断开连接，
+// 让服务器继续执行。
 const DefaultQueryTimeout = 240 * time.Second
 
-// clientTimeoutMargin is how much longer the HTTP client waits than the
-// server-side limit, so the server always wins the race and we get a real
-// error instead of a silent disconnect.
+// clientTimeoutMargin 是 HTTP 客户端比服务端限制多等的时间，
+// 使服务器总能赢得竞争，我们得到真实错误，
+// 而不是静默断开。
 const clientTimeoutMargin = 60 * time.Second
 
-// ClickHouseClient represents a ClickHouse HTTP client
+// ClickHouseClient 表示一个 ClickHouse HTTP 客户端
 type ClickHouseClient struct {
 	protocol   string
 	host       string
@@ -32,36 +32,36 @@ type ClickHouseClient struct {
 	password   string
 	httpClient *http.Client
 
-	// queryTimeout is sent as max_execution_time on every request. Zero
-	// means no server-side limit, in which case the HTTP client is also
-	// left unbounded so the two stay consistent.
+	// queryTimeout 作为 max_execution_time 随每个请求发送。零
+	// 表示无服务端限制，此时 HTTP 客户端也保持无上限，
+	// 使两者保持一致。
 	queryTimeout time.Duration
-	// margin is how much longer the HTTP client waits than queryTimeout.
+	// margin 是 HTTP 客户端比 queryTimeout 多等的时间。
 	margin time.Duration
 
-	// Dry-run state. When dryRun is true, ExecuteQuery prints the SQL
-	// and the system tables it would touch to dryOut, then returns an
-	// empty result without contacting the server. dryEstimate adds a
-	// real EXPLAIN ESTIMATE round-trip (read-only, metadata only) so
-	// the operator can see scan sizes without running the query itself.
+	// dry-run 状态。dryRun 为 true 时，ExecuteQuery 会把 SQL
+	// 及其将访问的 system 表打印到 dryOut，然后返回
+	// 空结果而不联系服务器。dryEstimate 会增加一次
+	// 真实的 EXPLAIN ESTIMATE 往返（只读、仅元数据），
+	// 使运维人员无需执行查询本身就能看到扫描量。
 	//
-	// ExecuteQueryReal bypasses this interception — used for the
-	// version probe, query-analysis pre-flight (so we have real
-	// derived values to template into subsequent SQL), and the
-	// EXPLAIN ESTIMATE round-trip itself.
+	// ExecuteQueryReal 绕过此拦截——用于
+	// 版本探测、查询分析预检（以便取得真实的
+	// 派生值模板到后续 SQL），以及
+	// EXPLAIN ESTIMATE 往返本身。
 	dryRun      bool
 	dryOut      io.Writer
 	dryEstimate bool
 	dryCounter  int
 
-	// settings are extra query settings sent on every request after the
-	// pinned ones (SetSetting), in the order they were first set.
+	// settings 是在固定设置（SetSetting）之后随每个请求发送的
+	// 额外查询设置，按首次设置的顺序排列。
 	settings []setting
 }
 
 type setting struct{ name, value string }
 
-// RemoveSetting drops a setting added with SetSetting (no-op if absent).
+// RemoveSetting 移除通过 SetSetting 添加的设置（不存在时为无操作）。
 func (c *ClickHouseClient) RemoveSetting(name string) {
 	for i := range c.settings {
 		if c.settings[i].name == name {
@@ -71,10 +71,10 @@ func (c *ClickHouseClient) RemoveSetting(name string) {
 	}
 }
 
-// SetSetting adds a query setting to every request from now on, or replaces
-// its value if it is already set. Like the pinned settings it is applied by
-// the server together with readonly=1, so only settings a readonly profile
-// may change belong here.
+// SetSetting 从此刻起向每个请求添加一个查询设置，若已设置
+// 则替换其值。与固定设置一样，它由服务器连同 readonly=1
+// 一起应用，因此只有 readonly profile 允许更改的设置
+// 才应放在这里。
 func (c *ClickHouseClient) SetSetting(name, value string) {
 	for i := range c.settings {
 		if c.settings[i].name == name {
@@ -85,7 +85,7 @@ func (c *ClickHouseClient) SetSetting(name, value string) {
 	c.settings = append(c.settings, setting{name, value})
 }
 
-// NewClickHouseClient creates a new ClickHouse client
+// NewClickHouseClient 创建一个新的 ClickHouse 客户端
 func NewClickHouseClient(protocol, host, port, username, password string) *ClickHouseClient {
 	return &ClickHouseClient{
 		protocol:   protocol,
@@ -100,11 +100,11 @@ func NewClickHouseClient(protocol, host, port, username, password string) *Click
 	}
 }
 
-// SetQueryTimeout sets the server-side max_execution_time and moves the
-// HTTP client timeout with it, preserving the invariant that the client
-// outlives the server limit. A zero duration disables both: the server
-// runs the query unbounded and the client waits indefinitely, which is
-// only sensible when the operator has asked for it explicitly.
+// SetQueryTimeout 设置服务端 max_execution_time，并同步移动
+// HTTP 客户端超时，保持客户端存活时间长于服务端限制的不变量。
+// 零时长会同时禁用两者：服务器无上限地执行查询，
+// 客户端无限等待，只有在运维人员明确要求时
+// 才合理。
 func (c *ClickHouseClient) SetQueryTimeout(d time.Duration) {
 	c.queryTimeout = d
 	if d <= 0 {
@@ -115,28 +115,27 @@ func (c *ClickHouseClient) SetQueryTimeout(d time.Duration) {
 	c.httpClient.Timeout = d + c.margin
 }
 
-// SetClientMargin changes how much longer the HTTP client waits than the
-// server-side limit (default 60 s) and applies it to the current timeout.
-// An essential collection uses a few seconds: a server stuck reaching Keeper
-// can ignore max_execution_time, and a minute of margin per request is then
-// a minute lost per request.
+// SetClientMargin 更改 HTTP 客户端比服务端限制多等的时间
+// （默认 60 s）并应用到当前超时。essential 采集会使用几秒：
+// 卡在连接 Keeper 的服务器可能忽略 max_execution_time，此时
+// 每个请求一分钟的余量就是每个请求损失一分钟。
 func (c *ClickHouseClient) SetClientMargin(d time.Duration) {
 	c.margin = d
 	c.SetQueryTimeout(c.queryTimeout)
 }
 
-// QueryTimeout is the current server-side per-query limit (0 = none).
+// QueryTimeout 是当前服务端每条查询的限制（0 = 无）。
 func (c *ClickHouseClient) QueryTimeout() time.Duration { return c.queryTimeout }
 
-// SetDryRun enables dry-run mode. While enabled, ExecuteQuery does NOT
-// contact the server — every query is printed to out (with its
-// system-table references) and an empty result is returned to the
-// caller so downstream parsing doesn't fail.
+// SetDryRun 启用 dry-run 模式。启用期间，ExecuteQuery 不会
+// 联系服务器——每条查询都会打印到 out（连同其
+// system 表引用），并向调用方返回空结果，
+// 使下游解析不会失败。
 //
-// If explainEstimate is true, each intercepted SELECT additionally
-// triggers a real `EXPLAIN ESTIMATE <query>` against the server. That
-// is a metadata-only query — it returns the rows/marks/parts the
-// query WOULD scan but reads no data parts. It respects readonly=1.
+// 如果 explainEstimate 为 true，每个被拦截的 SELECT 还会
+// 对服务器触发真实的 `EXPLAIN ESTIMATE <query>`。那是
+// 仅元数据的查询——返回查询 WOULD 扫描的行 / mark / part，
+// 但不读取任何数据 part。它遵守 readonly=1。
 func (c *ClickHouseClient) SetDryRun(out io.Writer, explainEstimate bool) {
 	c.dryRun = true
 	c.dryOut = out
@@ -144,14 +143,14 @@ func (c *ClickHouseClient) SetDryRun(out io.Writer, explainEstimate bool) {
 	c.dryCounter = 0
 }
 
-// IsDryRun reports whether the client is in dry-run mode. Callers
-// that print their own progress messages (e.g. the query executor,
-// the analysis collector) use this to suppress "successfully saved …"
-// lines whose presence in dry-run output would be misleading.
+// IsDryRun 报告客户端是否处于 dry-run 模式。会打印自身进度消息的
+// 调用方（例如查询执行器、分析采集器）用它来抑制
+// "successfully saved …" 行，因为这些行出现在 dry-run 输出中
+// 会造成误导。
 func (c *ClickHouseClient) IsDryRun() bool { return c.dryRun }
 
-// ExecuteQuery executes a query against the ClickHouse server, or
-// intercepts in dry-run mode.
+// ExecuteQuery 对 ClickHouse 服务器执行查询，或在 dry-run 模式下
+// 拦截它。
 func (c *ClickHouseClient) ExecuteQuery(query string) (string, error) {
 	if c.dryRun {
 		return c.dryRunIntercept(query)
@@ -159,42 +158,41 @@ func (c *ClickHouseClient) ExecuteQuery(query string) (string, error) {
 	return c.executeReal(query)
 }
 
-// ExecuteQueryReal bypasses dry-run interception. Used for queries
-// that MUST reach the server even in dry-run: the version probe (to
-// pick the right query variants), the query-analysis pre-flight (to
-// derive normalized_query_hash from --query-id and vice versa, so the
-// printed SQL has real values not unbound `{query_id}` markers), and
-// the EXPLAIN ESTIMATE round-trip itself.
+// ExecuteQueryReal 绕过 dry-run 拦截。用于那些即使在 dry-run 中
+// 也必须到达服务器的查询：版本探测（以选择正确的查询变体）、
+// 查询分析预检（从 --query-id 推导 normalized_query_hash
+// 及反向推导，使打印的 SQL 具有真实值而不是未绑定的
+// `{query_id}` 标记），以及 EXPLAIN ESTIMATE 往返本身。
 //
-// Callers can use it for any read-only metadata fetch that should
-// run independently of dry-run mode.
+// 调用方可以将其用于任何应独立于 dry-run 模式运行的
+// 只读元数据获取。
 func (c *ClickHouseClient) ExecuteQueryReal(query string) (string, error) {
 	return c.executeReal(query)
 }
 
-// ExecuteQueryWithFormat executes a query and returns results in JSONCompact format.
-// The query must NOT include a FORMAT clause.
+// ExecuteQueryWithFormat 执行查询并以 JSONCompact 格式返回结果。
+// 查询绝不能包含 FORMAT 子句。
 func (c *ClickHouseClient) ExecuteQueryWithFormat(query string) (string, error) {
 	return c.ExecuteQuery(query + "\nFORMAT JSONCompact")
 }
 
-// executeReal is the actual HTTP round-trip. Bypasses dry-run so it
-// can be used from inside dryRunIntercept (for the EXPLAIN ESTIMATE
-// metadata fetch) without recursion.
+// executeReal 是实际的 HTTP 往返。绕过 dry-run，因此可以从
+// dryRunIntercept 内部使用（进行 EXPLAIN ESTIMATE
+// 元数据获取）而不会递归。
 func (c *ClickHouseClient) executeReal(query string) (string, error) {
 	return c.executeWith(c.httpClient, query)
 }
 
-// ExecuteQueryFreshConnection runs the query over a NEW TCP/TLS connection
-// that is closed afterwards, bypassing the shared client's keep-alive pool.
+// ExecuteQueryFreshConnection 通过一个随后关闭的全新 TCP/TLS 连接
+// 运行查询，绕过共享客户端的 keep-alive 连接池。
 //
-// Exists for the node-identity probe. The default transport keeps the
-// connection to the server alive, and a load balancer pins a connection to
-// one backend — so three hostName() probes over the shared client answered
-// as the same replica on a three-replica cloud endpoint that plain curl
-// (one connection per call) showed rotating. Only a fresh connection per
-// probe can see the balancer. Not for collectors: a new TLS handshake per
-// query would cost more than the queries.
+// 为节点身份探测而存在。默认 transport 会保持到服务器的
+// 连接存活，而负载均衡器会把连接固定到一个后端——
+// 因此在三副本云端点上，通过共享客户端进行的三次 hostName() 探测
+// 都回答为同一个 replica，而普通 curl（每次调用一个连接）
+// 显示它在轮转。只有每次探测使用新连接才能看到
+// 均衡器。不适用于采集器：每条查询一次新 TLS 握手
+// 的代价会高于查询本身。
 func (c *ClickHouseClient) ExecuteQueryFreshConnection(query string) (string, error) {
 	if c.dryRun {
 		return c.dryRunIntercept(query)
@@ -202,19 +200,19 @@ func (c *ClickHouseClient) ExecuteQueryFreshConnection(query string) (string, er
 	return c.executeWith(freshConnectionClient(c.httpClient.Timeout), query)
 }
 
-// probeTimeout bounds one fresh-connection probe. The probes are trivial
-// queries that run sequentially at start-up, so they get a short overall
-// bound of their own rather than the collectors' query timeout — which can
-// be unbounded (-query-timeout 0) and would let a backend that accepts the
-// connection and then stalls hold the run indefinitely.
+// probeTimeout 限制一次新连接探测。这些探测是启动时
+// 顺序运行的简单查询，因此它们有自己的简短总体上限，
+// 而不是采集器的查询超时——后者可能无上限
+// （-query-timeout 0），会让一个接受连接后卡住的后端
+// 无限期拖住整个运行。
 const probeTimeout = 30 * time.Second
 
-// freshConnectionClient is an http.Client whose transport opens one
-// connection per request and never reuses it. Cloned from the default
-// transport so the connection-level bounds every other request has — the
-// 30 s dial timeout and the 10 s TLS-handshake timeout — stay in force; a
-// zero-value Transport would have dropped both. HTTP/2 is left off: a
-// multiplexed h2 connection is exactly the reuse the probe must avoid.
+// freshConnectionClient 是一个 http.Client，其 transport 每个请求
+// 打开一个连接且从不复用。从默认 transport 克隆而来，
+// 使其他每个请求拥有的连接级限制——30 s 拨号超时和
+// 10 s TLS 握手超时——继续生效；零值 Transport 会丢掉
+// 这两者。HTTP/2 保持关闭：多路复用的 h2 连接正是
+// 探测必须避免的复用。
 func freshConnectionClient(clientTimeout time.Duration) *http.Client {
 	tr := http.DefaultTransport.(*http.Transport).Clone()
 	tr.DisableKeepAlives = true
@@ -227,49 +225,47 @@ func freshConnectionClient(clientTimeout time.Duration) *http.Client {
 	return &http.Client{Timeout: timeout, Transport: tr}
 }
 
-// executeWith is the HTTP round-trip against a given client; executeReal
-// passes the shared keep-alive client, ExecuteQueryFreshConnection a
-// one-shot one.
+// executeWith 是对给定客户端执行的 HTTP 往返；executeReal
+// 传入共享 keep-alive 客户端，ExecuteQueryFreshConnection 传入
+// 一次性客户端。
 func (c *ClickHouseClient) executeWith(httpClient *http.Client, query string) (string, error) {
-	// Build the URL with readonly setting to prevent write operations.
+	// 构建带 readonly 设置的 URL，以防止写操作。
 	//
-	// output_format_json_quote_64bit_integers=1 is pinned rather than left
-	// to the server default. JSON numbers are IEEE-754 doubles in most
-	// parsers, so an unquoted UInt64 above 2^53 is silently rounded on
-	// read — JavaScript turns 18446744073709551615 into
-	// 18446744073709552000, and so does any jq expression that does
-	// arithmetic. Real columns hit this: normalized_query_hash and every
-	// cityHash64 value are full-width UInt64. The setting is writable
-	// under readonly=1, so a user profile CAN turn it off; pinning it is
-	// what makes the guarantee hold. Quoted integers are exact in every
-	// parser, and the dashboard already expects this form (parseUInt64).
+	// output_format_json_quote_64bit_integers=1 被固定，而不是留给
+	// 服务器默认值。JSON 数字在大多数解析器中是 IEEE-754 double，
+	// 因此未加引号的、超过 2^53 的 UInt64 在读取时会被静默舍入——
+	// JavaScript 会把 18446744073709551615 变成
+	// 18446744073709552000，任何做算术的 jq 表达式也一样。
+	// 真实列会碰到这一点：normalized_query_hash 和每个
+	// cityHash64 值都是满宽度 UInt64。该设置在 readonly=1 下可写，
+	// 因此用户 profile 可以关掉它；固定它才是
+	// 保证成立的原因。带引号的整数在每个解析器中都精确，
+	// dashboard 也已预期这种形式（parseUInt64）。
 	//
-	// max_execution_time bounds the query on the SERVER. Without it the
-	// only bound is the HTTP client timeout, and the two have no
-	// relationship: when the client gives up, Go closes the connection and
-	// moves to the next query while the server keeps executing. On a slow
-	// cluster that accumulates abandoned queries, each still burning CPU
-	// and memory, while the collector stacks more on top.
+	// max_execution_time 在 SERVER 端限制查询。没有它，
+	// 唯一的限制就是 HTTP 客户端超时，而两者没有任何
+	// 关系：客户端放弃时，Go 关闭连接并转向下一条查询，
+	// 而服务器仍在执行。在慢集群上这会累积被放弃的查询，
+	// 每条仍在消耗 CPU 和内存，而采集器又叠加更多。
 	//
-	// cancel_http_readonly_queries_on_client_close makes the server drop
-	// the query when we disconnect. It only takes effect under readonly>0,
-	// which is why it belongs next to readonly=1. Caveat: it does not fire
-	// over HTTPS today — on a graceful close the server's liveness peek
-	// sees the TLS close_notify bytes and concludes the peer is still
-	// there (ClickHouse/ClickHouse#96737). So it helps on plain http and
-	// max_execution_time remains the limit we actually rely on.
+	// cancel_http_readonly_queries_on_client_close 让服务器在我们断开时
+	// 丢弃查询。它只在 readonly>0 时生效，
+	// 因此应与 readonly=1 放在一起。注意：目前它在 HTTPS 上
+	// 不会触发——在优雅关闭时，服务器的存活探测会看到 TLS
+	// close_notify 字节，并断定对端仍然存在
+	// （ClickHouse/ClickHouse#96737）。因此它在纯 http 上有帮助，
+	// 而 max_execution_time 仍是我们实际依赖的限制。
 	//
-	// enable_http_compression lets the server gzip the response. Go's
-	// transport already sends Accept-Encoding: gzip and decompresses
-	// transparently — but ONLY while we do not set that header ourselves.
-	// If anyone adds it by hand, transparent decompression switches off
-	// and raw gzip lands in the output files.
+	// enable_http_compression 让服务器 gzip 压缩响应。Go 的
+	// transport 已经发送 Accept-Encoding: gzip 并透明解压——
+	// 但只在我们自己不设置该头部时。如果有人手动添加它，
+	// 透明解压会关闭，原始 gzip 会落入输出文件。
 	//
-	// All of these are applied by the server as one batch of setting
-	// changes alongside readonly=1, so listing readonly first does not
-	// block them (src/Server/HTTPHandler.cpp builds a single
-	// SettingsChanges and checks constraints once).
-	maxExecSeconds := int64((c.queryTimeout + time.Second - 1) / time.Second) // round up to avoid truncation
+	// 所有这些都由服务器作为一批设置变更连同 readonly=1
+	// 一起应用，因此把 readonly 列在前面不会阻止它们
+	// （src/Server/HTTPHandler.cpp 构建单个
+	// SettingsChanges 并只检查一次约束）。
+	maxExecSeconds := int64((c.queryTimeout + time.Second - 1) / time.Second) // 向上取整以避免截断
 	url := fmt.Sprintf("%s://%s:%s/?readonly=1&output_format_json_quote_64bit_integers=1"+
 		"&max_execution_time=%d&cancel_http_readonly_queries_on_client_close=1&enable_http_compression=1",
 		c.protocol, c.host, c.port, maxExecSeconds)
@@ -277,46 +273,45 @@ func (c *ClickHouseClient) executeWith(httpClient *http.Client, query string) (s
 		url += "&" + neturl.QueryEscape(st.name) + "=" + neturl.QueryEscape(st.value)
 	}
 
-	// Create the request
+	// 创建请求
 	req, err := http.NewRequest("POST", url, bytes.NewBufferString(query))
 	if err != nil {
-		return "", fmt.Errorf("error creating request: %w", err)
+		return "", fmt.Errorf("创建请求失败：%w", err)
 	}
 
-	// Set headers
+	// 设置头部
 	req.Header.Set("Content-Type", "text/plain")
 
-	// Add Basic Authentication
+	// 添加 Basic 认证
 	if c.username != "" {
 		req.SetBasicAuth(c.username, c.password)
 	}
 
-	// Execute the request
+	// 执行请求
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("error executing request: %w", err)
+		return "", fmt.Errorf("执行请求失败：%w", err)
 	}
 	defer resp.Body.Close()
 
-	// Check response status
+	// 检查响应状态
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("non-OK status: %d, body: %s", resp.StatusCode, body)
+		return "", fmt.Errorf("HTTP 状态非 200：%d，响应体：%s", resp.StatusCode, body)
 	}
 
-	// Read the response body
+	// 读取响应体
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", fmt.Errorf("error reading response: %w", err)
+		return "", fmt.Errorf("读取响应失败：%w", err)
 	}
 
 	return string(body), nil
 }
 
-// dryRunIntercept prints the query that would be sent and (if
-// configured) returns a real EXPLAIN ESTIMATE for it. The returned
-// payload is an empty result so callers that try to parse the
-// response don't crash.
+// dryRunIntercept 打印将要发送的查询，并（如果已配置）
+// 为其返回真实的 EXPLAIN ESTIMATE。返回的有效载荷是空结果，
+// 使尝试解析响应的调用方不会崩溃。
 func (c *ClickHouseClient) dryRunIntercept(query string) (string, error) {
 	c.dryCounter++
 	tables := ExtractTables(query)
@@ -330,27 +325,26 @@ func (c *ClickHouseClient) dryRunIntercept(query string) (string, error) {
 	fmt.Fprintf(c.dryOut, "    SQL:\n%s\n", indentBlock(query, "      "))
 
 	if c.dryEstimate && isExplainable(query) {
-		// Append `FORMAT PrettyCompactMonoBlock` so the result renders
-		// as the box-drawing table the operator expects:
+		// 追加 `FORMAT PrettyCompactMonoBlock`，使结果渲染为
+		// 运维人员期望的框线表格：
 		//   ┌─database─┬─table─┬─parts─┬─rows─┬─marks─┐
 		//   │ default  │ ttt   │     1 │  128 │     8 │
 		//   └──────────┴───────┴───────┴──────┴───────┘
-		// Without an explicit FORMAT the HTTP default is TabSeparated,
-		// which prints `default\tttt\t1\t128\t8` with no header — it
-		// reads as "empty" at a glance even when the estimate is
-		// populated. PrettyCompactMonoBlock also renders an empty
-		// table (just headers + separator) for the system.* queries
-		// that have no MergeTree parts to estimate, so the operator
-		// sees "no parts" explicitly instead of a blank line.
+		// 没有显式 FORMAT 时，HTTP 默认是 TabSeparated，
+		// 会打印 `default\tttt\t1\t128\t8` 且无表头——
+		// 即使估算有数据，一眼看去也像“空”。PrettyCompactMonoBlock
+		// 对于没有 MergeTree part 可估算的 system.* 查询，
+		// 也会渲染空表（仅表头 + 分隔线），使运维人员
+		// 明确看到“没有 part”，而不是一行空白。
 		est, err := c.executeReal("EXPLAIN ESTIMATE " + stripTrailingFormat(query) + " FORMAT PrettyCompactMonoBlock")
 		switch {
 		case err != nil:
 			fmt.Fprintf(c.dryOut, "    EXPLAIN ESTIMATE: (error: %v)\n", err)
 		case isEmptyEstimate(est):
-			// Header + separator with no data row — the planner found
-			// nothing to scan. Most often a virtual system table
-			// (e.g. system.dictionaries) or a query whose predicate
-			// prunes every part. Saying so plainly beats a blank box.
+			// 表头 + 分隔线但没有数据行——规划器没有找到
+			// 可扫描的内容。最常见的是虚拟 system 表
+			// （例如 system.dictionaries）或谓词裁掉所有 part 的
+			// 查询。明确说明胜过空白框。
 			fmt.Fprintln(c.dryOut, "    EXPLAIN ESTIMATE: this table is empty")
 		default:
 			fmt.Fprintf(c.dryOut, "    EXPLAIN ESTIMATE:\n%s\n", indentBlock(strings.TrimRight(est, "\n"), "      "))
@@ -359,11 +353,11 @@ func (c *ClickHouseClient) dryRunIntercept(query string) (string, error) {
 	return emptyResponseFor(query), nil
 }
 
-// isEmptyEstimate reports whether a PrettyCompactMonoBlock-formatted
-// EXPLAIN ESTIMATE result contains no data rows. The planner returns
-// just the top "┌──┐" and bottom "└──┘" separators when nothing
-// matched. Data rows always render with a "│" body, so any line that
-// starts (after leading whitespace) with "│" means we have content.
+// isEmptyEstimate 报告 PrettyCompactMonoBlock 格式的
+// EXPLAIN ESTIMATE 结果是否不含数据行。没有匹配时，规划器
+// 只返回顶部的 "┌──┐" 和底部的 "└──┘" 分隔线。
+// 数据行总是带 "│" 主体，因此任何（去除前导空白后）
+// 以 "│" 开头的行都意味着有内容。
 func isEmptyEstimate(out string) bool {
 	for _, line := range strings.Split(out, "\n") {
 		t := strings.TrimLeft(line, " \t\r\n0123456789.")
@@ -374,7 +368,7 @@ func isEmptyEstimate(out string) bool {
 	return true
 }
 
-// indentBlock prefixes every line of s with prefix.
+// indentBlock 为 s 的每一行加上 prefix。
 func indentBlock(s, prefix string) string {
 	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
 	for i, l := range lines {
@@ -383,12 +377,12 @@ func indentBlock(s, prefix string) string {
 	return strings.Join(lines, "\n")
 }
 
-// isExplainable returns true if the query is a SELECT or WITH that
-// EXPLAIN ESTIMATE can analyse. Strips leading SQL line- and block-
-// comments first, because many of the .sql files in
-// queries.query_analysis/ start with several `-- description` lines
-// above the SELECT — without comment-stripping isExplainable would
-// see `--` as the first token and skip EXPLAIN ESTIMATE entirely.
+// isExplainable 在查询是 EXPLAIN ESTIMATE 能分析的 SELECT 或 WITH
+// 时返回 true。先剥离开头的 SQL 行注释和块注释，
+// 因为 queries.query_analysis/ 中的许多 .sql 文件在
+// SELECT 上方以多行 `-- description` 开头——
+// 不剥离注释的话，isExplainable 会把 `--` 当作第一个 token，
+// 从而完全跳过 EXPLAIN ESTIMATE。
 func isExplainable(query string) bool {
 	trimmed := stripLeadingSQLComments(query)
 	trimmed = strings.TrimLeft(strings.TrimSpace(trimmed), "(")
@@ -396,11 +390,10 @@ func isExplainable(query string) bool {
 	return strings.HasPrefix(up, "SELECT") || strings.HasPrefix(up, "WITH")
 }
 
-// stripLeadingSQLComments removes any leading whitespace, `-- line`
-// comments, and `/* block */` comments from s — i.e. everything
-// preceding the first real SQL keyword. Used by isExplainable so it
-// can correctly identify SELECT/WITH queries whose head is wrapped
-// in documentation comments.
+// stripLeadingSQLComments 从 s 中移除任何前导空白、`-- line`
+// 注释和 `/* block */` 注释——即第一个真实 SQL 关键词之前的
+// 所有内容。isExplainable 使用它，以便
+// 正确识别头部被文档注释包裹的 SELECT/WITH 查询。
 func stripLeadingSQLComments(s string) string {
 	for {
 		s = strings.TrimLeft(s, " \t\r\n")
@@ -423,8 +416,8 @@ func stripLeadingSQLComments(s string) string {
 	}
 }
 
-// stripTrailingFormat removes a trailing `FORMAT <name>` clause so
-// EXPLAIN ESTIMATE can prefix the query cleanly.
+// stripTrailingFormat 移除末尾的 `FORMAT <name>` 子句，
+// 使 EXPLAIN ESTIMATE 能干净地为查询加前缀。
 func stripTrailingFormat(query string) string {
 	t := strings.TrimRight(query, " \t\r\n;")
 	idx := strings.LastIndex(strings.ToUpper(t), "FORMAT")
@@ -439,8 +432,7 @@ func stripTrailingFormat(query string) string {
 	return t
 }
 
-// emptyResponseFor returns a parseable empty result matching the
-// shape the caller asked for.
+// emptyResponseFor 返回与调用方所请求形态匹配的可解析空结果。
 func emptyResponseFor(query string) string {
 	if strings.Contains(strings.ToUpper(query), "FORMAT JSONCOMPACT") {
 		return `{"meta":[],"data":[],"rows":0}`
@@ -448,7 +440,7 @@ func emptyResponseFor(query string) string {
 	return ""
 }
 
-// GetConnectionInfo returns connection information for display
+// GetConnectionInfo 返回用于展示的连接信息
 func (c *ClickHouseClient) GetConnectionInfo() string {
 	return fmt.Sprintf("%s://%s:%s", c.protocol, c.host, c.port)
 }

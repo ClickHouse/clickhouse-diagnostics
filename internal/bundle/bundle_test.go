@@ -23,14 +23,14 @@ func TestRows_ExactCollectorNameAndQuotedIntegers(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(rows) != 2 {
-		t.Fatalf("rows = %d; the prefix-sharing collector must not be mixed in", len(rows))
+		t.Fatalf("rows = %d；前缀相同的采集器绝不能混入", len(rows))
 	}
 	r := rows[0]
 	if r.Str("database") != "db" || r.Int("is_readonly") != 1 || r.Int("queue_size") != 3 || r.Uint("absolute_delay") != 18446744073709551615 {
-		t.Fatalf("row accessors: %v", r)
+		t.Fatalf("行访问器：%v", r)
 	}
 	if rows[1].Int("queue_size") != 0 || rows[1].Str("missing") != "" {
-		t.Fatal("absent columns must read as zero values")
+		t.Fatal("缺失的列必须读作零值")
 	}
 }
 
@@ -41,7 +41,7 @@ func TestRows_StatusOfMissingSources(t *testing.T) {
 		_, err := b.Rows(name)
 		ne, ok := err.(*NotCollected)
 		if !ok || ne.State != want {
-			t.Errorf("%s: err %v, want state %q", name, err, want)
+			t.Errorf("%s：err %v，期望状态 %q", name, err, want)
 		}
 	}
 }
@@ -56,7 +56,7 @@ func TestRows_ParsesEachFileOnce(t *testing.T) {
 	}
 	c, err := b.Rows("system.metrics")
 	if err != nil || len(a) != 1 || len(c) != 1 {
-		t.Fatalf("second read must come from the cache: %v %v %v", a, c, err)
+		t.Fatalf("第二次读取必须来自缓存：%v %v %v", a, c, err)
 	}
 }
 
@@ -69,9 +69,9 @@ func TestRow_MapAndFloat(t *testing.T) {
 	}
 	r := rows[0]
 	if m := r.Map("errors"); m["ZNONODE"] != 7 || m["ZOK"] != 2 {
-		t.Fatalf("map: %v", m)
+		t.Fatalf("map：%v", m)
 	}
 	if r.Float("lat") != 1.5 || r.Float("f") != 2.25 {
-		t.Fatalf("float: %v %v", r.Float("lat"), r.Float("f"))
+		t.Fatalf("float：%v %v", r.Float("lat"), r.Float("f"))
 	}
 }

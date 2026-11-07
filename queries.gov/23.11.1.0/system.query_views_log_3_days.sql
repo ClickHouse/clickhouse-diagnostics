@@ -1,40 +1,40 @@
--- What this collector answers:
---   * an MV that "succeeds" while writing nothing (read_rows > 0, written_rows = 0,
---     exception_code = 0) — the silent row-drop class. Invisible in query_log,
---     because the parent INSERT reports success.
---   * an MV push that threw while the base part was already committed, leaving the
---     base table and the MV target inconsistent (ExceptionWhileProcessing).
---   * per-view memory and duration over time — how you spot an upgrade that raises
---     one MV's peak memory several-fold while its row counts stay flat.
---   * divergence between two views in a chain, by comparing written_rows per bucket.
+-- 本采集器回答的问题：
+--   * 一个物化视图“成功”却什么都没写（read_rows > 0、written_rows = 0、
+--     exception_code = 0）—— 静默丢行这一类。query_log 里看不到，
+--     因为父 INSERT 报告的是成功。
+--   * 一次 MV 推送抛错，而基础 part 已经提交，导致基表与 MV 目标
+--     不一致（ExceptionWhileProcessing）。
+--   * 按视图跟踪内存和耗时 —— 借此发现某次升级让一个 MV 的峰值内存
+--     翻了好几倍，而行数却持平。
+--   * 通过比较每个桶的 written_rows，发现链中两个视图之间的分叉。
 --
--- Redacted (gov) variant. Two differences from the onprem file:
---   * no exception text. An MV failure message embeds the identifier it failed on
---     ("Unknown table expression identifier 'db.lookup'"), so only the numeric
---     exception_code is collected — the same rule part_log and query_log follow.
---   * view_name and view_target are 'database.table' strings and are split before
---     hashing. PrintGovNameMapping builds the reversal CSV from system.tables, so
---     it keys on database and table names SEPARATELY; a hash of the joined string
---     matches nothing in the mapping and is unreadable to the analyst.
+-- 脱敏（gov）变体。与 onprem 文件有两处不同：
+--   * 不采集异常文本。MV 失败消息会嵌入失败所涉及的标识符
+--     ("Unknown table expression identifier 'db.lookup'")，所以只采集
+--     数值 exception_code —— 与 part_log 和 query_log 遵循同一规则。
+--   * view_name 和 view_target 是 'database.table' 字符串，在哈希前
+--     先拆分。PrintGovNameMapping 从 system.tables 构建反向 CSV，所以
+--     它分别以 database 和 table 名称为键；对拼接后的字符串做哈希
+--     在映射中匹配不到任何东西，分析人员也无法解读。
 --
--- Hashing sits in the OUTER select, over the aggregated result, so SHA256 runs once
--- per output row rather than once per source row.
+-- 哈希放在外层 select 中、作用于聚合结果，因此 SHA256 每个输出行
+-- 只运行一次，而不是每个源行一次。
 --
--- view_uuid is deliberately NOT collected: verified on 26.7.5.10 that ClickHouse
--- writes the zero UUID into it for every view, while system.tables carries the
--- real one. It would be a constant column.
+-- 有意不采集 view_uuid：已在 26.7.5.10 上验证 ClickHouse
+-- 对每个视图都写入零 UUID，而 system.tables 保存的是真实值。
+-- 它只会是一列常量。
 SELECT
     time,
-    -- hostname column added in 23.11; hashed like every other identifier.
+    -- hostname 列在 23.11 加入；像其他所有标识符一样哈希。
     hex(SHA256(concat(hostname, '%salt%')))                         AS hostname,
-    -- view_name / view_target are 'db.table' as the server prints them
-    -- (getFullTableName): either half is backquoted when it needs to be — a
-    -- database called a.b prints as `a.b`.mv, an MV declared with an ENGINE
-    -- writes to db.`.inner_id.<uuid>` — so a plain split on '.' is wrong in both
-    -- directions. The separator is the first '.' when the name starts bare, and
-    -- the '.' right after the closing backtick when it starts quoted; then the
-    -- backticks are stripped, so each hashed half equals the hashed database /
-    -- name in system.tables and the mapping CSV reverses it.
+    -- view_name / view_target 是服务器打印的 'db.table'
+    -- （getFullTableName）：两半在需要时都会加反引号 —— 名为 a.b 的
+    -- 数据库会打印成 `a.b`.mv，用 ENGINE 声明的 MV 写入
+    -- db.`.inner_id.<uuid>` —— 所以简单地按 '.' 拆分在两个方向上都是错的。
+    -- 名称不以引号开头时，分隔符是第一个 '.'；以引号开头时，
+    -- 是闭合反引号后面的那个 '.'；然后去掉反引号，使每个被哈希的
+    -- 半段都等于 system.tables 中哈希后的 database / name，
+    -- 映射 CSV 即可将其反转。
     hex(SHA256(concat(trim(BOTH '`' FROM substring(view_name, 1, if(startsWith(view_name, '`'), position(view_name, '`.'), position(view_name, '.') - 1))), '%salt%'))) AS view_database,
     hex(SHA256(concat(trim(BOTH '`' FROM substring(view_name, if(startsWith(view_name, '`'), position(view_name, '`.') + 2, position(view_name, '.') + 1))), '%salt%')))    AS view_table,
     if(view_target = '', '', hex(SHA256(concat(trim(BOTH '`' FROM substring(view_target, 1, if(startsWith(view_target, '`'), position(view_target, '`.'), position(view_target, '.') - 1))), '%salt%')))) AS target_database,
@@ -65,8 +65,8 @@ FROM (
         status,
         exception_code,
         count()                                             AS executions,
-        -- NOT a fault on its own: an MV whose SELECT has a WHERE clause legitimately
-        -- writes nothing for most blocks. Read it as a ratio of executions.
+        -- 本身并不代表故障：SELECT 带 WHERE 子句的 MV 在大多数块上
+        -- 合法地什么都不写。应把它当作执行次数的比例来读。
         countIf(qvl.read_rows > 0 AND qvl.written_rows = 0) AS zero_write_executions,
         sum(qvl.read_rows)                                  AS read_rows,
         sum(qvl.read_bytes)                                 AS read_bytes,
@@ -74,10 +74,10 @@ FROM (
         sum(qvl.written_bytes)                              AS written_bytes,
         sum(qvl.view_duration_ms)                           AS view_duration_ms,
         max(qvl.view_duration_ms)                           AS max_view_duration_ms,
-        -- Every aggregate argument is read through the `qvl.` alias on purpose:
-        -- `sum(view_duration_ms) AS view_duration_ms` puts the name in the query's
-        -- GLOBAL alias scope, so a later bare max(view_duration_ms) resolves to that
-        -- aggregate and the server rejects the query (ILLEGAL_AGGREGATION 184).
+        -- 每个聚合参数都特意通过 `qvl.` 别名读取：
+        -- `sum(view_duration_ms) AS view_duration_ms` 会把该名称放进查询的
+        -- 全局别名作用域，于是后面裸写的 max(view_duration_ms) 会解析成那个
+        -- 聚合，服务器会拒绝该查询（ILLEGAL_AGGREGATION 184）。
         avg(qvl.peak_memory_usage)                          AS avg_peak_memory_usage,
         quantile(0.5)(qvl.peak_memory_usage)                AS median_peak_memory_usage,
         max(qvl.peak_memory_usage)                          AS max_peak_memory_usage,
@@ -85,7 +85,7 @@ FROM (
         max(qvl.event_time)                                 AS maxDate
     FROM merge(system, '^query_views_log') AS qvl
     WHERE (event_time > {from:3d} AND event_time <= {to:now})
-    -- Explicit key list instead of GROUP BY ALL: that syntax needs 22.12+ and this
-    -- root file must run on every supported server (22.8+).
+    -- 显式列出键，而不用 GROUP BY ALL：该语法需要 22.12+，而这个根目录
+    -- 文件必须能在所有受支持的服务器（22.8+）上运行。
     GROUP BY time, hostname, view_name, view_target, view_type, status, exception_code
 )

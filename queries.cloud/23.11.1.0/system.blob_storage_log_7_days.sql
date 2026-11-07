@@ -1,5 +1,5 @@
--- Object-storage operations per hour and replica, with failures and an example
--- error. Table exists only when <blob_storage_log> is configured.
+-- 每小时、每个副本的对象存储操作，包含失败和一条示例
+-- 错误。仅当配置了 <blob_storage_log> 时该表才存在。
 SELECT
     toStartOfHour(event_time)                                        AS time,
     hostname,

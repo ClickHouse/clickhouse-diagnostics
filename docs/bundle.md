@@ -1,126 +1,126 @@
-# The bundle: output format, layout, host facts and configuration
+# bundle（诊断包）：输出格式、布局、host facts 与配置
 
-*Moved from the main [README](../README.md), which keeps a short version of each section.*
+*已从主 [README](../README.md) 迁移而来，该文件保留每一节的简短版本。*
 
-## Output format
+## 输出格式
 
-Query results are written one file per query, in the format chosen by `-output-format`. The default is **`jsonl`**.
+查询结果按每个查询一个文件写入，格式由 `-output-format` 选择。默认是 **`jsonl`**。
 
-| Value | ClickHouse format | Extension | |
+| 值 | ClickHouse 格式 | 扩展名 | |
 |---|---|---|---|
-| `jsonl` *(default)* | `JSONEachRow` | `.jsonl` | One self-describing JSON object per line. `grep`- and `jq`-able, and every row carries its column names — which matters because `system.query_log` has ~60 columns and positional formats leave you counting fields back to a header. |
-| `native` | `Native` | `.native` | The ClickHouse binary format used before v0.3.0. Column-oriented, exactly typed, reloadable with no schema — but unreadable without a ClickHouse to load it into. |
-| `tsv` | `TSVWithNamesAndTypes` | `.tsv` | Names on line 1, **types on line 2**. The most faithful text format for reload, but positional, so it reads poorly for wide tables. |
+| `jsonl` *(default)* | `JSONEachRow` | `.jsonl` | 每行一个自描述的 JSON 对象。可直接用 `grep` 和 `jq` 处理，且每一行都带有列名——这很重要，因为 `system.query_log` 约有 60 列，而按位置排列的格式会让你一路数着字段去对表头。 |
+| `native` | `Native` | `.native` | v0.3.0 之前使用的 ClickHouse 二进制格式。面向列、类型精确、无需 schema 即可重新载入——但没有 ClickHouse 可供载入时无法读取。 |
+| `tsv` | `TSVWithNamesAndTypes` | `.tsv` | 第 1 行是名称，**第 2 行是类型**。重新载入时最忠实的文本格式，但按位置排列，因此对宽表来说可读性很差。 |
 
-### Queries are bounded on the server
+### 查询在服务端受限
 
-The only bound used to be client-side: a 5-minute HTTP timeout. That timeout and the server had no relationship — when it fired, Go closed the connection and the tool moved on while the server kept executing. `cancel_http_readonly_queries_on_client_close` defaults to `0` on self-managed, so on a slow cluster you accumulate abandoned queries, each still burning CPU and memory, while the collector stacks more on top. Cloud sets it to `1`, which is why this was invisible in Cloud testing and only bit the self-managed audience the tool is mainly for.
+过去唯一的限制在客户端：5 分钟 HTTP 超时。这个超时与服务端毫无关系——一旦触发，Go 关闭连接，工具继续往下走，而服务端仍在执行。在 self-managed 上，`cancel_http_readonly_queries_on_client_close` 默认为 `0`，因此在慢集群上会不断累积被放弃的查询，每一个仍在消耗 CPU 和内存，而 collector（采集器）还在往上叠加更多。Cloud 将其设为 `1`，这就是为什么在 Cloud 测试中看不到这个问题，它只影响了该工具主要面向的 self-managed 用户。
 
-Every request now carries `max_execution_time` (default 240s, set with `-query-timeout`). The server enforces it, so a slow query fails with a clean `Code: 159` that lands in the customer's `query_log` and can be diagnosed, instead of vanishing into a silent disconnect. The HTTP client waits 60s longer than whatever `-query-timeout` says, so the server always wins the race. `-query-timeout=0` disables both.
+现在每个请求都携带 `max_execution_time`（默认 240s，由 `-query-timeout` 设置）。服务端会强制执行它，因此慢查询会以一个干净的 `Code: 159` 失败，该错误会落到客户的 `query_log` 中并可被诊断，而不是消失在无声的断连里。HTTP 客户端等待的时间比 `-query-timeout` 指定的值多 60s，因此服务端总会在竞争中胜出。`-query-timeout=0` 会同时禁用两者。
 
-Two more settings ride along. `cancel_http_readonly_queries_on_client_close=1` tells the server to drop the query when we disconnect — it only applies under `readonly>0`, and note it does **not** fire over HTTPS today: on a graceful close the server's liveness peek sees the TLS `close_notify` bytes and concludes the peer is still there ([ClickHouse#96737](https://github.com/ClickHouse/ClickHouse/issues/96737)). It works on plain `http`, which is why `max_execution_time` is the limit to rely on. `enable_http_compression=1` lets the server gzip the response, which matters on bastion hosts over a slow link; Go's transport requests and decompresses it transparently, and will stop doing so if anyone ever sets `Accept-Encoding` by hand.
+还有两个设置一并生效。`cancel_http_readonly_queries_on_client_close=1` 告诉服务端在我们断开时丢弃查询——它只在 `readonly>0` 时生效，并且请注意它目前**不会**在 HTTPS 上触发：在优雅关闭时，服务端的存活探测会看到 TLS 的 `close_notify` 字节，并断定对端仍然存在（[ClickHouse#96737](https://github.com/ClickHouse/ClickHouse/issues/96737)）。它在普通 `http` 上有效，因此 `max_execution_time` 才是应当依赖的限制。`enable_http_compression=1` 允许服务端对响应做 gzip 压缩，这在链路较慢的堡垒机上很重要；Go 的 transport 会透明地请求并解压，如果任何人手动设置了 `Accept-Encoding`，它就会停止这样做。
 
-### Large integers are never rounded
+### 大整数绝不被舍入
 
-JSON numbers are IEEE-754 doubles in most parsers, so an unquoted `UInt64` above 2^53 is silently corrupted on read — JavaScript turns `18446744073709551615` into `18446744073709552000`, and so does any `jq` expression that does arithmetic on it. This is not hypothetical: `normalized_query_hash` and every `cityHash64` value in `system.query_log` are full-width `UInt64`.
+在大多数解析器中，JSON 数字是 IEEE-754 double，因此超过 2^53 的未加引号 `UInt64` 在读取时会被悄悄破坏——JavaScript 会把 `18446744073709551615` 变成 `18446744073709552000`，任何对它做算术的 `jq` 表达式也是如此。这不是假设：`normalized_query_hash` 以及 `system.query_log` 中每个 `cityHash64` 值都是全宽 `UInt64`。
 
-The tool therefore pins `output_format_json_quote_64bit_integers=1` on every request, so 64-bit integers are emitted as **quoted strings** and survive every parser exactly. The setting is writable under `readonly=1`, so a server-side profile could otherwise turn it off — pinning it is what makes the guarantee hold rather than depend on the server's configuration.
+因此工具在每个请求中固定 `output_format_json_quote_64bit_integers=1`，让 64 位整数以**带引号的字符串**形式输出，从而在任何解析器中都精确保留下来。该设置即使在 `readonly=1` 下也可写，所以服务端 profile 原本可能把它关掉——固定它才能让这一保证成立，而不是依赖服务端的配置。
 
-`native` and `tsv` are exact by construction. Cast on read when you reload:
+`native` 和 `tsv` 在构造上就是精确的。重新载入时在读取阶段做类型转换：
 
 ```bash
 clickhouse-local -q "SELECT toUInt64(normalized_query_hash) FROM file('x.jsonl','JSONEachRow')"
 ```
 
-### Size
+### 大小
 
-The shipped artefact is a `tar.gz`, and JSON's repeated keys compress away almost entirely. Measured on a real bundle (21 queries, ClickHouse 24.8):
+交付产物是一个 `tar.gz`，JSON 中重复的键几乎可以被完全压缩掉。在一个真实 bundle（诊断包）上测得（21 个查询，ClickHouse 24.8）：
 
-| Format | Uncompressed | **Archive (`tar.gz`)** |
+| 格式 | 未压缩 | **归档（`tar.gz`）** |
 |---|---|---|
 | `jsonl` | 2.20 MB | **225 KB** |
 | `native` | 1.83 MB | 240 KB |
 | `tsv` | 2.12 MB | 272 KB |
 
-`jsonl` is 20% larger on disk but produces the **smallest archive** of the three, so the readable default costs nothing in what you actually send.
+`jsonl` 在磁盘上大 20%，但生成的**归档最小**，因此在真正发送的内容上，这个可读的默认选项没有额外代价。
 
-## Host facts and server logs
+## host facts（主机信息）与服务端日志
 
-Beyond what ClickHouse reports about itself, the tool collects the surrounding context that usually explains it: the host it runs on, and the log files on that host's disk.
+除了 ClickHouse 对自身的报告之外，工具还收集通常能解释这些情况的周边上下文：它运行所在的主机，以及该主机磁盘上的日志文件。
 
-### When these run
+### 何时运行
 
-Both collectors read the **machine executing the tool**, so `-host-info` and `-logs` take `auto` (the default), `on` or `off` rather than a plain skip flag:
+这两个 collector（采集器）读取的都是**执行工具的机器**，因此 `-host-info` 和 `-logs` 接受 `auto`（默认）、`on` 或 `off`，而不是一个简单的跳过 flag：
 
-| Mode | `auto` resolves to | Why |
+| 模式 | `auto` 解析为 | 原因 |
 |---|---|---|
-| `onprem` | **on** | The tool runs on the ClickHouse server, so `/proc` and `/var/log/clickhouse-server` describe that server. |
-| `cloud` | **off** | ClickHouse Cloud is reached over the network. Local host facts and log files would describe your laptop or bastion — confidently wrong data in a support bundle is worse than none. Pass `-host-info=on` / `-logs=on` if you are pointing cloud mode at a self-managed node. |
-| `gov` | **off**, unconditionally | Hostnames, mount paths, process command lines and log bodies are exactly what gov hashing protects, and none of them can be hashed while staying useful. `-host-info=on` is **rejected**, not ignored. |
+| `onprem` | **on** | 工具运行在 ClickHouse 服务端上，因此 `/proc` 和 `/var/log/clickhouse-server` 描述的就是该服务端。 |
+| `cloud` | **off** | ClickHouse Cloud 通过网络访问。本地 host facts（主机信息）和日志文件描述的会是你的笔记本或堡垒机——支持 bundle（诊断包）中自信给出的错误数据比没有数据更糟。如果你把 cloud 模式指向一个 self-managed 节点，请传入 `-host-info=on` / `-logs=on`。 |
+| `gov` | **off**，无条件 | 主机名、挂载路径、进程命令行和日志正文正是 gov 哈希所保护的内容，而它们都无法在保持有用性的同时被哈希。`-host-info=on` 会被**拒绝**，而不是被忽略。 |
 
-Both are also skipped under `--dry-run`, which promises to write nothing. The mode matrix is pinned by tests in `cmd/local_collector_test.go`.
+两者在 `--dry-run`（试运行）下也会被跳过，因为该模式承诺不写入任何内容。模式矩阵由 `cmd/local_collector_test.go` 中的测试固定。
 
-### `keeper/` — what each Keeper member says about itself
+### `keeper/`——每个 Keeper 成员对自身的描述
 
-`-keeper-mntr auto|on|off` (default `auto`) sends seven read-only four-letter commands to the Keeper members and writes one `keeper/<host>_<port>.txt` per member. The member list is the union of two sources: `system.zookeeper_connection`, which names the member each configured connection is **on right now** (one row per connection — the default `<zookeeper>` block and every auxiliary one — not one per ensemble member), and every `<zookeeper><node>` in the server configuration (`-config-dir` and the adjacent `config.xml`) when the tool runs on the server. The second is what reaches the followers this server is *not* connected to — the member a Keeper incident is usually about. A run without access to the configuration (remote `-host`, cloud, gov without `-config-dir`) probes the connected member only, and says so in the execution log.
+`-keeper-mntr auto|on|off`（默认 `auto`）向 Keeper 成员发送七个只读 four-letter command（四字命令），并为每个成员写一个 `keeper/<host>_<port>.txt`。成员列表是两个来源的并集：`system.zookeeper_connection`，它给出每个已配置连接**当前所在**的成员（每个连接一行——默认的 `<zookeeper>` 块和每个辅助块——而不是每个 ensemble 成员一行）；以及工具在服务端运行时服务器配置（`-config-dir` 和相邻的 `config.xml`）中的每个 `<zookeeper><node>`。第二个来源才能触达此服务器*未*连接的 follower——Keeper 事故通常涉及的正是那个成员。无法访问配置的运行（远程 `-host`、cloud、没有 `-config-dir` 的 gov）只探测已连接的成员，并在执行日志中说明这一点。
 
-| Command | What it answers |
+| 命令 | 它回答什么 |
 |---|---|
-| `ruok` | liveness (`imok`) |
-| `srvr` | Keeper version, latency min/avg/max, received/sent, connections, **outstanding requests**, zxid, **mode** (leader / follower / standalone), node count |
-| `mntr` | the same as `zk_*` counters, plus followers and synced followers (on the leader), znode / watch / ephemeral counts, memory, latest snapshot size |
-| `isro` | `ro` for a read-only member or observer, `rw` otherwise |
-| `lgif` | the member's Raft log: first / last index, committed vs leader-committed, last snapshot index (absent before 23.x) |
-| `conf` | the coordination settings in force — `snapshot_distance`, `reserved_log_items`, `snapshot_transfer_chunk_size`, `write_snapshot_version` … (in gov only numbers, booleans and plain words survive) |
-| `dirs` | bytes on disk in the snapshot and log directories |
+| `ruok` | 存活状态（`imok`） |
+| `srvr` | Keeper 版本、延迟 min/avg/max、接收/发送、连接数、**未完成请求**、zxid、**模式**（leader / follower / standalone）、节点数 |
+| `mntr` | 与 `zk_*` 计数器相同的内容，外加 follower 和已同步 follower（在 leader 上）、znode / watch / ephemeral 计数、内存、最新快照大小 |
+| `isro` | 只读成员或 observer 返回 `ro`，否则返回 `rw` |
+| `lgif` | 该成员的 Raft 日志：first / last index、committed 与 leader-committed、最后快照索引（23.x 之前不存在） |
+| `conf` | 当前生效的协调设置——`snapshot_distance`、`reserved_log_items`、`snapshot_transfer_chunk_size`、`write_snapshot_version`……（在 gov 下只有数字、布尔值和普通单词会保留） |
+| `dirs` | 快照和日志目录在磁盘上的字节数 |
 
-`ruok`, `isro` and `lgif` are sent first because they answer even on a member that is **not serving** (no quorum, still loading its snapshot); the others then reply `This instance is not currently serving requests`, which is recorded as the member's status. Every command is read-only, goes nowhere near Raft and does not grow with the data size: ~0.3 ms each on a healthy member. The members are asked **in parallel** and a member gets nothing more after its first network failure, so one or several hung members cost one read timeout (10 s) in total, not one per command. Commands with side effects (`csnp`, `rqld`, `ydld`, `rcvr`, `srst`, `crst`, `rclc`, `clrs`) are never sent. Each file names its ensemble (`# ensemble: default`, or the auxiliary ZooKeeper's name — hashed in gov), so members of different ensembles are never compared; an auxiliary member's file is `<ensemble>__<host>_<port>.txt`, so a default and an auxiliary connection to one host:port never overwrite each other.
+先发送 `ruok`、`isro` 和 `lgif`，因为即使成员**未在服务**（没有 quorum、仍在加载快照）它们也能应答；其余命令随后会回复 `This instance is not currently serving requests`，这会被记录为该成员的状态。每个命令都是只读的，完全不涉及 Raft，也不随数据量增长：在健康成员上每个约 0.3 ms。成员是**并行**询问的，某个成员在第一次网络失败后就不会再收到任何请求，因此一个或几个挂起的成员总共只消耗一次读取超时（10 s），而不是每个命令一次。有副作用的命令（`csnp`、`rqld`、`ydld`、`rcvr`、`srst`、`crst`、`rclc`、`clrs`）绝不会被发送。每个文件都会标明其 ensemble（`# ensemble: default`，或辅助 ZooKeeper 的名称——在 gov 下会被哈希），因此不同 ensemble 的成员绝不会被比较；辅助成员的文件名为 `<ensemble>__<host>_<port>.txt`，因此指向同一 host:port 的默认连接和辅助连接绝不会互相覆盖。
 
-These are the server-side facts a Keeper finding is settled with: `metric_log` says how long *this server* waited for Keeper, `zookeeper_connection` says which member it talks to, and only Keeper itself says whether that member is the leader, how many requests it has queued and what it runs. Each command opens its own TCP connection (3 s dial, 10 s read) because Keeper closes after one reply; a member that is down or refuses four-letter words is recorded as such in its file and in `execution_log.txt`, never a failed run. `stat` and `cons` are **never sent**: they list client addresses.
+这些就是用来定论某个 Keeper finding（发现）的服务端事实：`metric_log` 说明*此服务器*等待 Keeper 了多久，`zookeeper_connection` 说明它在与哪个成员通信，而只有 Keeper 自己才能说明该成员是否为 leader、队列中有多少请求以及它运行着什么。每个命令都会打开自己的 TCP 连接（3 s 连接，10 s 读取），因为 Keeper 在一次应答后就会关闭连接；一个宕机或拒绝四字命令的成员会在其文件和 `execution_log.txt` 中如实记录，绝不会导致整次运行失败。`stat` 和 `cons` **绝不会被发送**：它们会列出客户端地址。
 
-| Mode | `auto` resolves to | Why |
+| 模式 | `auto` 解析为 | 原因 |
 |---|---|---|
-| `onprem` | **on** | The tool runs beside the cluster, so the Keeper ports are reachable. |
-| `gov` | **on**, host hashed | The counters are numbers; the only identifier is the member's host, which is written as `hex(SHA256(host ‖ salt))` in the file name and header — the same form `system.zookeeper_connection` carries in a gov bundle, so the two join. Any reply line carrying an `ip:port` is dropped as a safeguard. |
-| `cloud` | **off** | A managed service's Keeper is not reachable from outside. `-keeper-mntr=on` is honoured with a warning for a self-managed cluster collected in cloud mode. |
+| `onprem` | **on** | 工具运行在集群旁边，因此 Keeper 端口可达。 |
+| `gov` | **on**，主机名哈希 | 计数器都是数字；唯一的标识符是成员的主机名，它会在文件名和文件头中写作 `hex(SHA256(host ‖ salt))`——与 gov bundle（诊断包）中 `system.zookeeper_connection` 所携带的形式相同，因此两者可以关联。任何携带 `ip:port` 的回复行都会被丢弃，作为保护措施。 |
+| `cloud` | **off** | 托管服务的 Keeper 无法从外部访问。对于在 cloud 模式下采集的 self-managed 集群，`-keeper-mntr=on` 会被执行，但会给出警告。 |
 
-Under `--dry-run` the members are listed and nothing is contacted; the one-row-per-connection `SELECT` on `system.zookeeper_connection` that builds the list is a metadata pre-flight read, executed for real and printed like the version probe. Per-member statuses in `execution_log.txt`: `ok` (all three commands answered), `partial` (some did — usually a word missing from `four_letter_word_white_list`), `refused`, `timeout` (including a reply cut short by the 10 s deadline, kept in the file and marked truncated), `failed` (every command failed for another reason, or the file could not be written). Servers before 23.8 have no `system.zookeeper_connection`, so the step is skipped and says so. Keeper must allow the three words in `four_letter_word_white_list` (the default `*` does); an empty reply is annotated accordingly.
+在 `--dry-run` 下只列出成员，不联系任何成员；用于构建列表的 `system.zookeeper_connection` 上每连接一行的 `SELECT` 是一次元数据预检读取，会真实执行并像版本探测一样打印出来。`execution_log.txt` 中的每成员状态：`ok`（全部三个命令都有应答）、`partial`（部分应答——通常是因为 `four_letter_word_white_list` 中缺少某个词）、`refused`、`timeout`（包括被 10 s 截止时间截断的回复，会保留在文件中并标记为截断）、`failed`（所有命令都因其他原因失败，或文件无法写入）。23.8 之前的服务器没有 `system.zookeeper_connection`，因此该步骤会被跳过并说明原因。Keeper 必须在 `four_letter_word_white_list` 中允许这些词（默认的 `*` 可以）；空回复会被相应地标注。
 
-### `host_info.json` — OS, kernel and hardware
+### `host_info.json`——操作系统、内核与硬件
 
-Read from `/proc`, `/sys` and `/etc` with no external dependencies, so it only yields data when the tool runs **on the ClickHouse host** — which is why `auto` restricts it to onprem. Forced on elsewhere, each section is marked unavailable with a note rather than silently empty.
+从 `/proc`、`/sys` 和 `/etc` 读取，不依赖外部组件，因此只有当工具**在 ClickHouse 主机上**运行时才会产生数据——这就是 `auto` 将其限制在 onprem 的原因。在其他位置强制启用时，每一节都会标记为不可用并附说明，而不是悄悄留空。
 
-| Section | Contents |
+| 节 | 内容 |
 |---|---|
-| `os` | hostname, **distro + version** (`/etc/os-release`), kernel version and full banner, arch, uptime |
-| `cpu` | logical CPUs, model, vendor, load average, and the vector flags ClickHouse dispatches on (`avx2`, `avx512f`, … / `asimd`, `sve` on ARM) |
-| `memory` | total / free / available / buffers / cached / swap, in bytes |
-| `disks` | every real mount: device, mount point, fs type, total, free, used % (pseudo- and file-bind mounts filtered out) |
-| `top_processes_by_rss` | top 25 by RSS — pid, ppid, state, threads, RSS, command |
-| `clickhouse_relevant_tunables` | **transparent hugepages** + defrag, `vm.swappiness`, `vm.overcommit_memory`, `vm.max_map_count`, `fs.nr_open`, `fs.file-max`, **cgroup memory/CPU limits**, and the running server's own `LimitNOFILE` |
+| `os` | 主机名、**发行版 + 版本**（`/etc/os-release`）、内核版本和完整 banner、架构、运行时间 |
+| `cpu` | 逻辑 CPU 数、型号、厂商、负载均值，以及 ClickHouse 进行分派所依据的向量 flag（`avx2`、`avx512f`……/ ARM 上的 `asimd`、`sve`） |
+| `memory` | 总量 / 空闲 / 可用 / buffers / cached / swap，单位为字节 |
+| `disks` | 每个真实挂载点：设备、挂载点、文件系统类型、总量、空闲、已用百分比（伪挂载和文件绑定挂载已过滤） |
+| `top_processes_by_rss` | 按 RSS 排名前 25——pid、ppid、state、threads、RSS、command |
+| `clickhouse_relevant_tunables` | **透明大页** + defrag、`vm.swappiness`、`vm.overcommit_memory`、`vm.max_map_count`、`fs.nr_open`、`fs.file-max`、**cgroup 内存/CPU 限制**，以及正在运行的服务端自身的 `LimitNOFILE` |
 
-That last row is the point of the collector: THP set to `always`, a cgroup memory cap far below `MemTotal`, or a low `LimitNOFILE` explain a large share of ClickHouse incidents and are invisible from inside the database.
+最后一行正是这个 collector（采集器）的意义所在：THP 被设为 `always`、cgroup 内存上限远低于 `MemTotal`，或 `LimitNOFILE` 过低，能解释相当大一部分 ClickHouse 事故，而这些问题从数据库内部是看不见的。
 
-### `logs/` — server log files
+### `logs/`——服务端日志文件
 
 ```bash
-./clickhouse-diagnostic -mode onprem -host ch-01           # discovers the log directory
+./clickhouse-diagnostic -mode onprem -host ch-01           # 发现日志目录
 ./clickhouse-diagnostic -mode onprem -logs-dir /data/ch/logs
 ```
 
-The directory is resolved in this order:
+目录按以下顺序解析：
 
-1. `-logs-dir`, used verbatim (a bad path is reported, never silently replaced)
-2. **`<log>` / `<errorlog>` paths read from the server configuration** — operators relocate logs more often than they change anything else, and this is what stops a bundle from quietly containing none
+1. `-logs-dir`，原样使用（错误路径会被报告，绝不会悄悄替换）
+2. **从服务器配置中读取的 `<log>` / `<errorlog>` 路径**——运维人员迁移日志目录的频率高于改动其他任何东西，这正是避免 bundle（诊断包）悄悄不含任何日志的原因
 3. `/var/log/clickhouse-server`
 
-Both 2 and 3 are collected when they differ. `*.log` is copied by default; `-logs-include-archives` adds rotated `*.gz`/`*.zst`. Files above `-logs-max-mb` (default 50) are **tail**-truncated — the recent end is kept, with a header recording what was dropped so the first surviving line isn't mistaken for the start of the log.
+当第 2 项和第 3 项不同时，两者都会被采集。默认复制 `*.log`；`-logs-include-archives` 会增加轮转后的 `*.gz`/`*.zst`。超过 `-logs-max-mb`（默认 50）的文件会被**从尾部**截断——保留最近的一端，并在文件头记录丢弃了什么，以免第一行保留下来的内容被误认为日志开头。
 
-> At `<level>debug</level>` a busy server writes 50 MB in **seconds**, so the tail of `clickhouse-server.log` rarely reaches back to an incident that ended hours earlier (the `.err.log` tail usually covers a few hours). For the incident timeline rely on `system.text_log_histogram_1_day` and the hourly aggregates, and raise `-logs-max-mb` (or ship the rotated file with `-logs-include-archives`) only when a specific log passage is needed.
+> 在 `<level>debug</level>` 下，繁忙的服务器**几秒**就能写入 50 MB，因此 `clickhouse-server.log` 的尾部很少能回溯到数小时前已结束的事故（`.err.log` 的尾部通常覆盖几个小时）。要还原事故时间线，请依赖 `system.text_log_histogram_1_day` 和按小时的聚合，只有需要某段特定日志时才提高 `-logs-max-mb`（或用 `-logs-include-archives` 一并带上轮转文件）。
 
-### `--collect-text-log` — a bounded slice of `system.text_log`
+### `--collect-text-log`——`system.text_log` 的有界切片
 
-**Off by default and requires an explicit window**, because `text_log` is the highest-volume table ClickHouse writes: an unbounded dump would be enormous and would itself load the server.
+**默认关闭且要求显式窗口**，因为 `text_log` 是 ClickHouse 写入量最大的表：无界转储会非常庞大，并且本身就会给服务器带来负载。
 
 ```bash
 ./clickhouse-diagnostic -mode onprem -host ch-01 \
@@ -128,75 +128,75 @@ Both 2 and 3 are collected when they differ. `*.log` is copied by default; `-log
   -text-log-level Warning
 ```
 
-| Flag | Meaning |
+| Flag | 含义 |
 |---|---|
-| `-collect-text-log` | Enable it. **Requires `--from` and `--to`** — the run fails fast otherwise. |
-| `-text-log-level` | Minimum severity (`Fatal`…`Trace`). Omit for all levels. |
-| `-text-log-limit` | Row cap (default 500 000). |
+| `-collect-text-log` | 启用它。**需要 `--from` 和 `--to`**——否则运行会快速失败。 |
+| `-text-log-level` | 最低严重级别（`Fatal`……`Trace`）。省略则包含所有级别。 |
+| `-text-log-limit` | 行数上限（默认 500 000）。 |
 
-Written as `text_log_<timestamp>.<ext>`, in the [configured output format](#output-format). In cloud mode it fans out across replicas; `message_format_string` is only selected on 23.1+. If `system.text_log` is disabled (the ClickHouse default) the tool says so and explains how to enable it, rather than reporting a bare error.
+写为 `text_log_<timestamp>.<ext>`，采用[配置的输出格式](#输出格式)。在 cloud 模式下会分发到各 replica（副本）；`message_format_string` 仅在 23.1+ 上被选取。如果 `system.text_log` 被禁用（ClickHouse 的默认行为），工具会说明这一点并解释如何启用，而不是只报一个裸错误。
 
-## Configuration Collection
+## 配置采集
 
-When `-skip-config` is not set, the tool reads files from `-config-dir` (default `/etc/clickhouse-server/config.d/`; in `cloud` mode collection is skipped unless `-config-dir` is given explicitly, and `gov` mode never collects) and writes sanitised copies into the run's `configuration/` directory (inside `clickhouse_diagnostic_<timestamp>/`), mirroring the source tree — `config.d/storage.xml` and `users.d/storage.xml` stay distinct, and the directory a file came from (which determines ClickHouse's merge order) is preserved.
+未设置 `-skip-config` 时，工具从 `-config-dir` 读取文件（默认 `/etc/clickhouse-server/config.d/`；在 `cloud` 模式下除非显式给出 `-config-dir`，否则跳过采集，而 `gov` 模式从不采集），并将 sanitisation（脱敏）后的副本写入本次运行的 `configuration/` 目录（位于 `clickhouse_diagnostic_<timestamp>/` 内），镜像源目录树——`config.d/storage.xml` 和 `users.d/storage.xml` 保持区分，文件来源目录（决定 ClickHouse 的合并顺序）也得以保留。
 
-Sanitisation runs in two layers — proper XML / YAML parsing first, then a heuristic byte-pattern pass over the result. If a file cannot be parsed, the tool **fails closed**: a warning is logged and the file is skipped rather than shipped un-sanitised.
+sanitisation（脱敏）分两层进行——先做正规的 XML / YAML 解析，再对结果做一次启发式字节模式扫描。如果文件无法解析，工具会**失败关闭（fail closed）**：记录一条警告并跳过该文件，而不是把未脱敏的文件发出去。
 
-### What gets sanitised
+### 哪些内容会被脱敏
 
-**Structural** (driven by tag / attribute / YAML-key name, case-insensitive):
+**结构化**（由标签 / 属性 / YAML 键名驱动，不区分大小写）：
 
-- Any name matching the exact list: `client_id`, `tenant_id`, `account_name`, `account_key`, `storage_account_url`, `role_arn`, `role_session_name`, `session_token`, `connection_string`
-- Any name **containing** one of: `password`, `passwd`, `secret`, `credential`, `token`, `private_key`, `api_key`, `access_key`, `service_account` — so future or custom tags like `<my_db_password>`, `<gcp_service_account_credentials>`, `<legacy_api_token>` are caught without code changes
-- XML attribute values with the same naming rules: `password="..."`, `aws_access_key_id="..."`, etc.
-- Multi-line values inside the above tags (the previous regex-only implementation missed these)
+- 任何与以下精确列表匹配的名称：`client_id`、`tenant_id`、`account_name`、`account_key`、`storage_account_url`、`role_arn`、`role_session_name`、`session_token`、`connection_string`
+- 任何**包含**以下之一的名称：`password`、`passwd`、`secret`、`credential`、`token`、`private_key`、`api_key`、`access_key`、`service_account`——因此像 `<my_db_password>`、`<gcp_service_account_credentials>`、`<legacy_api_token>` 这样的未来或自定义标签无需改代码就会被捕获
+- 遵循相同命名规则的 XML 属性值：`password="..."`、`aws_access_key_id="..."` 等
+- 上述标签内的多行值（此前仅用正则的实现会漏掉这些）
 
-**Heuristic** (byte-shape signatures, applied to the whole file including comments and free text):
+**启发式**（字节形态特征，应用于整个文件，包括注释和自由文本）：
 
-- PEM-encapsulated private keys (`-----BEGIN ... PRIVATE KEY-----` blocks)
-- AWS access key IDs (`AKIA…`, `ASIA…`)
-- JWT tokens (`eyJ…` three-segment shape)
-- Bcrypt password hashes (`$2[abxy]$…`)
-- Long hex strings (40+ chars — SHA-1, SHA-256, longer)
-- Long base64 blobs (128+ chars — GCP service-account payloads etc.)
-- Credentials embedded in URLs (`proto://user:pw@host` — only the password is redacted, host stays)
-- `keyword: value` / `keyword = value` / `keyword "value"` disclosures in prose, where keyword contains `password`, `secret`, `token`, `api_key`, `access_key`, `private_key`, or `credential` — catches values pasted into XML comments or YAML `# notes`
+- PEM 封装的私钥（`-----BEGIN ... PRIVATE KEY-----` 块）
+- AWS 访问密钥 ID（`AKIA…`、`ASIA…`）
+- JWT token（`eyJ…` 三段式形态）
+- Bcrypt 密码哈希（`$2[abxy]$…`）
+- 长十六进制字符串（40+ 字符——SHA-1、SHA-256 及更长）
+- 长 base64 数据块（128+ 字符——GCP 服务账号载荷等）
+- 嵌入 URL 的凭据（`proto://user:pw@host`——只脱敏密码，主机名保留）
+- 正文中的 `keyword: value` / `keyword = value` / `keyword "value"` 泄露，其中 keyword 包含 `password`、`secret`、`token`、`api_key`、`access_key`、`private_key` 或 `credential`——可捕获粘贴到 XML 注释或 YAML `# notes` 中的值
 
-### What does **not** get sanitised
+### 哪些内容**不会**被脱敏
 
-- Hostnames, IPs, cluster topology
-- Database and table names
-- Performance / resource settings
-- Non-security configuration
-- Prose mentioning credential keywords without an actual value (e.g. `password requirements are documented elsewhere`)
+- 主机名、IP、集群拓扑
+- 数据库名和表名
+- 性能 / 资源设置
+- 非安全相关配置
+- 提到凭据关键词但没有实际值的正文（例如 `password requirements are documented elsewhere`）
 
-The heuristic intentionally favours over-redaction over under-redaction — a stray flagged hash in the output is harmless, a leaked credential is not. Always review the contents of the run's `configuration/` directory before sharing the archive.
+该启发式有意偏向过度脱敏而非脱敏不足——输出中多标记一个哈希无伤大雅，泄露凭据则不是。分享归档前，请始终检查本次运行 `configuration/` 目录的内容。
 
-## Output Layout
+## 输出布局
 
-A single run produces:
+一次运行会生成：
 
 ```
 clickhouse_results/
-├── clickhouse_diagnostic_YYYYMMDD_HHMMSS/                   # → archived
-│   ├── system.parts_YYYYMMDD_HHMMSS.jsonl                   #   one file per query
+├── clickhouse_diagnostic_YYYYMMDD_HHMMSS/                   # → 归档
+│   ├── system.parts_YYYYMMDD_HHMMSS.jsonl                   #   每个查询一个文件
 │   ├── system.mutations_YYYYMMDD_HHMMSS.jsonl
 │   ├── ...
-│   ├── configuration/                                       #   sanitised configs, tree preserved (unless -skip-config; never in gov)
+│   ├── configuration/                                       #   脱敏后的配置，目录树保留（除非 -skip-config；gov 下从不包含）
 │   │   ├── config.xml
 │   │   ├── config.d/…
 │   │   └── users.d/…
-│   ├── query_analysis/                                      #   only with --query-id / --hash
-│   ├── keeper/<host>_<port>.txt                             #   four-letter replies per Keeper member (-keeper-mntr; gov hashes the host; not in cloud by default)
-│   ├── dashboard.html                                       #   unless -skip-dashboard or gov
-│   ├── execution_log.txt                                    #   every collector: outcome, wall time, size; alerts; phases
-│   └── alerts_summary.json                                  #   when alerts ran but dashboard.html is absent
-├── clickhouse_diagnostic_YYYYMMDD_HHMMSS.tar.gz             # → the archive, unless -skip-archive
-└── clickhouse_diagnostic_YYYYMMDD_HHMMSS_gov_name_mapping.csv   # → LOCAL only (gov mode)
+│   ├── query_analysis/                                      #   仅在使用 --query-id / --hash 时
+│   ├── keeper/<host>_<port>.txt                             #   每个 Keeper 成员的 four-letter command（四字命令）回复（-keeper-mntr；gov 下主机名会哈希；cloud 默认不包含）
+│   ├── dashboard.html                                       #   除非 -skip-dashboard 或 gov
+│   ├── execution_log.txt                                    #   每个 collector（采集器）：结果、耗时、大小；alert rule（告警规则）；阶段
+│   └── alerts_summary.json                                  #   当 alert rule（告警规则）运行了但没有 dashboard.html 时
+├── clickhouse_diagnostic_YYYYMMDD_HHMMSS.tar.gz             # → 归档文件，除非 -skip-archive
+└── clickhouse_diagnostic_YYYYMMDD_HHMMSS_gov_name_mapping.csv   # → 仅本地（gov 模式）
 ```
 
-- **Query results**: one file per query, in the format chosen by [`-output-format`](#output-format) (default `jsonl`)
-- **Dashboard**: standalone `dashboard.html`, loads Chart.js from CDN
-- **Execution log**: `execution_log.txt` — one line per collector query with its version directory, outcome (`ok` / `failed` / `empty`), wall time, result bytes and rows, plus every alert rule with its outcome and duration, one `keeper` entry per Keeper member probed (`ok` / `partial` / `refused` / `timeout`), and the wall time of each phase (collectors, keeper facts, host facts, logs, config, alerts, dashboard). The *Most expensive collectors* list is what to read before adapting a window in `queries.<mode>/`; the *Failed collectors* list is what separates "the table was empty" from "the query never ran". Contains file names, timings and ClickHouse error text only — no result data.
-- **Archive**: `tar.gz` containing the per-run results directory — `configuration/` now lives *inside* it, tree intact, so a bundle can only ever contain this run's configs. (Before v0.3.0 it was a flat, process-wide `./configuration` beside the run directory; anything parsing bundles by that path needs updating.)
-- **Gov-mode mapping CSV** (gov mode only): sits next to the backup folder, **not inside it** — never goes into the archive. See [Gov mode and hashed names](modes.md#gov-mode-and-hashed-names).
+- **查询结果**：每个查询一个文件，格式由 [`-output-format`](#输出格式) 选择（默认 `jsonl`）
+- **Dashboard（仪表盘）**：独立的 `dashboard.html`，从 CDN 加载 Chart.js
+- **执行日志**：`execution_log.txt`——每个 collector 查询一行，记录其版本目录、结果（`ok` / `failed` / `empty`）、耗时、结果字节数和行数，外加每条 alert rule（告警规则）的结果和耗时、每个被探测 Keeper 成员的一条 `keeper` 记录（`ok` / `partial` / `refused` / `timeout`），以及每个阶段的耗时（collector、keeper facts、host facts、logs、config、alerts、dashboard）。*最耗时的 collector* 列表是在调整 `queries.<mode>/` 中窗口之前应当查看的内容；*失败的 collector* 列表则用于区分“表是空的”和“查询根本没运行”。它只包含文件名、计时和 ClickHouse 错误文本——不含结果数据。
+- **归档**：包含每次运行结果目录的 `tar.gz`——`configuration/` 现在位于其*内部*，目录树完整，因此一个 bundle（诊断包）永远只可能包含本次运行的配置。（在 v0.3.0 之前，它是运行目录旁边一个扁平的、进程级的 `./configuration`；任何按该路径解析 bundle 的逻辑都需要更新。）
+- **Gov 模式映射 CSV**（仅 gov 模式）：位于备份文件夹旁边，**不在其内部**——绝不会进入归档。参见 [Gov 模式与哈希名称](modes.md#gov-模式与名称哈希)。

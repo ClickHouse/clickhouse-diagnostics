@@ -18,20 +18,20 @@ SELECT
     interface,
     normalized_query_hash,
     count(*) as count,
-    -- Truncated so the archive stays small, but present: without it a
-    -- normalized_query_hash in this file cannot be mapped back to SQL
-    -- once the server is gone.
+    -- 截断以保持归档较小，但保留它：没有它，
+    -- 本文件中的 normalized_query_hash 就无法在服务器
+    -- 消失后映射回 SQL。
     --
-    -- leftUTF8, not left: left() counts BYTES, so a cut landing inside a
-    -- multi-byte character emits a lone continuation byte and the .jsonl
-    -- line stops being valid UTF-8 — the server's response is written to
-    -- disk verbatim (internal/query/executor.go), so nothing downstream
-    -- repairs it. Strict parsers then reject the line outright
-    -- (python json: "invalid continuation byte"); jq is lenient and
-    -- silently substitutes U+FFFD, which corrupts the text just as much
-    -- but quietly. Reachable with any non-ASCII literal in customer SQL
-    -- ('München', CJK identifiers). leftUTF8 counts code points and is
-    -- registered alongside left in 22.8, so it needs no version gate.
+    -- 用 leftUTF8 而不是 left：left() 按字节计数，截断落在
+    -- 多字节字符中间时会输出一个孤立的续字节，导致 .jsonl
+    -- 行不再是有效 UTF-8——服务器响应会原样写入
+    -- 磁盘（internal/query/executor.go），因此下游没有任何环节
+    -- 会修复它。严格解析器会直接拒绝该行
+    -- （python json: "invalid continuation byte"）；jq 较宽松，
+    -- 会静默替换为 U+FFFD，对文本的破坏同样严重，
+    -- 只是更隐蔽。客户 SQL 中任何非 ASCII 字面量都可能触发
+    -- （'München'、CJK 标识符）。leftUTF8 按码点计数，并
+    -- 在 22.8 与 left 一同注册，因此不需要版本门槛。
     leftUTF8(any(query), 500) as query,
     min(event_time) as minDate,
     max(event_time) as maxDate,
@@ -40,35 +40,35 @@ SELECT
     uniqExact(ql.exception) as distinct_exceptions
 FROM clusterAllReplicas(default, system.query_log) AS ql
 LEFT ARRAY JOIN tables
--- distinct_exceptions is the denominator for any(exception). Because the
--- error code IS a group key, every row in a group shares it, so the sampled
--- message is representative rather than arbitrary — but the text still varies
--- with whatever identifier it embeds, and one message cannot say whether it
--- stands for 1 failure or 400 identical ones. uniqExact gives that in a single
--- integer, with no extra rows: 40 events / 1 distinct message is one recurring
--- fault, 40 / 40 is forty different ones that happen to share a code.
+-- distinct_exceptions 是 any(exception) 的分母。由于
+-- 错误码本身就是分组键，组内每行共享它，因此采样的
+-- 消息具有代表性而非任意选择——但文本仍会随其嵌入的标识符
+-- 变化，而且单条消息无法说明它
+-- 代表 1 次失败还是 400 次相同失败。uniqExact 用一个
+-- 整数给出答案，且不增加行：40 个事件 / 1 条不同消息表示一个反复出现的
+-- 故障，40 / 40 则是四十个恰好共享同一错误码的不同故障。
 --
--- any()/uniqExact() read the column through the `ql.` table alias on purpose.
--- `any(exception) AS exception` puts `exception` in the query's alias scope,
--- and aliases are global, so a bare `uniqExact(exception)` resolves to that
--- aggregate rather than the column and the server rejects the query outright:
+-- any()/uniqExact() 有意通过 `ql.` 表别名读取该列。
+-- `any(exception) AS exception` 会把 `exception` 放进查询的别名作用域，
+-- 而别名是全局的，所以裸写 `uniqExact(exception)` 会解析到那个
+-- 聚合函数而不是列，服务器会直接拒绝该查询：
 -- "Aggregate function any(exception) AS exception is found inside another
--- aggregate function" (ILLEGAL_AGGREGATION 184, hit on 26.7). Reordering the
--- projection does not help. Qualifying sidesteps the alias entirely; verified
--- on 22.8.21.38, 23.7.5.30 and 26.7.5.10.
+-- aggregate function"（ILLEGAL_AGGREGATION 184，在 26.7 上遇到）。重排
+-- 投影没有帮助。加限定符可以完全绕开别名；已在
+-- 22.8.21.38、23.7.5.30 和 26.7.5.10 上验证。
 --
--- Deliberately NOT a group key. Verified on 26.7: 8 UNKNOWN_DATABASE events
--- produced 8 distinct messages (each names its own database), and grouping on
--- the text turned 13 aggregated events into 13 rows — a row-for-row copy of
--- the source, the same trap part_name had.
+-- 故意不作为分组键。已在 26.7 验证：8 个 UNKNOWN_DATABASE 事件
+-- 产生了 8 条不同消息（每条都点名自己的数据库），而按
+-- 文本分组把 13 个聚合事件变成了 13 行——成了源表的逐行
+-- 副本，和 part_name 遇到的同一个陷阱。
 WHERE (event_time > {from:7d} AND event_time <= {to:now})
--- LEFT ARRAY JOIN, not ARRAY JOIN: a query that never resolved a table has an
--- empty `tables` array, and a plain ARRAY JOIN drops those rows entirely. That
--- is exactly the failure class worth archiving — UNKNOWN_TABLE (60), parse
--- errors (6/27), anything that threw before analysis finished. LEFT keeps them
--- with tables = ''.
+-- 使用 LEFT ARRAY JOIN 而不是 ARRAY JOIN：从未解析到表的查询有一个
+-- 空的 `tables` 数组，普通 ARRAY JOIN 会完全丢弃这些行。这
+-- 正是值得归档的失败类别——UNKNOWN_TABLE (60)、解析
+-- 错误（6/27），以及分析完成前抛出的任何错误。LEFT 会保留它们，
+-- 且 tables = ''。
 --
--- Consequence of the array join, either way: a query touching N tables emits N
--- rows and EVERY sum is repeated in full on each one. Filter to a single table
--- before reading the sums; never re-sum across rows or you will multiply-count.
+-- 无论哪种方式，array join 的后果都是：涉及 N 张表的查询会发出 N
+-- 行，并且每个 sum 都会在每一行上完整重复。读取汇总前
+-- 请过滤到单张表；绝不要跨行再次求和，否则会重复计数。
 GROUP BY ALL

@@ -1,10 +1,10 @@
 -- tier: essential
--- Slow-updating server gauges: Uptime (the denominator for system.errors and
--- system.events), ReplicasMaxAbsoluteDelay, ReplicasSumQueueSize,
--- NumberOfTables/NumberOfDatabases, MaxPartCountForPartition,
--- TotalPartsOfMergeTreeTables, FilesystemCacheBytes, memory/RSS, jemalloc.
--- Per-core rows (…CPU12, …MHz_12) are dropped — they add hundreds of rows
--- and nothing a bundle reader needs.
+-- 更新缓慢的服务器指标：Uptime（system.errors 与 system.events 的分母）、
+-- ReplicasMaxAbsoluteDelay、ReplicasSumQueueSize、
+-- NumberOfTables/NumberOfDatabases、MaxPartCountForPartition、
+-- TotalPartsOfMergeTreeTables、FilesystemCacheBytes、内存/RSS、jemalloc。
+-- 按核心拆分的行（…CPU12、…MHz_12）被丢弃——它们会增加数百行，
+-- 而 bundle 读取者并不需要。
 SELECT
     metric,
     value,

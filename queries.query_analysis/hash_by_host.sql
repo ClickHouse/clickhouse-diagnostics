@@ -1,10 +1,10 @@
--- Per-host distribution of the focus hash. Surfaces "one node is
--- slower than the rest" patterns in cloud clusters.
--- Run when --normalized-query-hash is set (auto-derived from --query-id).
+-- 目标 hash 的按 host 分布。在云集群中揭示
+-- "某个节点比其余节点慢" 的模式。
+-- 当设置了 --normalized-query-hash 时运行（由 --query-id 自动推导）。
 SELECT
-    -- Root variant: the hostname COLUMN was added to query_log in 23.11
-    -- (see 23.11.1.0/). hostName() runs on the serving replica, so the
-    -- per-host split still works through clusterAllReplicas.
+    -- 根变体：hostname 列在 23.11 才加入 query_log
+    -- （见 23.11.1.0/）。hostName() 在提供服务的 replica 上运行，
+    -- 因此按 host 的拆分通过 clusterAllReplicas 仍然有效。
     hostName()                                              AS hostname,
     count()                                                 AS executions,
     max(query_duration_ms)                                  AS max_duration_ms,

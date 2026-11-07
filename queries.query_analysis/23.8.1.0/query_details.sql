@@ -1,7 +1,7 @@
--- Full query_log row for the focus query_id.
--- Run when --query-id is set.
--- 23.8+ variant: adds query_cache_usage (new in 23.8). peak_threads_usage
--- (23.9) and the hostname column (23.11) come in later overrides.
+-- 目标 query_id 的完整 query_log 行。
+-- 当设置了 --query-id 时运行。
+-- 23.8+ 变体：增加 query_cache_usage（23.8 新增）。peak_threads_usage
+-- （23.9）和 hostname 列（23.11）在后续的版本覆盖中加入。
 SELECT
     event_time_microseconds                                AS ts,
     query_id,

@@ -1,9 +1,9 @@
 -- tier: essential
--- Cumulative ProfileEvents since server start: ZooKeeper*Exceptions,
--- S3*RequestsErrors, ReadBufferFromS3RequestsErrors, ReplicatedPartFailedFetches,
--- FailedQuery/FailedInsertQuery, RejectedInserts, DelayedInserts …
--- Counters, not rates: read them against Uptime (system.asynchronous_metrics)
--- or diff two bundles.
+-- 自服务器启动以来的累计 ProfileEvents：ZooKeeper*Exceptions、
+-- S3*RequestsErrors、ReadBufferFromS3RequestsErrors、ReplicatedPartFailedFetches、
+-- FailedQuery/FailedInsertQuery、RejectedInserts、DelayedInserts …
+-- 是计数器而非速率：对照 Uptime（system.asynchronous_metrics）读取，
+-- 或比较两个 bundle 的差值。
 SELECT
     event,
     value,

@@ -1,7 +1,7 @@
 -- tier: essential
 SELECT 
-  -- every replica has its own queue: the host tells them apart (the
-  -- dashboard shows the serving replica's, as a local read did)
+  -- 每个副本都有自己的队列：主机信息用于区分它们（
+  -- dashboard 显示服务副本的队列，与本地读取时一样）
   hostName() AS hostname,
   create_time,
   database,

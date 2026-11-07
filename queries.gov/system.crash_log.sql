@@ -1,8 +1,8 @@
 -- tier: essential
--- Server crashes (the table exists only on a server that has crashed). The
--- query that was running is hashed like every gov identifier; stack traces
--- are left out — they are build addresses, not needed to see that and when
--- the server crashed, and the crash_log_entries alert reads only these.
+-- 服务器崩溃（该表只存在于发生过崩溃的服务器上）。当时正在运行的
+-- 查询像每个 gov 标识符一样哈希；堆栈跟踪被排除 —— 它们是构建地址，
+-- 判断服务器是否崩溃、何时崩溃并不需要，而且 crash_log_entries
+-- 告警只读取这些内容。
 SELECT
     event_time,
     signal,

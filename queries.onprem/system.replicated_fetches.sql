@@ -1,8 +1,8 @@
 -- tier: essential
--- Part fetches in flight right now: which replica this node is pulling from,
--- how far along, how big. Many long-running fetches after a Keeper or network
--- incident = the replica is catching up; a fetch stuck at the same progress
--- across two bundles is a wedged interserver connection.
+-- 当前正在进行的 part 拉取：本节点正从哪个 replica 拉取、
+-- 进度多少、大小几何。Keeper 或网络事故之后出现大量长时间拉取，
+-- 说明 replica 正在追赶；若两次 bundle 中某个拉取卡在同一进度，
+-- 则是一条卡死的 interserver 连接。
 SELECT
     database,
     table,

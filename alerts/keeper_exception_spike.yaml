@@ -1,31 +1,26 @@
 name: keeper_exception_spike
-title: "Keeper/ZooKeeper exceptions spiking (code 999)"
+title: "Keeper/ZooKeeper异常激增（错误码999）"
 severity: warning
 description: |
-  More than 20 Keeper exception errors (code 999 — KEEPER_EXCEPTION) in a
-  single hour of the last 24 hours (one alert instance per such hour).
-  These errors mean ClickHouse failed to complete a coordination request
-  with ClickHouse Keeper or ZooKeeper. The window is a day, not an hour,
-  because bundles are usually collected after recovery — a rule that
-  only looks at the last hour is blind to the incident it is meant to
-  surface.
+  最近24小时中的某一小时内，Keeper异常错误（错误码999——KEEPER_EXCEPTION）
+  超过20次（每个此类小时生成一个告警实例）。这些错误意味着ClickHouse
+  未能完成与ClickHouse Keeper或ZooKeeper的协调请求。窗口是一天而不是
+  一小时，因为bundle通常是在恢复之后采集的——只看最后一小时的规则
+  无法看到它本应揭示的事件。
 
-  Ongoing Keeper exceptions can block DDL operations, stall replication,
-  and prevent mutations from completing. Common causes include Keeper
-  network issues, session expiry, Keeper overload, or a Keeper leader
-  election in progress.
+  持续的Keeper异常会阻塞DDL操作、拖住replication，并阻止mutation完成。
+  常见原因包括Keeper网络问题、会话过期、Keeper过载，或Keeper leader
+  选举正在进行。
 
-  Check: system.replication_queue for stuck entries, Keeper logs for
-  leadership changes, and whether affected queries were DDL or writes
-  to replicated tables.
+  排查：system.replication_queue中是否有卡住的条目、Keeper日志中的
+  领导权变更，以及受影响的查询是DDL还是对replicated表的写入。
 tags:
   - keeper
   - replication
   - reliability
 
-# Evaluated by the Go check over the files already collected (no second
-# query to the server). query: below is the same test in SQL, for the
-# customer to run live; the check mirrors it.
+# 由Go check在已采集的文件上评估（不会再次查询服务器）。下方query:是同一
+# 测试的SQL版本，供客户在线执行；check镜像同一逻辑。
 check: go:keeper_exception_spike
 source:
   - system.query_log_exceptions_1_day
@@ -43,4 +38,4 @@ query: |
   HAVING error_count > 20
   ORDER BY hour
 
-message: "Keeper exception (code 999) fired {error_count} times in the hour starting {hour} — example: {example_message}"
+message: "Keeper异常（错误码999）在{hour}开始的一小时内触发了{error_count}次——示例：{example_message}"

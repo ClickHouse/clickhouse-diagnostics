@@ -6,14 +6,13 @@ import (
 	"time"
 )
 
-// Runner is the one client method the probe needs (pkg.ClickHouseClient).
+// Runner 是探测所需的唯一客户端方法（pkg.ClickHouseClient）。
 type Runner interface {
 	ExecuteQueryReal(query string) (string, error)
 }
 
-// ProbeQuery reads only in-memory tables, on every supported version (22.8+).
-// max_threads reads "auto(16)" when not set by hand, which is the core count
-// the server itself uses.
+// ProbeQuery 只读取内存中的表，适用于所有受支持的版本（22.8+）。
+// max_threads 在未手动设置时读作 "auto(16)"，即服务器自身使用的核心数。
 const ProbeQuery = `SELECT
     (SELECT sum(value) FROM system.metrics WHERE metric = 'Query'),
     (SELECT sum(value) FROM system.metrics WHERE metric = 'MemoryTracking'),
@@ -26,16 +25,16 @@ const ProbeQuery = `SELECT
     (SELECT max(value) FROM system.metrics WHERE metric = 'ZooKeeperConnectionLossStartedTimestampSeconds')
 FORMAT TSV`
 
-// LimitsQuery reads the limits the ratios are measured against. Its table
-// arrived in 23.3; on older servers it fails and the limits stay unknown.
+// LimitsQuery 读取各项比率所对比的限额。它依赖的表在 23.3 才出现；
+// 在更老的服务器上会失败，限额保持未知。
 const LimitsQuery = `SELECT
     (SELECT toInt64OrZero(any(value)) FROM system.server_settings WHERE name = 'max_concurrent_queries'),
     (SELECT toInt64OrZero(any(value)) FROM system.server_settings WHERE name = 'max_server_memory_usage'),
     (SELECT toFloat64OrZero(any(value)) FROM system.server_settings WHERE name = 'max_server_memory_usage_to_ram_ratio')
 FORMAT TSV`
 
-// Probe reads the load signals. An error means SELECT 1 or the in-memory
-// read itself failed — which Decide treats as a struggling server.
+// Probe 读取负载信号。出错意味着 SELECT 1 或内存读取本身失败——
+// Decide 会将其视为服务器处于困境。
 func Probe(r Runner) (Signals, error) {
 	var s Signals
 	t := time.Now()

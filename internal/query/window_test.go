@@ -20,7 +20,7 @@ func TestWindowDefaultSQL(t *testing.T) {
 		{"15d", "now() - INTERVAL 15 DAY", true},
 		{"12h", "now() - INTERVAL 12 HOUR", true},
 		{"30m", "now() - INTERVAL 30 MINUTE", true},
-		// Rejected: these must fail closed rather than widen a window.
+		// 被拒绝：这些必须失败关闭，而不是放宽窗口。
 		{"7dd", "", false},
 		{"d", "", false},
 		{"7", "", false},
@@ -33,17 +33,17 @@ func TestWindowDefaultSQL(t *testing.T) {
 	for _, c := range cases {
 		got, ok := windowDefaultSQL(c.spec)
 		if ok != c.ok {
-			t.Errorf("windowDefaultSQL(%q) ok = %v, want %v", c.spec, ok, c.ok)
+			t.Errorf("windowDefaultSQL(%q) ok = %v，期望 %v", c.spec, ok, c.ok)
 			continue
 		}
 		if ok && got != c.want {
-			t.Errorf("windowDefaultSQL(%q) = %q, want %q", c.spec, got, c.want)
+			t.Errorf("windowDefaultSQL(%q) = %q，期望 %q", c.spec, got, c.want)
 		}
 	}
 }
 
-// TestWindowDefaultExpansion checks the template -> SQL mapping for the
-// shapes the shipped queries actually use.
+// TestWindowDefaultExpansion 针对随包查询实际使用的形态，
+// 检查模板 -> SQL 的映射。
 func TestWindowDefaultExpansion(t *testing.T) {
 	cases := []struct {
 		templated string
@@ -63,9 +63,9 @@ func TestWindowDefaultExpansion(t *testing.T) {
 		},
 	}
 	for _, c := range cases {
-		got := Apply(c.templated, Vars{}) // no flags -> defaults
+		got := Apply(c.templated, Vars{}) // 无 flag -> 默认值
 		if got != c.original {
-			t.Errorf("default expansion changed the window:\n got: %s\nwant: %s", got, c.original)
+			t.Errorf("默认展开改变了窗口：\n got: %s\nwant: %s", got, c.original)
 		}
 	}
 }
@@ -77,32 +77,31 @@ func TestWindowFlagsOverrideDefaults(t *testing.T) {
 	got := Apply("WHERE event_time > {from:15d} AND event_time <= {to:now}", Vars{From: from, To: to})
 	want := "WHERE event_time > toDateTime('2026-03-01 10:30:00', 'UTC') AND event_time <= toDateTime('2026-03-02 11:00:00', 'UTC')"
 	if got != want {
-		t.Errorf("both flags:\n got: %s\nwant: %s", got, want)
+		t.Errorf("两个 flag 都给出：\n got: %s\nwant: %s", got, want)
 	}
 
-	// One end supplied: the other must still fall back to its default,
-	// not to a zero timestamp (which would select nothing).
+	// 只给出一端：另一端仍必须回退到它的默认值，
+	// 而不是零时间戳（那会选不到任何数据）。
 	got = Apply("WHERE event_time > {from:7d} AND event_time <= {to:now}", Vars{From: from})
 	want = "WHERE event_time > toDateTime('2026-03-01 10:30:00', 'UTC') AND event_time <= now()"
 	if got != want {
-		t.Errorf("only --from:\n got: %s\nwant: %s", got, want)
+		t.Errorf("只给 --from：\n got: %s\nwant: %s", got, want)
 	}
 
 	got = Apply("WHERE event_time > {from:7d} AND event_time <= {to:now}", Vars{To: to})
 	want = "WHERE event_time > now() - INTERVAL 7 DAY AND event_time <= toDateTime('2026-03-02 11:00:00', 'UTC')"
 	if got != want {
-		t.Errorf("only --to:\n got: %s\nwant: %s", got, want)
+		t.Errorf("只给 --to：\n got: %s\nwant: %s", got, want)
 	}
 }
 
-// TestFlagTimestampsCarryExplicitUTC pins the blocking finding from PR
-// review: ClickHouse parses a BARE datetime literal in the column's
-// timezone (the server's), so an un-annotated '2026-03-01 10:30:00' on a
-// <timezone>America/New_York</timezone> server selects a window five
-// hours away from the UTC instant the operator asked for — silently.
-// Every flag-supplied timestamp must therefore reach the SQL wrapped in
-// toDateTime('…', 'UTC'). Defaults (now() arithmetic) are epoch-based and
-// need no annotation.
+// TestFlagTimestampsCarryExplicitUTC 固定住 PR 评审中的阻塞性发现：
+// ClickHouse 会按列所在时区（服务器的时区）解析裸 datetime 字面量，
+// 因此在 <timezone>America/New_York</timezone> 服务器上，未加注的
+// '2026-03-01 10:30:00' 会选出一个与运维人员想要的 UTC 时刻相差五小时的
+// 窗口 —— 而且悄无声息。因此每个由 flag 提供的时间戳都必须以
+// toDateTime('…', 'UTC') 包裹后到达 SQL。默认值（now() 运算）基于纪元，
+// 无需加注。
 func TestFlagTimestampsCarryExplicitUTC(t *testing.T) {
 	ts := time.Date(2026, 3, 1, 10, 30, 0, 0, time.UTC)
 	bare := regexp.MustCompile(`[^(]'\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}'`)
@@ -112,48 +111,46 @@ func TestFlagTimestampsCarryExplicitUTC(t *testing.T) {
 		"bare":   Apply("t >= {from} AND t <= {to}", Vars{From: ts, To: ts}),
 	} {
 		if bare.MatchString(sql) {
-			t.Errorf("%s: flag timestamp emitted as a bare literal (server-timezone "+
-				"parse): %s", name, sql)
+			t.Errorf("%s: flag 时间戳被输出为裸字面量（按服务器时区"+
+				"解析）：%s", name, sql)
 		}
 		if strings.Count(sql, "toDateTime('2026-03-01 10:30:00', 'UTC')") != 2 {
-			t.Errorf("%s: expected both bounds as explicit-UTC toDateTime:\n%s", name, sql)
+			t.Errorf("%s: 期望两端都是显式 UTC 的 toDateTime：\n%s", name, sql)
 		}
 	}
 }
 
-// TestMalformedWindowIsRefused: a typo must not silently become an
-// unbounded scan. It stays in the SQL and is reported as unbound, which
-// makes the executor refuse the query.
+// TestMalformedWindowIsRefused：拼写错误绝不能悄悄变成无界扫描。
+// 它会留在 SQL 中并被报告为未绑定，从而让 executor 拒绝该查询。
 func TestMalformedWindowIsRefused(t *testing.T) {
 	sql := Apply("WHERE event_time > {from:7dd}", Vars{})
 	if !strings.Contains(sql, "{from:7dd}") {
-		t.Fatalf("malformed spec was silently replaced: %s", sql)
+		t.Fatalf("格式错误的规格被悄悄替换了：%s", sql)
 	}
 	unbound := UnboundPlaceholders(sql)
 	if len(unbound) == 0 {
-		t.Fatal("malformed window placeholder was not reported as unbound; " +
-			"the executor would send a literal brace to the server")
+		t.Fatal("格式错误的窗口占位符未被报告为未绑定；" +
+			"executor 会把字面花括号发送到服务器")
 	}
 }
 
-// TestLogFormatBracesUntouched guards the reason rePlaceholder is narrow:
-// some queries match ClickHouse log messages containing {} braces.
+// TestLogFormatBracesUntouched 守护 rePlaceholder 之所以狭窄的原因：
+// 某些查询会匹配包含 {} 花括号的 ClickHouse 日志消息。
 func TestLogFormatBracesUntouched(t *testing.T) {
 	sql := "SELECT 1 WHERE message LIKE 'Selected {}/{} parts by partition key'"
 	if got := Apply(sql, Vars{}); got != sql {
-		t.Errorf("log-format braces were rewritten:\n got: %s\nwant: %s", got, sql)
+		t.Errorf("日志格式花括号被改写了：\n got: %s\nwant: %s", got, sql)
 	}
 	if u := UnboundPlaceholders(sql); len(u) != 0 {
-		t.Errorf("log-format braces reported as unbound: %v", u)
+		t.Errorf("日志格式花括号被报告为未绑定：%v", u)
 	}
 }
 
-// TestShippedQueriesHaveNoHardcodedWindow pins the change against the real
-// repo: a new query that hard-codes its own interval would silently ignore
-// --from/--to.
+// TestShippedQueriesHaveNoHardcodedWindow 针对真实仓库固定住这项改动：
+// 一个硬编码自身区间的新查询会悄悄忽略 --from/--to。
 func TestShippedQueriesHaveNoHardcodedWindow(t *testing.T) {
-	// toIntervalHour(...) is bucket granularity in a GROUP BY, not a
-	// window filter, so it is allowed.
+	// toIntervalHour(...) 是 GROUP BY 中的分桶粒度，不是窗口过滤，
+	// 因此允许使用。
 	bad := regexp.MustCompile(`(?i)INTERVAL\s+\d+\s+(DAY|HOUR|MINUTE)|toIntervalDay\(\s*\d|today\(\)\s*-\s*\d`)
 
 	var files []string
@@ -169,23 +166,23 @@ func TestShippedQueriesHaveNoHardcodedWindow(t *testing.T) {
 		})
 	}
 	if len(files) == 0 {
-		t.Skip("query directories not present")
+		t.Skip("查询目录不存在")
 	}
 	for _, f := range files {
 		b, err := os.ReadFile(f)
 		if err != nil {
-			t.Fatalf("read %s: %v", f, err)
+			t.Fatalf("读取 %s：%v", f, err)
 		}
 		if m := bad.FindString(string(b)); m != "" {
-			t.Errorf("%s hard-codes a time window (%q); use {from:<default>} / "+
-				"{to:now} so --from/--to can override it", f, m)
+			t.Errorf("%s 硬编码了时间窗口（%q）；请使用 {from:<default>} / "+
+				"{to:now}，以便 --from/--to 可以覆盖它", f, m)
 		}
 	}
 }
 
-// TestShippedQueryWindowsAllExpand makes sure every default spec actually
-// present in the repo is one windowDefaultSQL accepts — a typo would
-// otherwise only surface at collection time, against a live server.
+// TestShippedQueryWindowsAllExpand 确保仓库中实际存在的每个默认规格
+// 都是 windowDefaultSQL 接受的 —— 否则拼写错误只会在采集时、对着
+// 一台实时服务器才暴露。
 func TestShippedQueryWindowsAllExpand(t *testing.T) {
 	var files []string
 	for _, dir := range []string{"../../queries.onprem", "../../queries.cloud", "../../queries.gov"} {
@@ -197,7 +194,7 @@ func TestShippedQueryWindowsAllExpand(t *testing.T) {
 		})
 	}
 	if len(files) == 0 {
-		t.Skip("query directories not present")
+		t.Skip("查询目录不存在")
 	}
 	seen := 0
 	for _, f := range files {
@@ -205,47 +202,45 @@ func TestShippedQueryWindowsAllExpand(t *testing.T) {
 		for _, m := range reWindowPlaceholder.FindAllStringSubmatch(string(b), -1) {
 			seen++
 			if _, ok := windowDefaultSQL(m[2]); !ok {
-				t.Errorf("%s: %q has an unusable default spec %q", f, m[0], m[2])
+				t.Errorf("%s: %q 的默认规格 %q 不可用", f, m[0], m[2])
 			}
 		}
 		if u := UnboundPlaceholders(Apply(string(b), Vars{})); len(u) > 0 {
-			// '%salt%' is expected in gov files; named braces are not.
-			t.Errorf("%s: unbound after default expansion: %v", f, u)
+			// '%salt%' 在 gov 文件中是预期的；具名花括号则不是。
+			t.Errorf("%s: 默认展开后仍未绑定：%v", f, u)
 		}
 	}
 	if seen == 0 {
-		t.Error("no window placeholders found in the shipped queries; " +
-			"this guard would pass vacuously")
+		t.Error("在随包发布的查询中未找到窗口占位符；" +
+			"这个守护会形同虚设地通过")
 	}
-	t.Logf("checked %d window placeholders across %d files", seen, len(files))
+	t.Logf("在 %d 个文件中检查了 %d 个窗口占位符", seen, len(files))
 }
 
-// TestPlaceholderInCommentIgnored: query files explain ClickHouse macros
-// in prose (queries.gov/system.replication_queue.sql mentions the
-// {replica} macro). Treating that as an unbound placeholder would refuse
-// a valid query over a comment.
+// TestPlaceholderInCommentIgnored：查询文件会在说明文字中解释 ClickHouse 宏
+// （queries.gov/system.replication_queue.sql 提到了 {replica} 宏）。
+// 把它当作未绑定占位符，会仅因一条注释就拒绝一个合法的查询。
 func TestPlaceholderInCommentIgnored(t *testing.T) {
 	sql := "SELECT replica_name\n-- conventionally the {replica} macro\nFROM system.replication_queue"
 	if u := UnboundPlaceholders(sql); len(u) != 0 {
-		t.Errorf("placeholder inside a comment reported as unbound: %v", u)
+		t.Errorf("注释内的占位符被报告为未绑定：%v", u)
 	}
 	block := "SELECT 1 /* uses the {shard} macro */ FROM system.parts"
 	if u := UnboundPlaceholders(block); len(u) != 0 {
-		t.Errorf("placeholder inside a block comment reported as unbound: %v", u)
+		t.Errorf("块注释内的占位符被报告为未绑定：%v", u)
 	}
-	// But a real one outside a comment must still be caught.
+	// 但注释之外真正的占位符仍必须被捕获。
 	if u := UnboundPlaceholders("SELECT 1 WHERE id = {query_id}"); len(u) != 1 {
-		t.Errorf("real unbound placeholder missed: %v", u)
+		t.Errorf("漏掉了真正的未绑定占位符：%v", u)
 	}
 }
 
-// TestShippedQueryDefaultWindows pins the default look-back of every
-// shipped query by name. Without this the windows drift silently: they
-// live in 20 files across three mode directories plus version overrides,
-// and nothing else would notice one being edited to a different value.
+// TestShippedQueryDefaultWindows 按名称固定住每个随包查询的默认回看窗口。
+// 没有它，窗口会悄悄漂移：它们分布在三个模式目录中的 20 个文件里，
+// 外加版本覆盖，没有别的东西会注意到某个窗口被改成了不同的值。
 //
-// The map is the specification — update it deliberately when a window
-// changes, in the same commit that changes the SQL.
+// 这个映射就是规格 —— 窗口变化时，请在改动 SQL 的同一个提交中
+// 有意识地更新它。
 func TestShippedQueryDefaultWindows(t *testing.T) {
 	want := map[string]string{
 		"system.query_log_details_7_days.sql":       "7d",
@@ -275,57 +270,56 @@ func TestShippedQueryDefaultWindows(t *testing.T) {
 			}
 			spec, ok := want[filepath.Base(p)]
 			if !ok {
-				return nil // query has no window; TestShippedQueriesHaveNoHardcodedWindow covers it
+				return nil // 查询没有窗口；由 TestShippedQueriesHaveNoHardcodedWindow 覆盖
 			}
 			b, readErr := os.ReadFile(p)
 			if readErr != nil {
-				t.Fatalf("read %s: %v", p, readErr)
+				t.Fatalf("读取 %s：%v", p, readErr)
 			}
 			froms := regexp.MustCompile(`\{from:([A-Za-z0-9]+)\}`).FindAllStringSubmatch(string(b), -1)
 			if len(froms) == 0 {
-				t.Errorf("%s: expected a {from:%s} window, found none", p, spec)
+				t.Errorf("%s: 期望 {from:%s} 窗口，但未找到", p, spec)
 				return nil
 			}
 			for _, m := range froms {
 				if m[1] != spec {
-					t.Errorf("%s: default window is {from:%s}, expected {from:%s}", p, m[1], spec)
+					t.Errorf("%s: 默认窗口是 {from:%s}，期望 {from:%s}", p, m[1], spec)
 				}
 			}
 			checked[filepath.Base(p)]++
 			return nil
 		})
 		if err != nil {
-			t.Fatalf("walk %s: %v", dir, err)
+			t.Fatalf("遍历 %s：%v", dir, err)
 		}
 	}
 
 	if len(checked) == 0 {
-		t.Skip("query directories not present")
+		t.Skip("查询目录不存在")
 	}
 	for name := range want {
 		if checked[name] == 0 {
-			t.Errorf("%s was never found in any mode directory; the guard is not "+
-				"covering it (renamed or deleted?)", name)
+			t.Errorf("%s 在任何模式目录中都没有找到；守护没有"+
+				"覆盖它（被重命名或删除了？）", name)
 		}
 	}
-	t.Logf("pinned windows across %d query files", len(checked))
+	t.Logf("在 %d 个查询文件中固定了窗口", len(checked))
 }
 
-// TestSysPlaceholderWithoutModeIsRefused pins review finding #3: expanding
-// {sys.<table>} with an empty mode would quietly behave like onprem — the
-// first {sys.query_log} written into queries.cloud/ would collect one
-// replica instead of fanning out. With no mode the placeholder must
-// survive Apply and be reported unbound, so the executor refuses.
+// TestSysPlaceholderWithoutModeIsRefused 固定住评审发现 #3：用空 mode 展开
+// {sys.<table>} 会悄悄表现得像 onprem —— 写进 queries.cloud/ 的第一个
+// {sys.query_log} 将只采集一个 replica 而不是扇出。没有 mode 时，
+// 占位符必须经过 Apply 后仍然存在并被报告为未绑定，从而让 executor 拒绝。
 func TestSysPlaceholderWithoutModeIsRefused(t *testing.T) {
 	sql := Apply("SELECT 1 FROM {sys.query_log}", Vars{})
 	if !strings.Contains(sql, "{sys.query_log}") {
-		t.Fatalf("empty-mode expansion silently produced: %s", sql)
+		t.Fatalf("空 mode 展开悄悄产出了：%s", sql)
 	}
 	if u := UnboundPlaceholders(sql); len(u) == 0 {
-		t.Fatal("unexpanded {sys.} placeholder not reported as unbound")
+		t.Fatal("未展开的 {sys.} 占位符未被报告为未绑定")
 	}
-	// And with a mode it must expand as before.
+	// 而给出 mode 时，它必须像以前一样展开。
 	if got := Apply("SELECT 1 FROM {sys.query_log}", Vars{Mode: "cloud"}); !strings.Contains(got, "clusterAllReplicas") {
-		t.Errorf("cloud expansion broken: %s", got)
+		t.Errorf("cloud 展开出错：%s", got)
 	}
 }

@@ -9,15 +9,14 @@ import (
 	"testing"
 )
 
-// schemaGraphFixture is a small pipeline with every object kind the graph
-// distinguishes: a MergeTree source, an MV writing to an explicit target, an
-// MV with an implicit .inner_id target, a plain view, a dictionary reading a
-// table, a Distributed table over the source, and a refreshable MV. The DDL
-// of one table carries S3 credentials the way a 22.x server would ship them.
+// schemaGraphFixture 是一个小型管道，包含图所区分的每种对象类型：一个
+// MergeTree 源表、一个写入显式目标的 MV、一个带隐式 .inner_id 目标的 MV、
+// 一个普通视图、一个读取表的字典、一个基于源表的 Distributed 表，以及一个
+// 可刷新 MV。其中一张表的 DDL 带有 S3 凭据，就像 22.x 服务器会带的那样。
 //
 //	DASHBOARD_PREVIEW_DIR=/tmp go test ./internal/dashboard -run TestBuildSchemaGraphHTML_Preview
 //
-// writes /tmp/schema_graph_preview.html.
+// 写入 /tmp/schema_graph_preview.html。
 func schemaGraphFixture() map[string]interface{} {
 	tbl := func(db, name, engine, engineFull, ddl, sort, pk, part string, rows, bytes int64,
 		target [2]string, deps, loadDeps [][2]string) map[string]interface{} {
@@ -60,7 +59,7 @@ func schemaGraphFixture() map[string]interface{} {
 			"user_id", "user_id", "", 1000, 24000, [2]string{"", ""}, nil, nil),
 		tbl("shop", "v_recent", "View", "View",
 			"CREATE VIEW shop.v_recent (`ts` DateTime, `user_id` UInt64, `kind` LowCardinality(String), `amount` Float64) AS SELECT * FROM shop.events WHERE ts > (now() - toIntervalDay(1))",
-			"", "", "", 0, 0, [2]string{"", ""}, nil, nil), // a View: the server lists no dependency
+			"", "", "", 0, 0, [2]string{"", ""}, nil, nil), // 普通 View：服务器不列出依赖
 		tbl("shop", "users_src", "MergeTree", "MergeTree ORDER BY user_id SETTINGS index_granularity = 8192",
 			"CREATE TABLE shop.users_src (`user_id` UInt64, `name` String) ENGINE = MergeTree ORDER BY user_id SETTINGS index_granularity = 8192",
 			"user_id", "user_id", "", 1000, 30000, [2]string{"", ""}, [][2]string{{"shop", "dict_users"}}, nil),
@@ -69,12 +68,12 @@ func schemaGraphFixture() map[string]interface{} {
 			"", "", "", 1000, 65536, [2]string{"", ""}, nil, [][2]string{{"shop", "users_src"}}),
 		tbl("shop", "events_dist", "Distributed", "Distributed('default', 'shop', 'events', rand())",
 			"CREATE TABLE shop.events_dist (`ts` DateTime, `user_id` UInt64, `kind` LowCardinality(String), `amount` Float64) ENGINE = Distributed('default', 'shop', 'events', rand())",
-			"", "", "", 0, 0, [2]string{"", ""}, nil, nil), // Distributed: the local table is only an engine argument
+			"", "", "", 0, 0, [2]string{"", ""}, nil, nil), // Distributed：本地表只是引擎参数
 		tbl("shop", "rmv_daily", "MaterializedView", "MaterializedView",
 			"CREATE MATERIALIZED VIEW shop.rmv_daily\nREFRESH EVERY 1 HOUR OFFSET 5 MINUTE RANDOMIZE FOR 1 MINUTE\n(\n    `day` Date,\n    `c` UInt64\n)\nENGINE = MergeTree\nORDER BY day\nAS SELECT\n    toDate(ts) AS day,\n    count() AS c\nFROM shop.events\nGROUP BY day",
-			"", "", "", 0, 0, [2]string{"shop", ".inner_id.ab32b20f-6d2f-4554-80fc-3e501e082a40"}, nil, nil), // refreshable: not a dependent of its source
-		// A 22.x-style DDL with credentials in the engine arguments, plus a
-		// "</script>" in the comment to prove the embedding cannot be broken.
+			"", "", "", 0, 0, [2]string{"shop", ".inner_id.ab32b20f-6d2f-4554-80fc-3e501e082a40"}, nil, nil), // 可刷新：不是其源的依赖项
+		// 一个 22.x 风格的 DDL，凭据写在引擎参数中，注释里还有
+		// "</script>"，用来证明嵌入不会被破坏。
 		tbl("lake", "raw_s3", "S3", "S3('https://bucket.s3.amazonaws.com/raw/*.parquet', 'AKIAIOSFODNN7EXAMPLE', 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY', 'Parquet')",
 			"CREATE TABLE lake.raw_s3 (`id` UInt64, `payload` String) ENGINE = S3('https://bucket.s3.amazonaws.com/raw/*.parquet', 'AKIAIOSFODNN7EXAMPLE', 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY', 'Parquet') COMMENT 'loaded nightly </script><b>x</b>'",
 			"", "", "", 0, 0, [2]string{"", ""}, nil, nil),
@@ -83,7 +82,7 @@ func schemaGraphFixture() map[string]interface{} {
 		return map[string]interface{}{"database": db, "table": table, "name": name, "type": typ,
 			"is_key": key, "pk": key, "sk": key, "pt": 0, "sm": 0, "has_default": def}
 	}
-	// A sorting-key column that is ALSO the partition key, and a sampling column.
+	// 一个同时也是分区键的排序键列，以及一个采样列。
 	colRoles := func(db, table, name, typ string, pk, sk, pt, sm int) map[string]interface{} {
 		return map[string]interface{}{"database": db, "table": table, "name": name, "type": typ,
 			"is_key": pk | sk, "pk": pk, "sk": sk, "pt": pt, "sm": sm, "has_default": 0}
@@ -105,10 +104,10 @@ func schemaGraphFixture() map[string]interface{} {
 	}
 	dicts := []map[string]interface{}{
 		{"database": "shop", "name": "dict_users", "source": "ClickHouse: shop.users_src", "status": "LOADED", "last_exception": "", "lifetime_min": "0", "lifetime_max": "60"},
-		// FAILED dictionaries are the ones to look at first; the live page dropped them.
+		// FAILED 的字典是最应该先看的；实时页面却把它们丢掉了。
 		{"database": "shop", "name": "dict_geo", "source": "MySQL: geo.regions", "status": "FAILED",
 			"last_exception": "Code: 1000. DB::Exception: mysqlxx::ConnectionFailed: Can't connect to MySQL server on 'geo-db:3306' (password = 'geo\\'pw')"},
-		// Declared in server config (XML): database is '' and there is no system.tables row.
+		// 在服务器配置（XML）中声明：database 为 ''，且没有 system.tables 行。
 		{"database": "", "name": "country_codes", "source": "File: /etc/clickhouse-server/dictionaries/countries.csv", "status": "LOADED", "last_exception": ""},
 	}
 	refreshes := []map[string]interface{}{
@@ -126,43 +125,42 @@ func schemaGraphFixture() map[string]interface{} {
 	}
 }
 
-// jsonNum mimics how the JSONCompact response arrives: 64-bit integers are
-// quoted strings (output_format_json_quote_64bit_integers=1).
+// jsonNum 模拟 JSONCompact 响应的到达方式：64 位整数是被引号包裹的字符串
+// （output_format_json_quote_64bit_integers=1）。
 func jsonNum(n int64) interface{} { return strconv.FormatInt(n, 10) }
 
-// The page must work from disk with the network off: no live queries, no
-// credential handling, no CDN. It must also say where it came from.
+// 页面必须能在断网情况下从磁盘工作：没有实时查询、没有凭据处理、没有 CDN。
+// 它还必须说明来源。
 func TestSchemaGraphTemplate_IsOfflineSelfContainedAndAttributed(t *testing.T) {
 	for _, banned := range []string{
 		"fetch(", "XMLHttpRequest", "chQuery(", "navigator.credentials", "PasswordCredential",
 		"connection-form", `id="password"`, "https://cdn.", "cdnjs", "jsdelivr", "unpkg",
-		"loadViewsLoad", "query_views_log", // the heat map is a follow-up
+		"loadViewsLoad", "query_views_log", // 热力图是后续工作
 	} {
 		if strings.Contains(schemaGraphTemplate, banned) {
-			t.Errorf("schema graph page must not contain %q", banned)
+			t.Errorf("schema graph 页面不得包含 %q", banned)
 		}
 	}
 	for _, want := range []string{
 		"Adapted from ClickHouse programs/server/schema.html", "Apache License, Version 2.0",
 		"const DATA = /*DATA*/null;", "function loadFromBundle()", "chdiag-theme", "addEventListener('storage'",
-		"--surface-card", "--click-font-mono", // the shared token layer is present
+		"--surface-card", "--click-font-mono", // 共享 token 层存在
 		"function backQuoteIfNeed", "function layoutDatabase", "function showSidebar", "function attachDrag",
 		`id="back-link"`, "window.self !== window.top",
 	} {
 		if !strings.Contains(schemaGraphTemplate, want) {
-			t.Errorf("schema graph page lost %q", want)
+			t.Errorf("schema graph 页面丢失了 %q", want)
 		}
 	}
-	// --link is the dashboard's hyperlink token; the edge colour must not shadow it.
+	// --link 是 dashboard 的超链接 token；边颜色不得覆盖它。
 	if strings.Contains(schemaGraphTail, "--link:") {
-		t.Error("schema graph redefines --link — use --edge for the SVG stroke")
+		t.Error("schema graph 重新定义了 --link——SVG 描边请使用 --edge")
 	}
-	// Every customer string goes through textContent; innerHTML is only ever
-	// assigned static markup or cleared.
+	// 每个客户字符串都经过 textContent；innerHTML 只会被赋值为静态标记或被清空。
 	for _, line := range strings.Split(schemaGraphTail, "\n") {
 		if strings.Contains(line, ".innerHTML") && !strings.Contains(line, "innerHTML = ''") &&
-			!strings.Contains(line, `innerHTML = '<option value="">All databases</option>'`) {
-			t.Errorf("innerHTML with dynamic content: %s", strings.TrimSpace(line))
+			!strings.Contains(line, `innerHTML = '<option value="">所有数据库</option>'`) {
+			t.Errorf("innerHTML 包含动态内容：%s", strings.TrimSpace(line))
 		}
 	}
 }
@@ -177,34 +175,34 @@ func TestBuildSchemaGraphHTML_EmbedsFixtureAndCannotBreakOutOfTheScript(t *testi
 	end := strings.Index(html[start:], ";\n")
 	var out map[string]interface{}
 	if err := json.Unmarshal([]byte(html[start:start+end]), &out); err != nil {
-		t.Fatalf("embedded DATA is not valid JSON: %v", err)
+		t.Fatalf("嵌入的 DATA 不是有效 JSON：%v", err)
 	}
 	if n := len(out["tables"].([]interface{})); n != 11 {
-		t.Errorf("tables embedded: %d, want 11", n)
+		t.Errorf("嵌入的表数：%d，期望 11", n)
 	}
 	for _, want := range []string{`"mv_events_by_kind"`, `"dict_users"`, `"events_dist"`, `"rmv_daily"`, `"Scheduled"`, `.inner_id.7fdd1fdf`} {
 		if !strings.Contains(html, want) {
-			t.Errorf("page missing %q", want)
+			t.Errorf("页面缺少 %q", want)
 		}
 	}
-	// The S3 secret was redacted before embedding; the key id too; and the
-	// password quoted inside a dictionary's last_exception.
+	// S3 密钥在嵌入前已被脱敏；key id 也是；还有字典
+	// last_exception 中带引号的密码。
 	for _, gone := range []string{"wJalrXUtnFEMI", "AKIAIOSFODNN7EXAMPLE", "geo\\'pw", "geo'pw"} {
 		if strings.Contains(html, gone) {
-			t.Errorf("credential %q reached the page", gone)
+			t.Errorf("凭据 %q 到达了页面", gone)
 		}
 	}
 	if !strings.Contains(html, "[HIDDEN]") {
-		t.Error("redaction token missing from the embedded DDL")
+		t.Error("嵌入的 DDL 缺少脱敏标记")
 	}
-	// "</script>" inside a DDL comment must be HTML-escaped by the JSON encoder:
-	// the page ends up with exactly the closing tags its template has (the
-	// theme stamp in <head> and the main script), and not one more.
+	// DDL 注释中的 "</script>" 必须由 JSON 编码器进行 HTML 转义：
+	// 页面最终只会包含模板自带的那些闭合标签（<head> 中的主题标记和主脚本），
+	// 不会多一个。
 	if got, want := strings.Count(html, "</script>"), strings.Count(schemaGraphTemplate, "</script>"); got != want {
-		t.Errorf("a customer string terminated the inline script: %d </script> tags, want %d", got, want)
+		t.Errorf("客户字符串终止了内联脚本：%d 个 </script> 标签，期望 %d 个", got, want)
 	}
 	if !strings.Contains(html, `\u003c/script\u003e`) {
-		t.Error("expected the DDL's </script> to arrive as \\u003c/script\\u003e")
+		t.Error("期望 DDL 中的 </script> 以 \\u003c/script\\u003e 形式到达")
 	}
 }
 
@@ -216,16 +214,16 @@ func TestRedactSchemaRecords(t *testing.T) {
 	}
 	n := redactSchemaRecords(rows, "create_table_query", "engine_full")
 	if n != 2 {
-		t.Errorf("replacements = %d, want 2", n)
+		t.Errorf("替换次数 = %d，期望 2", n)
 	}
 	if strings.Contains(rows[0]["create_table_query"].(string), "'pw'") || strings.Contains(rows[0]["engine_full"].(string), "'pw'") {
-		t.Errorf("password survived: %v", rows[0])
+		t.Errorf("密码残留：%v", rows[0])
 	}
 	if rows[0]["name"] != "pw" {
-		t.Error("a field outside the list was touched")
+		t.Error("列表之外的字段被改动了")
 	}
 	if rows[1]["engine_full"] != "MergeTree ORDER BY x" {
-		t.Error("a clean row was rewritten")
+		t.Error("干净的行被改写了")
 	}
 }
 
@@ -234,13 +232,13 @@ func TestSchemaGraphSummary(t *testing.T) {
 	want := map[string]interface{}{"file": "schema_graph.html", "tables": 11, "columns": 26, "databases": 2, "mvs": 3, "refreshable": 1, "dictionaries": 3, "indices": 2}
 	for k, v := range want {
 		if got[k] != v {
-			t.Errorf("%s = %v, want %v", k, got[k], v)
+			t.Errorf("%s = %v，期望 %v", k, got[k], v)
 		}
 	}
 }
 
-// dashboard.html's side: the tab exists, is hidden until the payload says the
-// page was written, and the frame gets its src only inside the click handler.
+// dashboard.html 这一侧：标签页存在，在 payload 表明页面已写入前保持隐藏，
+// 并且 iframe 只在点击处理函数内获得 src。
 func TestDashboardTemplate_SchemaTabLoadsOnDemand(t *testing.T) {
 	for _, want := range []string{
 		`id="nav-schema" style="display:none"`, `<section id="sec-schema" style="display:none">`,
@@ -249,16 +247,16 @@ func TestDashboardTemplate_SchemaTabLoadsOnDemand(t *testing.T) {
 		"document.getElementById('nav-schema').addEventListener('click', load);",
 	} {
 		if !strings.Contains(htmlTemplate, want) {
-			t.Errorf("dashboard lost %q", want)
+			t.Errorf("dashboard 丢失了 %q", want)
 		}
 	}
 	if strings.Contains(htmlTemplate, `<iframe id="schema-frame" src=`) {
-		t.Error("the schema frame must not carry a static src — that would load the graph for every reader")
+		t.Error("schema iframe 不得携带静态 src——那会为每个读者加载该图")
 	}
-	// Without the payload key nothing is shown: the frame stays unassigned.
+	// 没有 payload 键时什么都不显示：iframe 保持未赋值。
 	html := buildHTML(map[string]interface{}{"alerts": []interface{}{}})
 	if strings.Contains(html, `"schema_graph"`) {
-		t.Error("schema_graph key present without a generated page")
+		t.Error("在没有生成页面时出现了 schema_graph 键")
 	}
 }
 
@@ -272,28 +270,26 @@ func TestBuildSchemaGraphHTML_Preview(t *testing.T) {
 		if err := os.WriteFile(dst, []byte(html), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		t.Logf("preview written: %s", dst)
+		t.Logf("预览已写入：%s", dst)
 	}
 }
 
-// Review findings on the payload queries and the dashboard's own panel.
+// 针对 payload 查询和 dashboard 自身面板的评审发现。
 func TestSchemaGraphQueries_ReviewFindings(t *testing.T) {
-	// FAILED / FAILED_AND_RELOADING dictionaries must not be filtered out.
+	// FAILED / FAILED_AND_RELOADING 的字典不得被过滤掉。
 	dictSQL := schemaDictionariesSQL("system.dictionaries")
 	if strings.Contains(dictSQL, "WHERE status") || strings.Contains(dictSQL, "status IN ('LOADED'") {
-		t.Error("schema dictionaries query filters by status — failed dictionaries are the nodes to inspect")
+		t.Error("schema dictionaries 查询按 status 过滤——失败的字典才是需要检查的节点")
 	}
 	for _, want := range []string{"status", "last_exception"} {
 		if !strings.Contains(dictSQL, want) {
-			t.Errorf("schema dictionaries query lost %q", want)
+			t.Errorf("schema dictionaries 查询丢失了 %q", want)
 		}
 	}
-	// Review finding: dictionaries were read from the local table in every
-	// mode, so a graph built through one cloud pod showed a dictionary
-	// healthy that had FAILED on another. The query goes through the
-	// mode-aware reference, folds replicas to one row per dictionary, ranks
-	// FAILED above everything else, and excludes system databases like the
-	// other schema queries.
+	// 评审发现：此前所有模式都从本地表读取字典，因此通过某个 cloud pod
+	// 构建的图会把在另一个 pod 上 FAILED 的字典显示为健康。该查询现在经过
+	// 感知模式的引用，把各 replica 折叠为每个字典一行，将 FAILED 排在最前，
+	// 并像其他 schema 查询一样排除系统数据库。
 	cloudDict := schemaDictionariesSQL(NewGenerator(nil, "cloud").sysTable("dictionaries"))
 	for _, want := range []string{
 		"FROM clusterAllReplicas(default, system.dictionaries)",
@@ -304,124 +300,122 @@ func TestSchemaGraphQueries_ReviewFindings(t *testing.T) {
 		schemaSysFilter,
 	} {
 		if !strings.Contains(cloudDict, want) {
-			t.Errorf("cloud dictionaries query lost %q", want)
+			t.Errorf("cloud dictionaries 查询丢失了 %q", want)
 		}
 	}
 	if !strings.Contains(dictSQL, "FROM system.dictionaries") {
-		t.Error("onprem dictionaries query must read the local table")
+		t.Error("onprem dictionaries 查询必须读取本地表")
 	}
-	// The page's dictionary nodes read these columns by name.
+	// 页面的字典节点按名称读取这些列。
 	for _, col := range []string{"AS source", "AS status", "AS lifetime_min", "AS lifetime_max", "AS last_exception"} {
 		if !strings.Contains(dictSQL, col) {
-			t.Errorf("dictionaries query lost output column %q", col)
+			t.Errorf("dictionaries 查询丢失了输出列 %q", col)
 		}
 	}
-	// view_refreshes goes through the mode-aware reference and folds replicas.
+	// view_refreshes 经过感知模式的引用，并折叠各 replica。
 	cloud := schemaRefreshesSQL(NewGenerator(nil, "cloud").sysTable("view_refreshes"))
 	if !strings.Contains(cloud, "clusterAllReplicas(default, system.view_refreshes)") {
-		t.Errorf("cloud refreshes query reads the local table only:\n%s", cloud)
+		t.Errorf("cloud refreshes 查询只读取了本地表：\n%s", cloud)
 	}
 	for _, want := range []string{"GROUP BY database, view", "RunningOnAnotherReplica", "argMax(exception"} {
 		if !strings.Contains(cloud, want) {
-			t.Errorf("refreshes query lost %q", want)
+			t.Errorf("refreshes 查询丢失了 %q", want)
 		}
 	}
 	if onprem := schemaRefreshesSQL(NewGenerator(nil, "onprem").sysTable("view_refreshes")); !strings.Contains(onprem, "FROM system.view_refreshes") {
-		t.Errorf("onprem refreshes query: %s", onprem)
+		t.Errorf("onprem refreshes 查询：%s", onprem)
 	}
 
-	// The dashboard's Dictionaries panel embeds source / last_exception too.
+	// dashboard 的 Dictionaries 面板也会嵌入 source / last_exception。
 	rows := []map[string]interface{}{
 		{"name": "d", "source": "MySQL('h:3306', 'db', 'tbl', 'u', 'pw')", "last_exception": "cannot connect: password = 'pw2'"},
 	}
 	if n := redactDictionaryPanel(rows); n != 2 {
-		t.Errorf("panel redaction count = %d, want 2", n)
+		t.Errorf("面板脱敏次数 = %d，期望 2", n)
 	}
 	if strings.Contains(rows[0]["source"].(string), "'pw'") || strings.Contains(rows[0]["last_exception"].(string), "pw2") {
-		t.Errorf("panel rows still carry credentials: %v", rows[0])
+		t.Errorf("面板行仍然携带凭据：%v", rows[0])
 	}
 }
 
-// Review finding: nodes were clickable <div>s with no keyboard path.
+// 评审发现：节点是可点击的 <div>，但没有键盘访问路径。
 func TestSchemaGraphTemplate_KeyboardAccessible(t *testing.T) {
 	for _, want := range []string{
 		"el.tabIndex = 0;", "el.setAttribute('role', 'button');", "el.setAttribute('aria-label'",
 		"e.key === 'Enter' || e.key === ' '", ".node:focus-visible", "a.href = '#';",
-		// config-declared dictionaries get a node; failed ones show status and error
-		"'(config)'", "Dictionary status", "Dictionary error",
+		// 配置声明的字典会获得节点；失败的会显示状态和错误
+		"'(config)'", "字典状态", "字典错误",
 	} {
 		if !strings.Contains(schemaGraphTail, want) {
-			t.Errorf("schema graph page lost %q", want)
+			t.Errorf("schema graph 页面丢失了 %q", want)
 		}
 	}
 }
 
-// Review finding: the collector returned before reading system.dictionaries
-// when system.tables had no user rows, so a server whose only user objects
-// are config-declared dictionaries got no graph despite the page knowing
-// how to draw them.
+// 评审发现：当 system.tables 没有用户行时，collector 在读取
+// system.dictionaries 之前就返回了，因此一个只有配置声明字典作为用户对象的
+// 服务器得不到图，尽管页面知道如何绘制它们。
 func TestSchemaGraphHasContent(t *testing.T) {
 	d := []map[string]interface{}{{"database": "", "name": "country_codes"}}
 	tb := []map[string]interface{}{{"database": "shop", "name": "events"}}
 	if !schemaGraphHasContent(nil, d) {
-		t.Error("dictionaries alone must produce a graph")
+		t.Error("仅有字典也必须生成图")
 	}
 	if !schemaGraphHasContent(tb, nil) {
-		t.Error("tables alone must produce a graph")
+		t.Error("仅有表也必须生成图")
 	}
 	if schemaGraphHasContent(nil, nil) {
-		t.Error("nothing to draw must produce no page")
+		t.Error("没有可绘制内容时必须不生成页面")
 	}
-	// The summary counts a dictionaries-only payload honestly.
+	// 摘要在只有字典的 payload 上如实计数。
 	got := schemaGraphSummary(map[string]interface{}{"tables": []map[string]interface{}{}, "dictionaries": d})
 	if got["tables"] != 0 || got["dictionaries"] != 1 {
-		t.Errorf("summary = %v", got)
+		t.Errorf("摘要 = %v", got)
 	}
 }
 
-// Reviewer suggestions on #34: the RMV schedule and the dictionary LIFETIME on
-// the node ribbon, key roles differentiated (and skip indices shown), and a
-// pretty-printed, highlighted CREATE statement.
+// 针对 #34 的评审建议：在节点信息带上显示 RMV 刷新计划和字典 LIFETIME，
+// 区分键角色（并显示跳数索引），以及美化并高亮显示的 CREATE 语句。
 func TestSchemaGraph_ReviewerSuggestions(t *testing.T) {
 	for _, want := range []string{
-		// 1. schedule parsed from the DDL (system.view_refreshes has no interval)
-		"function parseRefresh(ddl)", "RANDOMIZE", "no RANDOMIZE FOR — every copy of this schedule fires at the same instant", "'Refresh schedule'",
-		// 2. LIFETIME from the columns, DDL as the fallback for an unloaded dictionary
-		"function dictLifetime(n)", "'Dictionary lifetime'",
-		// 3. server-side pretty print + client-side highlight, spans only
+		// 1. 从 DDL 解析刷新计划（system.view_refreshes 没有 interval）
+		"function parseRefresh(ddl)", "RANDOMIZE", "没有 RANDOMIZE FOR — 该调度的每个副本会在同一时刻触发", "'刷新计划'",
+		// 2. LIFETIME 来自列，DDL 作为未加载字典的备用来源
+		"function dictLifetime(n)", "'字典生存时间'",
+		// 3. 服务端美化打印 + 客户端高亮，仅使用 span
 		"function highlightSQL(pre, text)", "syn-hidden", "highlightSQL(pre, n.createQuery);",
-		// 4. four independent key roles, a legend for them, tags in the sidebar, skip indices
+		// 4. 四个独立的键角色、对应的图例、侧栏中的标签、跳数索引
 		"function colRoles(c)", "key-primary", "key-sorting", "key-partition", "key-sampling",
-		"class=\"legend-col column-name key-partition\"", "'Skip indices ('", "role-tag",
+		"class=\"legend-col column-name key-partition\"", "'跳数索引（'", "role-tag",
 	} {
 		if !strings.Contains(schemaGraphTail, want) {
-			t.Errorf("schema graph page lost %q", want)
+			t.Errorf("schema graph 页面丢失了 %q", want)
 		}
 	}
-	// The highlighter must not take the innerHTML shortcut.
+	// 高亮器不得走 innerHTML 捷径。
 	hl := schemaGraphTail[strings.Index(schemaGraphTail, "function highlightSQL"):]
 	hl = hl[:strings.Index(hl, "function engineKind")]
 	if strings.Contains(hl, "innerHTML") {
-		t.Error("highlightSQL assigns innerHTML — customer DDL must go through textContent")
+		t.Error("highlightSQL 赋值 innerHTML——客户 DDL 必须经过 textContent")
 	}
-	// Payload side.
+	// payload 一侧。
 	for _, want := range []string{"is_in_partition_key AS pt", "is_in_sampling_key  AS sm", "formatQueryOrNull(create_table_query)", "fn:formatQueryOrNull"} {
 		if !strings.Contains(readSchemaGraphSource(t), want) {
-			t.Errorf("collectSchemaGraph lost %q", want)
+			t.Errorf("collectSchemaGraph 丢失了 %q", want)
 		}
 	}
 	if d := schemaDictionariesSQL("system.dictionaries"); !strings.Contains(d, "any(lifetime_min) AS lifetime_min") || !strings.Contains(d, "any(lifetime_max) AS lifetime_max") {
-		t.Error("dictionaries query lost the LIFETIME columns")
+		t.Error("dictionaries 查询丢失了 LIFETIME 列")
 	}
 	if !strings.Contains(schemaIndicesSQL, "system.data_skipping_indices") || !strings.Contains(schemaIndicesSQL, "granularity") {
-		t.Error("indices query lost its table or granularity")
+		t.Error("indices 查询丢失了表或 granularity")
 	}
-	// A page built from the fixture carries the schedule text, the indices and the lifetime.
+	// 由 fixture 构建的页面携带刷新计划文本、索引和生存时间。
 	fx := schemaGraphFixture()
 	html := buildSchemaGraphHTML(fx)
 	for _, want := range []string{"REFRESH EVERY 1 HOUR OFFSET 5 MINUTE RANDOMIZE FOR 1 MINUTE", `"idx_kind"`, `"bloom_filter"`, `"lifetime_max":"60"`, `"pt":1`, `"sm":1`} {
 		if !strings.Contains(html, want) {
-			t.Errorf("page missing %q", want)
+			t.Errorf("页面缺少 %q", want)
 		}
 	}
 }
@@ -434,25 +428,25 @@ func readSchemaGraphSource(t *testing.T) string {
 	return string(b)
 }
 
-// Reviewer follow-up on #34: a refreshable MV, a plain view and a Distributed
-// table have empty dependency arrays on the server, so they floated free. The
-// page now infers their source edges from the DDL and draws them dashed.
+// 针对 #34 的评审后续：可刷新 MV、普通视图和 Distributed 表在服务器上的
+// 依赖数组为空，因此它们自由漂浮。页面现在从 DDL 推断它们的源边，
+// 并以虚线绘制。
 func TestSchemaGraph_InferredEdgesFromDDL(t *testing.T) {
 	for _, want := range []string{
 		"function parseSourceTables(ddl, defaultDb)", "function parseDistributedSource(engineFull, defaultDb)",
 		"addEdge(src, node.key, 'mv', true);", "addEdge(src, node.key, 'distributed', true);",
-		"inferred: !!isInferred", ".arrow.inferred{stroke-dasharray:6 4}", "inferred from DDL</span>",
-		"'· inferred from the DDL'",
+		"inferred: !!isInferred", ".arrow.inferred{stroke-dasharray:6 4}", "由 DDL 推断</span>",
+		"'· 由 DDL 推断'",
 	} {
 		if !strings.Contains(schemaGraphTail, want) {
-			t.Errorf("schema graph page lost %q", want)
+			t.Errorf("schema graph 页面丢失了 %q", want)
 		}
 	}
-	// Metadata edges must be added before inferred ones so a real dependency is
-	// never demoted to dashed: the second pass comes after the first loop.
-	first := strings.Index(schemaGraphTail, "for (const node of nodes.values()) {\n        /// MV/RMV: SELECT FROM dependsOn")
-	second := strings.Index(schemaGraphTail, "/// Second pass, after every metadata edge is in")
+	// 元数据边必须先于推断边添加，这样真实的依赖永远不会被降级为虚线：
+	// 第二遍在第一个循环之后进行。
+	first := strings.Index(schemaGraphTail, "for (const node of nodes.values()) {\n        /// MV/RMV：从 dependsOn SELECT，写入 dependents")
+	second := strings.Index(schemaGraphTail, "/// 第二遍，在所有元数据边都加入之后")
 	if first < 0 || second < 0 || second < first {
-		t.Error("inferred edges must be added after the metadata pass")
+		t.Error("推断边必须在元数据遍历之后添加")
 	}
 }

@@ -41,11 +41,11 @@ SELECT
   `move_ttl_info.min`,
   `move_ttl_info.max`
 FROM system.parts
--- Bounded so the collector cannot dominate the run on the cluster that
--- most needs it: a TOO_MANY_PARTS box is exactly where system.parts has
--- exploded, and the result is fully buffered in memory before it is
--- written. Inactive parts are dropped, the largest parts come first, and
--- the row cap keeps the worst case to tens of MB rather than GB.
+-- 设置上限，使 collector 不会在最需要它的集群上拖垮整个运行：
+-- TOO_MANY_PARTS 的机器正是 system.parts 爆炸的地方，
+-- 而且结果在写入前会完整缓冲在内存中。非活动 part 被丢弃，
+-- 最大的 part 排在最前，行数上限把最坏情况控制在几十 MB
+-- 而不是 GB。
 WHERE active = 1
 ORDER BY bytes_on_disk DESC
 LIMIT 50000

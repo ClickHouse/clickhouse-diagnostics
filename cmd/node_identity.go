@@ -8,26 +8,22 @@ import (
 	"clickhouse-diagnostic/pkg"
 )
 
-// nodeIdentity is what the bundle says about the server it describes. Two
-// bundles in one escalation were read against the wrong node — one came
-// through a load balancer (system tables from replica A, log files from
-// replica B), the other from a sibling site — and both were spotted only by
-// hand from thread ids and uptime. The identity probe puts the answer in
-// the execution log, the dashboard header and the pre-pass coverage line.
+// nodeIdentity 是 bundle 对其所描述服务器的说明。一次升级处理中的两个
+// bundle 被误读了节点——一个经由负载均衡器（系统表来自 replica A，日志文件来自
+// replica B），另一个来自同级站点——两者都只能靠人工从线程 id 和 uptime 中
+// 发现。身份探测把答案写进执行日志、dashboard 头部和 pre-pass 覆盖行。
 type nodeIdentity struct {
-	Host          string   // hostName() — the node the system tables describe
+	Host          string   // hostName()——系统表所描述的节点
 	FQDN          string   // FQDN()
-	UptimeSeconds int64    // uptime() — how long ago this node (re)started
-	Samples       []string // hostName() from repeated probes; differing values mean a load balancer
-	Err           error    // probe failure; identity unknown, warnings suppressed
+	UptimeSeconds int64    // uptime()——该节点（重新）启动至今的时长
+	Samples       []string // 重复探测得到的 hostName()；值不同意味着存在负载均衡器
+	Err           error    // 探测失败；身份未知，抑制警告
 }
 
-// probeNodeIdentity asks the server who it is. Three separate round trips for
-// hostName() on purpose, each over a NEW connection: a load balancer pins a
-// kept-alive connection to one backend, so probes over the shared client
-// all answered as the same replica on a real three-replica endpoint and
-// the warning never fired. A fresh connection per probe is the only cheap
-// way to see the balancer from the client side.
+// probeNodeIdentity 询问服务器它是谁。特意为 hostName() 做了三次独立往返，
+// 每次都使用一条新连接：负载均衡器会把 keep-alive 连接固定到某个后端，因此在
+// 真实的三 replica 端点上，通过共享 client 进行的探测全部应答为同一个 replica，
+// 警告从未触发。每次探测使用新连接是从客户端侧发现均衡器的唯一廉价方式。
 func probeNodeIdentity(client *pkg.ClickHouseClient) nodeIdentity {
 	var id nodeIdentity
 	raw, err := client.ExecuteQueryFreshConnection("SELECT hostName(), FQDN(), toString(uptime()) FORMAT TSV")
@@ -49,8 +45,7 @@ func probeNodeIdentity(client *pkg.ClickHouseClient) nodeIdentity {
 	return id
 }
 
-// loadBalancerSuspected reports whether repeated hostName() probes answered
-// with more than one name.
+// loadBalancerSuspected 报告重复的 hostName() 探测是否应答了不止一个名称。
 func loadBalancerSuspected(samples []string) bool {
 	seen := map[string]bool{}
 	for _, s := range samples {
@@ -61,23 +56,20 @@ func loadBalancerSuspected(samples []string) bool {
 	return len(seen) > 1
 }
 
-// sameMachine says whether the server's reported name and the collector's
-// own hostname plausibly denote one machine. Two qualified names must be
-// equal outright — "ch-01.site-a" and "ch-01.site-b" share a first label
-// and are two machines. The first-label match is only for the case where
-// one side is bare (a server reports "ch-01" while the OS says
-// "ch-01.example.internal", or the reverse).
+// sameMachine 判断服务器报告的名称和 collector 自身的主机名是否可能指向
+// 同一台机器。两个完全限定名必须完全相等——"ch-01.site-a" 和 "ch-01.site-b"
+// 首标签相同，但是两台机器。首标签匹配只用于一侧为裸名的情况（服务器报告
+// "ch-01" 而操作系统给出 "ch-01.example.internal"，或反之）。
 func sameMachine(serverHost, serverFQDN, localHostname string) bool {
 	norm := func(s string) string { return strings.ToLower(strings.TrimSpace(s)) }
 	qualified := func(s string) bool { return strings.Contains(s, ".") }
 	first := func(s string) string { return strings.SplitN(s, ".", 2)[0] }
 	l := norm(localHostname)
 	if l == "" {
-		return true // cannot tell; do not warn
+		return true // 无法判断；不告警
 	}
-	// When both the server's FQDN and the local name are qualified, the
-	// FQDN decides alone — the short hostName() would otherwise match on
-	// the first label and hide the difference FQDN() proves.
+	// 当服务器的 FQDN 和本地名称都是完全限定名时，仅由 FQDN 决定——否则短的
+	// hostName() 会在首标签上匹配，从而掩盖 FQDN() 已证明的差异。
 	if f := norm(serverFQDN); qualified(f) && qualified(l) {
 		return f == l
 	}
@@ -89,7 +81,7 @@ func sameMachine(serverHost, serverFQDN, localHostname string) bool {
 	return false
 }
 
-// isLoopback reports whether the -host flag points at this machine.
+// isLoopback 报告 -host 标志是否指向本机。
 func isLoopback(target string) bool {
 	switch strings.ToLower(strings.TrimSpace(target)) {
 	case "localhost", "127.0.0.1", "::1", "[::1]", "0.0.0.0":
@@ -98,41 +90,39 @@ func isLoopback(target string) bool {
 	return false
 }
 
-// nodeWarnings turns the identity probe into operator warnings. Each names
-// the consequence for the bundle, not just the fact.
+// nodeWarnings 把身份探测结果转换为运维人员可读的警告。每条都说明了对 bundle
+// 的影响，而不仅仅陈述事实。
 //
-// mode decides how a load-balanced endpoint reads. In cloud collection it is
-// not a problem to report: a ClickHouse Cloud endpoint IS load-balanced across
-// the service's replicas, there is no per-replica endpoint to point at
-// instead, and the collection is built for it — the per-replica system tables
-// fan out with clusterAllReplicas and the shared ones are read once by design.
-// Calling that a warning on every Cloud bundle trains the reader to ignore the
-// line that matters on a self-managed cluster, where the same symptom means
-// the bundle silently describes no single node. So cloud gets a note and
-// everything else keeps the warning.
+// mode 决定负载均衡端点该如何解读。在 cloud 采集中报告此事不成问题：
+// ClickHouse Cloud 端点本来就在服务的各 replica 之间负载均衡，不存在可改指的
+// 按 replica 端点，而且采集本身就是为此设计的——按 replica 划分的系统表通过
+// clusterAllReplicas 分发，共享表按设计只读一次。若对每个 Cloud bundle 都报
+// 警告，会训练读者忽略那条在自建集群上真正重要的信息，而在自建集群上同样的
+// 症状意味着 bundle 静默地没有描述任何单一节点。因此 cloud 给 Note，其余情形
+// 保留 Warning。
 func nodeWarnings(id nodeIdentity, target, localHostname, mode string, collectingLocalFiles bool) []string {
 	if id.Err != nil {
 		return nil
 	}
 	var out []string
 	if loadBalancerSuspected(id.Samples) {
-		answered := strings.Join(uniqueStrings(id.Samples), " and ")
+		answered := strings.Join(uniqueStrings(id.Samples), " 和 ")
 		if strings.EqualFold(strings.TrimSpace(mode), "cloud") {
-			out = append(out, fmt.Sprintf("Note: -host %s answered as %s — the endpoint is load-balanced across the "+
-				"service's replicas, which is normal and is what cloud collection expects. The per-replica system tables "+
-				"(query_log, part_log, metric_log, errors, text_log …) fan out over every replica; the shared tables "+
-				"(parts, tables, columns, databases, replicas, replication_queue, mutations, detached_parts) come from "+
-				"whichever replica answered, as they always do in cloud mode.", target, answered))
+			out = append(out, fmt.Sprintf("Note: -host %s 的响应来自 %s——该端点在服务的各个 replica 之间负载均衡，"+
+				"这是正常的，也是 cloud 采集所预期的。按 replica 划分的系统表 "+
+				"（query_log、part_log、metric_log、errors、text_log …）会分发到每个 replica；共享表 "+
+				"（parts、tables、columns、databases、replicas、replication_queue、mutations、detached_parts）则来自 "+
+				"实际应答的那个 replica，这与任何 cloud 模式采集一致。", target, answered))
 		} else {
-			out = append(out, fmt.Sprintf("Warning: -host %s answered as %s — it is a load balancer or a DNS round-robin. "+
-				"Every system table in this bundle will come from whichever replica answers each query, so the bundle "+
-				"describes no single node. Point -host at one replica (or run the tool on it).", target, answered))
+			out = append(out, fmt.Sprintf("Warning: -host %s 的响应来自 %s——它是负载均衡器或 DNS 轮询。"+
+				"此 bundle 中的每张系统表都将来自应答各查询的那个 replica，因此 bundle "+
+				"不会描述任何单一节点。请将 -host 指向一个 replica（或在它上面运行工具）。", target, answered))
 		}
 	}
 	if collectingLocalFiles && !isLoopback(target) && !sameMachine(id.Host, id.FQDN, localHostname) {
-		out = append(out, fmt.Sprintf("Warning: the system tables describe %s but host facts, configuration and log files "+
-			"are read from THIS machine (%s). Run the tool on %s, or pass -host-info off -logs off -skip-config "+
-			"so the bundle does not mix two hosts.", id.Host, localHostname, id.Host))
+		out = append(out, fmt.Sprintf("Warning: 系统表描述的是 %s，但 host facts、配置和日志文件 "+
+			"是从本机（%s）读取的。请在 %s 上运行工具，或传入 -host-info off -logs off -skip-config "+
+			"以免 bundle 混合两台主机。", id.Host, localHostname, id.Host))
 	}
 	return out
 }
@@ -149,7 +139,7 @@ func uniqueStrings(in []string) []string {
 	return out
 }
 
-// humanUptime renders uptime() for the execution log and the coverage line.
+// humanUptime 为执行日志和覆盖行渲染 uptime()。
 func humanUptime(seconds int64) string {
 	if seconds <= 0 {
 		return "unknown"
@@ -167,60 +157,57 @@ func humanUptime(seconds int64) string {
 	}
 }
 
-// isSharedMergeTree reads the raw value of `SELECT value FROM system.settings
-// WHERE name = 'cloud_mode'`. Cloud mode is what a self-hosted SharedMergeTree
-// stack runs with; every replica then keeps its own system tables.
+// isSharedMergeTree 读取 `SELECT value FROM system.settings
+// WHERE name = 'cloud_mode'` 的原始值。自托管的 SharedMergeTree 栈以 cloud
+// mode 运行；此时每个 replica 都保有自己的系统表。
 func isSharedMergeTree(cloudModeValue string) bool {
 	v := strings.ToLower(strings.TrimSpace(cloudModeValue))
 	return v == "1" || v == "true"
 }
 
-// smtCollectionDecision is the outcome of finding a SharedMergeTree cluster
-// under -mode onprem.
+// smtCollectionDecision 是在 -mode onprem 下发现 SharedMergeTree 集群时的结果。
 type smtCollectionDecision struct {
-	EffectiveMode string // "cloud" when the run switches, else "onprem"
-	Note          string // one line for the execution log's `collection:` key
-	Message       string // what the operator sees
+	EffectiveMode string // 运行切换时为 "cloud"，否则为 "onprem"
+	Note          string // 执行日志中 `collection:` 键的一行内容
+	Message       string // 运维人员看到的内容
 }
 
-// decideSMTCollection: -mode onprem on a SharedMergeTree cluster collects one
-// node of N, which in one sev-1 meant five bundles that described nothing
-// useful. The run therefore switches to cloud collection — every system
-// table fans out over the `default` cluster — while still collecting this
-// node's host facts, configuration and log files, which cloud mode alone
-// does not. fanoutErr is the result of probing
-// clusterAllReplicas(default, system.one); a refused probe (no REMOTE grant,
-// no `default` cluster) means the switch cannot happen and the run stays on
-// one node, saying so. singleNode is the -single-node flag.
+// decideSMTCollection：在 SharedMergeTree 集群上使用 -mode onprem 只会采集
+// N 个节点中的一个，曾在一次 sev-1 中产生五个描述不了任何有用信息的 bundle。
+// 因此运行会切换到 cloud 采集——每张系统表都通过 `default` 集群分发——同时仍然
+// 采集本节点的 host facts、配置和日志文件，而仅用 cloud 模式做不到这一点。
+// fanoutErr 是探测 clusterAllReplicas(default, system.one) 的结果；探测被拒绝
+// （没有 REMOTE 授权、没有 `default` 集群）意味着无法切换，运行会停留在单节点
+// 并说明这一点。singleNode 是 -single-node 标志。
 func decideSMTCollection(fanoutErr error, singleNode bool, hint string) smtCollectionDecision {
 	switch {
 	case singleNode:
 		return smtCollectionDecision{
 			EffectiveMode: "onprem",
-			Note:          "onprem, single node by request (-single-node) on a SharedMergeTree cluster — the other replicas' system tables are not in this bundle",
+			Note:          "onprem，按请求（-single-node）在 SharedMergeTree 集群上只采集单节点——其他 replica 的系统表不在本 bundle 中",
 			Message:       hint,
 		}
 	case fanoutErr != nil:
 		return smtCollectionDecision{
 			EffectiveMode: "onprem",
-			Note: "onprem, single node: SharedMergeTree detected (cloud_mode = 1) but the cluster fan-out probe failed — " +
+			Note: "onprem，单节点：检测到 SharedMergeTree（cloud_mode = 1），但集群 fan-out 探测失败——" +
 				firstLine(fanoutErr.Error()),
-			Message: "Warning: this server runs SharedMergeTree (cloud_mode = 1), but clusterAllReplicas(default, …) failed: " +
-				firstLine(fanoutErr.Error()) + "\n    The bundle will describe THIS node only. To cover every replica grant " +
-				"REMOTE and CREATE TEMPORARY TABLE ON *.* to the diagnostic user and re-run.",
+			Message: "Warning: 此服务器运行 SharedMergeTree（cloud_mode = 1），但 clusterAllReplicas(default, …) 失败：" +
+				firstLine(fanoutErr.Error()) + "\n    此 bundle 将只描述本节点。要覆盖每个 replica，请向诊断用户授予 " +
+				"REMOTE 和 CREATE TEMPORARY TABLE ON *.* 后重新运行。",
 		}
 	default:
 		return smtCollectionDecision{
 			EffectiveMode: "cloud",
-			Note: "onprem → cloud: SharedMergeTree detected (cloud_mode = 1). Every per-replica system table fans out over the " +
-				"default cluster (clusterAllReplicas); the shared tables (parts, tables, columns, databases, replicas, " +
-				"replication_queue, mutations, detached_parts) are read from one replica, as in any cloud collection; " +
-				"host facts, configuration and log files are the collector machine's — this node's when the tool runs on it " +
-				"(a warnings: line above says when it does not)",
-			Message: "SharedMergeTree cluster detected (cloud_mode = 1): switching to cloud collection so the per-replica system tables " +
-				"(query_log, part_log, errors, metric_log, text_log …) cover every replica, not just this node; the shared tables " +
-				"(parts, tables, replicas …) are read once, as in any cloud collection. Host facts, configuration and log files are " +
-				"still read from the machine running this tool. Pass -single-node to collect this node only.",
+			Note: "onprem → cloud：检测到 SharedMergeTree（cloud_mode = 1）。每个按 replica 划分的系统表都会通过 " +
+				"default 集群（clusterAllReplicas）分发；共享表（parts、tables、columns、databases、replicas、" +
+				"replication_queue、mutations、detached_parts）只从一个 replica 读取，与任何 cloud 采集一致；" +
+				"host facts、配置和日志文件来自 collector 所在的机器——当工具运行在本节点上时就是本节点的" +
+				"（若不是，上方的 warnings: 行会说明）",
+			Message: "检测到 SharedMergeTree 集群（cloud_mode = 1）：正在切换到 cloud 采集，使按 replica 划分的系统表 " +
+				"（query_log、part_log、errors、metric_log、text_log …）覆盖每个 replica，而不仅仅是本节点；共享表 " +
+				"（parts、tables、replicas …）只读取一次，与任何 cloud 采集一致。host facts、配置和日志文件仍从 " +
+				"运行此工具的机器读取。传入 -single-node 可只采集本节点。",
 		}
 	}
 }

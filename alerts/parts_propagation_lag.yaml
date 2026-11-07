@@ -1,68 +1,59 @@
 name: parts_propagation_lag
-title: "A replica is behind on parts (SharedMergeTree propagation lag)"
+title: "某个replica在part上落后（SharedMergeTree传播延迟）"
 severity: warning
 description: |
-  On a SharedMergeTree cluster every replica keeps its own view of
-  system.parts and learns about new parts asynchronously: Keeper says a part
-  exists, then the replica fetches it. A replica that is behind returns fewer
-  rows than its siblings for the same query, and the gap grows until a fetch
-  slot frees up.
+  在SharedMergeTree集群上，每个replica维护自己的system.parts视图，
+  并异步获知新part：Keeper说某个part存在，随后该replica去fetch它。
+  落后的replica对同一查询返回的行数少于其兄弟节点，而且差距会持续扩大，
+  直到fetch slot释放。
 
-  Two things are reported, both read from one pass over system.parts:
+  报告两类情况，均来自对system.parts的一次扫描：
 
-    * a replica whose newest block in a partition is at least 32 behind the
-      newest any replica has. Block numbers are monotonic per partition, so
-      that difference is a real count of blocks the replica has not got. The
-      floor is one full scheduling round — shared_merge_tree_parts_load_batch_size,
-      default 32 — so an ordinary propagation gap mid-insert does not fire it.
-    * a replica with NO active part in a partition at all, when that partition
-      was written in the last day. Such a replica contributes no row to a
-      per-partition comparison, so it has to be found by subtracting the
-      replica set of the partition from the replica set of the table;
-      otherwise the worst case — a replica that fetched none of a new
-      partition — is the one case that reads as healthy. The one-day window is
-      what makes this safe against the collector's per-host cap, which keeps
-      each replica's most recently written partitions and drops the oldest.
+    * 某个replica在某分区中的最新block比任何replica的最新block至少
+      落后32。block号在每个分区内单调递增，因此该差值就是该replica
+      尚未获取的block的真实数量。下限是一个完整的调度轮次——
+      shared_merge_tree_parts_load_batch_size，默认32——因此insert过程中
+      的普通传播差距不会触发它。
+    * 某个replica在某个分区中完全没有活跃part，而该分区在最近一天内有
+      写入。这样的replica不会为逐分区比较贡献任何行，因此必须通过从表
+      的replica集合中减去该分区的replica集合来发现它；否则最坏的情况——
+      某个replica一个新分区都没fetch——反而是唯一被读作健康的情况。
+      一天窗口让这一点在collector的逐host上限（保留每个replica最近写入
+      的分区并丢弃最旧的）下仍然安全。
 
-  Deliberately NOT a duration. The difference between the newest
-  modification_time on two replicas is skew, not the age of the missing
-  blocks: it is large after an idle spell even when the missing blocks are
-  seconds old, stays small for a burst written within a few seconds however
-  long the replica lags, and a merge on the lagging replica refreshes it
-  without closing the block gap. max_newest_part_skew_s is reported as
-  corroboration only. For how long a replica has been behind, read
-  system.replicas — absolute_delay and inserts_oldest_time are the server's
-  own answer, per replica, in the same bundle.
+  刻意不是持续时间。两个replica上最新modification_time之差是时钟偏移，
+  不是缺失block的年龄：空闲一段时间后它会很大，即便缺失的block只有几秒
+  历史；几秒内写入的一批数据会让它保持很小，无论replica落后多久；
+  落后replica上的一次merge会刷新它，却不缩小block差距。
+  max_newest_part_skew_s仅作为佐证报告。要了解replica落后了多久，
+  请读取system.replicas——absolute_delay和inserts_oldest_time是服务器
+  自己的答案，逐replica，就在同一个bundle中。
 
-  Usual cause: a saturated background fetch or schedule pool (alerts
-  fetch_pool_saturated / schedule_pool_saturated, HC-2.13 / 2.14) — the fetch
-  executor has no queue, so a table needing more fetches than free slots backs
-  off silently. A restart clears the backlog only until the pool fills again;
-  the lasting fix is pool size, fewer and larger inserts, fewer tables. The
-  full per-partition list is in the collected file
-  system.parts_max_block_by_replica.
-# Scans per-table data: not run in an essential collection.
+  常见原因：后台fetch或schedule pool饱和（告警fetch_pool_saturated /
+  schedule_pool_saturated，HC-2.13 / 2.14）——fetch executor没有队列，
+  因此需要比空闲slot更多fetch的表会静默退避。重启只能清空积压，直到
+  pool再次填满；长久的修复是pool大小、更少更大的insert、更少的表。
+  完整的逐分区列表在采集文件system.parts_max_block_by_replica中。
+# 扫描逐表数据：在essential采集中不运行。
 tier: full
 tags:
   - replication
   - shared-merge-tree
   - capacity
 
-# Cloud only: the comparison needs every replica's system.parts, which only
-# a clusterAllReplicas fan-out gives ({sys.parts} is read on ONE node in
-# every mode because system.parts is a shared table for ordinary cloud
-# reads). On one node the rule has nothing to compare and is skipped.
+# 仅cloud：比较需要每个replica的system.parts，只有clusterAllReplicas
+# fan out才能提供（在每种模式下{sys.parts}都只在一个节点上读取，因为
+# 对于普通cloud读取，system.parts是共享表）。在单节点上规则没有可比对象，
+# 会被跳过。
 modes: [cloud]
 
-# Same shape as queries.cloud/system.parts_max_block_by_replica.sql: window
-# functions over ONE fan-out (a CTE read twice fans out twice), each replica
-# contributing its 20 000 most recently written partitions. Per partition the
-# windows carry every replica's newest block and the replicas that have none,
-# so both findings come out of the same pass; LIMIT 1 BY keeps one row per
-# partition and ARRAY JOIN turns it back into one row per lagging replica.
-# Evaluated by the Go check over the files already collected (no second
-# query to the server). query: below is the same test in SQL, for the
-# customer to run live; the check mirrors it.
+# 与queries.cloud/system.parts_max_block_by_replica.sql形状相同：在单次
+# fan out上使用窗口函数（CTE读取两次会fan out两次），每个replica贡献其
+# 最近写入的20000个分区。按分区，窗口携带每个replica的最新block以及
+# 完全没有block的replica，因此两类发现来自同一次扫描；LIMIT 1 BY保证
+# 每个分区一行，ARRAY JOIN再把它变回每个落后replica一行。
+# 由Go check在已采集的文件上评估（不会再次查询服务器）。下方query:是同一
+# 测试的SQL版本，供客户在线执行；check镜像同一逻辑。
 check: go:parts_propagation_lag
 source:
   - system.parts_max_block_by_replica
@@ -125,10 +116,10 @@ query: |
   ORDER BY max_blocks_behind DESC
   LIMIT 100
 
-# Follow-ups the dashboard shows under a fired alert, for the customer to run
-# on their own cluster (never run by the tool; read-only, validated like query).
+# 在触发的告警下方，dashboard会展示这些后续查询，供客户在自己的集群上运行
+# （工具从不执行；只读，并按query的标准校验）。
 investigate:
-  - title: "Every background pool right now, per replica: busy slots against its size"
+  - title: "当前每个background pool在每replica上的情况：忙碌slot与其大小对比"
     query: |
       SELECT t.hostname AS hostname, t.pool AS pool, t.busy AS busy, s.size AS size,
              round(100 * t.busy / greatest(s.size, 1)) AS pct_busy
@@ -146,7 +137,7 @@ investigate:
       ) AS s USING (hostname, pool)
       ORDER BY pct_busy DESC, hostname, pool
       LIMIT 200
-  - title: "Each pool's hourly peak over the last 24 hours, per replica (busy slots, and the pool's size)"
+  - title: "最近24小时每个pool在每replica上的小时峰值（忙碌slot及pool大小）"
     query: |
       SELECT
         hostName() AS hostname,
@@ -158,4 +149,4 @@ investigate:
       ORDER BY hostname, hour
       LIMIT 1000
 
-message: "{hostname}: behind on {partitions_affected} partition(s) ({partitions_not_fetched} with no parts fetched at all), worst {worst_partition} at {max_blocks_behind} blocks behind the newest replica — read system.replicas absolute_delay for how long, not the {max_newest_part_skew_s} s newest-part skew"
+message: "{hostname}：在{partitions_affected}个分区上落后（其中{partitions_not_fetched}个完全没有fetch任何part），最差的是{worst_partition}，落后最新replica {max_blocks_behind}个block——要了解落后多久请读取system.replicas的absolute_delay，而不是{max_newest_part_skew_s}秒的最新part偏移"

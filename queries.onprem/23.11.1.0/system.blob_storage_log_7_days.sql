@@ -1,9 +1,9 @@
--- Object-storage operations per hour (Upload / Delete / MultiPartUpload* …) and
--- how many failed, with one example error. Answers "did the server delete or
--- fail to write the blob that a query later could not find" without
--- system.remote_data_paths (too large to ship). Table exists only when
--- <blob_storage_log> is configured (23.11+); absent = not enabled, not healthy.
--- Delete rows carry data_size = UInt64 max — excluded from the byte sum.
+-- 每小时的对象存储操作（Upload / Delete / MultiPartUpload* …）以及
+-- 失败了多少次，附一条示例错误。回答“服务器是否删除了、或未能写入
+-- 之后某条查询找不到的 blob”，而无需
+-- system.remote_data_paths（太大，无法随包采集）。只有当配置了
+-- <blob_storage_log>（23.11+）时该表才存在；缺席 = 未启用，而非健康。
+-- Delete 行的 data_size = UInt64 最大值——已从字节求和中排除。
 SELECT
     toStartOfHour(event_time)                                        AS time,
     event_type,

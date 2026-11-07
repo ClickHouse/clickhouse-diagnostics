@@ -1,17 +1,17 @@
 -- tier: essential
--- Cloud runs 23.5 and newer, so this root file can use `default`
--- unconditionally (added to system.settings in 23.4) and needs no
--- version rung. The onprem/gov trees keep a 22.8-compatible root plus a
--- 23.4.1.0 override, because their floor is 22.8.
+-- Cloud 运行 23.5 及更新版本，因此这个根文件可以无条件使用
+-- `default`（23.4 加入 system.settings），不需要
+-- 版本层级。onprem/gov 目录保留兼容 22.8 的根文件加上
+-- 23.4.1.0 覆盖，因为它们的下限是 22.8。
 --
--- The effective session-level settings. Config files show what was
--- written on disk; this shows what the server actually resolved.
--- changed = 1 marks every setting that deviates from the default.
+-- 生效的会话级设置。配置文件显示磁盘上写入了什么；
+-- 本文件显示服务器实际解析出的结果。
+-- changed = 1 标记每个偏离默认值的设置。
 --
--- `readonly` is deliberately not collected: it reports this session's
--- readonly=1 (pkg/clickhouse.go:176), so it is 1 for every row on every
--- run and would read as "a profile has locked every setting". Real
--- per-profile constraints live in system.settings_profile_elements.
+-- 故意不采集 `readonly`：它报告本次会话的
+-- readonly=1（pkg/clickhouse.go:176），因此每次运行的每一行都是 1，
+-- 会被读成“某个 profile 锁定了所有设置”。真正的
+-- 按 profile 约束在 system.settings_profile_elements 中。
 SELECT
     name,
     value,

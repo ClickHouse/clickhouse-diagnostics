@@ -9,17 +9,16 @@ import (
 	"testing"
 )
 
-// The pre-pass reads keeper/<host>_<port>.txt — the four-letter replies of
-// every Keeper member — and turns them into findings. The fixture is the
-// shape of a real quorum loss: a 2.38 GB snapshot sent unchunked, and one
-// member that fell behind the leader's retained log, so it could only
-// rejoin through that snapshot (P-61).
+// pre-pass 会读取 keeper/<host>_<port>.txt——每个 Keeper 成员的
+// four-letter command 应答——并将其转换为 finding。这个 fixture 是真实
+// quorum 丢失的形态：一个 2.38 GB 的快照未分块发送，且一个成员落后于
+// leader 保留的日志，因此只能通过该快照重新加入（P-61）。
 
 const notServing = "This instance is not currently serving requests"
 
 type member struct {
 	name, isro, lgif, srvr, mntr, conf, dirs string
-	ens                                      string // "" = default, "-" = no ensemble line (older bundles)
+	ens                                      string // "" = 默认，"-" = 无 ensemble 行（较旧的 bundle）
 }
 
 func writeKeeperBundle(t *testing.T, members []member) string {
@@ -64,13 +63,13 @@ func keeperFindings(t *testing.T, run string) []map[string]string {
 	t.Helper()
 	out, errOut, code := runPrepass(t, "--json", run)
 	if code != 0 {
-		t.Fatalf("exit %d: %s", code, errOut)
+		t.Fatalf("退出码 %d：%s", code, errOut)
 	}
 	var r struct {
 		Findings []map[string]string `json:"findings"`
 	}
 	if err := json.Unmarshal([]byte(out), &r); err != nil {
-		t.Fatalf("pre-pass did not emit JSON: %v\n%s", err, out)
+		t.Fatalf("pre-pass 未输出 JSON：%v\n%s", err, out)
 	}
 	var k []map[string]string
 	for _, f := range r.Findings {
@@ -101,24 +100,24 @@ func TestInspectBundle_KeeperSnapshotTransferQuorumLoss(t *testing.T) {
 		{"keeper-b", "rw", lgif(9000000000, 9002500000, 9002500000, 9002500000, 9002400000),
 			"ClickHouse Keeper version: v26.8.17.4\nMode: follower\nNode count: 90000000",
 			"zk_server_state\tfollower\nzk_latest_snapshot_size\t" + snap, fmt.Sprintf(conf, 3), "snapshot_dir_size: 7200000000\nlog_dir_size: 5000000000", ""},
-		// Restarted last and came back below the leader's first log index.
+		// 最后重启，回来时低于 leader 的首个日志索引。
 		{"keeper-c", "rw", lgif(8996000000, 8999600000, 8999600000, 8999600000, 8996000000), notServing, notServing, notServing, notServing, ""},
 	})
 	fs := keeperFindings(t, run)
 	if !find(fs, "HC-3.20", "critical", "snapshot_transfer_chunk_size") {
-		t.Errorf("no critical finding for a 2.2 GiB snapshot sent unchunked: %v", fs)
+		t.Errorf("对 2.2 GiB 未分块发送的快照没有 critical finding：%v", fs)
 	}
 	if !find(fs, "HC-3.19", "critical", "keeper-c") {
-		t.Errorf("no critical finding for the member behind the leader's retained log: %v", fs)
+		t.Errorf("落后于 leader 保留日志的成员没有 critical finding：%v", fs)
 	}
 	if !find(fs, "HC-3.20", "warning", "write_snapshot_version") {
-		t.Errorf("no warning for snapshot format 6: %v", fs)
+		t.Errorf("快照格式 6 没有 warning：%v", fs)
 	}
 	if !find(fs, "HC-3.18", "warning", "keeper-c") {
-		t.Errorf("no warning for the member that is not serving (quorum still 2 of 3): %v", fs)
+		t.Errorf("未提供服务的成员没有 warning（quorum 仍为 3 之 2）：%v", fs)
 	}
 	if find(fs, "HC-3.18", "critical", "") {
-		t.Errorf("2 of 3 serving is a quorum, not a quorum loss: %v", fs)
+		t.Errorf("3 个中有 2 个在服务即满足 quorum，不是 quorum 丢失：%v", fs)
 	}
 }
 
@@ -126,17 +125,17 @@ func TestInspectBundle_KeeperQuorumLost(t *testing.T) {
 	m := func(name string) member {
 		return member{name, "rw", lgif(1, 100, 100, 100, 0), notServing, notServing, notServing, notServing, ""}
 	}
-	// Leaderless: every member answers "not serving" itself.
+	// 无 leader：每个成员自身都回答 "not serving"。
 	fs := keeperFindings(t, writeKeeperBundle(t, []member{m("keeper-a"), m("keeper-b"), m("keeper-c")}))
-	if !find(fs, "HC-3.18", "critical", "no member in this bundle is serving") {
-		t.Errorf("every member answering 'not serving' is critical: %v", fs)
+	if !find(fs, "HC-3.18", "critical", "本 bundle 中没有任何成员正在服务") {
+		t.Errorf("所有成员都回答 'not serving' 应为 critical：%v", fs)
 	}
-	// With one member serving, the files cannot prove the other two are the
-	// rest of the voters: a warning, not an asserted outage.
+	// 有一个成员在服务时，这些文件无法证明另外两个就是其余投票者：
+	// 应给 warning，而不是断言故障。
 	healthy := member{"keeper-a", "rw", lgif(1, 100, 100, 100, 0), "Mode: follower", "zk_server_state\tfollower", "snapshot_transfer_chunk_size=0", "snapshot_dir_size: 0", ""}
 	fs = keeperFindings(t, writeKeeperBundle(t, []member{healthy, m("keeper-b"), m("keeper-c")}))
 	if find(fs, "HC-3.18", "critical", "") || !find(fs, "HC-3.18", "warning", "keeper-b") {
-		t.Errorf("1 serving + 2 not serving: warning, not critical: %v", fs)
+		t.Errorf("1 个在服务 + 2 个不在服务：应为 warning，而不是 critical：%v", fs)
 	}
 }
 
@@ -148,81 +147,81 @@ func TestInspectBundle_KeeperHealthyEnsembleRaisesNothing(t *testing.T) {
 			"Mode: " + mode, "zk_server_state\t" + mode + "\nzk_latest_snapshot_size\t52428800", conf, "snapshot_dir_size: 157286400\nlog_dir_size: 3372003", ""})
 	}
 	if fs := keeperFindings(t, writeKeeperBundle(t, ms)); len(fs) != 0 {
-		t.Errorf("a healthy ensemble raised: %v", fs)
+		t.Errorf("健康的 ensemble 却报告了：%v", fs)
 	}
 }
 
 func TestInspectBundle_OlderKeeperWithoutNewCommands(t *testing.T) {
-	// Bundles from before these commands, or a 22.8 Keeper: no lgif / conf / dirs.
+	// 这些命令之前的 bundle，或 22.8 的 Keeper：没有 lgif / conf / dirs。
 	empty := "(empty reply — command not enabled in four_letter_word_white_list, or not known to this Keeper version)"
 	ms := []member{{"keeper-a", empty, empty, "Mode: leader", "zk_server_state\tleader\nzk_latest_snapshot_size\t2400000000", empty, empty, ""}}
 	if fs := keeperFindings(t, writeKeeperBundle(t, ms)); len(fs) != 0 {
-		t.Errorf("without conf the chunk size is unknown — no finding may claim it: %v", fs)
+		t.Errorf("没有 conf 时 chunk 大小未知——任何 finding 都不得断言它：%v", fs)
 	}
 }
 
 func TestInspectBundle_KeeperSnapshotFormatDefaultBefore268(t *testing.T) {
-	// 26.7 writes format 6 by default: worth knowing, not a warning.
+	// 26.7 默认写入格式 6：值得知道，但不是 warning。
 	m := member{"keeper-a", "rw", lgif(1, 100, 100, 100, 0), "ClickHouse Keeper version: v26.7.5.10\nMode: leader",
 		"zk_version\tv26.7.5.10\nzk_server_state\tleader", "snapshot_transfer_chunk_size=0\nwrite_snapshot_version=6", "snapshot_dir_size: 0", ""}
 	fs := keeperFindings(t, writeKeeperBundle(t, []member{m}))
-	if !find(fs, "HC-3.20", "info", "the default on 26.7") || find(fs, "HC-3.20", "warning", "write_snapshot_version") {
-		t.Errorf("format 6 on 26.7 is the default: want info, not warning: %v", fs)
+	if !find(fs, "HC-3.20", "info", "26.7 上的默认值") || find(fs, "HC-3.20", "warning", "write_snapshot_version") {
+		t.Errorf("26.7 上的格式 6 是默认值：应为 info，而不是 warning：%v", fs)
 	}
 }
 
-// ---- review round: what the files can and cannot prove
+// ---- 评审轮次：这些文件能证明什么、不能证明什么
 
 const truncated = "\nerror: timeout after 10s — reply truncated"
 
 func TestInspectBundle_KeeperTruncatedReplyIsNotEvidence(t *testing.T) {
-	// A cut-off lgif: last_log_idx arrived as "8" of a longer number.
+	// 被截断的 lgif：last_log_idx 只收到了更长数字中的 "8"。
 	leader := member{name: "keeper-a", isro: "rw", lgif: lgif(9000000000, 9002500000, 9002500000, 9002500000, 9002000000),
 		srvr: "Mode: leader", mntr: "zk_server_state\tleader", conf: "snapshot_transfer_chunk_size=100000000", dirs: "snapshot_dir_size: 0"}
 	cut := member{name: "keeper-b", isro: "rw", lgif: "first_log_idx\t9000000000\nlast_log_idx\t8" + truncated,
 		srvr: "skipped — lgif timed out", mntr: "skipped — lgif timed out", conf: "skipped — lgif timed out", dirs: "skipped — lgif timed out"}
 	fs := keeperFindings(t, writeKeeperBundle(t, []member{leader, cut}))
 	if find(fs, "HC-3.19", "critical", "keeper-b") {
-		t.Errorf("a truncated lgif produced a 'behind the log' critical: %v", fs)
+		t.Errorf("被截断的 lgif 产生了“落后于日志”的 critical：%v", fs)
 	}
 	if !find(fs, "HC-3.18", "warning", "keeper-b") {
-		t.Errorf("the member whose probe failed must still be reported: %v", fs)
+		t.Errorf("探测失败的成员仍必须被报告：%v", fs)
 	}
 }
 
 func TestInspectBundle_KeeperUnreachableIsNeverAQuorumLoss(t *testing.T) {
-	// A remote run probed only the connected member, and it timed out.
+	// 远程运行只探测了已连接的成员，而它超时了。
 	m := member{name: "keeper-a", isro: "error: timeout after 10s", lgif: "skipped — isro timed out", srvr: "skipped — isro timed out",
 		mntr: "skipped — isro timed out", conf: "skipped — isro timed out", dirs: "skipped — isro timed out"}
 	fs := keeperFindings(t, writeKeeperBundle(t, []member{m}))
 	if find(fs, "HC-3.18", "critical", "") || !find(fs, "HC-3.18", "warning", "keeper-a") {
-		t.Errorf("a collector-side timeout is a warning, never a quorum loss: %v", fs)
+		t.Errorf("collector 侧超时是 warning，绝不是 quorum 丢失：%v", fs)
 	}
 }
 
 func TestInspectBundle_KeeperEnsemblesAreNotCompared(t *testing.T) {
-	// The default ensemble is healthy with a large, chunked snapshot; an
-	// auxiliary ZooKeeper has its own small log and chunk size 0.
+	// 默认 ensemble 是健康的，快照很大且已分块；一个辅助 ZooKeeper
+	// 有自己的小日志，chunk 大小为 0。
 	def := member{name: "keeper-a", isro: "rw", lgif: lgif(9000000000, 9002500000, 9002500000, 9002500000, 9002000000),
 		srvr: "Mode: leader", mntr: "zk_server_state\tleader\nzk_latest_snapshot_size\t3000000000",
 		conf: "snapshot_transfer_chunk_size=100000000", dirs: "snapshot_dir_size: 0"}
 	aux := member{name: "zk-aux", isro: "rw", lgif: lgif(10, 500, 500, 500, 0), srvr: "Mode: follower",
 		mntr: "zk_server_state\tfollower\nzk_latest_snapshot_size\t1000", conf: "snapshot_transfer_chunk_size=0", dirs: "snapshot_dir_size: 0", ens: "aux_zk"}
 	if fs := keeperFindings(t, writeKeeperBundle(t, []member{def, aux})); len(fs) != 0 {
-		t.Errorf("two ensembles were compared with each other: %v", fs)
+		t.Errorf("两个 ensemble 被相互比较了：%v", fs)
 	}
 }
 
 func TestInspectBundle_KeeperFormatJudgedPerMember(t *testing.T) {
-	// A rolling upgrade: one member on 26.7 (6 is its default), one on 26.8
-	// still writing 6 (pinned below 8).
+	// 滚动升级：一个成员在 26.7（6 是它的默认值），另一个在 26.8
+	// 但仍写入 6（固定低于 8）。
 	old := member{name: "keeper-a", isro: "rw", lgif: lgif(1, 100, 100, 100, 0), srvr: "ClickHouse Keeper version: v26.7.5.10\nMode: leader",
 		mntr: "zk_server_state\tleader", conf: "write_snapshot_version=6", dirs: "snapshot_dir_size: 0"}
 	upgraded := member{name: "keeper-b", isro: "rw", lgif: lgif(1, 100, 100, 100, 0), srvr: "ClickHouse Keeper version: v26.8.17.4\nMode: follower",
 		mntr: "zk_server_state\tfollower", conf: "write_snapshot_version=6", dirs: "snapshot_dir_size: 0"}
 	fs := keeperFindings(t, writeKeeperBundle(t, []member{old, upgraded}))
 	if !find(fs, "HC-3.20", "warning", "keeper-b") || find(fs, "HC-3.20", "warning", "keeper-a") {
-		t.Errorf("the 26.8 member's pinned format must warn, the 26.7 default must not: %v", fs)
+		t.Errorf("26.8 成员固定使用的格式必须告警，26.7 的默认值不得告警：%v", fs)
 	}
 }
 
@@ -232,37 +231,37 @@ func TestInspectBundle_KeeperNoEnsembleLineSkipsCrossMemberChecks(t *testing.T) 
 	behind := member{name: "keeper-b", isro: "rw", lgif: lgif(8990000000, 8999600000, 8999600000, 8999600000, 8990000000),
 		srvr: "Mode: follower", mntr: "zk_server_state\tfollower", conf: "snapshot_transfer_chunk_size=100000000", dirs: "snapshot_dir_size: 0", ens: "-"}
 	if fs := keeperFindings(t, writeKeeperBundle(t, []member{leader, behind})); find(fs, "HC-3.19", "critical", "") {
-		t.Errorf("without ensemble identity two members' logs must not be compared: %v", fs)
+		t.Errorf("没有 ensemble 身份时不得比较两个成员的日志：%v", fs)
 	}
 }
 
-// Followers compact their logs independently: without an observed leader no
-// member can be declared behind what the leader retains.
+// follower 会独立压缩自己的日志：在未观察到 leader 时，
+// 不能宣布任何成员落后于 leader 所保留的内容。
 func TestInspectBundle_KeeperNoLeaderNoSnapshotVerdict(t *testing.T) {
 	a := member{"keeper-a", "rw", lgif(1000, 2000, 2000, 2000, 900), "Mode: follower", "zk_server_state\tfollower", "snapshot_transfer_chunk_size=100000000", "snapshot_dir_size: 0", ""}
 	b := member{"keeper-b", "rw", lgif(1, 500, 500, 500, 0), "Mode: follower", "zk_server_state\tfollower", "snapshot_transfer_chunk_size=100000000", "snapshot_dir_size: 0", ""}
 	if fs := keeperFindings(t, writeKeeperBundle(t, []member{a, b})); find(fs, "HC-3.19", "critical", "") {
-		t.Errorf("no leader answered, yet a member was declared behind the leader's log: %v", fs)
+		t.Errorf("没有 leader 应答，却宣布某成员落后于 leader 的日志：%v", fs)
 	}
 }
 
-// Apache ZooKeeper's wording of "not serving" counts like Keeper's.
+// Apache ZooKeeper 对 "not serving" 的措辞与 Keeper 一样会被计入。
 func TestInspectBundle_ZooKeeperNotServing(t *testing.T) {
 	const zk = "This ZooKeeper instance is not currently serving requests"
 	m := func(name string) member { return member{name, "rw", "(empty reply — not known)", zk, zk, zk, zk, ""} }
 	fs := keeperFindings(t, writeKeeperBundle(t, []member{m("zk-a"), m("zk-b"), m("zk-c")}))
-	if !find(fs, "HC-3.18", "critical", "no member in this bundle is serving") {
-		t.Errorf("three ZooKeeper members not serving must read as no member serving: %v", fs)
+	if !find(fs, "HC-3.18", "critical", "本 bundle 中没有任何成员正在服务") {
+		t.Errorf("三个 ZooKeeper 成员都未提供服务必须判定为无成员在服务：%v", fs)
 	}
 }
 
-// Mid-election a bundle can hold two members reporting leader. Neither then
-// says what "the leader" retains, so no member is declared behind it.
+// 选举中途时，bundle 里可能有两个成员都报告 leader。这样就没有
+// 任何一方能说明“leader”保留了哪些内容，因此不能宣布任何成员落后。
 func TestInspectBundle_KeeperTwoLeadersNoSnapshotVerdict(t *testing.T) {
 	a := member{"keeper-a", "rw", lgif(200, 1000, 1000, 1000, 150), "Mode: leader", "zk_server_state\tleader", "snapshot_transfer_chunk_size=1", "snapshot_dir_size: 0", ""}
 	b := member{"keeper-b", "rw", lgif(100, 1000, 1000, 1000, 50), "Mode: leader", "zk_server_state\tleader", "snapshot_transfer_chunk_size=1", "snapshot_dir_size: 0", ""}
 	c := member{"keeper-c", "rw", lgif(10, 150, 150, 150, 0), "Mode: follower", "zk_server_state\tfollower", "snapshot_transfer_chunk_size=1", "snapshot_dir_size: 0", ""}
 	if fs := keeperFindings(t, writeKeeperBundle(t, []member{a, b, c})); find(fs, "HC-3.19", "critical", "") {
-		t.Errorf("two leaders: no snapshot verdict, got %v", fs)
+		t.Errorf("两个 leader：不应有快照判定，实际得到 %v", fs)
 	}
 }

@@ -1,8 +1,8 @@
--- 23.12+ variant: includes system.tables.total_bytes_uncompressed (added in 23.12). See root file for the 22.8 baseline.
--- Current DDL + size for the tables the focus query touched.
--- The query_log.tables array reports `database.table` strings; we
--- split on '.' and look up each name in system.tables.
--- Run when --query-id is set.
+-- 23.12+ 变体：包含 system.tables.total_bytes_uncompressed（23.12 新增）。22.8 基线见根文件。
+-- 目标查询涉及的表当前的 DDL + 大小。
+-- query_log.tables 数组报告 `database.table` 字符串；我们
+-- 按 '.' 拆分，并在 system.tables 中查找每个名称。
+-- 当设置了 --query-id 时运行。
 WITH tables_for_query AS (
     SELECT
         splitByChar('.', t)[1]                              AS db,

@@ -1,29 +1,29 @@
--- Each replica's newest block number and last part time for its 200 most
--- recently written partitions — the raw numbers a parts-propagation lag is
--- computed from. On SharedMergeTree every replica keeps its own view of
--- system.parts; a replica that has not yet fetched the newest part of a
--- partition shows a lower max_block_number than its siblings, and the gap in
--- last_visible says for how long. Block numbers are allocated per partition,
--- so the grain is the partition; a per-table max would mix partitions.
+-- 每台副本最近写入的 200 个分区的最新 block 号和最后 part 时间 ——
+-- 计算 parts 传递延迟所用的原始数字。在 SharedMergeTree 上，每台
+-- 副本维护自己对 system.parts 的视图；某台副本若尚未获取
+-- 某个分区最新的 part，它的 max_block_number 会低于同组副本，
+-- 而 last_visible 的差距说明持续了多久。块号按分区分配，
+-- 所以粒度是分区；按表取最大值会混合不同分区。
 --
--- Cost: one pass over system.parts (in-memory) with five narrow columns,
--- grouped per partition; 200 rows per host.
--- Gov: this node's view (see queries.onprem for why the file exists beside
--- the full parts dump). hostname, database and table are hashed as in every
--- gov file; partition_id stays raw like in every other gov parts file (it
--- is the `partition` expression that carries the key). Block numbers,
--- times and counts stay clear: two gov bundles with the same salt still
--- line up on the hashes.
--- The `p.` alias on the WHERE columns is load-bearing, not style. Aliases are
--- global in ClickHouse, so `AS database` on the hashed projection puts
--- `database` in scope as THAT expression: a bare `WHERE database NOT IN
--- ('system', …)` then compares a 64-character hash with 'system', is true for
--- every row, and the system log tables are NOT excluded. Measured on 26.7:
--- the bare form returned both groups (user and system) where the qualified
--- form returns one, and a node with 6 user parts and 408 system parts filled
--- this file's LIMIT 200 with system.metric_log / query_log partitions —
--- pushing out the user tables the file exists to show. Same class as the
--- `pl.` qualification in system.part_log_3_days.sql.
+-- 成本：对 system.parts（内存中）做一次遍历，读取五个窄列，
+-- 按分区分组；每台主机 200 行。
+-- Gov：这是本节点的视图（该文件为何与完整 parts 转储并存，
+-- 见 queries.onprem）。hostname、database 和 table 像每个 gov
+-- 文件一样哈希；partition_id 与所有其他 gov parts 文件一样保持原样
+-- （携带键的是 `partition` 表达式）。块号、
+-- 时间和计数保持清晰：两个盐相同的 gov bundle 仍能按哈希
+-- 对应上。
+-- WHERE 列上的 `p.` 别名是关键，不是风格问题。ClickHouse 中别名
+-- 是全局的，所以哈希投影上的 `AS database` 会把
+-- `database` 以那个表达式的形式放进作用域：裸写的 `WHERE database NOT IN
+-- ('system', …)` 随后会拿 64 字符哈希与
+-- 'system' 比较，对每一行都成立，系统日志表就 NOT 被排除。
+-- 在 26.7 上实测：裸写形式返回了用户和系统两类分组，而限定
+-- 形式只返回一类；一个只有 6 个用户 part、408 个系统 part 的节点，
+-- 用 system.metric_log / query_log 的分区填满了本文件的 LIMIT 200 ——
+-- 把文件本来要展示的用户表挤了出去。与
+-- system.part_log_3_days.sql 中 `pl.` 限定
+-- 属于同一类问题。
 SELECT
     hex(SHA256(concat(hostName(), '%salt%')))       AS hostname,
     hex(SHA256(concat(p.database, '%salt%')))       AS database,

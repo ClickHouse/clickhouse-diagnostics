@@ -1,9 +1,9 @@
 -- tier: essential
 -- needs: keeper
--- Which Keeper node this server is connected to and for how long. A
--- session_uptime_elapsed_seconds far below server uptime means the session was
--- re-established recently (expiry, Keeper leader change, network); is_expired = 1
--- means it is gone right now. Table added in 23.8 — no root file, skipped below.
+-- 本服务器连接的是哪个 Keeper 节点，以及连接了多久。
+-- session_uptime_elapsed_seconds 远低于服务器 uptime，说明会话是
+-- 最近才重新建立的（过期、Keeper leader 变更、网络）；is_expired = 1
+-- 表示会话当下已经消失。该表在 23.8 加入——没有根文件，在更低版本上跳过。
 SELECT
     name,
     host,

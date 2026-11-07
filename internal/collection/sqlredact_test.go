@@ -5,14 +5,14 @@ import (
 	"testing"
 )
 
-// The DDL shapes below are what system.tables.create_table_query / engine_full
-// look like on a 22.8 server, where nothing is masked server-side. On ≥ 23.x
-// the server already writes '[HIDDEN]', and the redactor must leave that alone.
+// 下面的 DDL 形态是 22.8 服务器上
+// system.tables.create_table_query / engine_full 的样子，此时服务端不做任何屏蔽。
+// 在 ≥ 23.x 上服务器已经写入 '[HIDDEN]'，脱敏器必须保持原样不动。
 func TestRedactSQLText_PositionalEngineSecrets(t *testing.T) {
 	cases := []struct {
 		name, in   string
-		wantHidden []string // substrings that must be gone
-		wantKept   []string // substrings that must survive
+		wantHidden []string // 必须消失的子串
+		wantKept   []string // 必须保留的子串
 	}{
 		{
 			name:       "S3 with key id + secret + format",
@@ -122,19 +122,19 @@ func TestRedactSQLText_PositionalEngineSecrets(t *testing.T) {
 			got, _ := RedactSQLText(c.in)
 			for _, h := range c.wantHidden {
 				if strings.Contains(got, h) {
-					t.Errorf("still contains %q:\n%s", h, got)
+					t.Errorf("仍然包含 %q：\n%s", h, got)
 				}
 			}
 			for _, k := range c.wantKept {
 				if !strings.Contains(got, k) {
-					t.Errorf("lost %q:\n%s", k, got)
+					t.Errorf("丢失了 %q：\n%s", k, got)
 				}
 			}
 			if strings.Count(got, "'") != strings.Count(c.in, "'") && !strings.Contains(c.name, "truncated") && !strings.Contains(c.name, "URL") {
-				t.Errorf("quote count changed — a literal was not replaced in place:\n in: %s\nout: %s", c.in, got)
+				t.Errorf("引号数量变了——某个字面量未就地替换：\n in: %s\nout: %s", c.in, got)
 			}
 			if strings.Contains(got, "REMOVED") {
-				t.Errorf("SQL redaction must use [HIDDEN], the server's own token, not the config sentinel:\n%s", got)
+				t.Errorf("SQL 脱敏必须使用 [HIDDEN]，即服务器自己的 token，而不是配置哨兵值：\n%s", got)
 			}
 		})
 	}
@@ -145,16 +145,16 @@ func TestRedactSQLText_Idempotent(t *testing.T) {
 	once, n1 := RedactSQLText(in)
 	twice, n2 := RedactSQLText(once)
 	if once != twice {
-		t.Errorf("not idempotent:\n1: %s\n2: %s", once, twice)
+		t.Errorf("不是幂等的：\n1: %s\n2: %s", once, twice)
 	}
 	if n1 == 0 || n2 != 0 {
-		t.Errorf("counts: first=%d second=%d, want first>0 second=0", n1, n2)
+		t.Errorf("计数：first=%d second=%d，期望 first>0 second=0", n1, n2)
 	}
 }
 
-// The JSONL hook must touch only the named fields and only where a value
-// changed: 64-bit integers stay quoted, key order stays the server's, and
-// every untouched line is byte-identical.
+// JSONL 钩子只能触及指定字段，且只在值确实改变的地方：
+// 64 位整数保持带引号，键顺序保持服务器的顺序，
+// 每个未被触及的行字节完全一致。
 func TestRedactJSONLFields(t *testing.T) {
 	line1 := `{"database":"sec","name":"t_s3","uuid":"0b6e-…","total_rows":"12345678901234567890","create_table_query":"CREATE TABLE sec.t_s3 (` + "`x`" + ` UInt8) ENGINE = S3('https://b/f.csv', 'AKIAIOSFODNN7EXAMPLE', 'wJalrX\\/secret', 'CSV')","engine_full":"S3('https://b/f.csv', 'AKIAIOSFODNN7EXAMPLE', 'wJalrX\\/secret', 'CSV')","as_select":""}`
 	line2 := `{"database":"d","name":"plain","uuid":"1","total_rows":"7","create_table_query":"CREATE TABLE d.plain (x UInt8) ENGINE = MergeTree ORDER BY x","engine_full":"MergeTree ORDER BY x SETTINGS index_granularity = 8192","as_select":""}`
@@ -162,26 +162,26 @@ func TestRedactJSONLFields(t *testing.T) {
 
 	got, n := RedactJSONLFields(body, []string{"create_table_query", "engine_full", "as_select"})
 	if n == 0 {
-		t.Fatal("expected redactions on line 1")
+		t.Fatal("期望第 1 行发生脱敏")
 	}
 	lines := strings.Split(got, "\n")
 	if lines[1] != line2 {
-		t.Errorf("untouched line must be byte-identical:\n got: %s\nwant: %s", lines[1], line2)
+		t.Errorf("未被触及的行必须字节完全一致：\n got: %s\nwant: %s", lines[1], line2)
 	}
 	if lines[2] != "" {
-		t.Errorf("trailing newline lost")
+		t.Errorf("末尾换行丢失")
 	}
 	if strings.Contains(lines[0], "secret") || strings.Contains(lines[0], "AKIAIOSFODNN7EXAMPLE") {
-		t.Errorf("credential survived: %s", lines[0])
+		t.Errorf("凭据幸存：%s", lines[0])
 	}
 	for _, keep := range []string{`"total_rows":"12345678901234567890"`, `"database":"sec"`, `"uuid":"0b6e-…"`, `[HIDDEN]`} {
 		if !strings.Contains(lines[0], keep) {
-			t.Errorf("line 1 lost %q: %s", keep, lines[0])
+			t.Errorf("第 1 行丢失了 %q：%s", keep, lines[0])
 		}
 	}
-	// Key order is the server's, not Go's map order.
+	// 键顺序是服务器的顺序，而不是 Go 的 map 顺序。
 	if strings.Index(lines[0], `"database"`) > strings.Index(lines[0], `"create_table_query"`) {
-		t.Errorf("key order changed: %s", lines[0])
+		t.Errorf("键顺序变了：%s", lines[0])
 	}
 }
 
@@ -189,22 +189,22 @@ func TestRedactJSONLFields_NonStringAndMissingFieldsAreLeftAlone(t *testing.T) {
 	body := `{"a":1,"source":null,"engine_full":42}` + "\n" + `{"a":2}`
 	got, n := RedactJSONLFields(body, []string{"source", "engine_full", "create_table_query"})
 	if got != body || n != 0 {
-		t.Errorf("got %q (n=%d), want unchanged", got, n)
+		t.Errorf("得到 %q（n=%d），期望保持不变", got, n)
 	}
 }
 
-// The config sanitizer's behaviour must not change under the refactor that
-// parameterised its sentinel.
+// 配置脱敏器的行为在参数化其哨兵值的重构之后
+// 必须保持不变。
 func TestRedactCredentialsInText_StillUsesRemoved(t *testing.T) {
 	got, n := RedactCredentialsInText(`password = 'abc' and https://u:pw@h/x`)
 	if n != 2 || !strings.Contains(got, "password = REMOVED") || !strings.Contains(got, "https://u:REMOVED@h/x") {
-		t.Errorf("got %q (n=%d)", got, n)
+		t.Errorf("得到 %q（n=%d）", got, n)
 	}
 }
 
-// Review finding: the keyword rule's [^'"]+ stopped at an escaped quote, so
-// password = 'pa\'ss' became '[HIDDEN]'ss' — the tail of the password stayed.
-// The value's end is now found by scanning the literal with SQL escaping.
+// 评审发现：关键词规则的 [^'"]+ 会在转义引号处停止，于是
+// password = 'pa\'ss' 变成 '[HIDDEN]'ss'——密码尾部留了下来。
+// 现在值的结尾通过按 SQL 转义规则扫描字面量来找到。
 func TestRedactSQLText_QuotedValuesWithEscapedQuotes(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{`SETTINGS password = 'pa\'ss'`, `SETTINGS password = '[HIDDEN]'`},
@@ -216,18 +216,18 @@ func TestRedactSQLText_QuotedValuesWithEscapedQuotes(t *testing.T) {
 	for _, c := range cases {
 		got, _ := RedactSQLText(c.in)
 		if got != c.want {
-			t.Errorf("\n in: %s\ngot: %s\nwant: %s", c.in, got, c.want)
+			t.Errorf("\n 输入: %s\n得到: %s\n期望: %s", c.in, got, c.want)
 		}
 	}
-	// And the config sanitizer's path, with its own sentinel.
+	// 以及配置脱敏器的路径，使用它自己的哨兵值。
 	got, _ := RedactCredentialsInText(`# password = 'we\'ird' rotate quarterly`)
 	if got != `# password = REMOVED rotate quarterly` {
-		t.Errorf("config path: %q", got)
+		t.Errorf("配置路径：%q", got)
 	}
 }
 
-// Review finding: the JSONL map redacted the dashboard's and graph's
-// last_exception but not the persisted system.dictionaries file.
+// 评审发现：JSONL 映射脱敏了 dashboard 和图的
+// last_exception，但没有脱敏持久化的 system.dictionaries 文件。
 func TestSensitiveCollectorFields_DictionariesCoverLastException(t *testing.T) {
 	fields := SensitiveCollectorFields["system.dictionaries.sql"]
 	for _, want := range []string{"source", "last_exception"} {
@@ -236,22 +236,22 @@ func TestSensitiveCollectorFields_DictionariesCoverLastException(t *testing.T) {
 			found = found || f == want
 		}
 		if !found {
-			t.Errorf("system.dictionaries.sql redaction lacks %q (fields: %v)", want, fields)
+			t.Errorf("system.dictionaries.sql 脱敏缺少 %q（fields：%v）", want, fields)
 		}
 	}
 	line := `{"name":"d","status":"FAILED","source":"","last_exception":"mysqlxx::ConnectionFailed: Can't connect (password = 'geo\\'pw')"}` + "\n"
 	out, n := RedactJSONLFields(line, fields)
 	if n == 0 || strings.Contains(out, "geo") {
-		t.Errorf("last_exception not redacted (n=%d): %s", n, out)
+		t.Errorf("last_exception 未脱敏（n=%d）：%s", n, out)
 	}
 }
 
-// Review finding: nextCall skipped only single-quoted literals, so a backtick
-// or double-quoted identifier or a comment containing "s3(" was taken for the
-// engine call. matchingParen then paired that '(' with the real call's ')'
-// (or ran off the end), and the real password sat outside the span the
-// positional rule inspects. Formatted DDL from system.tables rarely carries
-// such text, but a redaction path must not depend on that.
+// 评审发现：nextCall 只跳过单引号字面量，因此反引号
+// 或双引号标识符，或包含 "s3(" 的注释，会被当成
+// 引擎调用。matchingParen 随后会把那个 '(' 与真实调用的 ')'
+// 配对（或一路跑到末尾），真实密码便落在位置规则检查的
+// 范围之外。system.tables 中格式化过的 DDL 很少携带
+// 这类文本，但脱敏路径不能依赖这一点。
 func TestRedactSQLText_SkipsQuotedIdentifiersAndComments(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{
@@ -270,45 +270,45 @@ func TestRedactSQLText_SkipsQuotedIdentifiersAndComments(t *testing.T) {
 			"-- s3( is the source\nSELECT * FROM s3('https://b/f.csv', 'AKIAIOSFODNN7EXAMPLE', 'wJalrXsecret', 'CSV')",
 			"-- s3( is the source\nSELECT * FROM s3('https://b/f.csv', '[HIDDEN]', '[HIDDEN]', 'CSV')",
 		},
-		// A ')' or ',' inside a quoted identifier must not close or split the argument list.
+		// 引用标识符内的 ')' 或 ',' 绝不能关闭或切分参数列表。
 		{
 			"SELECT * FROM mysql('h:3306', 'db', `t)`, 'u', 'pw')",
 			"SELECT * FROM mysql('h:3306', 'db', `t)`, 'u', '[HIDDEN]')",
 		},
-		// Unterminated regions run to the end without panicking or looping.
+		// 未终止的区域会一直延伸到末尾，不 panic 也不死循环。
 		{"SELECT `unterminated", "SELECT `unterminated"},
 		{"SELECT /* open", "SELECT /* open"},
 	}
 	for _, c := range cases {
 		got, _ := RedactSQLText(c.in)
 		if got != c.want {
-			t.Errorf("\n in: %s\ngot: %s\nwant: %s", c.in, got, c.want)
+			t.Errorf("\n 输入: %s\n得到: %s\n期望: %s", c.in, got, c.want)
 		}
 	}
 }
 
-// Review finding: the JSONL field locator was a raw substring search. Valid
-// JSON escapes every quote inside a value, so the needle cannot occur there,
-// but the locator now also requires key position so the guarantee does not
-// rest on that. A value that spells out the key, and a longer key that ends
-// in the field name, must both be skipped in favour of the real member.
+// 评审发现：JSONL 字段定位器原本是原始子串搜索。合法
+// JSON 会转义值中的每个引号，因此 needle 不可能出现在那里，
+// 但定位器现在还要求处于键位置，使这一保证不再
+// 依赖上述论断。拼出键名的值，以及以字段名结尾的更长键，
+// 都必须跳过，转而匹配真正的成员。
 func TestRedactJSONLFields_MatchesKeysNotValues(t *testing.T) {
 	line := `{"comment":"see {\"source\":\"MYSQL(password 'inner')\"}","x_source":"MYSQL(user 'u' password 'longer')","source":"MYSQL(user 'u' password 'real' db 'd')"}`
 	got, n := RedactJSONLFields(line, []string{"source"})
 	if n != 1 {
-		t.Fatalf("n = %d, want 1 (only the real source member): %s", n, got)
+		t.Fatalf("n = %d，期望 1（只有真正的 source 成员）：%s", n, got)
 	}
 	if strings.Contains(got, "'real'") {
-		t.Errorf("the real member's credential survived: %s", got)
+		t.Errorf("真正成员的凭据幸存：%s", got)
 	}
 	for _, keep := range []string{`\"source\":\"MYSQL(password 'inner')\"`, `"x_source":"MYSQL(user 'u' password 'longer')"`} {
 		if !strings.Contains(got, keep) {
-			t.Errorf("a non-member occurrence was rewritten; lost %q: %s", keep, got)
+			t.Errorf("非成员的出现位置被重写；丢失了 %q：%s", keep, got)
 		}
 	}
-	// Whitespace after the separator is still key position.
+	// 分隔符之后的空白仍属于键位置。
 	spaced := `{"a": 1, "source": "MYSQL(user 'u' password 'p')"}`
 	if got, n := RedactJSONLFields(spaced, []string{"source"}); n != 1 || strings.Contains(got, "'p'") {
-		t.Errorf("spaced member not redacted: %s", got)
+		t.Errorf("带空白的成员未脱敏：%s", got)
 	}
 }

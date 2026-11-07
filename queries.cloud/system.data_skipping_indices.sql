@@ -1,11 +1,11 @@
--- Data-skipping indices per table: which columns/expressions have a minmax,
--- set, bloom_filter or ngram index and at what granularity. The only evidence
--- for "the index exists but the query does not use it" (P-53) and for the
--- schema graph's index markers.
+-- 每张表的数据跳过索引：哪些列/表达式拥有 minmax、
+-- set、bloom_filter 或 ngram 索引，以及粒度是多少。这是
+-- “索引存在但查询没有使用它”（P-53）以及
+-- schema graph 索引标记的唯一证据。
 --
--- Read directly, not through clusterAllReplicas: these are definition columns,
--- identical on every replica, and the fan-out would return each index once per
--- replica. The per-replica size columns are deliberately not selected.
+-- 直接读取，不经过 clusterAllReplicas：这些是定义列，
+-- 每个副本都相同，fan-out 会让每个索引按副本重复返回。
+-- 按副本的大小列被有意排除。
 SELECT
     database,
     table,

@@ -19,9 +19,9 @@ SELECT
   loading_duration,
   last_exception,
   comment,
-  -- The dashboard's dictionaries panel: the key and attribute layout, and
-  -- error_count where the server has it (COLUMNS() yields nothing on a
-  -- version without it, never an error).
+  -- dashboard 的字典面板：键与属性的布局，以及
+  -- 服务器有 error_count 时取它（在没有此列的版本上 COLUMNS() 返回空，
+  -- 而不会报错）。
   key.names,
   key.types,
   attribute.names,

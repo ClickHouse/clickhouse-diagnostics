@@ -1,5 +1,5 @@
 -- tier: essential
--- Databases are identical on every replica; read them once.
+-- 数据库在每个副本上都相同；只读取一次。
 SELECT
     name,
     engine,

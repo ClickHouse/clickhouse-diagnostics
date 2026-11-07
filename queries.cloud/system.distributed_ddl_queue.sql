@@ -1,5 +1,5 @@
 -- needs: keeper
--- The DDL queue lives in Keeper and is the same from every replica; read it once.
+-- DDL 队列存放在 Keeper 中，从每个副本看到的都相同；只读取一次。
 SELECT
     entry,
     entry_version,

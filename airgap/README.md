@@ -1,40 +1,40 @@
-# Air-gapped dashboards
+# 离线（air-gapped）环境下的 dashboard（仪表盘）
 
-By default `dashboard.html` loads its chart library (Chart.js) from a public CDN. When the page is opened on a machine with **no internet access**, the library never arrives, and the page stays almost empty: not just the charts, but also the alerts and tables.
+默认情况下，`dashboard.html` 会从公共 CDN 加载它的图表库（Chart.js）。当页面在一台**无法访问互联网**的机器上打开时，这个库始终加载不到，页面几乎一片空白：不只是图表，连告警和表格也不显示。
 
-Add **`-airgap`** and the diagnostic embeds Chart.js, which ships inside the binary, directly in `dashboard.html`. The page then opens anywhere, with no network access at all. Nothing else changes: the same queries run, and the same bundle is written. Without the flag, every run behaves exactly as before.
+加上 **`-airgap`**，诊断工具就会把随二进制一同发布的 Chart.js 直接内嵌进 `dashboard.html`。这样页面在任何地方都能打开，完全不需要网络访问。其他一切不变：同样的查询照常运行，写出的也是同样的 bundle（诊断包）。不加这个 flag 时，每次运行的行为都和之前完全一样。
 
-## When to use it
+## 何时使用
 
-Use it when the dashboard will be **opened** on a machine without internet: an air-gapped network, a locked-down workstation, or a browser that blocks CDNs. What matters is where the file is opened, not where the diagnostic runs.
+当 dashboard 将会在一台没有互联网的机器上**打开**时使用：隔离网络、受限工作站，或会拦截 CDN 的浏览器。关键在于文件在哪里打开，而不是诊断工具在哪里运行。
 
-## Examples
+## 示例
 
-One node, from the folder holding `clickhouse-diagnostic` and the `queries.*` folders:
+单节点，在包含 `clickhouse-diagnostic` 和 `queries.*` 文件夹的目录中执行：
 
 ```bash
 export CLICKHOUSE_PASSWORD='…'
 ./clickhouse-diagnostic -host localhost -port 8123 -user diag -airgap
 ```
 
-Collecting a whole cluster ([`cluster-collect/`](../cluster-collect/README.md)): pass it after `--` so every host's run gets it:
+采集整个集群（[`cluster-collect/`](../cluster-collect/README.md)）：把它放在 `--` 之后传入，这样每台主机的运行都会带上它：
 
 ```bash
 export CLICKHOUSE_PASSWORD='…'
 ./clickhouse-diagnostic cluster -user diag -- -airgap
 ```
 
-Combined with other flags, as usual:
+与其他 flag 组合使用，一如既往：
 
 ```bash
 ./clickhouse-diagnostic -host ch-node-1 -user diag -from 2026-10-01 -to 2026-10-02 -airgap
 ```
 
-To check the result, open `dashboard.html` and look at the footer: it reads **"Chart.js 4.4.3 embedded (air-gap build, no network needed)"** instead of "requires Chart.js CDN".
+要检查结果，打开 `dashboard.html` 看页脚：它会显示 **"已内嵌 Chart.js 4.4.3（air-gap 构建，无需网络）"**，而不是 "需要 Chart.js CDN"。
 
-## Good to know
+## 须知
 
-- **Size:** `dashboard.html` grows by about 200 KB (about 70 KB in the `.tar.gz`).
-- **Gov mode** (`-mode gov`) produces no dashboard, so the flag has no effect there.
-- **`schema_graph.html`** needs no network in any mode.
-- **Licence:** Chart.js is MIT-licensed. Its full licence text is embedded in `dashboard.html`, just above the library, so it travels with every copy.
+- **体积：** `dashboard.html` 增大约 200 KB（在 `.tar.gz` 中约 70 KB）。
+- **Gov 模式**（`-mode gov`）不会生成 dashboard，因此该 flag 在那里不起作用。
+- **`schema_graph.html`** 在任何模式下都不需要网络。
+- **许可：** Chart.js 使用 MIT 许可。其完整许可文本内嵌在 `dashboard.html` 中、紧挨着库代码上方，因此每份副本都会携带它。

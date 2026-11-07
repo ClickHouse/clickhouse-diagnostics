@@ -1,115 +1,115 @@
-# Query analysis
+# 查询分析
 
-*Moved from the main [README](../README.md), which keeps a short version of each section.*
+*从主 [README](../README.md) 移出，该文件保留每节的简短版本。*
 
-## Query analysis mode
+## 查询分析模式
 
-When you already know **which** query is the problem — a specific `query_id` from a customer ticket or a `normalized_query_hash` from a slow-query rollup — the tool can collect a focused slice of `query_log`, `text_log`, and `processors_profile_log` so you can understand *why* it was slow without bringing back the whole system. The analysis runs **in addition to** the regular per-mode collection; it does not replace it.
+当你已经知道**哪条**查询是问题时——来自客户工单的某个 `query_id`，或来自慢查询汇总的某个 `normalized_query_hash`——工具可以采集 `query_log`、`text_log` 和 `processors_profile_log` 的一个聚焦切片，让你理解它*为什么*慢，而无需取回整个系统。该分析**附加于**常规的按模式采集之上；它不会取代后者。
 
-> **Not available in gov mode.** Query-analysis output embeds raw query text, exception messages, identifiers and full DDL — exactly the values gov-mode hashing exists to protect, and they can't be meaningfully hashed inside freeform text. `--query-id` / `--normalized-query-hash` are therefore rejected when `-mode gov` is set.
+> **gov 模式下不可用。** 查询分析的输出会嵌入原始查询文本、异常消息、标识符和完整 DDL——正是 gov 模式哈希旨在保护的那些值，而它们无法在自由文本中有意义地哈希。因此在设置 `-mode gov` 时，`--query-id` / `--normalized-query-hash` 会被拒绝。
 
-### Invoking it
+### 调用方式
 
-| You have | Pass | What you get |
+| 你拥有的 | 传入 | 得到什么 |
 |---|---|---|
-| A specific `query_id` (from a ticket) | `--query-id <uuid>` | Tool auto-derives the `normalized_query_hash` from `system.query_log`, centres the time window on the query's `event_time`, and runs both single-id and group queries |
-| A `normalized_query_hash` (from a dashboard) | `--normalized-query-hash <uint64>` | Tool auto-derives the **slowest** `query_id` for that hash within the window (so the single-id files — ProfileEvents, text_log, tables-referenced — are populated) and runs the full bundle |
-| Both | both flags | Skips both pre-flight derivations; otherwise identical to passing either alone |
-| A specific time window | `--from <RFC3339>` / `--to <RFC3339>` | Overrides the auto-derived window (RFC3339 or `YYYY-MM-DD` accepted) |
+| 一个具体的 `query_id`（来自工单） | `--query-id <uuid>` | 工具从 `system.query_log` 自动推导 `normalized_query_hash`，将时间窗口以该查询的 `event_time` 为中心，并同时运行单 id 查询和分组查询 |
+| 一个 `normalized_query_hash`（来自 dashboard） | `--normalized-query-hash <uint64>` | 工具在窗口内为该 hash 自动推导**最慢**的 `query_id`（这样单 id 文件——ProfileEvents、text_log、被引用的表——才有内容），并运行完整 bundle |
+| 两者都有 | 两个 flag 都传 | 跳过两项预检推导；除此之外与只传其一相同 |
+| 一个具体的时间窗口 | `--from <RFC3339>` / `--to <RFC3339>` | 覆盖自动推导的窗口（接受 RFC3339 或 `YYYY-MM-DD`） |
 
-Works in all three modes (`cloud`, `onprem`, `gov`) — table references adapt the same way as the alert evaluator (`clusterAllReplicas(...)` in cloud, plain `system.*` elsewhere).
+在三种模式下都可用（`cloud`、`onprem`、`gov`）——表引用的适配方式与告警求值器相同（cloud 下为 `clusterAllReplicas(...)`，其他地方为普通 `system.*`）。
 
-**Gov mode caveat**: the `query` and `tables` columns in `system.query_log` contain raw, *unhashed* SQL and table names. The standard gov-mode collection already exposes this; query-analysis does not change that surface. If your environment can't ship raw SQL out, skip the analysis flags in gov mode.
+**Gov 模式注意事项**：`system.query_log` 中的 `query` 和 `tables` 列包含原始、*未哈希*的 SQL 和表名。标准的 gov 模式采集本就暴露了这一点；查询分析不会改变该暴露面。如果你的环境不能把原始 SQL 传出，请在 gov 模式下跳过分析相关的 flag。
 
-### What it collects
+### 采集内容
 
-Twelve `.sql` files under `queries.query_analysis/`, each written to `<backup>/query_analysis/<name>_<ts>.<ext>`:
+`queries.query_analysis/` 下有十二个 `.sql` 文件，每个写入 `<backup>/query_analysis/<name>_<ts>.<ext>`：
 
-**Single-query-id (need `--query-id` or one auto-derived from `--normalized-query-hash`)**
+**单 query-id（需要 `--query-id`，或由 `--normalized-query-hash` 自动推导出的一个）**
 
-| File | What it answers |
+| 文件 | 回答什么 |
 |---|---|
-| `query_details.sql` | The full `query_log` row — duration, memory, read rows, query text, exception, profile events |
-| `profile_events.sql` | All `ProfileEvents` for this execution, sorted by value descending. *Most useful single artifact.* |
-| `text_log_parts.sql` | Just the "Selected X/Y parts by partition key, Z marks…" and "Reading approx. N rows with M streams" log lines — answers "did we full-scan?" |
-| `text_log_full.sql` | Every `text_log` row for the query (up to 5000) — fallback when the targeted slices don't show the issue |
-| `tables_for_query.sql` | Current DDL + size for the tables the query touched (joined from `query_log.tables`) |
+| `query_details.sql` | 完整的 `query_log` 行——耗时、内存、读取行数、查询文本、异常、profile events |
+| `profile_events.sql` | 本次执行的所有 `ProfileEvents`，按值降序排列。*最有用的单项产物。* |
+| `text_log_parts.sql` | 仅包含 “Selected X/Y parts by partition key, Z marks…” 和 “Reading approx. N rows with M streams” 日志行——回答“我们是否做了全表扫描？” |
+| `text_log_full.sql` | 该查询的每一行 `text_log`（最多 5000 行）——当定向切片未能显示问题时使用 |
+| `tables_for_query.sql` | 该查询涉及的表的当前 DDL + 大小（从 `query_log.tables` 连接得到） |
 
-**Hash-group (need `--normalized-query-hash`, auto-derived from `--query-id`)**
+**Hash 分组（需要 `--normalized-query-hash`，可由 `--query-id` 自动推导）**
 
-| File | What it answers |
+| 文件 | 回答什么 |
 |---|---|
-| `fast_slow_query_ids.sql` | The slowest and fastest `query_id` for this hash in the window — defines the comparison pair |
-| `profile_events_compare.sql` | Side-by-side `ProfileEvents` for slow vs fast execution with `delta` and `percentage_diff` columns. *Most diagnostic query in the bundle.* |
-| `hash_by_host.sql` | Per-hostname execution count, avg / p95 / max duration, memory, errors — surfaces "one node is slow" patterns |
-| `hash_summary.sql` | Per-minute execution count (executions / succeeded / failed). Drives the "Executions per minute" stacked bar. |
-| `failed_over_time.sql` | Failed-execution count per minute, split by exception code — feeds the "Failed queries per minute" stacked bar |
-| `failed_queries.sql` | Per-table × per-error breakdown of failures (tables touched, error type, user, count, first/last seen, sample exception) |
-| `executions_timeline.sql` | One row per individual execution of the hash (`LIMIT 10000`, most recent first), including `ProfileEvents['UserTimeMicroseconds']`. Drives all five per-execution scatter charts (duration / memory / CPU / read rows / read bytes). |
+| `fast_slow_query_ids.sql` | 窗口内该 hash 最慢和最快的 `query_id`——定义比较对 |
+| `profile_events_compare.sql` | 慢执行与快执行的并排 `ProfileEvents`，含 `delta` 和 `percentage_diff` 列。*bundle 中最具诊断价值的查询。* |
+| `hash_by_host.sql` | 按主机名的执行次数、avg / p95 / max 耗时、内存、错误——揭示“某个节点很慢”的模式 |
+| `hash_summary.sql` | 每分钟执行次数（executions / succeeded / failed）。驱动 “Executions per minute” 堆叠条形图。 |
+| `failed_over_time.sql` | 每分钟失败执行数，按异常码拆分——为 “Failed queries per minute” 堆叠条形图提供数据 |
+| `failed_queries.sql` | 失败按表 × 错误拆分（涉及的 table、错误类型、user、count、first/last seen、sample exception） |
+| `executions_timeline.sql` | 该 hash 每次单独执行一行（`LIMIT 10000`，最近的在前），包括 `ProfileEvents['UserTimeMicroseconds']`。驱动全部五个按执行的散点图（duration / memory / CPU / read rows / read bytes）。 |
 
-### Dashboard integration
+### dashboard 集成
 
-When `--query-id` or `--normalized-query-hash` is set and `--skip-dashboard` is not, the generated `dashboard.html` includes a new **🔍 Query Analysis** section near the top of the nav.
+当设置了 `--query-id` 或 `--normalized-query-hash` 且未设置 `--skip-dashboard` 时，生成的 `dashboard.html` 会在导航顶部附近包含一个新的 **🔍 Query Analysis** 区块。
 
-**Focus header**: which `query_id` (user-supplied OR auto-derived slowest), which hash, time window, plus the focus execution's duration / memory / read-rows, plus a one-line comparison of the slow vs fast `query_id` durations (e.g. "slowest 2400 ms · fastest 50 ms → 48× slower").
+**聚焦头部**：哪个 `query_id`（用户提供或自动推导出的最慢者）、哪个 hash、时间窗口，加上聚焦执行的 duration / memory / read-rows，以及一行慢与快 `query_id` 耗时的对比（例如 “slowest 2400 ms · fastest 50 ms → 48× slower”）。
 
-**Query text card** (cloud / onprem only): the exact SQL of the focus execution, monospaced and scrollable. Hidden — and also stripped from the embedded JSON — in `gov` mode, because the query text contains the table names gov mode is otherwise hashing.
+**查询文本卡片**（仅 cloud / onprem）：聚焦执行的确切 SQL，等宽字体、可滚动。在 `gov` 模式下隐藏——并从嵌入的 JSON 中剥离——因为查询文本包含 gov 模式本要哈希的表名。
 
-**Per-execution scatters** — five charts, one dot per individual query (up to 10 000 rows from `executions_timeline.sql`). Green dot = success, red cross = failure. Hover shows `query_id`, hostname, exception code, and the metric value in human units:
+**按执行的散点图**——五个图，每个单独查询一个点（最多 10 000 行，来自 `executions_timeline.sql`）。绿点 = 成功，红叉 = 失败。悬停显示 `query_id`、hostname、异常码和人类可读单位的指标值：
 
-| Chart | Y axis | Notes |
+| 图 | Y 轴 | 说明 |
 |---|---|---|
-| Per-execution duration | sec or min (adaptive at 200 s) | the "why was THIS execution slow" view |
-| Per-execution memory usage | MiB / GiB / TiB (adaptive) | |
-| Per-execution user CPU | sec | from `ProfileEvents['UserTimeMicroseconds']` |
-| Per-execution read rows | rows | |
-| Per-execution read bytes | MiB / GiB / TiB (adaptive) | |
+| 按执行耗时 | 秒或分（200 s 处自适应） | “为什么这一次执行慢”的视图 |
+| 按执行内存使用 | MiB / GiB / TiB（自适应） | |
+| 按执行用户 CPU | 秒 | 来自 `ProfileEvents['UserTimeMicroseconds']` |
+| 按执行读取行数 | 行 | |
+| 按执行读取字节 | MiB / GiB / TiB（自适应） | |
 
-**Count bars** — minute-bucketed (the one place per-execution doesn't apply, since the metric *is* "1"):
+**计数条形图**——按分钟分桶（这是唯一不适用按执行的地方，因为指标*就是* “1”）：
 
-| Chart | X | Y |
+| 图 | X | Y |
 |---|---|---|
-| Executions per minute | event minute | count, stacked succeeded / failed |
-| Failed queries per minute | event minute | count, stacked by exception code (`MEMORY_LIMIT_EXCEEDED (241)`, `TIMEOUT_EXCEEDED (159)`, …) |
+| Executions per minute | event minute | 计数，按 succeeded / failed 堆叠 |
+| Failed queries per minute | event minute | 计数，按异常码堆叠（`MEMORY_LIMIT_EXCEEDED (241)`、`TIMEOUT_EXCEEDED (159)` 等） |
 
-**Single-execution row**:
+**单次执行行**：
 
-- Top 30 `ProfileEvents` for the focus execution
-- Fast vs slow `ProfileEvents` (top 30 by `|delta|`)
+- 聚焦执行的前 30 个 `ProfileEvents`
+- 快与慢的 `ProfileEvents`（按 `|delta|` 取前 30）
 
-**Detail tables**:
+**明细表**：
 
-- Per-host distribution (executions / durations / memory / errors per hostname)
-- Failed queries breakdown (per table × error type × user)
-- Tables referenced by the focus query (current DDL + size)
-- "Selected X parts, Y marks" log lines for the slowest execution
-- Full `text_log` for the slowest execution (scrollable)
+- 按主机分布（每个 hostname 的 executions / durations / memory / errors）
+- 失败查询拆分（按 table × 错误类型 × user）
+- 聚焦查询引用的表（当前 DDL + 大小）
+- 最慢执行的 “Selected X parts, Y marks” 日志行
+- 最慢执行的完整 `text_log`（可滚动）
 
-The section is hidden when neither analysis flag is set.
+当两个分析 flag 都未设置时，该区块隐藏。
 
-### Example
+### 示例
 
 ```bash
-# A customer ticket has a query_id that timed out. Look at it and how it
-# compares to other recent runs of the same statement shape.
+# 客户工单中有一个超时的 query_id。查看它，以及它与同一语句形态的
+# 其他近期运行相比如何。
 ./clickhouse-diagnostic --mode cloud \
   --host my-cluster.clickhouse.cloud --port 8443 --protocol https --user default \
   --query-id 1bc3abaf-968f-4d4f-be3d-f77251b1ff0b \
   --skip-config -skip-archive
-# → Pre-flight: query_id ... → normalized_query_hash 7769688026807387533 (event_time ...)
-# → Query analysis: running 12 file(s) (window <event-time-centred 48h>)
-# → 12 written, 0 skipped
-# → dashboard.html now has a "Query Analysis" section
+# → pre-flight：query_id ... → normalized_query_hash 7769688026807387533（event_time ...）
+# → 查询分析：运行 12 个文件（窗口 <以 event_time 为中心的 48h>）
+# → 12 个已写入，0 个跳过
+# → dashboard.html 现在有 “Query Analysis” 区段
 ```
 
 ```bash
-# A dashboard shows a particular hash regressing this week. Run the
-# group-comparison only over the last 7 days; no individual query_id.
+# dashboard 显示某个 hash 本周出现退化。仅在过去 7 天内运行
+# 分组比较；不指定单个 query_id。
 ./clickhouse-diagnostic --mode onprem --host prod-ch-01 \
   --normalized-query-hash 7769688026807387533 \
   --from 2026-05-23 --to 2026-05-30
-# → 12 written, 0 skipped — the tool auto-derives a representative
-#   query_id (the slowest execution in the window), so the single-id
-#   files run too. If no execution exists in the window, the 5
-#   single-id files are skipped instead (7 written, 5 skipped).
+# → 12 个已写入，0 个跳过——工具会自动推导一个代表性的
+#   query_id（窗口内最慢的一次执行），因此单 query_id 文件也会运行。
+#   如果窗口内没有任何执行，则改为跳过 5 个单 query_id 文件
+#   （7 个已写入，5 个跳过）。
 ```

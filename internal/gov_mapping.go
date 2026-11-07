@@ -11,40 +11,38 @@ import (
 	"clickhouse-diagnostic/pkg"
 )
 
-// reGovSalt restricts the gov-mode salt to a printable ASCII shape that
-// cannot break out of the surrounding SQL string literal and cannot
-// accidentally match the validator's forbidden-keyword regex (which uses
-// \bWORD\b boundaries — keeping the salt strictly alphanumeric avoids
-// any word-boundary surprise with values like "DELETE_2026").
+// reGovSalt 将 gov 模式的 salt 限制为可打印 ASCII 形态，
+// 使其无法跳出周边 SQL 字符串字面量，也无法
+// 意外匹配校验器的禁用关键词正则（后者使用
+// \bWORD\b 边界——保持 salt 严格为字母数字可避免
+// 像 "DELETE_2026" 这样的值引发任何词边界意外）。
 var reGovSalt = regexp.MustCompile(`^[A-Za-z0-9]{8,64}$`)
 
-// ValidateGovSalt rejects salts that contain anything other than
-// 8–64 ASCII alphanumeric characters. The strict shape prevents SQL
-// escaping issues and rules out salts that contain DML/DDL keywords
-// as bare words.
+// ValidateGovSalt 拒绝包含 8–64 个 ASCII 字母或数字之外
+// 任何字符的 salt。严格形态可避免 SQL 转义问题，
+// 并排除以裸词形式包含 DML/DDL 关键词的 salt。
 func ValidateGovSalt(salt string) error {
 	if salt == "" {
-		return fmt.Errorf("gov-mode salt is required (use --salt or the interactive prompt)")
+		return fmt.Errorf("gov 模式必须提供 salt（使用 --salt 或交互式提示）")
 	}
 	if !reGovSalt.MatchString(salt) {
-		return fmt.Errorf("gov-mode salt must be 8–64 ASCII alphanumeric characters (A–Z, a–z, 0–9)")
+		return fmt.Errorf("gov 模式的 salt 必须是 8–64 个 ASCII 字母或数字（A–Z、a–z、0–9）")
 	}
 	return nil
 }
 
-// PrintGovNameMapping queries system.tables and emits a database/table
-// → hex(SHA256(name+salt)) mapping using the customer-supplied salt
-// (the same value the executor substitutes into '%salt%' in .sql files).
-// The console summary shows up to `consoleLimit` rows so the operator can
-// sanity-check the hashes; the full mapping is written to a CSV alongside
-// the backup folder.
+// PrintGovNameMapping 查询 system.tables，并使用客户提供的 salt
+// （也就是执行器替换到 .sql 文件中 '%salt%' 的同一个值）
+// 输出 database/table → hex(SHA256(name+salt)) 映射。
+// 控制台摘要最多显示 `consoleLimit` 行，以便运维人员
+// 抽查哈希；完整映射会与备份文件夹一起写入 CSV。
 //
-// The CSV is placed at outputDir (parent of backupDir), NOT inside
-// backupDir, so the support archive does not contain it. The whole
-// point of gov-mode hashing is that the salt-decoded names stay with
-// the customer — leaking the mapping would defeat that.
+// CSV 放在 outputDir（backupDir 的父目录），而不是
+// backupDir 内，因此支持归档不包含它。gov 模式哈希的
+// 全部意义就在于经 salt 解码的名称留在客户处——
+// 泄漏映射会毁掉这一点。
 //
-// salt must be pre-validated (alphanumeric only) — see ValidateGovSalt.
+// salt 必须预先校验（仅字母数字）——见 ValidateGovSalt。
 func PrintGovNameMapping(client *pkg.ClickHouseClient, outputDir, backupDir, salt string) error {
 	const consoleLimit = 30
 
@@ -60,12 +58,12 @@ func PrintGovNameMapping(client *pkg.ClickHouseClient, outputDir, backupDir, sal
 
 	raw, err := client.ExecuteQuery(q)
 	if err != nil {
-		return fmt.Errorf("gov-mode mapping query failed: %w", err)
+		return fmt.Errorf("gov 模式名称映射查询失败：%w", err)
 	}
 
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
-		fmt.Println("\n[gov mode] No user databases/tables found — name mapping skipped.")
+		fmt.Println("\n[gov 模式] 未发现用户数据库/表——跳过名称映射。")
 		return nil
 	}
 
@@ -82,7 +80,7 @@ func PrintGovNameMapping(client *pkg.ClickHouseClient, outputDir, backupDir, sal
 	mapPath := filepath.Join(outputDir, filepath.Base(backupDir)+"_gov_name_mapping.csv")
 	f, err := os.OpenFile(mapPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
 	if err != nil {
-		return fmt.Errorf("create mapping file: %w", err)
+		return fmt.Errorf("创建映射文件失败：%w", err)
 	}
 	defer f.Close()
 
@@ -101,20 +99,20 @@ func PrintGovNameMapping(client *pkg.ClickHouseClient, outputDir, backupDir, sal
 	}
 
 	fmt.Println()
-	fmt.Println("[gov mode] Hashed database/table mapping (keep LOCAL — do NOT share with support):")
+	fmt.Println("[gov 模式] 已哈希的数据库/表映射（仅保留在本机——切勿与支持团队共享）：")
 	fmt.Printf("  %-30s %-30s %-16s %-16s\n", "database", "table", "database_hash", "table_hash")
 	fmt.Printf("  %s\n", strings.Repeat("-", 96))
 	for i, r := range rows {
 		if i == consoleLimit {
-			fmt.Printf("  … and %d more — see CSV for the full list\n", len(rows)-consoleLimit)
+			fmt.Printf("  … 另有 %d 条——完整列表见 CSV\n", len(rows)-consoleLimit)
 			break
 		}
 		fmt.Printf("  %-30s %-30s %-16s %-16s\n",
 			truncTo(r.db, 30), truncTo(r.tbl, 30),
 			truncTo(r.dbHash, 14)+"…", truncTo(r.tblHash, 14)+"…")
 	}
-	fmt.Printf("\nFull mapping written to: %s\n", mapPath)
-	fmt.Println("(file is OUTSIDE the support archive — do not send it to ClickHouse support)")
+	fmt.Printf("\n完整映射已写入：%s\n", mapPath)
+	fmt.Println("（该文件位于支持归档之外——不要发送给 ClickHouse 支持团队）")
 	fmt.Println()
 	return nil
 }

@@ -1,64 +1,56 @@
 name: keeper_health
-title: "Keeper unavailable: session loss storm while Keeper traffic collapsed"
+title: "Keeper不可用：会话丢失风暴且Keeper流量崩溃"
 severity: critical
 description: |
-  The two-signal Keeper health test over the last 7 days, per hour and per
-  replica. An hour fires when one replica logged more than 1000
-  ZooKeeperHardwareExceptions (connection loss, session expiry, operation
-  timeout) AND completed less than half of its own usual Keeper transactions.
-  "Usual" is that replica's median hourly ZooKeeperTransactions over the same
-  7 days — a cluster-wide median would hide a single replica's outage behind
-  its healthy peers' traffic. Low traffic on its own never
-  fires: a quiet night looks the same as a disconnected server in this
-  counter, and telling them apart needs ZooKeeperSession (system.metrics)
-  or the dashboard's per-hour verdict, which labels such hours
-  "idle/disconnected" instead.
+  最近7天的双信号Keeper健康测试，逐小时、逐replica进行。当某个replica
+  记录了超过1000次ZooKeeperHardwareExceptions（连接丢失、会话过期、
+  操作超时）且完成的Keeper事务少于自身常规的一半时，该小时触发。
+  “常规”是该replica在同一7天窗口内的每小时ZooKeeperTransactions中位数——
+  集群级中位数会把单个replica的故障隐藏在其健康同伴的流量之后。
+  仅流量偏低本身绝不会触发：在这个计数器里，平静的夜晚和断连的服务器
+  看起来一样，区分它们需要ZooKeeperSession（system.metrics）或
+  dashboard的逐小时判定，后者会把这类小时标记为“idle/disconnected”。
 
-  Both signals together mean Keeper was effectively unavailable to that
-  replica: sessions were expiring and the work that normally flows through
-  Keeper (part commits, merge assignment, DDL, replication log) was not
-  happening. Expect 999 / 319 on inserts, 571 / 57 on DDL, merges stopped
-  and TOO_MANY_PARTS following in the same or next hours. Exceptions with
-  normal traffic are reported separately by keeper_connection_blips.
+  两个信号同时出现意味着Keeper对那个replica实际上不可用：会话不断过期，
+  通常流经Keeper的工作（part提交、merge分配、DDL、replication log）
+  没有发生。预期insert出现999 / 319，DDL出现571 / 57，merge停止，
+  同一小时或随后几小时出现TOO_MANY_PARTS。流量正常情况下的异常由
+  keeper_connection_blips单独报告。
 
-  This rule reads metric_log because background operations never reach
-  query_log: an outage at night shows up here and nowhere else. The median
-  is quantileExactHigh — the upper-middle hourly sample. LIMIT 168 BY
-  hostname covers every hour of the 7-day window for each replica, so
-  neither a multi-day outage nor a wide cluster is truncated.
+  本规则读取metric_log，因为后台操作从不会进入query_log：
+  夜间故障只会在这里出现，别处看不到。中位数使用quantileExactHigh——
+  偏上的中间小时样本。LIMIT 168 BY hostname覆盖每个replica在7天窗口内的
+  每个小时，因此多日的故障或规模很大的集群都不会被截断。
 
-  On a multi-replica service this median is per replica. The dashboard's
-  Keeper Health panel and the skill's pre-pass still compute one median
-  over every replica's hours combined, so their percentages for the same
-  hour will not match this rule's, and both can miss an outage confined to
-  one node. This rule is the per-replica verdict until they group by host
-  too.
+  在多replica服务上，该中位数是逐replica计算的。dashboard的Keeper Health
+  面板和skill的pre-pass仍会将每个replica的所有小时合并计算一个中位数，
+  因此它们对同一小时的百分比不会与本规则一致，而且两者都可能漏掉
+  局限于单个节点的故障。在它们也按host分组之前，本规则才是逐replica的判定。
 
-  Check next: system.zookeeper_connection (session age), part_log errors
-  in the same hours, text_log 'Session expired' / 'Finalizing session' /
-  'Connected to ZooKeeper' markers, then the Keeper nodes themselves
-  ('echo mntr | nc <keeper> <port>': zk_followers vs zk_synced_followers,
-  zk_avg_latency, zk_outstanding_requests; leader changes in Keeper logs).
+  下一步排查：system.zookeeper_connection（会话年龄）、同一小时的
+  part_log错误、text_log中的'Session expired' / 'Finalizing session' /
+  'Connected to ZooKeeper'标记，然后检查Keeper节点本身
+  （'echo mntr | nc <keeper> <port>'：zk_followers对比
+  zk_synced_followers、zk_avg_latency、zk_outstanding_requests；
+  Keeper日志中的leader变更）。
 tags:
   - keeper
   - replication
   - reliability
 
-# {sys.metric_log} — metric_log is per-replica, so in cloud mode it fans out
-# via clusterAllReplicas. Both the per-hour aggregate AND the median baseline
-# must therefore group by hostName(): with a single cluster-wide bucket, one
-# replica's outage is averaged against its healthy peers and this `critical`
-# rule stays silent (its transactions never fall below half of the CLUSTER
-# median), while the exception threshold becomes N times easier to cross.
-# hostName() attributes each row to the replica that reported it.
+# {sys.metric_log}——metric_log是逐replica的，因此在cloud模式下会经
+# clusterAllReplicas fan out。因此每小时聚合和基线中位数都必须按
+# hostName()分组：若用单个集群级桶，一个replica的故障会与健康同伴一起
+# 被平均掉，这条`critical`规则将保持沉默（其事务永远不会低于集群中位数的
+# 一半），而异常阈值反而变得容易N倍越过。hostName()把每一行归因到
+# 报告它的replica。
 #
-# Safe in gov: alert rows never leave the machine there — alerts_summary.json
-# records only counts (internal/alert/alert.go WriteSummaryJSON) and gov never
-# generates the dashboard, the only other consumer of matched rows. Do not add
-# row-level detail to that file without revisiting this.
-# Evaluated by the Go check over the files already collected (no second
-# query to the server). query: below is the same test in SQL, for the
-# customer to run live; the check mirrors it.
+# 在gov中安全：告警行绝不会离开本机——alerts_summary.json只记录计数
+# （internal/alert/alert.go WriteSummaryJSON），而gov从不生成dashboard，
+# 那是匹配行的唯一其他消费者。不要在未重新审视这一点的情况下向该文件
+# 添加行级明细。
+# 由Go check在已采集的文件上评估（不会再次查询服务器）。下方query:是同一
+# 测试的SQL版本，供客户在线执行；check镜像同一逻辑。
 check: go:keeper_health
 source:
   - system.metric_log_7_days
@@ -97,4 +89,4 @@ query: |
   ORDER BY hour, hostname
   LIMIT 168 BY hostname
 
-message: "hour starting {hour} on {hostname}: {hw_exceptions} Keeper hardware exceptions, {transactions} Keeper transactions = {pct_of_usual}% of usual ({usual_transactions}/h median for this replica) — Keeper effectively unavailable to it"
+message: "{hostname}上从{hour}开始的一小时：{hw_exceptions}次Keeper hardware exception，{transactions}次Keeper事务 = 常规的{pct_of_usual}%（该replica的中位数为{usual_transactions}/h）——Keeper对它实际不可用"

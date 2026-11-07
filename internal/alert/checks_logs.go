@@ -7,10 +7,10 @@ import (
 	"clickhouse-diagnostic/internal/bundle"
 )
 
-// Checks over the hourly log files (part_log_3_days, query_log_exceptions_1_day).
-// The rules used raw rows over "the last N hours"; the files hold hourly
-// buckets, so a window is the buckets that END after now − N: the oldest one
-// may reach up to an hour further back (an accepted hour-bucket fidelity).
+// 对按小时分桶的日志文件（part_log_3_days、query_log_exceptions_1_day）做检查。
+// 规则原本在“最近 N 小时”的原始行上运行；这些文件按小时分桶，因此一个窗口
+// 就是结束时间晚于 now − N 的桶：最旧的桶可能再向前多覆盖将近一小时
+//（这是按小时分桶可接受的精度损失）。
 
 func init() {
 	RegisterCheck("merges_stalled", checkMergesStalled)
@@ -20,8 +20,8 @@ func init() {
 	RegisterCheck("too_many_simultaneous_queries", checkTooManySimultaneous)
 }
 
-// inWindow reports whether the hour bucket starting at t ends after
-// now − d, and returns the bucket start.
+// inWindow 报告从 t 开始的小时桶是否结束于 now − d 之后，
+// 并返回该桶的起点。
 func inWindow(r bundle.Row, col string, now time.Time, loc *time.Location, d time.Duration) (time.Time, bool) {
 	t, ok := parseTime(r.Str(col), loc)
 	if !ok {
@@ -32,8 +32,8 @@ func inWindow(r bundle.Row, col string, now time.Time, loc *time.Location, d tim
 
 func fmtHour(t time.Time) string { return t.Format("2006-01-02 15:04:05") }
 
-// merges_stalled: an hour on one host with > 100 new parts and no
-// successful merge.
+// merges_stalled：某台主机上有一小时新增 part 超过 100 个，
+// 且没有成功的 merge。
 func checkMergesStalled(b *bundle.Bundle, mode string) ([]row, error) {
 	rows, err := b.Rows("system.part_log_3_days")
 	if err != nil {
@@ -83,8 +83,8 @@ func checkMergesStalled(b *bundle.Bundle, mode string) ([]row, error) {
 	return out, nil
 }
 
-// background_operation_failures: > 50 failures of one (hour, event type,
-// error), the 24 largest.
+// background_operation_failures：同一 (hour, event type, error) 的失败超过 50 次，
+// 取最大的 24 个。
 func checkBackgroundFailures(b *bundle.Bundle, mode string) ([]row, error) {
 	rows, err := b.Rows("system.part_log_3_days")
 	if err != nil {
@@ -135,10 +135,9 @@ func checkBackgroundFailures(b *bundle.Bundle, mode string) ([]row, error) {
 	return out, nil
 }
 
-// exceptionsByHour counts failed queries per (hour, code) from
-// query_log_exceptions_1_day, which counts each query once (the per-table
-// rows of query_log_details_7_days cannot be told apart from separate
-// executions of one pattern on different tables).
+// exceptionsByHour 从 query_log_exceptions_1_day 按 (hour, code) 统计失败查询，
+// 该文件对每个查询只计一次（query_log_details_7_days 的按表行无法与
+// 同一模式在不同表上的多次独立执行区分开来）。
 func exceptionsByHour(b *bundle.Bundle, window time.Duration, keep func(r bundle.Row) bool) (map[[2]string]*excAgg, error) {
 	rows, err := b.Rows("system.query_log_exceptions_1_day")
 	if err != nil {
@@ -176,7 +175,7 @@ type excAgg struct {
 	msg string
 }
 
-// high_exception_rate: > 50 failed queries with one code in an hour.
+// high_exception_rate：一小时内同一错误码的失败查询超过 50 个。
 func checkHighExceptionRate(b *bundle.Bundle, mode string) ([]row, error) {
 	m, err := exceptionsByHour(b, 24*time.Hour, func(r bundle.Row) bool {
 		return r.Int("exception_code") != 0 && r.Str("type") == "ExceptionWhileProcessing"
@@ -197,7 +196,7 @@ func checkHighExceptionRate(b *bundle.Bundle, mode string) ([]row, error) {
 	return out, nil
 }
 
-// keeper_exception_spike: > 20 queries failing with 999 in an hour.
+// keeper_exception_spike：一小时内以错误码 999 失败的查询超过 20 个。
 func checkKeeperExceptionSpike(b *bundle.Bundle, mode string) ([]row, error) {
 	m, err := exceptionsByHour(b, 24*time.Hour, func(r bundle.Row) bool {
 		return r.Int("exception_code") == 999 && r.Str("type") == "ExceptionWhileProcessing"
@@ -215,8 +214,8 @@ func checkKeeperExceptionSpike(b *bundle.Bundle, mode string) ([]row, error) {
 	return out, nil
 }
 
-// too_many_simultaneous_queries: > 10 queries refused with 202 in the last
-// hour (the hour buckets that end after now − 1 h: up to two).
+// too_many_simultaneous_queries：最近一小时内以错误码 202 被拒绝的查询
+// 超过 10 个（结束时间晚于 now − 1 h 的小时桶：最多两个）。
 func checkTooManySimultaneous(b *bundle.Bundle, mode string) ([]row, error) {
 	m, err := exceptionsByHour(b, time.Hour, func(r bundle.Row) bool { return r.Int("exception_code") == 202 })
 	if err != nil {

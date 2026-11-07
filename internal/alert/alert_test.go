@@ -21,7 +21,7 @@ func TestExpandQuery_OnPrem(t *testing.T) {
 	got := ev.expandQuery("SELECT * FROM {sys.mutations} WHERE parts_to_do > 0")
 	want := "SELECT * FROM system.mutations WHERE parts_to_do > 0"
 	if got != want {
-		t.Errorf("got %q, want %q", got, want)
+		t.Errorf("得到 %q，期望 %q", got, want)
 	}
 }
 
@@ -30,19 +30,19 @@ func TestExpandQuery_Cloud_PerReplicaTable(t *testing.T) {
 	got := ev.expandQuery("SELECT * FROM {sys.query_log}")
 	want := "SELECT * FROM clusterAllReplicas(default, system.query_log)"
 	if got != want {
-		t.Errorf("got %q, want %q", got, want)
+		t.Errorf("得到 %q，期望 %q", got, want)
 	}
 }
 
 func TestExpandQuery_Cloud_SharedTable(t *testing.T) {
-	// Shared tables (parts, tables, replicas, …) are queried plain in cloud
-	// because every replica sees the same rows.
+	// 共享表（parts、tables、replicas 等）在 cloud 中直接查询，
+	// 因为每个 replica 看到相同的行。
 	ev := &Evaluator{mode: "cloud"}
 	for _, table := range []string{"parts", "tables", "replicas", "replication_queue", "mutations", "detached_parts"} {
 		got := ev.expandQuery("SELECT * FROM {sys." + table + "}")
 		want := "SELECT * FROM system." + table
 		if got != want {
-			t.Errorf("table %q: got %q, want %q", table, got, want)
+			t.Errorf("表 %q：得到 %q，期望 %q", table, got, want)
 		}
 	}
 }
@@ -51,7 +51,7 @@ func TestExpandQuery_MultiPlaceholder(t *testing.T) {
 	ev := &Evaluator{mode: "onprem"}
 	got := ev.expandQuery("SELECT * FROM {sys.parts} JOIN {sys.tables} USING (database, table)")
 	if !strings.Contains(got, "system.parts") || !strings.Contains(got, "system.tables") {
-		t.Errorf("multi-placeholder expansion failed: %q", got)
+		t.Errorf("多占位符展开失败：%q", got)
 	}
 }
 
@@ -66,11 +66,11 @@ func TestFormattedMessages(t *testing.T) {
 	}
 	msgs := r.FormattedMessages()
 	if len(msgs) != 1 {
-		t.Fatalf("expected 1 message, got %d", len(msgs))
+		t.Fatalf("期望 1 条消息，实际为 %d 条", len(msgs))
 	}
 	want := "Mutation mutation_42 on prod.events running 5h"
 	if msgs[0] != want {
-		t.Errorf("got %q, want %q", msgs[0], want)
+		t.Errorf("得到 %q，期望 %q", msgs[0], want)
 	}
 }
 
@@ -84,7 +84,7 @@ func TestFormattedMessages_MultiRow(t *testing.T) {
 	}
 	msgs := r.FormattedMessages()
 	if len(msgs) != 2 {
-		t.Fatalf("expected 2 messages, got %d", len(msgs))
+		t.Fatalf("期望 2 条消息，实际为 %d 条", len(msgs))
 	}
 }
 
@@ -93,21 +93,21 @@ func TestFormattedMessages_MultiRow(t *testing.T) {
 func TestNotable_NoRows(t *testing.T) {
 	r := Result{Rows: []map[string]interface{}{}}
 	if r.Notable() {
-		t.Error("empty rows must not be Notable")
+		t.Error("空行不得是 Notable")
 	}
 }
 
 func TestNotable_WithRows(t *testing.T) {
 	r := Result{Rows: []map[string]interface{}{{"x": "1"}}}
 	if !r.Notable() {
-		t.Error("rows present must be Notable")
+		t.Error("存在行时必须是 Notable")
 	}
 }
 
 func TestNotable_WithError(t *testing.T) {
 	r := Result{Error: "connection refused"}
 	if !r.Notable() {
-		t.Error("an errored result must be Notable (it needs display) — but Summarize must not count it as fired")
+		t.Error("出错的结果必须是 Notable（它需要展示）—— 但 Summarize 不得把它计为 fired")
 	}
 }
 
@@ -117,13 +117,13 @@ func TestParseJSONCompact(t *testing.T) {
 	raw := `{"meta":[{"name":"exception_code"},{"name":"error_count"}],"data":[["241","15"],["60","8"]],"rows":2}`
 	rows, err := parseJSONCompact(raw)
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("意外错误：%v", err)
 	}
 	if len(rows) != 2 {
-		t.Fatalf("expected 2 rows, got %d", len(rows))
+		t.Fatalf("期望 2 行，实际为 %d 行", len(rows))
 	}
 	if rows[0]["exception_code"] != "241" {
-		t.Errorf("expected '241', got %v", rows[0]["exception_code"])
+		t.Errorf("期望 '241'，实际为 %v", rows[0]["exception_code"])
 	}
 }
 
@@ -131,20 +131,20 @@ func TestParseJSONCompact_Empty(t *testing.T) {
 	raw := `{"meta":[{"name":"id"}],"data":[],"rows":0}`
 	rows, err := parseJSONCompact(raw)
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("意外错误：%v", err)
 	}
 	if len(rows) != 0 {
-		t.Errorf("expected 0 rows, got %d", len(rows))
+		t.Errorf("期望 0 行，实际为 %d 行", len(rows))
 	}
 }
 
-// ── RunAll (filesystem, no ClickHouse) ───────────────────────────────────────
+// ── RunAll（文件系统，无 ClickHouse）─────────────────────────────────────────
 
 func TestRunAll_MissingDir(t *testing.T) {
 	ev := &Evaluator{mode: "onprem"}
 	results := ev.RunAll("/nonexistent/dir/that/does/not/exist", internal.Version{Major: 25, Minor: 4, Patch: 1, Build: 0})
 	if results != nil {
-		t.Errorf("expected nil for missing dir, got %v", results)
+		t.Errorf("目录缺失时期望 nil，实际为 %v", results)
 	}
 }
 
@@ -165,16 +165,16 @@ tags:
 `)
 	var def Definition
 	if err := yaml.Unmarshal(raw, &def); err != nil {
-		t.Fatalf("yaml unmarshal failed: %v", err)
+		t.Fatalf("yaml 反序列化失败：%v", err)
 	}
 	if def.Name != "test_alert" {
-		t.Errorf("name: got %q, want %q", def.Name, "test_alert")
+		t.Errorf("name：得到 %q，期望 %q", def.Name, "test_alert")
 	}
 	if def.Severity != "warning" {
-		t.Errorf("severity: got %q, want %q", def.Severity, "warning")
+		t.Errorf("severity：得到 %q，期望 %q", def.Severity, "warning")
 	}
 	if !strings.Contains(def.Query, "{sys.parts}") {
-		t.Error("query should contain {sys.parts} placeholder")
+		t.Error("query 应包含 {sys.parts} 占位符")
 	}
 }
 
@@ -192,11 +192,11 @@ message: "should never fire"
 		t.Fatal(err)
 	}
 
-	// evalFile directly — no ClickHouse client needed; security check fires before query execution
+	// 直接调用 evalFile —— 无需 ClickHouse client；安全检查在查询执行前触发
 	ev := &Evaluator{mode: "onprem"}
 	r := ev.evalFile(filepath.Join(dir, "bad.yaml"))
 	if !strings.Contains(r.Error, "security") {
-		t.Errorf("expected security error, got: %q", r.Error)
+		t.Errorf("期望安全错误，实际为：%q", r.Error)
 	}
 }
 
@@ -205,55 +205,53 @@ func TestRunAll_IgnoresNonYAML(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(dir, "readme.md"), []byte("# hello"), 0644)
 	_ = os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("some notes"), 0644)
 
-	// Empty client is OK here because no .yaml files exist so RunAll returns early.
+	// 这里 client 为空也没问题，因为不存在 .yaml 文件，RunAll 会提前返回。
 	ev := &Evaluator{mode: "onprem"}
 	results := ev.RunAll(dir, internal.Version{Major: 25, Minor: 4, Patch: 1, Build: 0})
 	if len(results) != 0 {
-		t.Errorf("expected 0 results (no yaml files), got %d", len(results))
+		t.Errorf("期望 0 个结果（没有 yaml 文件），实际为 %d 个", len(results))
 	}
 }
 
-// ── Real alert YAML files from the alerts/ directory ─────────────────────────
+// ── 来自 alerts/ 目录的真实告警 YAML 文件 ───────────────────────────────────
 
-// TestSummarize asserts the load-bearing reporting invariant: skipped
-// rules (table not present) are excluded from "evaluated" — a check that
-// never ran must not read as a check that passed.
+// TestSummarize 断言关键的报送不变量：skipped 的规则（表不存在）
+// 被排除在 "evaluated" 之外 —— 从未运行的检查不得被读作通过的检查。
 func TestSummarize(t *testing.T) {
 	results := []Result{
-		{Name: "fired", Rows: []map[string]interface{}{{"a": 1}}}, // fired
-		{Name: "clean"},                         // evaluated, not fired
-		{Name: "errored", Error: "query: boom"}, // errored, NOT fired
-		{Name: "skipped", Skipped: true, Reason: "table not present"}, // not evaluated
+		{Name: "fired", Rows: []map[string]interface{}{{"a": 1}}}, // 已触发
+		{Name: "clean"},                         // 已评估，未触发
+		{Name: "errored", Error: "query: boom"}, // 已出错，未触发
+		{Name: "skipped", Skipped: true, Reason: "table not present"}, // 未评估
 	}
 	evaluated, fired, errored, skipped := Summarize(results)
-	// evaluated = produced an answer. Both the skipped rule (never ran) and
-	// the errored rule (ran, got nothing) are excluded — reporting either as
-	// "checked" claims verification that didn't happen.
+	// evaluated = 给出了答案。skipped 的规则（从未运行）和
+	// errored 的规则（运行了，但没得到结果）都被排除 —— 把任一者报告为
+	// "checked" 都是在声称并未发生的验证。
 	if evaluated != 2 {
-		t.Errorf("evaluated = %d, want 2 (skipped AND errored rules must be excluded)", evaluated)
+		t.Errorf("evaluated = %d，期望 2（skipped 和 errored 的规则都必须排除）", evaluated)
 	}
-	// fired counts real findings only. Folding errors in here would report
-	// a permissions problem as N production findings — observed live
-	// against a restricted Cloud user where all 11 rules errored.
+	// fired 只统计真正的 findings。把错误折叠进来会把一个权限问题
+	// 报告成 N 个生产问题 —— 这是针对受限的 Cloud 用户实际观察到的，
+	// 当时全部 11 条规则都出错了。
 	if fired != 1 {
-		t.Errorf("fired = %d, want 1 (matched rows only, NOT errors)", fired)
+		t.Errorf("fired = %d，期望 1（只统计匹配的行，不统计错误）", fired)
 	}
 	if errored != 1 {
-		t.Errorf("errored = %d, want 1 (counted separately from fired)", errored)
+		t.Errorf("errored = %d，期望 1（与 fired 分开计数）", errored)
 	}
 	if skipped != 1 {
-		t.Errorf("skipped = %d, want 1", skipped)
+		t.Errorf("skipped = %d，期望 1", skipped)
 	}
-	// A skipped result is neither fired nor errored.
+	// 被跳过的结果既不是 fired 也不是 errored。
 	if results[3].Notable() {
-		t.Error("a Skipped result must not report Notable()")
+		t.Error("Skipped 的结果不得报告 Notable()")
 	}
 }
 
-// TestWriteSummaryJSON covers the one artifact a support engineer reads
-// when there is no dashboard: the four states must map correctly, and
-// matched ROWS must never appear — their columns are rule-defined, so in
-// gov mode they would carry the identifiers gov hashes everywhere else.
+// TestWriteSummaryJSON 覆盖没有 dashboard 时支持工程师会阅读的唯一产物：
+// 四种状态必须正确映射，且匹配的行绝不能出现 —— 它们的列由规则定义，
+// 因此在 gov 模式下会携带 gov 在其他所有地方都会哈希的标识符。
 func TestWriteSummaryJSON(t *testing.T) {
 	results := []Result{
 		{Name: "fired_rule", Title: "Fired", Severity: SeverityCritical,
@@ -276,23 +274,23 @@ func TestWriteSummaryJSON(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			// Row contents must not leak, in ANY mode.
+			// 行内容在任何模式下都不得泄漏。
 			for _, leak := range []string{"secretdb", "customer_pii"} {
 				if strings.Contains(string(blob), leak) {
-					t.Errorf("row content %q leaked into alerts_summary.json", leak)
+					t.Errorf("行内容 %q 泄漏进了 alerts_summary.json", leak)
 				}
 			}
 			var got struct {
 				Evaluated int `json:"evaluated"`
 				Fired     int `json:"fired"`
 				Errored   int `json:"errored"`
-				// Needs the tag: Go won't map not_applicable → NotApplicable.
+				// 需要该 tag：Go 不会把 not_applicable 映射到 NotApplicable。
 				NotApplicable int `json:"not_applicable"`
 				Note          string
 				Rules         []struct {
 					Name, State string
-					// Also needs a tag — the key is skip_reason, so an
-					// untagged Reason would silently stay empty.
+					// 同样需要 tag —— 键是 skip_reason，因此没有 tag 的
+					// Reason 会悄悄保持为空。
 					Reason string `json:"skip_reason"`
 					Count  int    `json:"instance_count"`
 				}
@@ -301,7 +299,7 @@ func TestWriteSummaryJSON(t *testing.T) {
 				t.Fatal(err)
 			}
 			if got.Evaluated != 2 || got.Fired != 1 || got.Errored != 1 || got.NotApplicable != 1 {
-				t.Errorf("counts = evaluated %d / fired %d / errored %d / n-a %d; want 2/1/1/1",
+				t.Errorf("计数 = evaluated %d / fired %d / errored %d / n-a %d；期望 2/1/1/1",
 					got.Evaluated, got.Fired, got.Errored, got.NotApplicable)
 			}
 			states := map[string]string{}
@@ -312,39 +310,38 @@ func TestWriteSummaryJSON(t *testing.T) {
 				counts[r.Name] = r.Count
 				reasons[r.Name] = r.Reason
 			}
-			// The skip reason is what the dashboard's "not applicable" note
-			// renders from, so it has to survive serialisation.
+			// dashboard 的 “not applicable” 说明正是根据 skip reason 渲染的，
+			// 因此它必须能在序列化后保留。
 			if reasons["skipped_rule"] != "table not present" {
-				t.Errorf("skipped_rule skip_reason = %q, want %q", reasons["skipped_rule"], "table not present")
+				t.Errorf("skipped_rule skip_reason = %q，期望 %q", reasons["skipped_rule"], "table not present")
 			}
 			for name, want := range map[string]string{
 				"fired_rule": "fired", "clean_rule": "clean",
 				"errored_rule": "error", "skipped_rule": "skipped",
 			} {
 				if states[name] != want {
-					t.Errorf("%s: state %q, want %q", name, states[name], want)
+					t.Errorf("%s：state %q，期望 %q", name, states[name], want)
 				}
 			}
-			// The count is the substitute for the omitted rows.
+			// 计数是被省略行的替代品。
 			if counts["fired_rule"] != 2 {
-				t.Errorf("fired_rule instance_count = %d, want 2", counts["fired_rule"])
+				t.Errorf("fired_rule instance_count = %d，期望 2", counts["fired_rule"])
 			}
-			// The note must not send the reader to an artifact that isn't there.
+			// 说明不得把读者引向一个并不存在的产物。
 			if strings.Contains(got.Note, "see the dashboard") {
-				t.Errorf("note points at a dashboard this archive lacks: %q", got.Note)
+				t.Errorf("说明指向了本归档中不存在的 dashboard：%q", got.Note)
 			}
 			if mode == "gov" && !strings.Contains(got.Note, "gov") {
-				t.Errorf("gov note should state the privacy reason: %q", got.Note)
+				t.Errorf("gov 的说明应陈述隐私原因：%q", got.Note)
 			}
 		})
 	}
 }
 
-// TestRunAll_OverrideFilePrefix asserts that a rule served from a version
-// directory reports its File with the directory prefix (mirrors
-// analysis.go), so support engineers can tell which variant ran. Uses
-// security-blocked rules: evalFile returns before touching the client, so
-// no ClickHouse connection is needed.
+// TestRunAll_OverrideFilePrefix 断言来自版本目录的规则会在 File 中报告
+// 目录前缀（与 analysis.go 一致），以便支持工程师分辨运行的是哪个变体。
+// 使用被安全校验拦截的规则：evalFile 在接触 client 之前就返回，
+// 因此无需 ClickHouse 连接。
 func TestRunAll_OverrideFilePrefix(t *testing.T) {
 	dir := t.TempDir()
 	blocked := []byte("name: r\ntitle: t\nquery: |\n  DROP TABLE x\nmessage: m\n")
@@ -359,26 +356,25 @@ func TestRunAll_OverrideFilePrefix(t *testing.T) {
 	}
 
 	ev := &Evaluator{mode: "onprem"}
-	// New server → the 22.11.1.0 override wins.
+	// 较新的服务器 → 22.11.1.0 的覆盖胜出。
 	results := ev.RunAll(dir, internal.Version{Major: 25, Minor: 4, Patch: 1, Build: 0})
 	if len(results) != 1 {
-		t.Fatalf("expected 1 result (override shadows root), got %d", len(results))
+		t.Fatalf("期望 1 个结果（覆盖遮蔽根规则），实际为 %d 个", len(results))
 	}
 	if results[0].File != "22.11.1.0/r.yaml" {
-		t.Errorf("File = %q, want %q", results[0].File, "22.11.1.0/r.yaml")
+		t.Errorf("File = %q，期望 %q", results[0].File, "22.11.1.0/r.yaml")
 	}
-	// Old server → the root rule, no prefix.
+	// 较旧的服务器 → 根规则，无前缀。
 	results = ev.RunAll(dir, internal.Version{Major: 22, Minor: 8, Patch: 1, Build: 0})
 	if len(results) != 1 || results[0].File != "r.yaml" {
-		t.Errorf("root run: got %+v, want single result with File=r.yaml", results)
+		t.Errorf("根规则运行：得到 %+v，期望单个 File=r.yaml 的结果", results)
 	}
 }
 
-// TestNotApplicable_ModeAware pins the single-node half of the rule: a
-// local UNKNOWN_TABLE is conclusive ("not applicable"), while a missing
-// COLUMN never is. In cloud the answer is not mode-derived — it comes from
-// counting replicas that have the table; see
-// TestNotApplicable_CloudClusterProbe for those branches.
+// TestNotApplicable_ModeAware 固定住规则中单节点的部分：本地 UNKNOWN_TABLE
+// 是定论（“不适用”），而缺列则永远不是。在 cloud 中答案并非由模式推导 ——
+// 它来自统计拥有该表的 replica 数；这些分支见
+// TestNotApplicable_CloudClusterProbe。
 func TestNotApplicable_ModeAware(t *testing.T) {
 	missing := errString("Code: 60. DB::Exception: Table system.crash_log doesn't exist. (UNKNOWN_TABLE) (version 24.8.1.1)")
 	badColumn := errString("Code: 47. DB::Exception: Missing columns: 'is_killed' (UNKNOWN_IDENTIFIER)")
@@ -386,34 +382,33 @@ func TestNotApplicable_ModeAware(t *testing.T) {
 	for _, mode := range []string{"onprem", "gov"} {
 		ev := &Evaluator{mode: mode}
 		if !ev.notApplicable(missing) {
-			t.Errorf("%s: a locally missing table should be not-applicable", mode)
+			t.Errorf("%s：本地缺失的表应判为不适用", mode)
 		}
 		if ev.notApplicable(badColumn) {
-			t.Errorf("%s: a missing COLUMN must stay a genuine error", mode)
+			t.Errorf("%s：缺列必须保持为真正的错误", mode)
 		}
 	}
 
-	// Cloud resolves the ambiguity by counting replicas that have the table
-	// (clusterAllReplicas over system.tables). With no client the probe
-	// can't run, so it must refuse to claim "not applicable" and let the
-	// error surface — never silently hide a possible real finding.
+	// Cloud 通过统计拥有该表的 replica 来消解歧义
+	//（对 system.tables 使用 clusterAllReplicas）。没有 client 时探测
+	// 无法运行，因此它必须拒绝声称“不适用”，并让错误暴露出来 ——
+	// 绝不能悄悄隐藏一个可能的真实 finding。
 	cloud := &Evaluator{mode: "cloud"}
 	if cloud.notApplicable(missing) {
-		t.Error("cloud: without a verifiable cluster-wide absence check, UNKNOWN_TABLE must NOT " +
-			"be treated as not-applicable — it can mean the table exists on another replica (a real crash)")
+		t.Error("cloud：没有可验证的集群范围缺失检查时，UNKNOWN_TABLE 绝不能" +
+			"被当作不适用 —— 它可能意味着该表存在于另一个 replica 上（真实的崩溃）")
 	}
 	if cloud.notApplicable(badColumn) {
-		t.Error("cloud: a missing COLUMN must stay a genuine error")
+		t.Error("cloud：缺列必须保持为真正的错误")
 	}
 }
 
-// TestNotApplicable_CloudClusterProbe covers the branch the whole cloud
-// design rests on — and the one that decides whether a critical crash
-// alert is hidden or surfaced. Uses the queryFn seam so no live cluster is
-// needed. Every uncertain outcome must fail toward SURFACING.
+// TestNotApplicable_CloudClusterProbe 覆盖整个 cloud 设计所依赖的分支 ——
+// 也是决定一个危急崩溃告警是被隐藏还是被暴露的分支。使用 queryFn 接缝，
+// 因此无需实时集群。每一种不确定的结果都必须失败向暴露。
 func TestNotApplicable_CloudClusterProbe(t *testing.T) {
 	missing := errString("Code: 60. DB::Exception: Table system.crash_log does not exist. (UNKNOWN_TABLE)")
-	// count() responses keyed by whether the query targets the specific table.
+	// count() 响应根据查询是否针对特定表来区分。
 	resp := func(n string) string {
 		return `{"meta":[{"name":"c"}],"data":[["` + n + `"]],"rows":1}`
 	}
@@ -421,44 +416,44 @@ func TestNotApplicable_CloudClusterProbe(t *testing.T) {
 	cases := []struct {
 		name string
 		fn   func(string) (string, error)
-		want bool // true ⇒ treated as not-applicable (skipped)
+		want bool // true ⇒ 视为不适用（skipped）
 	}{
 		{
-			name: "absent cluster-wide → skip",
+			name: "整个集群都不存在 → 跳过",
 			fn: func(sql string) (string, error) {
 				if strings.Contains(sql, "name='crash_log'") {
-					return resp("0"), nil // no replica has it
+					return resp("0"), nil // 没有 replica 拥有它
 				}
-				return resp("120"), nil // but the database is visible
+				return resp("120"), nil // 但该数据库可见
 			},
 			want: true,
 		},
 		{
-			name: "present on some replicas → surface (a real crash must not be hidden)",
+			name: "存在于部分 replica → 暴露（真实的崩溃不得被隐藏）",
 			fn: func(sql string) (string, error) {
 				if strings.Contains(sql, "name='crash_log'") {
-					return resp("1"), nil // one replica has it
+					return resp("1"), nil // 一个 replica 拥有它
 				}
 				return resp("120"), nil
 			},
 			want: false,
 		},
 		{
-			name: "privilege-blind (database itself invisible) → surface, never claim absent",
+			name: "权限盲区（数据库本身不可见）→ 暴露，绝不声称不存在",
 			fn: func(sql string) (string, error) {
-				return resp("0"), nil // even the database check returns 0
+				return resp("0"), nil // 连数据库检查都返回 0
 			},
 			want: false,
 		},
 		{
-			name: "probe query fails → surface",
+			name: "探测查询失败 → 暴露",
 			fn: func(string) (string, error) {
 				return "", errString("connection reset")
 			},
 			want: false,
 		},
 		{
-			name: "unparseable probe response → surface",
+			name: "探测响应无法解析 → 暴露",
 			fn: func(string) (string, error) {
 				return "not json", nil
 			},
@@ -469,15 +464,15 @@ func TestNotApplicable_CloudClusterProbe(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			ev := &Evaluator{mode: "cloud", queryFn: c.fn}
 			if got := ev.notApplicable(missing); got != c.want {
-				t.Errorf("notApplicable = %v, want %v", got, c.want)
+				t.Errorf("notApplicable = %v，期望 %v", got, c.want)
 			}
 		})
 	}
 }
 
-// TestNotApplicable_CloudKeepsDatabase asserts the probe checks the database
-// the error named, not a hard-coded "system" — otherwise a rule against
-// mydb.foo would be validated against system.foo and wrongly skipped.
+// TestNotApplicable_CloudKeepsDatabase 断言探测检查的是错误中给出的数据库，
+// 而不是硬编码的 "system" —— 否则针对 mydb.foo 的规则会被拿到
+// system.foo 上校验并被错误地跳过。
 func TestNotApplicable_CloudKeepsDatabase(t *testing.T) {
 	var seen []string
 	ev := &Evaluator{mode: "cloud", queryFn: func(sql string) (string, error) {
@@ -487,18 +482,17 @@ func TestNotApplicable_CloudKeepsDatabase(t *testing.T) {
 	ev.notApplicable(errString("Table mydb.foo does not exist. (UNKNOWN_TABLE)"))
 	joined := strings.Join(seen, " | ")
 	if !strings.Contains(joined, "database='mydb'") {
-		t.Errorf("probe should target the named database; queries were: %s", joined)
+		t.Errorf("探测应针对指定的数据库；实际查询为：%s", joined)
 	}
 	if strings.Contains(joined, "database='system' AND name='foo'") {
-		t.Errorf("probe must not fall back to system for a qualified name: %s", joined)
+		t.Errorf("对于带限定的名称，探测不得回退到 system：%s", joined)
 	}
 }
 
 func TestMissingTableNameExtraction(t *testing.T) {
-	// Both wordings must parse: 22.8 emits "doesn't exist", 26.2 emits
-	// "does not exist". Matching only the older form made the cloud
-	// cluster-wide probe silently unreachable on newer servers (observed
-	// live on Cloud 26.2.1.525).
+	// 两种措辞都必须能解析：22.8 输出 "doesn't exist"，26.2 输出
+	// "does not exist"。只匹配旧形式会让 cloud 的集群范围探测在较新的服务器上
+	// 悄悄无法到达（在 Cloud 26.2.1.525 上实际观察到）。
 	cases := map[string]string{
 		"Code: 60. DB::Exception: Table system.crash_log doesn't exist. (UNKNOWN_TABLE) (version 22.8.21.38)":    "crash_log",
 		"Code: 60. DB::Exception: Table system.no_such_log does not exist. (UNKNOWN_TABLE) (version 26.2.1.525)": "no_such_log",
@@ -515,7 +509,7 @@ func TestMissingTableNameExtraction(t *testing.T) {
 			}
 		}
 		if got != want {
-			t.Errorf("from %q: got %q, want %q", errText, got, want)
+			t.Errorf("从 %q：得到 %q，期望 %q", errText, got, want)
 		}
 	}
 }
@@ -534,13 +528,13 @@ func TestIsMissingTable(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			if got := isMissingTable(c.err); got != c.want {
-				t.Errorf("isMissingTable(%v) = %v, want %v", c.err, got, c.want)
+				t.Errorf("isMissingTable(%v) = %v，期望 %v", c.err, got, c.want)
 			}
 		})
 	}
 }
 
-// errString is a trivial error whose message is the given string.
+// errString 是一个简单的 error，其消息就是给定字符串。
 type errString string
 
 func (e errString) Error() string { return string(e) }
@@ -548,12 +542,12 @@ func (e errString) Error() string { return string(e) }
 func TestAlertYAML_FilesAreValid(t *testing.T) {
 	alertsDir := "../../alerts"
 	if _, err := os.Stat(alertsDir); os.IsNotExist(err) {
-		t.Skip("alerts/ directory not present")
+		t.Skip("alerts/ 目录不存在")
 	}
 
-	// Validate every rule at the root AND one level down (version-override
-	// directories), so override rules get the same required-field and
-	// security checks as root rules — not just the ones in the root.
+	// 校验根目录以及下一层（版本覆盖目录）中的每条规则，
+	// 使覆盖规则获得与根规则相同的必填字段和安全检查 ——
+	// 而不仅仅是根目录中的那些。
 	type yfile struct{ display, path string }
 	var files []yfile
 	entries, err := os.ReadDir(alertsDir)
@@ -587,46 +581,44 @@ func TestAlertYAML_FilesAreValid(t *testing.T) {
 			}
 			var def Definition
 			if err := yaml.Unmarshal(raw, &def); err != nil {
-				t.Fatalf("YAML parse error: %v", err)
+				t.Fatalf("YAML 解析错误：%v", err)
 			}
 			if def.Name == "" {
-				t.Error("alert has no name")
+				t.Error("告警没有 name")
 			}
 			if def.Title == "" {
-				t.Error("alert has no title")
+				t.Error("告警没有 title")
 			}
 			if def.Query == "" {
-				t.Error("alert has no query")
+				t.Error("告警没有 query")
 			}
-			// Severity must be one of the three known values (empty is fine —
-			// evalFile defaults it to warning). Anything else passes straight
-			// through to the dashboard, where the severity chips and the nav
-			// badge only count critical/warning/info: a rule with
-			// `severity: high` that genuinely FIRES would be counted nowhere
-			// and be invisible in both summary surfaces. Cheaper to make the
-			// "we control the severities" assumption enforced than assumed.
+			// severity 必须是三个已知值之一（可以为空 ——
+			// evalFile 会默认设为 warning）。其他任何值都会直接
+			// 传到 dashboard，而那里的严重级别标签和导航徽章只统计
+			// critical/warning/info：一条 `severity: high` 且真的触发的规则
+			// 会在两处汇总中都不被计数、不可见。与其假定“我们掌控严重级别”，
+			// 不如强制执行这一假定，代价更低。
 			switch def.Severity {
 			case "", SeverityCritical, SeverityWarning, SeverityInfo:
 			default:
-				t.Errorf("severity %q is not one of %q/%q/%q — a firing rule with an "+
-					"unknown severity is counted in neither the badge nor any chip",
+				t.Errorf("severity %q 不是 %q/%q/%q 之一 —— 使用未知严重级别"+
+					"的触发规则既不会被徽章计数，也不会被任何标签计数",
 					def.Severity, SeverityCritical, SeverityWarning, SeverityInfo)
 			}
-			// Security: expanded query must pass validation
+			// 安全性：展开后的查询必须通过校验
 			expanded := ev.expandQuery(def.Query)
 			if err := query.ValidateQueryContent(expanded); err != nil {
-				t.Errorf("security validation failed: %v", err)
+				t.Errorf("安全校验失败：%v", err)
 			}
-			// Follow-up queries are shown to customers to run on their own
-			// cluster: each needs a title and must be a read-only SELECT in
-			// every mode's form.
+			// 跟进查询会展示给客户，供其在自建集群上运行：
+			// 每条都需要 title，并且必须在每种模式的形式下都是只读 SELECT。
 			for i, inv := range def.Investigate {
 				if strings.TrimSpace(inv.Title) == "" || strings.TrimSpace(inv.Query) == "" {
-					t.Errorf("investigate[%d] needs a title and a query", i)
+					t.Errorf("investigate[%d] 需要 title 和 query", i)
 				}
 				for _, mode := range []string{"onprem", "cloud", "gov"} {
 					if err := query.ValidateQueryContent((&Evaluator{mode: mode}).expandQuery(inv.Query)); err != nil {
-						t.Errorf("investigate[%d] (%s): %v", i, mode, err)
+						t.Errorf("investigate[%d]（%s）：%v", i, mode, err)
 					}
 				}
 			}
@@ -634,17 +626,16 @@ func TestAlertYAML_FilesAreValid(t *testing.T) {
 	}
 }
 
-// TestAlertYAML_OverridesMatchRoot guards against root/override drift: a
-// version-directory rule (e.g. alerts/24.1.1.0/foo.yaml) is a near-copy of
-// its root twin differing only in the query, so a future edit could easily
-// land in one and not the other. Assert every override has a root twin with
-// the same identity metadata (name/title/severity/tags), and that its name
-// matches the filename (a rename silently creates a second rule instead of
-// an override — see the README note).
+// TestAlertYAML_OverridesMatchRoot 防止根规则/覆盖规则漂移：
+// 版本目录中的规则（例如 alerts/24.1.1.0/foo.yaml）与其根对应文件几乎相同，
+// 只在查询上有差异，因此未来的编辑很容易只落在其中一个上。
+// 断言每个覆盖都有一个身份元数据（name/title/severity/tags）相同的根对应文件，
+// 并且其 name 与文件名一致（重命名会悄悄创建出第二条规则，而不是一个覆盖 ——
+// 见 README 说明）。
 func TestAlertYAML_OverridesMatchRoot(t *testing.T) {
 	alertsDir := "../../alerts"
 	if _, err := os.Stat(alertsDir); os.IsNotExist(err) {
-		t.Skip("alerts/ directory not present")
+		t.Skip("alerts/ 目录不存在")
 	}
 	load := func(path string) (Definition, error) {
 		raw, err := os.ReadFile(path)
@@ -677,15 +668,15 @@ func TestAlertYAML_OverridesMatchRoot(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				// The load-bearing check: an override's name must match its
-				// filename. A mismatch means a rename that silently turns the
-				// override into a separate rule. Applies to every override.
+				// 关键检查：覆盖规则的 name 必须与
+				// 其文件名一致。不一致意味着一次重命名悄悄把覆盖
+				// 变成了独立规则。适用于每个覆盖。
 				if base := strings.TrimSuffix(name, ".yaml"); ov.Name != base {
-					t.Errorf("name %q does not match filename %q", ov.Name, base)
+					t.Errorf("name %q 与文件名 %q 不匹配", ov.Name, base)
 				}
-				// A file that exists only in a version directory (no root
-				// twin) is a supported pattern — skipped on older servers,
-				// see the README. There's nothing to compare metadata against.
+				// 仅存在于版本目录中的文件（没有
+				// 根对应文件）是受支持的模式 —— 在较旧的服务器上会被跳过，
+				// 见 README。没有可对比的元数据。
 				rootPath := filepath.Join(alertsDir, name)
 				if _, err := os.Stat(rootPath); err != nil {
 					return
@@ -695,35 +686,34 @@ func TestAlertYAML_OverridesMatchRoot(t *testing.T) {
 					t.Fatal(err)
 				}
 				if ov.Name != rt.Name {
-					t.Errorf("name drift: override %q vs root %q", ov.Name, rt.Name)
+					t.Errorf("name 漂移：覆盖 %q 与根 %q", ov.Name, rt.Name)
 				}
 				if ov.Title != rt.Title {
-					t.Errorf("title drift: override %q vs root %q", ov.Title, rt.Title)
+					t.Errorf("title 漂移：覆盖 %q 与根 %q", ov.Title, rt.Title)
 				}
 				if ov.Severity != rt.Severity {
-					t.Errorf("severity drift: override %q vs root %q", ov.Severity, rt.Severity)
+					t.Errorf("severity 漂移：覆盖 %q 与根 %q", ov.Severity, rt.Severity)
 				}
 				if !reflect.DeepEqual(ov.Tags, rt.Tags) {
-					t.Errorf("tags drift: override %v vs root %v", ov.Tags, rt.Tags)
+					t.Errorf("tags 漂移：覆盖 %v 与根 %v", ov.Tags, rt.Tags)
 				}
-				// The follow-ups too: an override is what runs on newer
-				// servers, so one without them hides the queries exactly where
-				// they matter. A follow-up that must differ per version is not
-				// supported; keep them version-neutral.
+				// 跟进查询也一样：覆盖规则才是较新
+				// 服务器上运行的内容，因此缺少它们恰恰会在最需要的地方
+				// 隐藏这些查询。不支持按版本不同的跟进查询；
+				// 请让它们保持版本中立。
 				if !reflect.DeepEqual(ov.Investigate, rt.Investigate) {
-					t.Errorf("investigate drift: override has %d follow-up(s), root %d — copy the root's investigate: list", len(ov.Investigate), len(rt.Investigate))
+					t.Errorf("investigate 漂移：覆盖有 %d 条跟进查询，根有 %d 条 —— 请复制根的 investigate: 列表", len(ov.Investigate), len(rt.Investigate))
 				}
 			})
 		}
 	}
 }
 
-// ── modes gate ───────────────────────────────────────────────────────────────
+// ── modes 门控 ───────────────────────────────────────────────────────────────
 
-// A rule that only makes sense with a cluster fan-out (per-replica parts
-// comparison) declares `modes: [cloud]`; elsewhere it is skipped — never
-// run, never errored — so an onprem bundle does not show a failed rule for
-// a cluster it does not have.
+// 只有在集群扇出时才有意义的规则（per-replica parts 比较）会声明
+// `modes: [cloud]`；在其他模式下它会被跳过 —— 从不运行、从不出错 ——
+// 这样 onprem 的 bundle 不会为一个它并不拥有的集群显示失败的规则。
 func TestDefinition_AppliesTo(t *testing.T) {
 	every := Definition{}
 	cloudOnly := Definition{Modes: []string{"cloud"}}
@@ -738,14 +728,13 @@ func TestDefinition_AppliesTo(t *testing.T) {
 		{single, "onprem", true}, {single, "gov", true}, {single, "cloud", false},
 	} {
 		if got := c.d.appliesTo(c.mode); got != c.want {
-			t.Errorf("modes %v in %q: got %v, want %v", c.d.Modes, c.mode, got, c.want)
+			t.Errorf("modes %v 在 %q 中：得到 %v，期望 %v", c.d.Modes, c.mode, got, c.want)
 		}
 	}
 }
 
-// evalFile must return a Skipped result for a rule gated to another mode
-// BEFORE touching the server: the evaluator here has no client, so any
-// attempt to run the query would panic.
+// 对于被门控到其他模式的规则，evalFile 必须在接触服务器之前返回
+// Skipped 结果：这里的评估器没有 client，任何尝试运行查询的动作都会 panic。
 func TestEvalFile_ModeGateSkipsWithoutQuerying(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cloud_only.yaml")
@@ -755,16 +744,15 @@ func TestEvalFile_ModeGateSkipsWithoutQuerying(t *testing.T) {
 	ev := &Evaluator{mode: "onprem"}
 	r := ev.evalFile(path)
 	if !r.Skipped || r.Error != "" || len(r.Rows) != 0 {
-		t.Fatalf("gated rule: skipped=%v error=%q rows=%d", r.Skipped, r.Error, len(r.Rows))
+		t.Fatalf("被门控的规则：skipped=%v error=%q rows=%d", r.Skipped, r.Error, len(r.Rows))
 	}
 	if !strings.Contains(r.Reason, "onprem") || !strings.Contains(r.Reason, "cloud") {
-		t.Errorf("reason should name the run mode and the rule's modes: %q", r.Reason)
+		t.Errorf("原因应指出运行模式和规则的 modes：%q", r.Reason)
 	}
 }
 
-// A typo in modes: must be an error on the rule, not a silent skip in every
-// mode. The evaluator has no client, so the test also proves the check runs
-// before any query.
+// modes: 中的拼写错误必须是规则上的错误，而不是在每种模式下都静默跳过。
+// 该评估器没有 client，因此这个测试也证明了检查在任何查询之前运行。
 func TestEvalFile_UnknownModeIsAnError(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "typo.yaml")
@@ -774,29 +762,28 @@ func TestEvalFile_UnknownModeIsAnError(t *testing.T) {
 	ev := &Evaluator{mode: "onprem"}
 	r := ev.evalFile(path)
 	if r.Skipped || r.Error == "" || !strings.Contains(r.Error, "on-prem") {
-		t.Fatalf("unknown mode: skipped=%v error=%q — want an error naming the bad value", r.Skipped, r.Error)
+		t.Fatalf("未知模式：skipped=%v error=%q —— 期望一个指出错误取值的错误", r.Skipped, r.Error)
 	}
 	for _, ok := range []Definition{{}, {Modes: []string{"cloud"}}, {Modes: []string{" Gov ", "ONPREM"}}} {
 		if err := ok.validateModes(); err != nil {
-			t.Errorf("modes %v should validate: %v", ok.Modes, err)
+			t.Errorf("modes %v 应能通过校验：%v", ok.Modes, err)
 		}
 	}
 }
 
-// shippedRuleModes maps the rules that must carry a modes: list to the exact
-// list they must carry. Extended by the PRs that add gated rules; a copy-paste
-// that drops the key would make a cluster-only rule fail with
-// CLUSTER_DOESNT_EXIST on every onprem run.
+// shippedRuleModes 把必须携带 modes: 列表的规则映射到它们必须携带的确切列表。
+// 由添加门控规则的 PR 扩展；一次丢掉该键的复制粘贴会让仅适用于集群的规则
+// 在每次 onprem 运行时以 CLUSTER_DOESNT_EXIST 失败。
 var shippedRuleModes = map[string][]string{
 	"parts_propagation_lag": {"cloud"},
 }
 
-// Every shipped rule with a modes: list names real modes, and every rule in
-// shippedRuleModes is present with exactly that list.
+// 每条带 modes: 列表的随包规则都指定真实模式，且 shippedRuleModes 中的
+// 每条规则都存在并携带完全相同的列表。
 func TestShippedRules_ModesAreGated(t *testing.T) {
 	files, err := filepath.Glob("../../alerts/*.yaml")
 	if err != nil || len(files) == 0 {
-		t.Fatalf("no alert files: %v", err)
+		t.Fatalf("没有告警文件：%v", err)
 	}
 	sub, _ := filepath.Glob("../../alerts/*/*.yaml")
 	files = append(files, sub...)
@@ -812,28 +799,26 @@ func TestShippedRules_ModesAreGated(t *testing.T) {
 		}
 		for _, m := range d.Modes {
 			if m != "cloud" && m != "onprem" && m != "gov" {
-				t.Errorf("%s: unknown mode %q", f, m)
+				t.Errorf("%s：未知模式 %q", f, m)
 			}
 		}
 		if w, ok := shippedRuleModes[d.Name]; ok {
 			seen[d.Name] = true
 			if strings.Join(d.Modes, ",") != strings.Join(w, ",") {
-				t.Errorf("%s: modes %v, want %v", f, d.Modes, w)
+				t.Errorf("%s：modes %v，期望 %v", f, d.Modes, w)
 			}
 		}
 	}
 	for n := range shippedRuleModes {
 		if !seen[n] {
-			t.Errorf("rule %s not found under alerts/", n)
+			t.Errorf("在 alerts/ 下未找到规则 %s", n)
 		}
 	}
 }
 
-// A displayed alert (fired, or whose query failed) carries the SQL the
-// customer can run on their own cluster: the rule's query exactly as it ran,
-// placeholders expanded for the mode, and the rule's follow-up queries. A
-// clean rule carries none, so the dashboard does not grow for rules that
-// found nothing.
+// 展示的告警（已触发，或其查询失败）会携带客户可在自建集群上运行的 SQL：
+// 规则实际运行的查询原文、按模式展开的占位符，以及规则的跟进查询。
+// 干净的规则不携带任何内容，因此 dashboard 不会因没有发现任何东西的规则而膨胀。
 const evidenceRule = `
 name: pool_rule
 title: "Pool saturated"
@@ -865,17 +850,17 @@ func TestEvalFile_FiredResultCarriesTheQueriesToRun(t *testing.T) {
 	ev := &Evaluator{mode: "cloud", queryFn: func(sql string) (string, error) { ran = sql; return oneRow, nil }}
 	r := ev.evalFile(writeRule(t, evidenceRule))
 	if len(r.Rows) != 1 {
-		t.Fatalf("rule did not fire: %+v", r)
+		t.Fatalf("规则没有触发：%+v", r)
 	}
 	if r.Query == "" || r.Query != ran {
-		t.Errorf("Query = %q; want exactly what ran (%q)", r.Query, ran)
+		t.Errorf("Query = %q；期望与实跑内容完全一致（%q）", r.Query, ran)
 	}
 	if !strings.Contains(r.Query, "clusterAllReplicas") || strings.Contains(r.Query, "{sys.") {
-		t.Errorf("Query must be expanded for the mode: %q", r.Query)
+		t.Errorf("Query 必须按模式展开：%q", r.Query)
 	}
 	if len(r.Investigate) != 1 || r.Investigate[0].Title != "Every background pool now, per replica" ||
 		!strings.Contains(r.Investigate[0].Query, "clusterAllReplicas") || strings.Contains(r.Investigate[0].Query, "{sys.") {
-		t.Errorf("Investigate = %+v; want the follow-up, expanded", r.Investigate)
+		t.Errorf("Investigate = %+v；期望展开后的跟进查询", r.Investigate)
 	}
 }
 
@@ -883,7 +868,7 @@ func TestEvalFile_CleanResultCarriesNoQuery(t *testing.T) {
 	ev := &Evaluator{mode: "onprem", queryFn: func(string) (string, error) { return noRows, nil }}
 	r := ev.evalFile(writeRule(t, evidenceRule))
 	if r.Query != "" || len(r.Investigate) != 0 {
-		t.Errorf("a clean rule must not carry SQL into the dashboard: %+v", r)
+		t.Errorf("干净的规则不得把 SQL 带进 dashboard：%+v", r)
 	}
 }
 
@@ -893,7 +878,7 @@ func TestEvalFile_FailedQueryIsShown(t *testing.T) {
 	}}
 	r := ev.evalFile(writeRule(t, evidenceRule))
 	if r.Error == "" || !strings.Contains(r.Query, "system.metric_log") {
-		t.Errorf("a rule whose query failed is displayed, and its query is what is worth seeing: %+v", r)
+		t.Errorf("查询失败的规则会被展示，其查询正是值得一看的内容：%+v", r)
 	}
 }
 
@@ -904,10 +889,10 @@ func TestEvalFile_FollowUpQueriesMustBeReadOnly(t *testing.T) {
 	ev := &Evaluator{mode: "onprem", queryFn: func(string) (string, error) { ran = true; return oneRow, nil }}
 	r := ev.evalFile(writeRule(t, bad))
 	if !strings.Contains(r.Error, "security") || r.Query != "" || len(r.Investigate) != 0 {
-		t.Errorf("a non-SELECT follow-up must break the rule and show nothing: %+v", r)
+		t.Errorf("非 SELECT 的跟进查询必须使规则失效且不展示任何内容：%+v", r)
 	}
 	if ran {
-		t.Error("the rule ran although its definition is unsafe")
+		t.Error("规则定义不安全，却仍然运行了")
 	}
 }
 
@@ -920,13 +905,13 @@ func TestWriteSummaryJSON_CarriesNoSQL(t *testing.T) {
 	}
 	b, _ := os.ReadFile(filepath.Join(dir, "alerts_summary.json"))
 	if strings.Contains(string(b), "SELECT") {
-		t.Errorf("alerts_summary.json is counts only:\n%s", b)
+		t.Errorf("alerts_summary.json 只应包含计数：\n%s", b)
 	}
 }
 
-// On 23.3+ RunAll picks the alerts/23.3.1.0/ overrides of the pool rules —
-// every current server, 26.7 included. The follow-ups must survive that
-// selection, or the "which pool?" queries never show where they matter.
+// 在 23.3+ 上，RunAll 会选择池规则的 alerts/23.3.1.0/ 覆盖 ——
+// 涵盖所有当前服务器，包括 26.7。跟进查询必须在这一选择中保留下来，
+// 否则“是哪个池？”的查询永远不会出现在它们该出现的地方。
 func TestRunAll_VersionSelectedRulesKeepTheirFollowUps(t *testing.T) {
 	var hours []row
 	for i := 1; i <= 3; i++ {
@@ -946,42 +931,40 @@ func TestRunAll_VersionSelectedRulesKeepTheirFollowUps(t *testing.T) {
 		}
 		delete(want, r.Name)
 		if len(r.Investigate) == 0 {
-			t.Errorf("%s (%s) fired on 26.7 without its follow-ups", r.Name, r.File)
+			t.Errorf("%s（%s）在 26.7 上触发了，却没有跟进查询", r.Name, r.File)
 		}
 	}
 	for n := range want {
-		t.Errorf("%s did not fire in this test", n)
+		t.Errorf("%s 在此测试中没有触发", n)
 	}
 }
 
-// An essential collection does not run rules that scan per-table data
-// (tier: full); they are reported as not run, never as clean, and the
-// essential ones still run.
+// essential 采集不会运行扫描逐表数据的规则（tier: full）；
+// 它们被报告为未运行，绝不是干净，而 essential 规则仍然运行。
 func TestEvalFile_EssentialSkipsFullTierRules(t *testing.T) {
 	heavy := "name: heavy\ntitle: Heavy\nseverity: warning\ntier: full\nquery: |\n  SELECT 1 AS x FROM {sys.parts}\nmessage: \"x\"\n"
 	light := "name: light\ntitle: Light\nseverity: warning\nquery: |\n  SELECT 1 AS x FROM {sys.metrics}\nmessage: \"x\"\n"
 	ran := 0
 	ev := (&Evaluator{mode: "onprem", queryFn: func(string) (string, error) { ran++; return noRows, nil }}).WithEssential(true)
 	r := ev.evalFile(writeRule(t, heavy))
-	if !r.Skipped || !strings.Contains(r.Reason, "essential collection") || ran != 0 {
-		t.Fatalf("full-tier rule in an essential run: %+v (queries sent: %d)", r, ran)
+	if !r.Skipped || !strings.Contains(r.Reason, "essential") || ran != 0 {
+		t.Fatalf("essential 运行中的 full tier 规则：%+v（已发送查询：%d）", r, ran)
 	}
 	r = ev.evalFile(writeRule(t, light))
 	if r.Skipped || r.Error != "" {
-		t.Fatalf("essential rule did not run: %+v", r)
+		t.Fatalf("essential 规则没有运行：%+v", r)
 	}
 	if r := (&Evaluator{mode: "onprem", queryFn: func(string) (string, error) { return noRows, nil }}).evalFile(writeRule(t, heavy)); r.Skipped {
-		t.Fatalf("full-tier rule skipped in a full run: %+v", r)
+		t.Fatalf("full 运行中 full tier 规则被跳过了：%+v", r)
 	}
 	bad := "name: bad\ntitle: Bad\nseverity: warning\ntier: fast\nquery: |\n  SELECT 1\nmessage: \"x\"\n"
 	if r := ev.evalFile(writeRule(t, bad)); r.Error == "" {
-		t.Fatal("an unknown tier was accepted")
+		t.Fatal("未知的 tier 被接受了")
 	}
 }
 
-// The rules that scan per-table data are full-tier, and a version override
-// keeps its root rule's tier (else the essential set would change with the
-// server version).
+// 扫描逐表数据的规则是 full tier，并且版本覆盖会保留其根规则的 tier
+// （否则 essential 集合会随服务器版本变化）。
 func TestAlertYAML_Tiers(t *testing.T) {
 	want := map[string]string{"large_parts": "full", "detached_parts_exist": "full", "parts_propagation_lag": "full", "replica_readonly": ""}
 	err := filepath.WalkDir("../../alerts", func(p string, d fs.DirEntry, err error) error {
@@ -997,7 +980,7 @@ func TestAlertYAML_Tiers(t *testing.T) {
 			return err
 		}
 		if w, ok := want[def.Name]; ok && def.Tier != w {
-			t.Errorf("%s: tier %q, want %q", p, def.Tier, w)
+			t.Errorf("%s：tier %q，期望 %q", p, def.Tier, w)
 		}
 		return nil
 	})
@@ -1012,14 +995,14 @@ func TestEvalFile_KeeperDownAndBudgetSkip(t *testing.T) {
 	ran := 0
 	fn := func(string) (string, error) { ran++; return noRows, nil }
 	ev := (&Evaluator{mode: "onprem", queryFn: fn}).WithKeeperDown("no Keeper session")
-	if r := ev.evalFile(writeRule(t, zk)); !r.Skipped || !strings.Contains(r.Reason, "live Keeper session") || ran != 0 {
-		t.Fatalf("needs-keeper rule with Keeper down: %+v", r)
+	if r := ev.evalFile(writeRule(t, zk)); !r.Skipped || !strings.Contains(r.Reason, "Keeper 会话") || ran != 0 {
+		t.Fatalf("Keeper 宕机时的 needs-keeper 规则：%+v", r)
 	}
 	if r := ev.evalFile(writeRule(t, light)); r.Skipped {
-		t.Fatalf("other rule skipped: %+v", r)
+		t.Fatalf("其他规则被跳过了：%+v", r)
 	}
 	spent := (&Evaluator{mode: "onprem", queryFn: fn}).WithStop(func() bool { return true })
-	if r := spent.evalFile(writeRule(t, light)); !r.Skipped || !strings.Contains(r.Reason, "time budget") {
-		t.Fatalf("budget spent: %+v", r)
+	if r := spent.evalFile(writeRule(t, light)); !r.Skipped || !strings.Contains(r.Reason, "时间预算") {
+		t.Fatalf("预算已用尽：%+v", r)
 	}
 }

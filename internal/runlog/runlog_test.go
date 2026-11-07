@@ -22,33 +22,33 @@ func TestRender_SectionsAndOrdering(t *testing.T) {
 	out := r.Render(time.Now().Add(50 * time.Second))
 
 	for _, want := range []string{
-		"clickhouse-diagnostic execution log",
+		"clickhouse-diagnostic 执行日志",
 		"mode:     onprem",
-		"collectors: 2 ok, 1 failed, 0 empty",
-		"alerts:     1 rules — 1 fired, 0 clean, 0 failed, 0 skipped",
-		"Most expensive collectors",
-		"Failed collectors (1)",
+		"collectors：2 成功，1 失败，0 为空",
+		"alerts：    1 条规则 — 1 触发，0 正常，0 失败，0 跳过",
+		"最耗时的 collector",
+		"失败的 collector（1）",
 		"| # | stage | name | source | status | duration_ms | bytes | rows | note | error |",
 		"| 2 | collector | system.part_log_3_days.sql | 23.11.1.0 | ok | 41000 | 192796599 | 556430 |  |  |",
-		"phases:     collectors 43.00 s | dashboard 4.00 s",
+		"phases：    collectors 43.00 s | dashboard 4.00 s",
 	} {
 		if !strings.Contains(out, want) {
-			t.Errorf("render missing %q\n---\n%s", want, out)
+			t.Errorf("渲染结果缺少 %q\n---\n%s", want, out)
 		}
 	}
-	// Most expensive list is sorted by duration: part_log first.
-	top := out[strings.Index(out, "Most expensive"):]
+	// 最耗时列表按耗时排序：part_log 在前。
+	top := out[strings.Index(out, "最耗时"):]
 	if strings.Index(top, "system.part_log_3_days.sql") > strings.Index(top, "system.parts.sql") {
-		t.Error("most-expensive list is not sorted by duration")
+		t.Error("最耗时列表未按耗时排序")
 	}
-	// Error text: capped, single line, pipes replaced so the table stays parseable.
+	// 错误文本：已截断、单行、管道符已替换，以保证表格仍可解析。
 	if strings.Contains(out, strings.Repeat("x", 301)) {
-		t.Error("error text was not capped")
+		t.Error("错误文本未被截断")
 	}
 	failed := out[strings.Index(out, "| 3 | collector"):]
 	failed = failed[:strings.Index(failed, "\n")]
 	if strings.Count(failed, "|") != 11 {
-		t.Errorf("failed row has a stray pipe or newline: %q", failed)
+		t.Errorf("失败行含有游离的管道符或换行：%q", failed)
 	}
 }
 
@@ -61,7 +61,7 @@ func TestWrite_CreatesFileAndNilIsSafe(t *testing.T) {
 		t.Fatal(err)
 	}
 	if filepath.Base(p) != FileName {
-		t.Errorf("unexpected file name %s", p)
+		t.Errorf("文件名不符合预期：%s", p)
 	}
 	if _, err := os.Stat(p); err != nil {
 		t.Fatal(err)
@@ -70,7 +70,7 @@ func TestWrite_CreatesFileAndNilIsSafe(t *testing.T) {
 	nilRec.Record(Entry{})
 	nilRec.Phase("x", 0, "")
 	if p, err := nilRec.Write(dir); err != nil || p != "" {
-		t.Errorf("nil recorder must be a no-op, got %q %v", p, err)
+		t.Errorf("nil 记录器必须是无操作，得到 %q %v", p, err)
 	}
 }
 
@@ -84,18 +84,18 @@ func TestGovRedaction(t *testing.T) {
 	r.Record(Entry{Stage: "collector", Name: "system.x.sql", Status: "failed", Rows: -1, Error: "Code: 60. DB::Exception: something about (CUSTOMER_TABLE) (UNKNOWN_TABLE)"})
 	for _, leak := range []string{"customer_db", "orders", "10.1.2.3", "CUSTOMER_TABLE", "UNKNOWN_TABLE"} {
 		if strings.Contains(out, leak) {
-			t.Errorf("gov log leaks %q:\n%s", leak, out)
+			t.Errorf("gov 日志泄漏了 %q：\n%s", leak, out)
 		}
 	}
-	for _, want := range []string{"Code: 60 — message redacted in gov mode", "error text redacted in gov mode"} {
+	for _, want := range []string{"Code: 60 — gov 模式下已隐去消息", "gov 模式下已隐去错误文本"} {
 		if !strings.Contains(out, want) {
-			t.Errorf("gov log missing %q", want)
+			t.Errorf("gov 日志缺少 %q", want)
 		}
 	}
-	// Non-gov keeps the text.
+	// 非 gov 模式保留文本。
 	plain := New()
 	plain.Record(Entry{Stage: "collector", Name: "x.sql", Status: "failed", Rows: -1, Error: "Code: 60. Unknown table customer_db.orders (UNKNOWN_TABLE)"})
 	if !strings.Contains(plain.Render(time.Now()), "customer_db.orders") {
-		t.Error("non-gov recorder must keep the error text")
+		t.Error("非 gov 记录器必须保留错误文本")
 	}
 }

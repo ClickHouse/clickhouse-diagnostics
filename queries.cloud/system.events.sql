@@ -1,5 +1,5 @@
 -- tier: essential
--- Per-replica cumulative ProfileEvents since each replica's start.
+-- 每个副本自启动以来的累计 ProfileEvents。
 SELECT
     hostName() AS hostname,
     event,

@@ -1,10 +1,10 @@
 -- needs: keeper
--- ON CLUSTER / Replicated-database DDL as seen in Keeper: one row per (entry, host)
--- with status, exception and duration. Stuck DDL (status not Finished for
--- minutes), UUID collisions on replayed CREATE OR REPLACE (code 57) and
--- "session expired" DDL failures (code 571/999) are visible only here.
--- Reading this table costs one Keeper read per entry; the LIMIT and the
--- collector's -query-timeout bound it when Keeper itself is slow.
+-- Keeper 中所见的 ON CLUSTER / Replicated 数据库 DDL：每个 (entry, host)
+-- 一行，含 status、exception 和耗时。卡住的 DDL（status 在数分钟内
+-- 未变为 Finished）、重放 CREATE OR REPLACE 时的 UUID 冲突（code 57）
+-- 以及 "session expired" 这类 DDL 失败（code 571/999）只能在这里看到。
+-- 读取该表每行要花一次 Keeper 读取；当 Keeper 本身变慢时，
+-- LIMIT 和 collector 的 -query-timeout 会对它形成约束。
 SELECT
     entry,
     entry_version,

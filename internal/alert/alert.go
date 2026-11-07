@@ -1,82 +1,79 @@
-// Package alert provides a YAML-driven alerting system for ClickHouse diagnostics.
+// Package alert 提供用于 ClickHouse 诊断的 YAML 驱动告警系统。
 //
-// Alert rules live in .yaml files (see the alerts/ directory at the repo root).
-// Each rule defines a read-only SELECT query; if the query returns any rows the
-// alert fires and those rows are surfaced in the HTML dashboard.
+// alert rule（告警规则）位于 .yaml 文件中（参见仓库根目录的 alerts/ 目录）。
+// 每条规则定义一个只读 SELECT 查询；如果查询返回任何行，告警就会触发，
+// 这些行会呈现在 HTML dashboard 中。
 //
-// YAML rule format
-// ────────────────
+// YAML 规则格式
+// ──────────────
 //
 //	name:        unique_snake_case_id
-//	title:       "Human-readable title"
-//	severity:    critical | warning | info        (default: warning)
+//	title:       "人类可读的标题"
+//	severity:    critical | warning | info        （默认：warning）
 //	description: |
-//	  Multi-line explanation of what the alert means
-//	  and what to do about it.
+//	  多行说明，解释该告警的含义
+//	  以及应当如何处理。
 //	tags:
 //	  - mutations
 //	  - performance
-//	modes: [cloud]                                 (optional; default every mode)
+//	modes: [cloud]                                 （可选；默认所有模式）
 //	query: |
 //	  SELECT database, table, mutation_id,
 //	         dateDiff('hour', create_time, now()) AS hours_running,
 //	         parts_to_do
-//	  FROM {sys.mutations}                 -- placeholder, see below
+//	  FROM {sys.mutations}                 -- 占位符，见下文
 //	  WHERE parts_to_do > 0
 //	    AND dateDiff('hour', create_time, now()) > 3
 //	  ORDER BY hours_running DESC
 //	message: "Mutation {mutation_id} on {database}.{table} running {hours_running}h"
 //
-//	modes limits a rule to the run modes where its query has meaning —
-//	`[cloud]` for a per-replica comparison that needs the clusterAllReplicas
-//	fan-out, `[onprem, gov]` for a ReplicatedMergeTree replication queue
-//	that SharedMergeTree does not have. Elsewhere the rule is reported as
-//	not applicable (skipped), never errored and never counted as checked.
+//	modes 把规则限制在其查询有意义的运行模式中 ——
+//	`[cloud]` 用于需要 clusterAllReplicas 扇出的 per-replica 比较，
+//	`[onprem, gov]` 用于 SharedMergeTree 所没有的 ReplicatedMergeTree
+//	replication queue（复制队列）。在其他模式中，规则会被报告为不适用（skipped），
+//	绝不算作出错，也绝不计为已检查。
 //
-//	Keep root rules to columns/syntax available on the oldest supported
-//	server (22.8); gate anything newer behind a version subdirectory. For
-//	example system.mutations.is_killed (24.1+) lives in
-//	alerts/24.1.1.0/mutation_running_too_long.yaml, not the root rule.
+//	根规则只应使用最旧受支持服务器（22.8）上可用的列/语法；更新的内容
+//	请放在版本子目录中做门控。例如 system.mutations.is_killed（24.1+）
+//	位于 alerts/24.1.1.0/mutation_running_too_long.yaml，而不是根规则中。
 //
-// System-table placeholder
-// ────────────────────────
+// system 表占位符
+// ───────────────
 //
-//	Use {sys.<table>} in your query instead of a hard-coded table path.
-//	The evaluator substitutes the right reference based on the run mode:
+//	在查询中使用 {sys.<table>}，而不是硬编码表路径。
+//	评估器会根据运行模式替换为正确的引用：
 //
-//	  {sys.query_log}  →  system.query_log                                  (onprem / gov)
-//	                   →  clusterAllReplicas(default, system.query_log)     (cloud, per-replica)
-//	  {sys.parts}      →  system.parts                                      (all modes)
+//	  {sys.query_log}  →  system.query_log                                  （onprem / gov）
+//	                   →  clusterAllReplicas(default, system.query_log)     （cloud，per-replica）
+//	  {sys.parts}      →  system.parts                                      （所有模式）
 //
-//	Tables whose contents are shared across replicas (parts, tables,
-//	replicas, replication_queue, mutations, detached_parts, columns,
-//	databases) are queried directly even in cloud mode: each replica
-//	sees the same rows, so clusterAllReplicas would duplicate them.
-//	(system.dictionaries is deliberately NOT in that list — its runtime
-//	state is per-replica; see internal/query/template.go.)
+//	内容在各 replica 间共享的表（parts、tables、replicas、replication_queue、
+//	mutations、detached_parts、columns、databases）即使在 cloud 模式下也直接查询：
+//	每个 replica 看到相同的行，因此 clusterAllReplicas 会造成重复。
+//	（system.dictionaries 故意不在该列表中 —— 它的运行时状态是 per-replica 的；
+//	见 internal/query/template.go。）
 //
-// Message template
-// ────────────────
-//
-//	Use {column_name} in the message string; the evaluator substitutes the
-//	column value from each result row.  One alert instance is created per row.
-//
-// Checks
-// ──────
-//
-//	check: go:<name> names a Go function (internal/alert/checks_*.go,
-//	RegisterCheck) evaluated over the files the collectors wrote — the rule
-//	sends no query. source: lists those files. query: stays the same test
-//	in SQL, shown to the customer to run live. A file that was not collected
-//	makes the rule not applicable, naming the collector and why. A rule
-//	without check: runs its query against the server.
-//
-// Security
+// 消息模板
 // ────────
 //
-//	All alert queries are validated by ValidateQueryContent before execution.
-//	Only SELECT / WITH queries are accepted; INSERT, ALTER, DROP, etc. are
-//	rejected with an error and the alert is skipped.
+//	在 message 字符串中使用 {column_name}；评估器会用每个结果行中的
+//	列值进行替换。每一行创建一个告警实例。
+//
+// 检查
+// ────
+//
+//	check: go:<name> 指定一个 Go 函数（internal/alert/checks_*.go、
+//	RegisterCheck），在 collector 写出的文件上评估 —— 该规则不发送任何查询。
+//	source: 列出这些文件。query: 保留同样用 SQL 表达的测试，展示给客户现场运行。
+//	未采集到的文件会让规则变为不适用，并指明采集器及原因。
+//	没有 check: 的规则会向服务器运行它的查询。
+//
+// 安全性
+// ──────
+//
+//	所有告警查询在执行前都会由 ValidateQueryContent 校验。
+//	只接受 SELECT / WITH 查询；INSERT、ALTER、DROP 等会被拒绝并报错，
+//	该告警会被跳过。
 package alert
 
 import (
@@ -97,14 +94,14 @@ import (
 	"clickhouse-diagnostic/pkg"
 )
 
-// Severity constants.
+// 严重级别常量。
 const (
 	SeverityCritical = "critical"
 	SeverityWarning  = "warning"
 	SeverityInfo     = "info"
 )
 
-// Definition is the schema for a single .yaml alert rule file.
+// Definition 是单个 .yaml 告警规则文件的 schema。
 type Definition struct {
 	Name        string   `yaml:"name"`
 	Title       string   `yaml:"title"`
@@ -113,49 +110,47 @@ type Definition struct {
 	Query       string   `yaml:"query"`
 	Message     string   `yaml:"message"`
 	Tags        []string `yaml:"tags"`
-	// Modes restricts the rule to these run modes (cloud / onprem / gov).
-	// Empty = every mode. A rule whose query only makes sense with a fan-out
-	// (a per-replica comparison over clusterAllReplicas) says `modes: [cloud]`
-	// and is reported as skipped elsewhere, not errored — the alternative
-	// was a rule that fails with CLUSTER_DOESNT_EXIST on every onprem run.
+	// Modes 把规则限制在这些运行模式（cloud / onprem / gov）。
+	// 为空 = 所有模式。如果规则的查询只有在扇出时才有意义
+	//（基于 clusterAllReplicas 的 per-replica 比较），就写 `modes: [cloud]`，
+	// 在其他模式下报告为 skipped 而不是 errored —— 否则该规则会在每次
+	// onprem 运行时以 CLUSTER_DOESNT_EXIST 失败。
 	Modes []string `yaml:"modes"`
-	// Investigate lists follow-up queries for the customer to run on their
-	// own cluster when the rule fires — the "which one?" a finding raises
-	// (which pool, which table). Shown in the dashboard, never run by the
-	// tool; each must be a read-only SELECT like the rule's query.
+	// Investigate 列出跟进查询，供客户在规则触发时在自己的集群上运行 ——
+	// 即一个 finding（发现）引出的“是哪一个？”（哪个池、哪张表）。
+	// 只在 dashboard 中展示，工具从不运行它们；每条都必须像规则查询一样
+	// 是只读 SELECT。
 	Investigate []InvestigateQuery `yaml:"investigate"`
-	// Tier is "full" for rules that scan per-table data (system.parts,
-	// detached_parts …): an essential collection does not run them and
-	// reports them as not run. Empty or "essential" runs in every
-	// collection — rules are small, and a missing one costs more than a run.
+	// Tier 为 "full" 用于扫描逐表数据的规则（system.parts、detached_parts 等）：
+	// essential 采集不会运行它们，并报告为未运行。为空或 "essential"
+	// 则在每次采集中都运行 —— 规则很小，漏掉一条的代价比运行一次更大。
 	Tier string `yaml:"tier"`
-	// Needs is "keeper" for rules that wait on a live Keeper session
-	// (system.zookeeper_connection): skipped, with the reason, on a server
-	// that has none.
+	// Needs 为 "keeper" 用于等待活动 Keeper 会话的规则
+	//（system.zookeeper_connection）：在没有 Keeper 会话的服务器上会被跳过，
+	// 并给出原因。
 	Needs string `yaml:"needs"`
-	// Source and Check: the rule is evaluated by a registered Go function
-	// over the collected files (go:<name>, see checks.go), not by running
-	// its query on the server. Query then is only what the customer is
-	// given to run on their own cluster to see the same thing.
+	// Source 和 Check：规则由注册的 Go 函数在已采集的文件上评估
+	//（go:<name>，见 checks.go），而不是在服务器上运行它的查询。
+	// 此时 Query 只是给客户在自己集群上运行、以看到同样结果的内容。
 	Source []string `yaml:"source"`
 	Check  string   `yaml:"check"`
 }
 
-// InvestigateQuery is one follow-up query in a rule file.
+// InvestigateQuery 是规则文件中的一条跟进查询。
 type InvestigateQuery struct {
 	Title string `yaml:"title"`
 	Query string `yaml:"query"`
 }
 
-// Investigation is a follow-up query as the dashboard shows it: expanded
-// for the mode, ready to paste into clickhouse-client.
+// Investigation 是 dashboard 所展示的跟进查询：已按模式展开，
+// 可直接粘贴到 clickhouse-client 中。
 type Investigation struct {
 	Title string `json:"title"`
 	Query string `json:"query"`
 }
 
-// Result holds the outcome of evaluating one alert rule.
-// It is JSON-serialisable so it can be embedded in the dashboard payload.
+// Result 保存评估一条告警规则的结果。
+// 它可 JSON 序列化，因此能嵌入 dashboard 的载荷中。
 type Result struct {
 	Name        string                   `json:"name"`
 	Title       string                   `json:"title"`
@@ -167,38 +162,35 @@ type Result struct {
 	FiredAt     string                   `json:"fired_at"`
 	Error       string                   `json:"error,omitempty"`
 	File        string                   `json:"file"`
-	// Skipped marks a rule that did not run because it is not applicable
-	// on this server — e.g. the system table it queries doesn't exist
-	// (crash_log with no crash, or a config-disabled text_log/query_log).
-	// A skipped rule is neither fired nor errored; it must NOT be counted
-	// as "evaluated", or the dashboard would claim a check passed when it
-	// never ran.
+	// Skipped 标记一条未运行的规则，因为它在这台服务器上不适用 ——
+	// 例如它查询的 system 表不存在（没有崩溃时的 crash_log，
+	// 或配置禁用的 text_log/query_log）。被跳过的规则既未触发也未出错；
+	// 它绝不能计入 "evaluated"，否则 dashboard 会在检查从未运行时
+	// 声称检查通过。
 	Skipped bool   `json:"skipped,omitempty"`
 	Reason  string `json:"skip_reason,omitempty"`
-	// DurationMs is the wall time of the rule's query, for execution_log.txt.
+	// DurationMs 是规则查询的实际耗时，用于 execution_log.txt。
 	DurationMs int64 `json:"duration_ms,omitempty"`
-	// Query and Investigate are set only on a displayed result (fired, or
-	// its query failed): the rule's SQL exactly as it ran, and the follow-up
-	// queries, both expanded for the mode — what the customer can run on
-	// their own cluster to see the evidence. A clean rule carries neither,
-	// so the dashboard does not grow for rules that found nothing; the gov
-	// alerts_summary.json never carries them (it is counts only).
+	// Query 和 Investigate 只在展示结果时设置（触发，或其查询失败）：
+	// 规则实际运行的 SQL，以及跟进查询，两者都已按模式展开 ——
+	// 也就是客户可以在自己集群上运行以查看证据的内容。
+	// 干净的规则两者都不带，因此 dashboard 不会因没有发现任何东西的规则而膨胀；
+	// gov 的 alerts_summary.json 从不携带它们（它只包含计数）。
 	Query       string          `json:"query,omitempty"`
 	Investigate []Investigation `json:"investigate,omitempty"`
 }
 
-// Notable reports whether this result deserves the reader's attention —
-// it matched rows OR failed to run. Used only to decide what to DISPLAY.
+// Notable 报告该结果是否值得读者注意 ——
+// 它匹配了行，或者运行失败。仅用于决定要展示什么。
 //
-// Deliberately not called "Fired": treating an error as a fire is what
-// produced the "11 fired" line on a server where all eleven rules failed
-// on permissions. For counting, use Summarize, which separates fired /
-// errored / skipped. Anything reporting numbers to a human must use
-// Summarize, not this.
+// 刻意不命名为 "Fired"：把错误当作触发，正是那台服务器上十一条规则都因权限
+// 失败时却输出 "11 fired" 这一行的原因。计数请使用 Summarize，
+// 它会区分 fired / errored / skipped。任何向人类报告数字的地方
+// 都必须使用 Summarize，而不是这个。
 func (r Result) Notable() bool { return len(r.Rows) > 0 || r.Error != "" }
 
-// FormattedMessages returns one message string per result row, with
-// {column_name} placeholders substituted from that row's values.
+// FormattedMessages 为每个结果行返回一条 message 字符串，
+// 其中的 {column_name} 占位符用该行的值替换。
 func (r Result) FormattedMessages() []string {
 	out := make([]string, 0, len(r.Rows))
 	for _, row := range r.Rows {
@@ -211,97 +203,95 @@ func (r Result) FormattedMessages() []string {
 	return out
 }
 
-// Evaluator loads and runs alert rules against a ClickHouse instance.
+// Evaluator 针对一个 ClickHouse 实例加载并运行告警规则。
 type Evaluator struct {
 	client *pkg.ClickHouseClient
 	mode   string
-	// queryFn, when set, replaces the client for auxiliary probe queries.
-	// Exists so the cloud not-applicable logic — which decides whether a
-	// critical crash alert is hidden or surfaced — can be unit-tested
-	// without a live cluster. Nil in production; see query().
+	// queryFn 设置后会替代 client 来执行辅助探测查询。
+	// 它的存在是为了让 cloud 的不适用逻辑 —— 即决定一个危急崩溃告警
+	// 是被隐藏还是被暴露 —— 无需实时集群即可做单元测试。
+	// 生产环境中为 nil；见 query()。
 	queryFn func(string) (string, error)
-	// essential: skip full-tier rules (an essential collection).
+	// essential：跳过 full tier 的规则（essential 采集）。
 	essential bool
-	// detachedScope fills {detached_scope} (see query.DetachedScope).
+	// detachedScope 填充 {detached_scope}（见 query.DetachedScope）。
 	detachedScope string
-	// keeperDown: skip `needs: keeper` rules, with this reason.
+	// keeperDown：以该原因跳过 `needs: keeper` 的规则。
 	keeperDown string
-	// stop, when it returns true, skips every rule not yet run (the run's
-	// time budget is spent).
+	// stop 返回 true 时，跳过所有尚未运行的规则
+	//（本次运行的时间预算已用完）。
 	stop func() bool
-	// bundle is the run's collected data, read by Go-check rules.
+	// bundle 是本次运行采集的数据，供 Go-check 规则读取。
 	bundle *bundle.Bundle
 }
 
-// WithBundle gives Go-check rules the collected data of this run.
+// WithBundle 把本次运行采集的数据交给 Go-check 规则。
 func (ev *Evaluator) WithBundle(b *bundle.Bundle) *Evaluator {
 	ev.bundle = b
 	return ev
 }
 
-// WithKeeperDown skips rules that need a live Keeper session.
+// WithKeeperDown 跳过需要活动 Keeper 会话的规则。
 func (ev *Evaluator) WithKeeperDown(reason string) *Evaluator {
 	ev.keeperDown = reason
 	return ev
 }
 
-// WithStop skips the remaining rules once stop() returns true.
+// WithStop 在 stop() 返回 true 后跳过剩余规则。
 func (ev *Evaluator) WithStop(stop func() bool) *Evaluator {
 	ev.stop = stop
 	return ev
 }
 
-// WithDetachedScope limits detached-parts rules like the collector.
+// WithDetachedScope 像 collector 一样限制 detached part 相关规则。
 func (ev *Evaluator) WithDetachedScope(scope string) *Evaluator {
 	ev.detachedScope = scope
 	return ev
 }
 
-// WithEssential makes the evaluator skip full-tier rules.
+// WithEssential 让评估器跳过 full tier 的规则。
 func (ev *Evaluator) WithEssential(on bool) *Evaluator {
 	ev.essential = on
 	return ev
 }
 
-// query runs an auxiliary probe query through the injected seam if present,
-// otherwise the real client. Returns an error when neither is available so
-// callers fail toward surfacing rather than silently skipping.
+// query 在存在注入接缝时通过它运行辅助探测查询，
+// 否则使用真实的 client。两者都不可用时返回错误，
+// 使调用方倾向于暴露问题，而不是悄悄跳过。
 func (ev *Evaluator) query(sql string) (string, error) {
 	if ev.queryFn != nil {
 		return ev.queryFn(sql)
 	}
 	if ev.client == nil {
-		return "", fmt.Errorf("no ClickHouse client available")
+		return "", fmt.Errorf("没有可用的 ClickHouse 客户端")
 	}
 	return ev.client.ExecuteQueryWithFormat(sql)
 }
 
-// NewEvaluator creates a new Evaluator for the given connection and mode.
+// NewEvaluator 为给定的连接和模式创建一个新的 Evaluator。
 func NewEvaluator(client *pkg.ClickHouseClient, mode string) *Evaluator {
 	return &Evaluator{client: client, mode: strings.ToLower(mode)}
 }
 
-// expandQuery replaces {sys.<name>} placeholders with the correct table
-// path for the evaluator's mode. Delegated to the shared template
-// helper (single source of truth for the cloud-shared-tables list).
+// expandQuery 用评估器模式对应的正确表路径替换 {sys.<name>} 占位符。
+// 委托给共享的模板辅助函数（cloud 共享表列表的唯一事实来源）。
 func (ev *Evaluator) expandQuery(sql string) string {
 	return query.Apply(sql, query.Vars{Mode: ev.mode, DetachedScope: ev.detachedScope})
 }
 
-// RunAll loads every .yaml file from dir and evaluates each rule.
-// If the directory does not exist the call is a no-op (returns nil).
+// RunAll 从 dir 加载每个 .yaml 文件并评估每条规则。
+// 如果目录不存在，该调用是空操作（返回 nil）。
 //
-// dir follows the same version-directory convention as the query
-// directories: a subdirectory named like a ClickHouse version
-// (e.g. "25.4.1.0") overrides a same-named root rule when the connected
-// server (serverVersion) is at least that version.
+// dir 遵循与查询目录相同的版本目录约定：名为 ClickHouse 版本
+// （例如 "25.4.1.0"）的子目录，在所连接的服务器（serverVersion）至少为该版本时
+// 覆盖同名的根规则。
 func (ev *Evaluator) RunAll(dir string, serverVersion internal.Version) []Result {
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
 		return nil
 	}
 	files, err := query.FindVersionedFiles(dir, serverVersion, ".yaml")
 	if err != nil {
-		fmt.Printf("[alerts] cannot read %s: %v\n", dir, err)
+		fmt.Printf("[alerts] 无法读取 %s: %v\n", dir, err)
 		return nil
 	}
 
@@ -310,18 +300,17 @@ func (ev *Evaluator) RunAll(dir string, serverVersion internal.Version) []Result
 		started := time.Now()
 		r := ev.evalFile(f.FullPath)
 		r.DurationMs = time.Since(started).Milliseconds()
-		// Preserve the version-override context in the reported filename
-		// (mirrors analysis.go) so support engineers can tell which variant
-		// fired — e.g. "22.11.1.0/detached_parts_exist.yaml".
+		// 在报告的文件名中保留版本覆盖上下文（与 analysis.go 一致），
+		// 以便支持工程师分辨是哪个变体触发的 ——
+		// 例如 "22.11.1.0/detached_parts_exist.yaml"。
 		if f.DirName != "" {
 			r.File = f.DirName + "/" + f.Name
 		}
-		// Surface any genuine failure (read / yaml / query / parse) once,
-		// here, using the version-aware File — evalFile only stores it in
-		// Result.Error, which otherwise never reaches stdout, so a broken
-		// rule would look identical to a healthy one. The security case is
-		// skipped: evalFile already prints "[alert] BLOCKED". Missing-table
-		// skips carry no Error, so they're excluded automatically.
+		// 在这里用能感知版本的 File 把任何真实失败（读取 / yaml / 查询 / 解析）
+		// 暴露一次 —— evalFile 只把它存进 Result.Error，否则永远不会到达 stdout，
+		// 这样一条损坏的规则看起来会和健康规则一模一样。安全相关的情况
+		// 被跳过：evalFile 已经打印了 "[alert] BLOCKED"。缺表的跳过
+		// 不携带 Error，因此会被自动排除。
 		if r.Error != "" && !strings.HasPrefix(r.Error, "security:") {
 			fmt.Printf("  [alert] ERROR %s: %s\n", r.File, r.Error)
 		}
@@ -329,24 +318,21 @@ func (ev *Evaluator) RunAll(dir string, serverVersion internal.Version) []Result
 	}
 
 	evaluated, fired, errored, skipped := Summarize(results)
-	fmt.Printf("[alerts] evaluated %d rule(s), %d fired, %d errored, %d skipped (not applicable)\n",
+	fmt.Printf("[alerts] 已评估 %d 条规则：%d fired，%d errored，%d skipped（不适用）\n",
 		evaluated, fired, errored, skipped)
 	return results
 }
 
-// WriteSummaryJSON writes alerts_summary.json into dir: one entry per
-// rule with its identity, outcome and instance COUNT — deliberately NOT
-// the matched rows.
+// WriteSummaryJSON 把 alerts_summary.json 写入 dir：每条规则一个条目，
+// 包含其身份、结果和实例计数 —— 刻意不包含匹配的行。
 //
-// Written whenever the HTML dashboard isn't (gov mode, --skip-dashboard, or
-// a generation failure), because the dashboard is the only other consumer
-// of alert results — without this the archive would record nothing about
-// rules that ran and possibly fired.
+// 在未生成 HTML dashboard 时（gov 模式、--skip-dashboard，或生成失败）写出，
+// 因为 dashboard 是告警结果的唯一另一个消费者 —— 没有它，归档就不会记录
+// 任何关于已运行、可能已触发规则的信息。
 //
-// Row contents are always omitted: an alert's columns are defined by the
-// rule, so they routinely carry raw database/table names that gov mode
-// hashes everywhere else. A count plus the rule's own message template
-// gives support the signal without the identifiers.
+// 行内容始终省略：告警的列由规则定义，因此它们经常携带原始的 database/table
+// 名称，而 gov 模式在其他所有地方都会对这些名称做哈希。仅凭计数加上规则自身的
+// 消息模板，就能在不含标识符的情况下给支持工程师提供信号。
 func WriteSummaryJSON(dir string, results []Result, mode string) error {
 	type entry struct {
 		Name     string `json:"name"`
@@ -396,38 +382,32 @@ func WriteSummaryJSON(dir string, results []Result, mode string) error {
 	return os.WriteFile(filepath.Join(dir, "alerts_summary.json"), blob, 0600)
 }
 
-// summaryNote explains the file's scope to whoever opens the archive. In
-// gov mode the omission of rows is a privacy requirement; elsewhere it's
-// simply the substitute-for-the-dashboard scope.
+// summaryNote 向打开归档的人说明该文件的范围。在 gov 模式下，
+// 省略行是隐私要求；在其他模式下，它只是替代 dashboard 的范围说明。
 func summaryNote(mode string) string {
 	if strings.ToLower(mode) == "gov" {
-		return "gov mode: rule outcomes and instance counts only; matched rows are omitted " +
-			"because their columns can contain unhashed identifiers"
+		return "gov 模式：仅包含规则结果与实例计数；匹配的行已省略，" +
+			"因为这些列可能包含未脱敏的标识符"
 	}
-	// Don't point the reader at dashboard.html: this file exists precisely
-	// because that artifact is NOT in this archive, so "see the dashboard"
-	// reads as a missing attachment. Give an action instead.
-	return "rule outcomes and instance counts only, written because the HTML dashboard was " +
-		"not generated for this run; matched rows are omitted — re-run without --skip-dashboard " +
-		"(or resolve the dashboard generation error above) for row-level detail"
+	// 不要让读者去看 dashboard.html：这个文件之所以存在，正是因为
+	// 该产物不在本归档中，所以“见 dashboard”会读成缺失的附件。
+	// 应给出一个可执行的建议。
+	return "仅包含规则结果与实例计数；本次运行未生成 HTML dashboard，因此写出此文件。匹配的行已省略——" +
+		"如需行级详情，请去掉 --skip-dashboard 重新运行（或解决上方的 dashboard 生成错误）"
 }
 
-// Summarize counts results for reporting. Single source of truth for
-// RunAll's summary and cmd/main.go's completion line.
+// Summarize 统计结果以供报告。它是 RunAll 的汇总和 cmd/main.go 完成行
+// 的唯一事实来源。
 //
-// Three distinctions matter, because each means something different to
-// the person reading the archive:
-//   - "evaluated" counts only rules that actually produced an answer, so
-//     it excludes BOTH skipped and errored rules. A rule that never ran
-//     — whether because its table is absent here or because the query
-//     failed — must not read as a check that passed.
-//   - "fired" counts only rules that matched rows, i.e. real findings.
-//   - "errored" is counted separately from fired. Folding the two
-//     together is actively misleading: a user missing SELECT grants makes
-//     every rule fail, and the summary then reads "11 fired" — eleven
-//     apparent production problems that are really one permissions issue
-//     (observed against a restricted ClickHouse Cloud user, which is also
-//     where "11 checked" was shown to overstate what had been verified).
+// 有三种区分很重要，因为对阅读归档的人来说，它们各自意味着不同的东西：
+//   - "evaluated" 只统计真正给出了答案的规则，因此同时排除 skipped 和
+//     errored 的规则。一条从未运行的规则 —— 无论是因为它的表在这里不存在，
+//     还是因为查询失败 —— 都不能被读作检查通过。
+//   - "fired" 只统计匹配到行的规则，即真正的 findings。
+//   - "errored" 与 fired 分开计数。把两者合并会严重误导：一个缺少 SELECT
+//     授权的用户会让所有规则失败，汇总就会读成 "11 fired" —— 十一个表面上的
+//     生产问题，实际上是一个权限问题（这是针对受限的 ClickHouse Cloud 用户
+//     观察到的，也正是 "11 checked" 被证明高估了实际验证内容的地方）。
 func Summarize(results []Result) (evaluated, fired, errored, skipped int) {
 	for _, r := range results {
 		switch {
@@ -442,28 +422,26 @@ func Summarize(results []Result) (evaluated, fired, errored, skipped int) {
 	return len(results) - skipped - errored, fired, errored, skipped
 }
 
-// knownModes is the closed set a rule may name in modes:. Kept here, next
-// to the gate, rather than imported from cmd (which owns the CLI's
-// canonicalisation) so the alert package stays importable from tests and
-// the dashboard without a cycle.
+// knownModes 是规则可在 modes: 中指定的封闭集合。它放在这里、紧挨着门控，
+// 而不是从 cmd（它负责 CLI 的规范化）导入，这样 alert 包就能被测试和
+// dashboard 导入而不产生循环依赖。
 var knownModes = map[string]bool{"cloud": true, "onprem": true, "gov": true}
 
-// validateModes rejects a modes: list naming a mode that does not exist.
-// Rules come from a user-selectable -alerts-dir, so a typo such as
-// `modes: [on-prem]` must surface as a broken definition, not silently
-// skip the rule in every run — the gate would otherwise read it as "some
-// other mode" forever.
+// validateModes 拒绝指定了不存在模式的 modes: 列表。
+// 规则来自用户可选的 -alerts-dir，因此像 `modes: [on-prem]` 这样的拼写错误
+// 必须作为损坏的定义暴露出来，而不是在每次运行中都悄悄跳过该规则 ——
+// 否则门控会永远把它读作“某个其他模式”。
 func (d Definition) validateModes() error {
 	for _, m := range d.Modes {
 		if !knownModes[strings.ToLower(strings.TrimSpace(m))] {
-			return fmt.Errorf("modes: unknown mode %q (known: cloud, onprem, gov)", m)
+			return fmt.Errorf("modes: 未知模式 %q（已知：cloud, onprem, gov）", m)
 		}
 	}
 	return nil
 }
 
-// appliesTo reports whether the rule runs in mode: every mode when Modes is
-// empty, else only the listed ones (case-insensitive, whitespace-tolerant).
+// appliesTo 报告规则是否在 mode 下运行：Modes 为空时适用于所有模式，
+// 否则仅适用于列出的模式（不区分大小写，容忍空白）。
 func (d Definition) appliesTo(mode string) bool {
 	if len(d.Modes) == 0 {
 		return true
@@ -476,41 +454,38 @@ func (d Definition) appliesTo(mode string) bool {
 	return false
 }
 
-// isMissingTable reports whether err is a ClickHouse "table doesn't
-// exist" error (code 60 / UNKNOWN_TABLE). It deliberately does NOT match
-// UNKNOWN_IDENTIFIER (a missing column) — that must stay a genuine error
-// so the version-gating detector still catches the is_killed class of bug.
+// isMissingTable 报告 err 是否为 ClickHouse 的“表不存在”错误
+// （code 60 / UNKNOWN_TABLE）。它刻意不匹配 UNKNOWN_IDENTIFIER（缺列）——
+// 后者必须保持为真正的错误，这样版本门控检测器仍能捕获 is_killed 那类 bug。
 func isMissingTable(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "UNKNOWN_TABLE")
 }
 
-// reMissingTable pulls the table out of the UNKNOWN_TABLE message so a
-// cluster-wide existence check can be targeted at it.
+// reMissingTable 从 UNKNOWN_TABLE 消息中提取表名，以便让集群范围的存在性检查
+// 针对该表进行。
 //
-// The wording is NOT stable across versions — 22.8 emits "Table
-// system.crash_log doesn't exist." while 26.2 emits "... does not
-// exist." — so both spellings are accepted. (Found the hard way: matching
-// only the older form made the cloud probe silently unreachable on 26.2.)
+// 措辞在不同版本间并不稳定 —— 22.8 输出 "Table
+// system.crash_log doesn't exist."，而 26.2 输出 "... does not
+// exist." —— 因此两种拼写都接受。（这是吃了苦头才发现的：只匹配旧形式，
+// 会让 cloud 探测在 26.2 上悄悄无法到达。）
 var reMissingTable = regexp.MustCompile(`Table ([A-Za-z_][\w.]*) (?:doesn'?t|does not) exist`)
 
-// notApplicable reports whether err means "this rule does not apply to
-// this server" (as opposed to "this rule is broken").
+// notApplicable 报告 err 是否表示“该规则不适用于这台服务器”
+// （相对于“该规则损坏了”）。
 //
-// Single-node modes: a local UNKNOWN_TABLE is conclusive.
+// 单节点模式：本地 UNKNOWN_TABLE 即为定论。
 //
-// Cloud: per-replica tables are read through clusterAllReplicas, so
-// UNKNOWN_TABLE is ambiguous — it can come from a table that is absent
-// everywhere (genuinely not applicable) OR from one that exists on only
-// SOME replicas, where treating it as not-applicable would hide a real
-// finding (system.crash_log materialises on the node that crashed).
-// Rather than guess, ask: count the replicas that have the table. Zero
-// means absent cluster-wide, so skipping is correct; any other answer
-// (including a failed probe) means we cannot rule out partial presence,
-// so the error surfaces.
+// Cloud：per-replica 表通过 clusterAllReplicas 读取，因此 UNKNOWN_TABLE
+// 是有歧义的 —— 它可能来自一张到处都不存在的表（确实不适用），
+// 也可能来自一张仅在某些 replica 上存在的表，此时把它当作不适用
+// 会掩盖一个真实的 finding（system.crash_log 会在发生崩溃的节点上生成）。
+// 与其猜测，不如询问：统计拥有该表的 replica 数。为零表示整个集群都不存在，
+// 因此跳过是正确的；其他任何答案（包括探测失败）都意味着我们无法排除
+// 部分存在，于是错误会被暴露出来。
 //
-// Measured on a 3-replica Cloud 26.2 service: crash_log and text_log are
-// pre-created on every replica, so the fan-out returns 0 rows instead of
-// UNKNOWN_TABLE and this path isn't reached at all there.
+// 在 3 副本的 Cloud 26.2 服务上实测：crash_log 和 text_log 在
+// 每个 replica 上都会预先创建，因此扇出返回 0 行而不是 UNKNOWN_TABLE，
+// 在那里根本不会走到这条路径。
 func (ev *Evaluator) notApplicable(err error) bool {
 	if !isMissingTable(err) {
 		return false
@@ -520,10 +495,10 @@ func (ev *Evaluator) notApplicable(err error) bool {
 	}
 	m := reMissingTable.FindStringSubmatch(err.Error())
 	if m == nil {
-		return false // can't identify the table → surface it
+		return false // 无法识别表 → 暴露该错误
 	}
-	// Keep the database the error named instead of assuming "system", so a
-	// rule against mydb.foo isn't checked against system.foo.
+	// 保留错误中给出的数据库，而不是假定为 "system"，这样针对
+	// mydb.foo 的规则不会去检查 system.foo。
 	db, name := "system", m[1]
 	if i := strings.LastIndex(name, "."); i >= 0 {
 		db, name = name[:i], name[i+1:]
@@ -541,10 +516,10 @@ func (ev *Evaluator) notApplicable(err error) bool {
 		n, convErr := strconv.ParseInt(strings.TrimSpace(fmt.Sprintf("%v", rows[0]["c"])), 10, 64)
 		return n, convErr == nil
 	}
-	// Same privilege-blindness guard the dashboard probes use: system.tables
-	// is filtered by grant WITHOUT erroring, so a bare zero can mean "no
-	// permission" rather than "absent". A database we can query always has
-	// SOME visible table, so require that before trusting the specific zero.
+	// 与 dashboard 探测所用的防权限盲区保护相同：system.tables
+	// 会按授权过滤而不报错，因此裸的零可能意味着“没有权限”而不是“不存在”。
+	// 我们能查询的数据库总会有一些可见的表，因此在信任那个具体的零之前
+	// 先要求这一点。
 	if n, ok := count(fmt.Sprintf("database='%s'", db)); !ok || n == 0 {
 		return false
 	}
@@ -552,25 +527,24 @@ func (ev *Evaluator) notApplicable(err error) bool {
 	return ok && n == 0
 }
 
-// evalFile loads, validates, and executes one alert rule file.
+// evalFile 加载、校验并执行一个告警规则文件。
 func (ev *Evaluator) evalFile(path string) Result {
 	now := time.Now().UTC().Format(time.RFC3339)
 
-	// On read/yaml failures there is no parsed definition, so derive the
-	// identity fields from the filename — otherwise the dashboard renders
-	// an untitled error card ((a.title||a.name) both empty) and the
-	// operator can't tell which rule broke.
+	// 读取/yaml 失败时没有解析出的定义，因此从文件名推导身份字段 ——
+	// 否则 dashboard 会渲染一张无标题的错误卡片（(a.title||a.name) 都为空），
+	// 运维人员无法分辨是哪条规则坏了。
 	base := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return Result{Name: base, Title: base, Severity: SeverityWarning,
-			File: filepath.Base(path), Error: fmt.Sprintf("read: %v", err), FiredAt: now}
+			File: filepath.Base(path), Error: fmt.Sprintf("读取失败: %v", err), FiredAt: now}
 	}
 
 	var def Definition
 	if err := yaml.Unmarshal(raw, &def); err != nil {
 		return Result{Name: base, Title: base, Severity: SeverityWarning,
-			File: filepath.Base(path), Error: fmt.Sprintf("yaml: %v", err), FiredAt: now}
+			File: filepath.Base(path), Error: fmt.Sprintf("yaml 解析失败: %v", err), FiredAt: now}
 	}
 
 	r := Result{
@@ -587,10 +561,10 @@ func (ev *Evaluator) evalFile(path string) Result {
 		r.Severity = SeverityWarning
 	}
 
-	// A malformed modes: list is a broken rule, reported like a YAML error
-	// — the gate below must never turn a typo into a silent skip.
+	// 格式错误的 modes: 列表是一条损坏的规则，会像 YAML 错误一样报告 ——
+	// 下面的门控绝不能把拼写错误变成静默跳过。
 	if def.Tier != "" && def.Tier != "essential" && def.Tier != "full" {
-		r.Error = fmt.Sprintf("unknown tier %q (want essential or full)", def.Tier)
+		r.Error = fmt.Sprintf("未知 tier %q（应为 essential 或 full）", def.Tier)
 		fmt.Printf("  [alert] ERROR %q: %v\n", def.Name, r.Error)
 		return r
 	}
@@ -600,44 +574,43 @@ func (ev *Evaluator) evalFile(path string) Result {
 		return r
 	}
 
-	// Mode gate before anything touches the server: a rule declared for
-	// other modes is "not applicable" here, the same outcome as a missing
-	// table — never run, never errored, never counted as checked.
+	// 在接触服务器之前先做模式门控：声明给其他模式的规则在这里就是“不适用”，
+	// 与缺表的结果相同 —— 从不运行、从不出错、从不计为已检查。
 	if !def.appliesTo(ev.mode) {
 		r.Skipped = true
-		r.Reason = "not applicable in " + ev.mode + " mode (rule modes: " + strings.Join(def.Modes, ", ") + ")"
+		r.Reason = "在 " + ev.mode + " 模式下不适用（规则模式：" + strings.Join(def.Modes, ", ") + "）"
 		fmt.Printf("  [alert] skipped %q (%s)\n", def.Name, r.Reason)
 		return r
 	}
 
-	// The three gates below protect the server from a live rule query. A Go
-	// check reads the collected files only: whether its source was collected
-	// (skipped in an essential run, without Keeper, past the budget) decides.
+	// 下面三个门控保护服务器免受实时规则查询的影响。Go check 只读取已采集的
+	// 文件：由其数据源是否被采集（在 essential 运行、无 Keeper、超出预算时
+	// 会被跳过）来决定。
 	live := def.Check == "" || ev.bundle == nil
 	if live && ev.stop != nil && ev.stop() {
 		r.Skipped = true
-		r.Reason = "not run: the collection's time budget was spent"
+		r.Reason = "未运行：本次采集的时间预算已用尽"
 		fmt.Printf("  [alert] skipped %q (%s)\n", def.Name, r.Reason)
 		return r
 	}
 	if live && ev.keeperDown != "" && def.Needs == "keeper" {
 		r.Skipped = true
-		r.Reason = "not run: it needs a live Keeper session — " + ev.keeperDown
+		r.Reason = "未运行：需要活动的 Keeper 会话 — " + ev.keeperDown
 		fmt.Printf("  [alert] skipped %q (%s)\n", def.Name, r.Reason)
 		return r
 	}
 	if live && ev.essential && def.Tier == "full" {
 		r.Skipped = true
-		r.Reason = "not run in an essential collection (it scans per-table data)"
+		r.Reason = "在 essential 采集模式下未运行（该规则会扫描逐表数据）"
 		fmt.Printf("  [alert] skipped %q (%s)\n", def.Name, r.Reason)
 		return r
 	}
 
 	sql := ev.expandQuery(def.Query)
 
-	// Security: alert queries must be read-only SELECT — and so must the
-	// follow-ups, which are handed to the customer to run. A rule with an
-	// unsafe follow-up is broken: it does not run, and shows no SQL.
+	// 安全性：告警查询必须是只读 SELECT —— 交给客户运行的跟进查询
+	// 也必须如此。带有不安全跟进查询的规则是损坏的：它不会运行，
+	// 也不展示任何 SQL。
 	if err := query.ValidateQueryContent(sql); err != nil {
 		r.Error = fmt.Sprintf("security: %v", err)
 		fmt.Printf("  [alert] BLOCKED %q: %v\n", def.Name, err)
@@ -654,54 +627,53 @@ func (ev *Evaluator) evalFile(path string) Result {
 		followUps = append(followUps, Investigation{Title: inv.Title, Query: strings.TrimSpace(q)})
 	}
 
-	// No bundle (a -output-format the checks cannot read): the rule's query
-	// runs live, as before checks existed.
+	// 没有 bundle（check 无法读取的 -output-format）：规则的查询会像
+	// check 出现之前那样实时运行。
 	if def.Check != "" && ev.bundle != nil {
 		return ev.evalCheck(def, r, sql, followUps)
 	}
 
 	resp, err := ev.query(sql)
 	if err != nil {
-		// A missing table means the rule is not applicable on this server
-		// (e.g. system.crash_log only exists after a crash; system.text_log
-		// / system.query_log may be disabled) — as does a typo'd table name,
-		// which the *_FilesAreValid tests and review are expected to catch.
-		// Either way it is not a broken rule: return a Skipped result (not
-		// fired, not errored) so it neither trips "[alert] ERROR" — which
-		// must stay reserved for genuine breakage like a missing column
-		// (UNKNOWN_IDENTIFIER) — nor gets counted as an evaluated check that
-		// found nothing. RunAll prints genuine errors.
+		// 缺表意味着该规则在这台服务器上不适用
+		//（例如 system.crash_log 只在崩溃后存在；system.text_log
+		// / system.query_log 可能被禁用）—— 拼错的表名也是如此，
+		// 后者本应由 *_FilesAreValid 测试和评审捕获。
+		// 无论哪种情况，这都不是损坏的规则：返回一个 Skipped 结果（未触发、
+		// 未出错），这样它既不会触发 "[alert] ERROR" —— 该输出必须保留给
+		// 缺列（UNKNOWN_IDENTIFIER）之类的真正损坏 —— 也不会被计为一次
+		// 没有发现任何东西的已评估检查。RunAll 会打印真正的错误。
 		//
-		// In cloud mode a clusterAllReplicas fan-out makes UNKNOWN_TABLE
-		// ambiguous, so notApplicable() resolves it by counting the
-		// replicas that actually have the table — see its doc comment.
+		// 在 cloud 模式下，clusterAllReplicas 扇出会让 UNKNOWN_TABLE
+		// 产生歧义，因此 notApplicable() 通过统计真正拥有该表的 replica
+		// 来判定 —— 见其文档注释。
 		if ev.notApplicable(err) {
 			r.Skipped = true
-			r.Reason = "table not present"
-			fmt.Printf("  [alert] skipped %q (table not present)\n", def.Name)
+			r.Reason = "表不存在"
+			fmt.Printf("  [alert] skipped %q（表不存在）\n", def.Name)
 			return r
 		}
-		r.Error = fmt.Sprintf("query: %v", err)
-		r.Query, r.Investigate = sql, followUps // displayed: show what failed
+		r.Error = fmt.Sprintf("查询失败: %v", err)
+		r.Query, r.Investigate = sql, followUps // 展示：显示失败的内容
 		return r
 	}
 
 	rows, err := parseJSONCompact(resp)
 	if err != nil {
-		r.Error = fmt.Sprintf("parse: %v", err)
+		r.Error = fmt.Sprintf("解析失败: %v", err)
 		return r
 	}
 
 	r.Rows = rows
 	if len(rows) > 0 {
-		fmt.Printf("  [alert] FIRED  %q — %d row(s)\n", def.Name, len(rows))
+		fmt.Printf("  [alert] FIRED  %q — %d 行\n", def.Name, len(rows))
 		r.Query, r.Investigate = sql, followUps
 	}
 	return r
 }
 
-// parseJSONCompact converts a ClickHouse JSONCompact response to a slice of
-// column-name → value maps.
+// parseJSONCompact 把 ClickHouse JSONCompact 响应转换为
+// “列名 → 值”映射的切片。
 func parseJSONCompact(raw string) ([]map[string]interface{}, error) {
 	var res struct {
 		Meta []struct {
@@ -711,7 +683,7 @@ func parseJSONCompact(raw string) ([]map[string]interface{}, error) {
 		Rows int                 `json:"rows"`
 	}
 	if err := json.Unmarshal([]byte(raw), &res); err != nil {
-		return nil, fmt.Errorf("json unmarshal: %w (%.120s)", err, raw)
+		return nil, fmt.Errorf("JSON 解析失败: %w (%.120s)", err, raw)
 	}
 	out := make([]map[string]interface{}, 0, res.Rows)
 	for _, row := range res.Data {

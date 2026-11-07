@@ -7,11 +7,10 @@ import (
 	"testing"
 )
 
-// The mode decides which queries.* tree runs, and gov is the one that hashes
-// identifiers. onprem is the least protective of the three, so a fallback
-// TOWARDS it is the only wrong answer available here: `-mode govv` used to
-// print one line and collect an unhashed onprem bundle, and with stdin closed
-// — any CI job — nothing read that line.
+// mode 决定运行哪棵 queries.* 树，而 gov 是会对标识符做哈希的那一个。
+// onprem 是三者中保护最弱的，因此向它回退是这里唯一可能犯的错：
+// `-mode govv` 过去只打印一行，然后采集未经哈希的 onprem bundle，而在
+// stdin 关闭时——任何 CI 任务——都没有人读那一行。
 
 func TestCanonicalMode_NormalisesAndAliases(t *testing.T) {
 	for in, want := range map[string]string{
@@ -19,20 +18,20 @@ func TestCanonicalMode_NormalisesAndAliases(t *testing.T) {
 		"cloud": "cloud", "CLOUD": "cloud", "ch-cloud": "cloud", "clickhouse-cloud": "cloud",
 		"onprem": "onprem", "on-prem": "onprem", "on_prem": "onprem",
 		"on-premise": "onprem", "on-premises": "onprem", "self-hosted": "onprem",
-		// Unrecognised must be "", never a guess.
+		// 无法识别的必须为 ""，绝不能猜测。
 		"govv": "", "": "", "  ": "", "prod": "", "government": "",
 	} {
 		if got := canonicalMode(in); got != want {
-			t.Errorf("canonicalMode(%q) = %q, want %q", in, got, want)
+			t.Errorf("canonicalMode(%q) = %q，期望 %q", in, got, want)
 		}
 	}
 }
 
-// The padded form is called out separately because it is the one that used to
-// slip through: ToLower left the space, == "gov" failed, onprem was adopted.
+// 带空白的写法单独列出，因为它是过去会被漏判的那种：
+// ToLower 保留了空格，== "gov" 失败，于是采用了 onprem。
 func TestCanonicalMode_PaddedGovIsNotDowngraded(t *testing.T) {
 	if got := canonicalMode(" gov"); got != "gov" {
-		t.Fatalf(`canonicalMode(" gov") = %q — a padded gov must not fall through`, got)
+		t.Fatalf(`canonicalMode(" gov") = %q——带空白的 gov 不得漏判`, got)
 	}
 }
 
@@ -40,23 +39,23 @@ func TestResolveMode_ExplicitInvalidIsAnError(t *testing.T) {
 	for _, raw := range []string{"govv", "onpre", "prod", " ", "cloud9"} {
 		mode, _, err := resolveMode(raw, true, false, unusedPrompt(t))
 		if err == nil {
-			t.Errorf("resolveMode(%q, explicit) returned %q with no error — an unparseable mode must fail, not default", raw, mode)
+			t.Errorf("resolveMode(%q, explicit) 返回 %q 且无错误——无法解析的 mode 必须报错，而不是取默认值", raw, mode)
 		}
 		if mode != "" {
-			t.Errorf("resolveMode(%q, explicit) leaked mode %q alongside its error", raw, mode)
+			t.Errorf("resolveMode(%q, explicit) 在报错的同时泄露了 mode %q", raw, mode)
 		}
 	}
 }
 
 func TestResolveMode_SuggestsTheNearestMode(t *testing.T) {
 	_, _, err := resolveMode("govv", true, false, unusedPrompt(t))
-	if err == nil || !strings.Contains(err.Error(), `did you mean "gov"`) {
-		t.Fatalf("expected a gov suggestion, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), `你是指 "gov" 吗？`) {
+		t.Fatalf("期望得到 gov 建议，实际得到 %v", err)
 	}
-	// Nothing close enough should not invent one.
+	// 没有足够接近的候选时不应凭空编造。
 	_, _, err = resolveMode("banana", true, false, unusedPrompt(t))
-	if err == nil || strings.Contains(err.Error(), "did you mean") {
-		t.Fatalf("unrelated input should not be given a suggestion, got %v", err)
+	if err == nil || strings.Contains(err.Error(), "你是指") {
+		t.Fatalf("无关输入不应给出建议，实际得到 %v", err)
 	}
 }
 
@@ -66,44 +65,44 @@ func TestResolveMode_ExplicitValidPassesThrough(t *testing.T) {
 	} {
 		got, notice, err := resolveMode(raw, true, false, unusedPrompt(t))
 		if err != nil || got != want {
-			t.Errorf("resolveMode(%q) = (%q, %v), want %q", raw, got, err, want)
+			t.Errorf("resolveMode(%q) = (%q, %v)，期望 %q", raw, got, err, want)
 		}
 		if notice != "" {
-			t.Errorf("resolveMode(%q) should not narrate an explicit choice, got %q", raw, notice)
+			t.Errorf("resolveMode(%q) 不应为显式选择附加说明，实际得到 %q", raw, notice)
 		}
 	}
 }
 
-// Unset and nobody to ask: the default still applies, but it is announced.
-// This is the CI shape, and the notice is the only signal the operator gets.
+// 未设置且无人可问：默认值仍然生效，但会予以通告。
+// 这是 CI 的形态，而通告是运维人员唯一能得到的信号。
 func TestResolveMode_UnsetNonInteractiveDefaultsAndSaysSo(t *testing.T) {
 	got, notice, err := resolveMode("onprem", false, false, unusedPrompt(t))
 	if err != nil || got != "onprem" {
-		t.Fatalf("resolveMode(unset, non-interactive) = (%q, %v), want onprem", got, err)
+		t.Fatalf("resolveMode(未设置, 非交互式) = (%q, %v)，期望 onprem", got, err)
 	}
-	if !strings.Contains(notice, "onprem") || !strings.Contains(notice, "not a terminal") {
-		t.Errorf("the default must be announced, got %q", notice)
+	if !strings.Contains(notice, "onprem") || !strings.Contains(notice, "不是终端") {
+		t.Errorf("必须通告默认值，实际得到 %q", notice)
 	}
 }
 
 func TestResolveMode_UnsetInteractive(t *testing.T) {
-	// Enter accepts the offered default.
+	// 回车接受所提供的默认值。
 	got, _, err := resolveMode("onprem", false, true, func() (string, error) { return "\n", nil })
 	if err != nil || got != "onprem" {
-		t.Errorf("empty answer should take the default, got (%q, %v)", got, err)
+		t.Errorf("空答案应采用默认值，实际得到 (%q, %v)", got, err)
 	}
-	// A typed mode wins, aliases and padding included.
+	// 输入的 mode 优先，包括别名和空白。
 	got, _, err = resolveMode("onprem", false, true, func() (string, error) { return "  GOV \n", nil })
 	if err != nil || got != "gov" {
-		t.Errorf("typed answer should be honoured, got (%q, %v)", got, err)
+		t.Errorf("输入的答案应被采纳，实际得到 (%q, %v)", got, err)
 	}
-	// A typo at the prompt is an error too — same reasoning as the flag.
+	// 提示符处的拼写错误同样报错——理由与标志相同。
 	if _, _, err = resolveMode("onprem", false, true, func() (string, error) { return "govv\n", nil }); err == nil {
-		t.Error("a mistyped answer must not fall back to onprem")
+		t.Error("拼错的答案不得回退到 onprem")
 	}
-	// Ctrl-D with nothing typed is a failure, not consent to the default.
+	// 未输入时按 Ctrl-D 是失败，而不是同意默认值。
 	if _, _, err = resolveMode("onprem", false, true, func() (string, error) { return "", io.EOF }); err == nil {
-		t.Error("an unreadable prompt must fail rather than assume onprem")
+		t.Error("无法读取的提示必须失败，而不是假定为 onprem")
 	}
 }
 
@@ -114,21 +113,21 @@ func TestGetQueriesDir(t *testing.T) {
 	} {
 		got, err := getQueriesDir(mode)
 		if err != nil || got != want {
-			t.Errorf("getQueriesDir(%q) = (%q, %v), want %q", mode, got, err, want)
+			t.Errorf("getQueriesDir(%q) = (%q, %v)，期望 %q", mode, got, err, want)
 		}
 	}
-	// The old default returned ./queries.onprem here, which made this the
-	// second place an unrecognised mode became an unhashed collection.
+	// 旧的默认值在这里返回 ./queries.onprem，使这里成为无法识别的 mode
+	// 变成未哈希采集的第二处。
 	if got, err := getQueriesDir("govv"); err == nil {
-		t.Errorf("getQueriesDir(%q) must fail rather than fall back, got %q", "govv", got)
+		t.Errorf("getQueriesDir(%q) 必须报错而不是回退，实际得到 %q", "govv", got)
 	}
 }
 
-// unusedPrompt fails the test if the resolver asks a question it should not.
+// 如果解析器询问了本不该询问的问题，unusedPrompt 会让测试失败。
 func unusedPrompt(t *testing.T) func() (string, error) {
 	t.Helper()
 	return func() (string, error) {
-		t.Error("resolveMode prompted when it should not have")
+		t.Error("resolveMode 在本不该提示时进行了提示")
 		return "", errors.New("unexpected prompt")
 	}
 }

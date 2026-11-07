@@ -1,9 +1,9 @@
 -- tier: essential
--- Per query pattern (normalized_query_hash), kind, user and type over the
--- window, counted once per query, with one sample of the SQL. The
--- dashboard's slowest / heaviest patterns and per-user panels read this.
--- timed_count leaves out the QueryFinish rows with no measured duration.
--- The hash is a UInt64: kept as text so JavaScript never rounds it.
+-- 按查询模式（normalized_query_hash）、kind、user 和 type 在窗口内
+-- 聚合，每条查询只计一次，并附带一条 SQL 样本。
+-- dashboard 的 slowest / heaviest 模式和 per-user 面板都读取此文件。
+-- timed_count 排除没有测得耗时的 QueryFinish 行。
+-- hash 是 UInt64：以文本形式保留，以免 JavaScript 对其进行舍入。
 SELECT
     toString(normalized_query_hash)                AS hash,
     query_kind,

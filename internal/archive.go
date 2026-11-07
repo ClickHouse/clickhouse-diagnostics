@@ -11,32 +11,31 @@ import (
 	"strings"
 )
 
-// CreateArchive creates a tar.gz archive of the specified directories.
+// CreateArchive 创建指定目录的 tar.gz 归档。
 //
-// The archive is written to a hidden temporary file next to archiveName and
-// renamed into place only after every write and every close — tar, gzip,
-// file — succeeded. It used to be written straight to archiveName with the
-// Close errors discarded and a directory that failed mid-walk skipped, so a
-// full disk or an unreadable file left a truncated or half-written
-// clickhouse_backup_*.tar.gz that looked like a bundle, after "Archive
-// created successfully". On any error the temporary file is removed and an
-// archive already at archiveName is left as it was.
+// 归档先写入 archiveName 旁边的隐藏临时文件，只有在每次写入和每次
+// 关闭——tar、gzip、file——都成功之后才重命名到位。过去它直接写入
+// archiveName，丢弃 Close 错误，并跳过中途遍历失败的目录，因此
+// 磁盘写满或文件不可读会留下一个截断或半写入的
+// clickhouse_backup_*.tar.gz，看起来像 bundle，而且是在
+// “Archive created successfully” 之后。任何错误发生时，临时文件会被
+// 删除，archiveName 处已有的归档保持原样。
 func CreateArchive(archiveName string, dirs ...string) (err error) {
-	fmt.Printf("Creating archive %s...\n", archiveName)
+	fmt.Printf("正在创建归档 %s...\n", archiveName)
 
-	// Check if any of the source directories exist
+	// 检查是否有任何源目录存在
 	existingDirs := filterExistingDirs(dirs)
 
 	if len(existingDirs) == 0 {
-		fmt.Println("No valid directories to archive, skipping archive creation")
+		fmt.Println("没有可归档的有效目录，跳过归档创建")
 		return nil
 	}
 
-	// Same directory, so the rename is atomic; dot-prefixed and .partial, so
-	// nothing that looks for clickhouse_backup_*.tar.gz picks it up.
+	// 同一目录，因此重命名是原子的；带点前缀和 .partial，
+	// 使任何寻找 clickhouse_backup_*.tar.gz 的东西都不会选中它。
 	tmp, err := os.CreateTemp(filepath.Dir(archiveName), "."+filepath.Base(archiveName)+".*.partial")
 	if err != nil {
-		return fmt.Errorf("error creating archive file: %w", err)
+		return fmt.Errorf("创建归档文件失败：%w", err)
 	}
 	defer func() {
 		if err != nil {
@@ -45,35 +44,34 @@ func CreateArchive(archiveName string, dirs ...string) (err error) {
 		}
 	}()
 	if err = tmp.Chmod(0o600); err != nil {
-		return fmt.Errorf("error creating archive file: %w", err)
+		return fmt.Errorf("创建归档文件失败：%w", err)
 	}
 
 	totalFiles, err := writeArchive(tmp, existingDirs)
 	if err != nil {
-		return fmt.Errorf("error writing archive: %w", err)
+		return fmt.Errorf("写入归档失败：%w", err)
 	}
-	// Sync before Close: on a full disk or a network filesystem the error
-	// may only surface here.
+	// 在 Close 之前 Sync：在磁盘写满或网络文件系统上，
+	// 错误可能只在这里才暴露。
 	if err = tmp.Sync(); err != nil {
-		return fmt.Errorf("error writing archive: %w", err)
+		return fmt.Errorf("写入归档失败：%w", err)
 	}
 	if err = tmp.Close(); err != nil {
-		return fmt.Errorf("error writing archive: %w", err)
+		return fmt.Errorf("写入归档失败：%w", err)
 	}
 	if err = os.Rename(tmp.Name(), archiveName); err != nil {
-		return fmt.Errorf("error publishing archive: %w", err)
+		return fmt.Errorf("发布归档失败：%w", err)
 	}
 
-	fmt.Printf("Archive created successfully with %d files\n", totalFiles)
+	fmt.Printf("归档创建成功，共 %d 个文件\n", totalFiles)
 	return nil
 }
 
-// writeArchive writes dirs as a tar.gz stream to w and returns the number of
-// files written. Every error is returned, including those from closing the
-// tar and gzip writers — gzip writes its footer on Close, so dropping that
-// error is how a truncated archive used to pass for a complete one. A
-// directory that fails stops the archive: its entry may be half-written, and
-// skipping it would publish a corrupt stream.
+// writeArchive 将 dirs 作为 tar.gz 流写入 w，并返回写入的文件数。
+// 所有错误都会返回，包括关闭 tar 和 gzip 写入器产生的错误——
+// gzip 在 Close 时写入其尾部，丢弃该错误正是截断归档
+// 过去被当作完整归档的原因。目录失败会中止归档：其条目可能
+// 只写了一半，跳过它会发布损坏的流。
 func writeArchive(w io.Writer, dirs []string) (int, error) {
 	gzipWriter := gzip.NewWriter(w)
 	tarWriter := tar.NewWriter(gzipWriter)
@@ -82,7 +80,7 @@ func writeArchive(w io.Writer, dirs []string) (int, error) {
 	for _, dir := range dirs {
 		filesAdded, err := addDirectoryToArchive(tarWriter, dir)
 		if err != nil {
-			return totalFiles, fmt.Errorf("archiving directory %q: %w", dir, err)
+			return totalFiles, fmt.Errorf("归档目录 %q 失败：%w", dir, err)
 		}
 		totalFiles += filesAdded
 	}
@@ -95,12 +93,12 @@ func writeArchive(w io.Writer, dirs []string) (int, error) {
 	return totalFiles, nil
 }
 
-// filterExistingDirs filters out non-existent directories
+// filterExistingDirs 过滤掉不存在的目录
 func filterExistingDirs(dirs []string) []string {
 	var existingDirs []string
 	for _, dir := range dirs {
 		if _, err := os.Stat(dir); os.IsNotExist(err) {
-			fmt.Printf("Directory '%s' does not exist, skipping in archive\n", dir)
+			fmt.Printf("目录 '%s' 不存在，归档时跳过\n", dir)
 		} else {
 			existingDirs = append(existingDirs, dir)
 		}
@@ -108,19 +106,18 @@ func filterExistingDirs(dirs []string) []string {
 	return existingDirs
 }
 
-// archiveEntryName builds the slash-separated name a tar entry must carry,
-// from a base directory and the relative path filepath.Rel produced on the
-// collecting machine.
+// archiveEntryName 根据基础目录和采集机器上 filepath.Rel 产生的
+// 相对路径，构建 tar 条目必须携带的斜杠分隔名称。
 func archiveEntryName(baseDir, relPath string) string {
 	return entryName(baseDir, relPath, filepath.Separator)
 }
 
-// entryName converts only sep, the collecting platform's separator — what
-// filepath.ToSlash does, with the platform passed in so the Windows case is
-// testable on the Linux CI, where ToSlash is a no-op. On Unix a backslash is
-// an ordinary filename character: configuration/ and logs/ copy the server's
-// files under their real names, so `a\b.xml` and `a/b.xml` are two files and
-// rewriting the backslash would merge them into one entry.
+// entryName 只转换 sep，即采集平台的分隔符——这正是
+// filepath.ToSlash 的行为，只是把平台作为参数传入，以便 Windows 情形
+// 能在 ToSlash 为无操作的 Linux CI 上测试。在 Unix 上反斜杠
+// 是普通文件名字符：configuration/ 和 logs/ 以真实名称复制服务器的
+// 文件，因此 `a\b.xml` 和 `a/b.xml` 是两个文件，重写反斜杠
+// 会把它们合并成一个条目。
 func entryName(baseDir, relPath string, sep rune) string {
 	if relPath == "." || relPath == "" {
 		return baseDir
@@ -131,7 +128,7 @@ func entryName(baseDir, relPath string, sep rune) string {
 	return path.Join(baseDir, relPath)
 }
 
-// addDirectoryToArchive adds a directory and its contents to the tar archive
+// addDirectoryToArchive 将目录及其内容加入 tar 归档
 func addDirectoryToArchive(tarWriter *tar.Writer, dir string) (int, error) {
 	fileCount := 0
 	baseDir := filepath.Base(dir)
@@ -141,40 +138,39 @@ func addDirectoryToArchive(tarWriter *tar.Writer, dir string) (int, error) {
 			return err
 		}
 
-		// Get header info
+		// 获取头部信息
 		header, err := tar.FileInfoHeader(info, info.Name())
 		if err != nil {
 			return err
 		}
 
-		// Create proper path in the archive
+		// 在归档中创建正确的路径
 		relPath, err := filepath.Rel(dir, path)
 		if err != nil {
 			return err
 		}
 
-		// Set the name with directory structure.
+		// 设置带目录结构的名称。
 		//
-		// `path`, never `filepath`: tar names are slash-separated by
-		// definition, while filepath.Join and filepath.Rel use the host
-		// separator. On Windows this wrote entries like
-		// `clickhouse_backup_…\system.parts_….jsonl`, which is not a path in
-		// the archive at all — every other platform then extracts ONE file
-		// whose name contains a backslash instead of a directory, so the
-		// dashboard, the analysis skill and plain `tar` all see an empty
-		// bundle. Measured on a customer bundle collected with the Windows
-		// build: `tar` and Python both produced the single-file form, and the
-		// case lost two round trips to it. Slashes are correct everywhere —
-		// Windows accepts them in Win32 paths, and Python's tarfile maps them
-		// to os.sep on extraction.
+		// 用 `path`，绝不用 `filepath`：按定义 tar 名称以斜杠分隔，
+		// 而 filepath.Join 和 filepath.Rel 使用主机分隔符。在 Windows 上
+		// 这曾写出 `clickhouse_backup_…\system.parts_….jsonl` 这样的条目，
+		// 它在归档中根本不是路径——其他平台随后会解出
+		// 一个名称包含反斜杠的单个文件，而不是目录，于是
+		// dashboard、分析 skill 和普通 `tar` 都看到一个空
+		// bundle。在由 Windows 构建采集的客户 bundle 上实测：
+		// `tar` 和 Python 都产生了单文件形式，该
+		// 案例为此损失了两个来回。斜杠在所有地方都正确——
+		// Windows 在 Win32 路径中接受它们，Python 的 tarfile 会在
+		// 解压时将其映射为 os.sep。
 		header.Name = archiveEntryName(baseDir, relPath)
 
-		// Write the header
+		// 写入头部
 		if err := tarWriter.WriteHeader(header); err != nil {
 			return err
 		}
 
-		// If it's a regular file, write the content
+		// 如果是普通文件，写入内容
 		if !info.IsDir() {
 			if err := addFileContent(tarWriter, path); err != nil {
 				return err
@@ -188,7 +184,7 @@ func addDirectoryToArchive(tarWriter *tar.Writer, dir string) (int, error) {
 	return fileCount, err
 }
 
-// addFileContent adds file content to the tar archive
+// addFileContent 将文件内容加入 tar 归档
 func addFileContent(tarWriter *tar.Writer, filePath string) error {
 	file, err := os.Open(filePath)
 	if err != nil {

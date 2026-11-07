@@ -14,22 +14,21 @@ func TestParseTier(t *testing.T) {
 		"SELECT 1":                                  TierFull,
 		"-- tier: essential\nSELECT 1":              TierEssential,
 		"-- a comment\n--   tier:   full  \nSELECT": TierFull,
-		"SELECT 1 -- tier: essential":               TierFull, // only a line of its own counts
+		"SELECT 1 -- tier: essential":               TierFull, // 只有独占一行的标记才算数
 	} {
 		got, err := ParseTier(in)
 		if err != nil || got != want {
-			t.Errorf("ParseTier(%q) = %q, %v; want %q", in, got, err, want)
+			t.Errorf("ParseTier(%q) = %q, %v；期望 %q", in, got, err, want)
 		}
 	}
 	if _, err := ParseTier("-- tier: fast\nSELECT 1"); err == nil {
-		t.Error("an unknown tier was accepted")
+		t.Error("未知的 tier 被接受了")
 	}
 }
 
-// Every variant of a collector (root and version directories) must declare
-// the same tier — otherwise the essential set would change with the server
-// version — and the collectors that decide most incidents must be essential
-// in every mode that has them.
+// 一个 collector 的每个变体（根目录和版本目录）都必须声明相同的 tier ——
+// 否则 essential 集合会随服务器版本变化 —— 并且那些能判定大多数故障的
+// collector，在拥有它们的每种模式下都必须是 essential。
 func TestShippedQueryFiles_TiersAreConsistent(t *testing.T) {
 	mustBeEssential := []string{"system.version", "system.metrics", "system.asynchronous_metrics", "system.processes",
 		"system.errors", "system.replicas", "system.replication_queue", "system.merges", "system.mutations", "system.disks",
@@ -54,7 +53,7 @@ func TestShippedQueryFiles_TiersAreConsistent(t *testing.T) {
 			}
 			name := strings.TrimSuffix(d.Name(), ".sql")
 			if prev, ok := tiers[name]; ok && prev != tier {
-				t.Errorf("%s/%s: variants disagree on the tier (%s vs %s)", mode, name, prev, tier)
+				t.Errorf("%s/%s：各变体的 tier 不一致（%s 与 %s）", mode, name, prev, tier)
 			}
 			tiers[name] = tier
 			return nil
@@ -64,12 +63,12 @@ func TestShippedQueryFiles_TiersAreConsistent(t *testing.T) {
 		}
 		for _, n := range mustBeEssential {
 			if tier, ok := tiers[n]; ok && tier != TierEssential {
-				t.Errorf("%s/%s must be essential", mode, n)
+				t.Errorf("%s/%s 必须是 essential", mode, n)
 			}
 		}
 		for _, n := range mustBeFull {
 			if tier, ok := tiers[n]; ok && tier != TierFull {
-				t.Errorf("%s/%s must stay full (expensive per table)", mode, n)
+				t.Errorf("%s/%s 必须保持 full（按表计开销大）", mode, n)
 			}
 		}
 	}
@@ -80,22 +79,22 @@ func TestApply_MaxLookbackCapsDefaultsOnly(t *testing.T) {
 	got := Apply(sql, Vars{MaxLookback: 24 * time.Hour})
 	for _, want := range []string{"now() - INTERVAL 24 HOUR AND event_time > now() - INTERVAL 24 HOUR", "now() - INTERVAL 12 HOUR", "<= now()"} {
 		if !strings.Contains(got, want) {
-			t.Errorf("capped window lacks %q:\n%s", want, got)
+			t.Errorf("设上限后的窗口缺少 %q：\n%s", want, got)
 		}
 	}
-	// An explicit -from wins over the cap: the operator asked for that window.
+	// 显式的 -from 优先于上限：运维人员要的就是那个窗口。
 	from := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
 	if got := Apply(sql, Vars{MaxLookback: 24 * time.Hour, From: from}); !strings.Contains(got, "2026-10-01 00:00:00") || strings.Contains(got, "24 HOUR") {
-		t.Errorf("-from did not win over the cap:\n%s", got)
+		t.Errorf("-from 未优先于上限：\n%s", got)
 	}
-	// No cap: the query's own default.
+	// 无上限：使用查询自身的默认值。
 	if got := Apply(sql, Vars{}); !strings.Contains(got, "INTERVAL 7 DAY") {
-		t.Errorf("uncapped window changed:\n%s", got)
+		t.Errorf("未设上限的窗口被改动了：\n%s", got)
 	}
 }
 
-// The collectors that wait on a live Keeper session say so, in every
-// variant; the cheap replicas columns do not.
+// 等待活动 Keeper 会话的 collector 在每个变体中都会声明这一点；
+// 开销低的 replicas 列则不会。
 func TestShippedQueryFiles_NeedsKeeper(t *testing.T) {
 	want := map[string]bool{"system.zookeeper_connection": true, "system.database_replicas": true,
 		"system.replicas_problem_tables": true, "system.distributed_ddl_queue": true, "system.replicas": false, "system.errors": false}
@@ -111,7 +110,7 @@ func TestShippedQueryFiles_NeedsKeeper(t *testing.T) {
 			}
 			b, _ := os.ReadFile(p)
 			if NeedsKeeper(string(b)) != w {
-				t.Errorf("%s: needs keeper = %v, want %v", p, !w, w)
+				t.Errorf("%s：needs keeper = %v，期望 %v", p, !w, w)
 			}
 			return nil
 		})

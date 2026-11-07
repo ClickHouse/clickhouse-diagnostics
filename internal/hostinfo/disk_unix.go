@@ -12,9 +12,9 @@ import (
 func runtimeArch() string { return runtime.GOARCH }
 func runtimeOS() string   { return runtime.GOOS }
 
-// pseudoFS are kernel/virtual filesystems that have no capacity worth
-// reporting; including them buries the handful of real mounts a support
-// engineer needs (notably where ClickHouse keeps its data).
+// pseudoFS 是没有值得报告容量的内核/虚拟文件系统；
+// 包含它们会淹没支持工程师真正需要的那几个挂载点
+// （尤其是 ClickHouse 存放数据的位置）。
 var pseudoFS = map[string]bool{
 	"proc": true, "sysfs": true, "devtmpfs": true, "devpts": true,
 	"cgroup": true, "cgroup2": true, "pstore": true, "bpf": true,
@@ -24,9 +24,9 @@ var pseudoFS = map[string]bool{
 	"ramfs": true, "efivarfs": true, "selinuxfs": true, "fuse.gvfsd-fuse": true,
 }
 
-// collectDisks reads the mount table and adds real capacity via statfs.
-// Reading /proc/mounts (rather than /etc/fstab) means we see what is
-// actually mounted now, including bind mounts and container volumes.
+// collectDisks 读取挂载表，并通过 statfs 补充真实容量。
+// 读取 /proc/mounts（而不是 /etc/fstab）意味着我们能看到
+// 当前实际挂载的内容，包括 bind mount 和容器卷。
 func collectDisks() ([]DiskInfo, error) {
 	raw := readFile("/proc/mounts")
 	if raw == "" {
@@ -46,10 +46,10 @@ func collectDisks() ([]DiskInfo, error) {
 		if pseudoFS[fstype] || strings.HasPrefix(fstype, "fuse.") || seen[mount] {
 			continue
 		}
-		// Skip single-FILE bind mounts. Containers mount /etc/resolv.conf,
-		// /etc/hostname and /etc/hosts this way; statfs reports the whole
-		// backing filesystem for each, so they show up as duplicate
-		// full-size "disks" and bury the mounts that actually matter.
+		// 跳过单文件 bind mount。容器以这种方式挂载 /etc/resolv.conf、
+		// /etc/hostname 和 /etc/hosts；statfs 会为每个文件报告整个
+		// 底层文件系统，因此它们会显示为重复的满容量
+		// “磁盘”，淹没真正重要的挂载点。
 		if fi, err := os.Stat(mount); err != nil || !fi.IsDir() {
 			continue
 		}
@@ -57,7 +57,7 @@ func collectDisks() ([]DiskInfo, error) {
 
 		var st syscall.Statfs_t
 		if err := syscall.Statfs(mount, &st); err != nil {
-			continue // unreadable mount (permissions, stale NFS) — skip quietly
+			continue // 挂载点不可读（权限、NFS 陈旧）——静默跳过
 		}
 		bsize := uint64(st.Bsize)
 		total := st.Blocks * bsize
@@ -78,8 +78,8 @@ func collectDisks() ([]DiskInfo, error) {
 	return out, nil
 }
 
-// unescapeMount decodes the octal escapes the kernel uses in /proc/mounts
-// for spaces and tabs in mount paths (e.g. "/mnt/my\040disk").
+// unescapeMount 解码内核在 /proc/mounts 中为挂载路径里的
+// 空格和制表符使用的八进制转义（例如 "/mnt/my\040disk"）。
 func unescapeMount(s string) string {
 	r := strings.NewReplacer(`\040`, " ", `\011`, "\t", `\012`, "\n", `\134`, `\`)
 	return r.Replace(s)

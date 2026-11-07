@@ -1,6 +1,5 @@
-// Package docs holds no code: its test keeps the README and the pages in
-// docs/ linked correctly — every relative link names an existing file, and
-// every #anchor an existing heading of that file.
+// Package docs 不包含代码：它的测试保证 README 与 docs/ 中的页面链接正确——
+// 每个相对链接都指向存在的文件，每个 #anchor 都指向该文件中的现有标题。
 package docs
 
 import (
@@ -18,8 +17,8 @@ var (
 	reHeading = regexp.MustCompile(`^#{1,6}\s+(.*)$`)
 )
 
-// anchors returns a markdown file's heading anchors, GitHub style: lower
-// case, punctuation dropped, spaces to hyphens, repeats numbered -1, -2.
+// anchors 返回 Markdown 文件的标题锚点，采用 GitHub 风格：转小写、
+// 去掉标点、空格转连字符、重复标题依次编号 -1、-2。
 func anchors(t *testing.T, path string) map[string]bool {
 	t.Helper()
 	raw, err := os.ReadFile(path)
@@ -56,7 +55,7 @@ func anchors(t *testing.T, path string) map[string]bool {
 	return out
 }
 
-// links outside code blocks.
+// links 返回代码块之外的链接。
 func links(t *testing.T, path string) []string {
 	raw, _ := os.ReadFile(path)
 	var out []string
@@ -121,9 +120,9 @@ func TestDocsLinksResolve(t *testing.T) {
 	}
 }
 
-// A release archive ships the binary with the Makefile's DATA_DIRS, the
-// README and AGENTS.md. Every top-level path the README links to has to be
-// in it, or a downloaded release points at files it does not contain.
+// 发布归档会随二进制分发 Makefile 的 DATA_DIRS、README 和 AGENTS.md。
+// README 链接到的每个顶层路径都必须包含在其中，否则下载的发行版会
+// 指向它并不包含的文件。
 func TestReleasePayloadHoldsReadmeLinks(t *testing.T) {
 	mk, err := os.ReadFile("../../Makefile")
 	if err != nil {

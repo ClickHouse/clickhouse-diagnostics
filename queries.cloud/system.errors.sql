@@ -9,8 +9,8 @@ SELECT
     left(toString(last_error_trace), 500)  AS last_error_trace
 FROM clusterAllReplicas(default, system.errors)
 WHERE value > 0
--- 100 per replica, not 100 over the cluster: the dashboard sums the
--- replicas' counters per error, and a cluster-wide cap taken before that
--- sum could drop the error that is most frequent overall.
+-- 每个副本 100 条，而不是整个集群 100 条：dashboard 会汇总
+-- 各副本按错误码的计数器，若在汇总前做全集群截断，
+-- 可能丢掉整体上最频繁的错误。
 ORDER BY value DESC
 LIMIT 100 BY hostname

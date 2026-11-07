@@ -1,5 +1,5 @@
 -- tier: essential
--- Gov: policy, volume and disk names are hashed (same salt as system.disks.name).
+-- Gov：policy、volume 和磁盘名会被哈希（与 system.disks.name 相同的盐）。
 SELECT
     hex(SHA256(concat(policy_name, '%salt%')))                    AS policy_name,
     hex(SHA256(concat(volume_name, '%salt%')))                    AS volume_name,

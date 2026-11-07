@@ -1,113 +1,113 @@
 ---
 name: clickhouse-diagnostic
 description: >-
-  Analyse a ClickHouse support-diagnostic bundle (clickhouse_diagnostic_*.tar.gz, or clickhouse_backup_*.tar.gz from older releases, or
-  its extracted folder: system.* JSONL dumps, dashboard.html, host_info.json,
-  logs/, configuration/) and produce an evidence-backed health summary — parts
-  and merges, replication and Keeper, disk, memory/CPU, queries, inserts,
-  mutations/TTL, host tunables — with recommended actions and follow-up prompts.
-  Also explains how to run clickhouse-diagnostic (grants, modes, windows,
-  query analysis, gov mode) and what to re-collect. Use when the user mentions a
-  diagnostic bundle, support bundle, clickhouse_diagnostic, clickhouse_backup, dashboard.html,
-  "run the diagnostic", "what does this file in the bundle mean", or asks why
-  their ClickHouse server is slow, OOMing, has too many parts, is read-only or
-  is losing inserts and has (or can collect) a bundle. Works offline; network
-  only for optional version research on GitHub.
+  分析ClickHouse support-diagnostic bundle（clickhouse_diagnostic_*.tar.gz，或旧版本的
+  clickhouse_backup_*.tar.gz，或其解压目录：system.* JSONL转储、dashboard.html、
+  host_info.json、logs/、configuration/），产出有证据支撑的健康摘要——parts
+  与merges、复制与Keeper、磁盘、内存/CPU、查询、插入、
+  mutations/TTL、主机可调参数——并给出建议操作与后续提示。
+  同时说明如何运行clickhouse-diagnostic（grants、模式、窗口、
+  查询分析、gov mode）以及需要重新采集哪些内容。当用户提到
+  diagnostic bundle、support bundle、clickhouse_diagnostic、clickhouse_backup、dashboard.html、
+  "run the diagnostic"、"what does this file in the bundle mean"，或询问为什么
+  其ClickHouse服务器变慢、OOM、parts过多、处于只读状态或
+  正在丢失插入，并且已有（或可以采集）bundle时使用。可离线工作；仅在做可选的
+  版本研究时访问GitHub。
 user-invocable: true
 ---
 
-# clickhouse-diagnostic — read a bundle, explain the server
+# clickhouse-diagnostic — 读取bundle，解释服务器
 
-The bundle is produced by `clickhouse-diagnostic` (this repository). It is a **read-only snapshot of one ClickHouse server or service**: ~20 `system.*` tables as JSONL, alert results, optionally host facts, config and server logs. Your job is to turn it into a short, evidence-backed summary the owner can act on, and to say clearly what the bundle cannot show.
+bundle（诊断包）由`clickhouse-diagnostic`（本仓库）生成。它是**一台ClickHouse服务器或服务的只读快照**：约20张`system.*`表（JSONL格式）、alert结果、可选的host facts、配置和服务器日志。你的任务是把这份快照变成一份简短、有证据支撑、所有者可据此行动的摘要，并明确说明bundle无法展示什么。
 
-## The one rule: evidence first, bundle untouched
+## 唯一准则：证据优先，bundle原封不动
 
-Every finding cites `file → column → value`. Never modify the bundle. Never send bundle content to any service, and never paste identifiers into anything that leaves the machine without the privacy gate (step 7). Never call anything a "known issue" — say "resembles" / "consistent with" and let the owner or ClickHouse confirm. If the data does not cover the question, say so and give the exact re-collection command instead of guessing.
+每一条finding（发现）都要引用`file → column → value`。绝不修改bundle。绝不把bundle内容发送给任何服务，也绝不把标识符粘贴到任何离开本机的内容中——除非先通过隐私闸门（第7步）。永远不要把任何问题称为 "known issue"——应说 "resembles" / "consistent with"，由所有者或ClickHouse确认。如果数据未覆盖该问题，就直说，并给出精确的重新采集命令，而不是猜测。
 
-## When to use / not use
+## 何时使用 / 何时不适用
 
-- **Use** for: a `clickhouse_diagnostic_*.tar.gz` (older releases: `clickhouse_backup_*.tar.gz`) or extracted folder; questions about what a bundle file/column means; "how do I run the tool / which grants / which mode"; "what should I collect for this problem".
-- **Don't use** for: live troubleshooting of a running server (no bundle) — offer to explain how to collect one; problems outside ClickHouse (application code, Kafka brokers, cloud IAM) beyond what the bundle shows.
+- **使用**场景：`clickhouse_diagnostic_*.tar.gz`（旧版本为`clickhouse_backup_*.tar.gz`）或其解压目录；关于bundle中某个文件/列含义的问题；"如何运行该工具 / 需要哪些grants / 用哪个模式"；"针对这个问题应该采集什么"。
+- **不适用**场景：对正在运行的服务器做实时排障（没有bundle）——可以提议说明如何采集一份；ClickHouse之外的问题（应用代码、Kafka broker、云IAM）超出bundle能展示的范围。
 
-## Read-before-you-act table (lazy loading — read only what the step needs)
+## 动手前先读表（惰性加载——只读当前步骤需要的内容）
 
-| When | Read |
+| 何时 | 阅读 |
 |---|---|
-| Before opening any file in a bundle | `references/bundle-layout.md` (what is in the archive, columns, encodings) |
-| Deciding what to compute from a given file, or what "healthy" looks like for it | `references/file-guide.md` — one entry per file: why we run it, question it answers, read-first list, healthy baseline, red flags, traps; plus scenario walkthroughs (replicated cluster under load, TOO_MANY_PARTS, 241, disk, upgrade regression, crash) |
-| Writing any query/`jq`/Python over the JSONL | `references/reading-recipes.md` |
-| Step 2 (health pass) | `references/health-checks.md` |
-| An error code appears (`system.errors`, `exception_code`, `Code: NNN`) | `references/error-codes.md` |
-| A finding matches a symptom (parts, memory, Keeper, mutations, …) | `references/known-patterns.md` — scan its quick-reference table, open only matching entries |
-| The user asks about their version, a setting's default, a bug, or an upgrade (network) | `references/clickhouse-source.md` |
-| The user has no bundle, the window is wrong, or data is missing | `references/running-the-tool.md` |
-| Writing the summary | `references/summary-template.md` |
-| Before any text or file leaves the machine | `references/privacy.md` |
+| 打开bundle中任何文件之前 | `references/bundle-layout.md`（归档里有什么、列、编码） |
+| 决定从某个文件里算什么，或它"健康"时是什么样 | `references/file-guide.md` — 每个文件一个条目：为什么运行它、它回答什么问题、先读清单、健康基线、危险信号、陷阱；另有场景走查（高负载下的复制集群、TOO_MANY_PARTS、241、磁盘、升级回归、崩溃） |
+| 对JSONL编写任何query/`jq`/Python | `references/reading-recipes.md` |
+| 第2步（健康检查） | `references/health-checks.md` |
+| 出现错误码（`system.errors`、`exception_code`、`Code: NNN`） | `references/error-codes.md` |
+| 某条finding与某个症状吻合（parts、内存、Keeper、mutations……） | `references/known-patterns.md` — 扫描其速查表，只打开匹配的条目 |
+| 用户询问其版本、某个设置的默认值、某个bug或升级（需要网络） | `references/clickhouse-source.md` |
+| 用户没有bundle、时间窗口不对或数据缺失 | `references/running-the-tool.md` |
+| 撰写摘要 | `references/summary-template.md` |
+| 任何文本或文件离开本机之前 | `references/privacy.md` |
 
-## Workflow
+## 工作流程
 
-### 0 — Intake and coverage (mandatory before any conclusion)
-1. Locate the input: a `.tar.gz`, or a folder containing `system.version_*.jsonl`, or a parent `clickhouse_results/` with one `clickhouse_diagnostic_*` (or older `clickhouse_backup_*`) inside. Ask if there are several.
-2. Run the deterministic pre-pass — it extracts safely (to a temp dir), inventories the files and computes the checks that need no SQL:
+### 0 — 接收与覆盖范围（下任何结论前必做）
+1. 定位输入：一个`.tar.gz`，或一个包含`system.version_*.jsonl`的目录，或一个父目录`clickhouse_results/`（其中有一个`clickhouse_diagnostic_*`，旧版本为`clickhouse_backup_*`）。如果有多个，先询问。
+2. 运行确定性的预扫描——它会安全解压（到临时目录）、清点文件，并计算不需要SQL的检查项：
    ```bash
-   python3 <skill-dir>/scripts/inspect_bundle.py <bundle.tar.gz|dir>          # markdown
+   python3 <skill-dir>/scripts/inspect_bundle.py <bundle.tar.gz|dir>          # markdown 输出
    python3 <skill-dir>/scripts/inspect_bundle.py <bundle> --json > /tmp/inspect.json
    ```
-   `<skill-dir>` is the directory holding this SKILL.md. Reuse the printed extraction directory (`B=…`) for every later recipe.
+   `<skill-dir>`是存放本SKILL.md的目录。后续所有recipe都复用打印出的解压目录（`B=…`）。
 
-   If it exits 2 with `bundle was collected with -output-format native|tsv`, **stop**: the whole skill reads `.jsonl` only, so nothing downstream can be trusted on that bundle. Say the bundle is unreadable and ask for a re-collection with the default `-output-format jsonl` (bundle-layout §1). Never substitute your own reading of the `.native`/`.tsv` files, and never report zeros from them.
-3. State the **coverage** in ≤ 6 lines: ClickHouse version; mode (cloud/onprem/gov — detection rules in bundle-layout §3); **which node** the system tables describe and how long it had been up (`execution_log.txt` header `node:` / `uptime:` — a node restarted < 24 h before collection is post-restart evidence; a `warnings:` line means the collector saw a load balancer or a mixed-host run; a `collection:` line means an onprem run switched to cloud collection on a SharedMergeTree cluster, or stayed on one node and why); collection timestamp; query_log window actually covered; text_log rows and span; files empty/absent and why (healthy-empty vs not collected); `TRUNCATED` log headers; whether `host_info.json` describes the server or another machine; signs the collector lacked grants (only `system` tables visible, 497 in `system.errors`); and, when the server has materialized views, whether `query_views_log` was collected — the pre-pass raises an HC-0 warning when MVs exist but the file does not, because "no MV findings" then means no telemetry, not a healthy pipeline.
-4. If the user's incident is outside the covered window, say so now and propose the `-from/-to` re-run (running-the-tool §8). Continue with what the bundle *does* cover.
+   如果它以退出码2退出并输出`bundle was collected with -output-format native|tsv`，**立即停止**：整个skill只读取`.jsonl`，该bundle后续的任何结论都不可信。告知该bundle不可读，并要求用默认的`-output-format jsonl`重新采集（bundle-layout §1）。绝不要自行解读`.native`/`.tsv`文件来替代，也绝不要从这些文件报出零值。
+3. 用不超过6行说明**覆盖范围**：ClickHouse版本；模式（cloud/onprem/gov——判定规则见bundle-layout §3）；system表描述的是**哪个节点**、该节点已运行多久（`execution_log.txt`头部的`node:` / `uptime:`——采集前24小时内重启过的节点属于重启后证据；`warnings:`行表示collector看到了负载均衡器或混主机运行；`collection:`行表示onprem运行在SharedMergeTree集群上切换成了cloud采集，或停留在单节点及其原因）；采集时间戳；query_log实际覆盖的时间窗口；text_log的行数与时间跨度；为空/缺失的文件及原因（健康为空vs未采集）；`TRUNCATED`日志头部；`host_info.json`描述的是本服务器还是另一台机器；collector缺少grant的迹象（只能看到`system`表、`system.errors`中出现497）；以及当服务器有materialized view时，是否采集了`query_views_log`——存在MV但没有该文件时，预扫描会给出HC-0警告，因为此时"没有MV finding"意味着没有遥测，而不是管道健康。
+4. 如果用户的故障不在覆盖窗口内，现在就说明，并提议用`-from/-to`重新运行（running-the-tool §8）。然后基于bundle实际覆盖的内容继续。
 
-### 1 — Triage the headline
-From the pre-pass and `dashboard.html` `DATA.alerts` / `alerts_summary.json`: fired alerts (never count "could not run" as findings), `crash_log` rows, read-only replicas, disks < 15 %, top `system.errors` codes relative to uptime (`asynchronous_metrics.Uptime`), `replication_queue.last_exception`, the **incident hours** — the dashboard's Keeper Health verdict table (same rule as HC-3.8), hours where `metric_log_coordination` shows Keeper hardware exceptions, `part_log` shows inserts without merges, or `query_log` exceptions spike (the pre-pass prints an hourly timeline). Write the 1–3 headline bullets; everything else is detail.
+### 1 — 对headline做分诊
+从预扫描结果和`dashboard.html`的`DATA.alerts` / `alerts_summary.json`中提取：已触发的alert（绝不要把"无法运行"计为finding）、`crash_log`行数、只读replica、可用空间 < 15% 的磁盘、按运行时长（`asynchronous_metrics.Uptime`）衡量的top `system.errors`错误码、`replication_queue.last_exception`、**事故时段**——dashboard的Keeper Health判定表（与HC-3.8同一规则）、`metric_log_coordination`出现Keeper硬件异常的时段、`part_log`只有插入没有merge的时段，或`query_log`异常激增的时段（预扫描会打印按小时的时间线）。写出1–3条headline要点；其余都是细节。
 
-### 2 — Area health pass
-Walk `health-checks.md` HC-1 → HC-11 in order — and run the **Keeper health test** (HC-3.8: hardware exceptions *and* transactions per hour against the 7-day median) whenever any 999/319/571, read-only replica or stalled-merge hour appears — opening the `file-guide.md` entry for each file you touch and using the recipes in `reading-recipes.md` (`clickhouse local` if available, else Python; `jq` only for non-numeric filtering). Record one status per area with its single most specific evidence line. Respect the two data traps: `query_log_details` rows are duplicated per table (`LEFT ARRAY JOIN tables`) — fix one `tables` value before summing; `system.errors.value` is cumulative since restart — compare with uptime, never treat as a rate. Read `system.parts` with `active = 1` only.
+### 2 — 分区域健康检查
+按顺序走`health-checks.md` HC-1 → HC-11，并在出现任何999/319/571、只读replica或merge停滞的时段时运行 **Keeper健康测试**（HC-3.8：硬件异常*和*每小时事务数对比7天中位数）；对接触到的每个文件打开`file-guide.md`中的对应条目，并使用`reading-recipes.md`中的recipe（有`clickhouse local`就用它，否则用Python；`jq`只用于非数值过滤）。每个区域记录一个状态，并附上一条最具体的证据行。注意两个数据陷阱：`query_log_details`的行会按表重复（`LEFT ARRAY JOIN tables`）——求和前先固定一个`tables`值；`system.errors.value`是自重启以来的累计值——要与uptime对比，绝不能当作速率。读取`system.parts`时只用`active = 1`。
 
-### 3 — Query analysis (only if `query_analysis/` exists)
-Read `file-guide.md` → *query_analysis/* first. Order matters:
-1. **Identify the shape** from `query_details`: `tables` (a MergeTree table, or a table function such as `_table_function.s3Cluster`/`s3`/`remote`), `is_initial_query`, `query_kind`, `user`/`initial_user`. If `is_initial_query = 0`, the hash is a **worker sub-query** of a distributed statement — the "executions" are shards of one run, and slow-vs-fast measures data skew, not a regression. Say so and analyse per-replica shares.
-2. **Time budget** from `profile_events` of the focus execution: `query_duration_ms` as wall (not `RealTimeMicroseconds`, which is summed over threads) vs `OSCPUVirtualTimeMicroseconds` (CPU used), `OSCPUWaitMicroseconds` (CPU throttled), `NetworkSendElapsedMicroseconds` (shipping rows), `ParquetFetchWaitTimeMicroseconds`/`ReadBufferFromS3Microseconds`/`S3ReadMicroseconds` (object storage), `DiskReadElapsedMicroseconds`, `MemoryTracker*`. Name the dominant component before anything else.
-3. **Runs vs shards**: `executions_timeline` + `hash_by_host` — same `ts` cluster on different hosts with rows proportional to duration = shards; spread over time on any host = runs.
-4. `profile_events_compare` (largest `|delta|`) only when step 3 says "runs"; `text_log_parts` ("Selected N/N parts" = no pruning) and `tables_for_query` only when `tables` is a MergeTree table; `text_log_full` for the onset (`Reading object…`, `Selected…`, the longest gap between lines); `failed_*` for when errors started.
-5. Empty files are expected for shapes they do not apply to (table functions → `text_log_parts`, `tables_for_query`; no failures → `failed_*`); say "not applicable", not "not collected".
-Tie the result to P-50…P-56.
+### 3 — 查询分析（仅当存在`query_analysis/`时）
+先读`file-guide.md` → *query_analysis/*。顺序很重要：
+1. **识别查询形态**（依据`query_details`）：`tables`（一张MergeTree表，或`_table_function.s3Cluster`/`s3`/`remote`之类的表函数）、`is_initial_query`、`query_kind`、`user`/`initial_user`。如果`is_initial_query = 0`，该hash属于某个分布式语句的**worker子查询**——所谓"执行"是一次运行的各个分片，慢与快的差异衡量的是数据倾斜，而不是回归。要说明这一点，并按replica份额分析。
+2. **时间预算**：从重点执行的`profile_events`中取`query_duration_ms`作为墙钟时间（不要用`RealTimeMicroseconds`，那是按线程求和的），对比`OSCPUVirtualTimeMicroseconds`（消耗的CPU）、`OSCPUWaitMicroseconds`（被限流的CPU）、`NetworkSendElapsedMicroseconds`（传输行数）、`ParquetFetchWaitTimeMicroseconds`/`ReadBufferFromS3Microseconds`/`S3ReadMicroseconds`（对象存储）、`DiskReadElapsedMicroseconds`、`MemoryTracker*`。先说出占主导的组件，再谈其他。
+3. **多次运行vs分片**：`executions_timeline` + `hash_by_host`——不同主机上在相同`ts`聚成一簇、行数与时长成比例 = 分片；在任何主机上分散于不同时间 = 多次运行。
+4. 只有当第3步判定为"多次运行"时才看`profile_events_compare`（最大的`|delta|`）；只有当`tables`是MergeTree表时才看`text_log_parts`（"Selected N/N parts" = 未做裁剪）和`tables_for_query`；用`text_log_full`定位起始点（`Reading object…`、`Selected…`、行间最长间隔）；用`failed_*`确定错误开始的时间。
+5. 对不适用的查询形态，空文件是正常的（表函数 → `text_log_parts`、`tables_for_query`；无失败 → `failed_*`）；应说"不适用"，而不是"未采集"。
+把结论对应到P-50…P-56。
 
-### 4 — Pattern match
-For each warning/critical finding, scan the quick-reference table in `known-patterns.md` and open the matching entry. Use its *Verify* step with a second, independent source in the bundle before promoting the match to a recommendation. Use the language rules from `clickhouse-source.md` §4.
+### 4 — 模式匹配
+对每条warning/critical级别的finding，扫描`known-patterns.md`的速查表并打开匹配条目。在把匹配结果升级为建议之前，先用bundle中第二个独立来源执行其 *Verify* 步骤。措辞规则见`clickhouse-source.md` §4。
 
-### 5 — Version research (optional, network, ask first)
-Only if the user wants it or a finding smells version-specific (P-30, P-31, P-54): resolve `version` → tag, check release notes between the customer's patch and the latest patch of the minor, verify settings in source at the tag, search issues by exact error text. Follow the four-step citation protocol; never invent issue numbers.
+### 5 — 版本研究（可选，需要网络，先征得同意）
+仅在用户需要、或某条finding看起来与版本相关（P-30、P-31、P-54）时才做：把`version`解析为tag，检查客户补丁版本与该minor最新补丁之间的release notes，在对应tag的源码中核实设置，用精确的错误文本搜索issue。遵循四步引用协议；绝不要编造issue编号。
 
-### 6 — Write the summary
-Use `summary-template.md`: coverage → headline → scorecard → findings (severity-ordered, each with evidence, threshold, action, confidence) → recommendations → **suggested follow-up prompts** → what to re-collect → caveats. Measurements, not attributions. Numbers with their thresholds. ≤ 7 findings.
+### 6 — 撰写摘要
+使用`summary-template.md`：覆盖范围 → headline → scorecard → findings（按严重程度排序，每条包含证据、阈值、操作、置信度）→ 建议 → **建议的后续提示** → 需要重新采集的内容 → 注意事项。写测量结果，不写归因。数字要带阈值。findings不超过7条。
 
-### 7 — Privacy gate
-Before any output is pasted into a ticket, shared, or written to a file outside the scratch dir: run the checklist in `privacy.md` (hostnames, IPs, db/table/column/user names, query literals, paths, config excerpts). Never ask for the gov salt; use a mapping CSV only locally. Do not write into the bundle directory.
+### 7 — 隐私闸门
+在任何输出被粘贴进工单、分享，或写入scratch目录之外的文件之前：执行`privacy.md`中的检查清单（主机名、IP、库/表/列/用户名、查询字面量、路径、配置片段）。绝不要索取gov salt；映射CSV只在本地使用。不要写入bundle目录。
 
-## Running the tool (when the user has no bundle)
+## 运行工具（当用户没有bundle时）
 
-Point them to `references/running-the-tool.md`: grants (`SHOW DATABASES, SHOW TABLES, SHOW COLUMNS ON *.*` + `SELECT ON system.*`; cloud adds `REMOTE` + `CREATE TEMPORARY TABLE`), `-mode onprem|cloud|gov`, run from the directory that contains `queries.<mode>/`, `-from/-to` for the incident window, `--normalized-query-hash`/`--query-id` for one query, `-dry-run` for a security review. Tell them what the run will and will not collect before they send anything to a third party. **Password:** the CLI takes `-password`, then `CLICKHOUSE_PASSWORD` from the environment, then a TTY prompt — from an agent shell the prompt reads empty and the run fails with 401 / code 194. Prefer `export CLICKHOUSE_PASSWORD=…` and no `-password` (it stays out of `ps`); never `VAR=x cmd -password "$VAR"` on one line, never write the password into the repository, and remind the user to rotate it afterwards (running-the-tool.md §2a).
+让他们阅读`references/running-the-tool.md`：grants（`SHOW DATABASES, SHOW TABLES, SHOW COLUMNS ON *.*` + `SELECT ON system.*`；cloud模式还需`REMOTE` + `CREATE TEMPORARY TABLE`）、`-mode onprem|cloud|gov`、在包含`queries.<mode>/`的目录中运行、用`-from/-to`指定事故窗口、用`--normalized-query-hash`/`--query-id`针对单个查询、用`-dry-run`做安全审查。在他们把任何内容发给第三方之前，说明这次运行会采集什么、不会采集什么。**密码：** CLI依次取`-password`、环境变量`CLICKHOUSE_PASSWORD`、TTY提示——在agent shell中提示读取为空，运行会以401 / code 194失败。优先使用`export CLICKHOUSE_PASSWORD=…`且不传`-password`（这样它不会出现在`ps`中）；绝不要在同一行写`VAR=x cmd -password "$VAR"`，绝不要把密码写进仓库，并提醒用户事后轮换密码（running-the-tool.md §2a）。
 
-## Hard negatives
+## 硬性禁止
 
-- Do **not** sum `query_log_details` across rows without fixing one `tables` value (multiply-counting).
-- Do **not** treat `system.errors.value` as a rate; pair it with uptime or a second bundle.
-- Do **not** parse quoted 64-bit integers as JavaScript/`jq` numbers.
-- Do **not** conclude "no errors" from `system.text_log` (24 h, 2000-row cap) — check its actual span.
-- Do **not** trust `host_info.json` when the tool ran on a different machine than the server.
-- Do **not** read an `onprem` bundle from a SharedMergeTree / `cloud_mode = 1` cluster as the cluster unless its `execution_log.txt` header says `collection: onprem → cloud` (v0.7+ switches by itself when the grants allow) — and even then only the per-replica tables (query_log, part_log, errors, metric_log, text_log …) cover every replica; `parts`, `tables`, `replicas`, `replication_queue`, `mutations`, `detached_parts` are one replica's copy. Without that line it is one replica of N (parts, errors, part_log, query_log, text_log are per replica): say which node (`node:` header), and propose a re-run with `REMOTE` + `CREATE TEMPORARY TABLE` granted, or `-mode cloud`.
-- Do **not** trust a bundle whose header carries a load-balancer **`Warning:`** as a picture of any single node: every system table came from whichever replica answered that query. The prefix matters — in cloud mode the same line is a **`Note:`**, because a Cloud endpoint is load-balanced across the service's replicas by design, there is no per-replica endpoint to prefer, and the collection is built for it: the per-replica tables fan out and the shared ones are read once. Read the note for *which* replica served the shared tables, not as a reason to distrust the bundle.
-- Do **not** conclude "Keeper was fine" from `query_log`: background merges, fetches and part commits never appear there. Read `metric_log_coordination_3_days` (`ZooKeeperHardwareExceptions` per hour) and `part_log` errors first.
-- Do **not** read an **essential** bundle (`execution_log.txt` `collect: essential …`, the dashboard banner, the pre-pass's first finding) like a full one: its windows are 1 day and the per-table collectors (parts, tables, columns, detached parts, clusters, stack_trace …) were skipped on purpose — absent files say nothing about health. The reason it was essential (load, memory, concurrency, read-only replicas, no Keeper session) is itself a finding; ask for `-collect full` once the node is healthy.
-- Do **not** treat an absent `zookeeper_log_errors_1_day` / `blob_storage_log_7_days` as evidence of anything — both tables exist only when configured.
-- Do **not** treat absent `aggregated_zookeeper_log_*` files as evidence — they are collected only from servers ≥ 26.3. When they are present and Keeper is implicated, read them (who / when / where — HC-3.21–3.23, P-62–P-68) **before** asking the customer for `zookeeper_log`; for an incident older than their windows, give the customer the live queries in `reading-recipes.md` §3b.
-- Do **not** call anything a known issue, name a fix version you have not verified, or cite an issue you have not opened.
-- Do **not** promote a measurement to an attribution in customer-facing text.
-- Do **not** modify, re-pack, or upload the bundle; do not paste `configuration/`, `logs/`, `host_info.json` or DDL verbatim outside the machine.
-- Do **not** rely on alert *names* for error codes — check the code (tool versions before September 2026 shipped a `too_many_simultaneous_queries` rule that filtered 252 = TOO_MANY_PARTS, and a `too_many_parts` message citing "code 497", which is ACCESS_DENIED; bundles from those versions carry the mislabelled alert text).
+- **不要**在未固定`tables`值的情况下对`query_log_details`跨行求和（会重复计数）。
+- **不要**把`system.errors.value`当作速率；要把它与uptime或另一份bundle配对使用。
+- **不要**把带引号的64位整数解析为JavaScript/`jq`数字。
+- **不要**根据`system.text_log`得出"没有错误"的结论（24小时、2000行上限）——要检查它实际的时间跨度。
+- 当工具运行在与服务器不同的机器上时，**不要**信任`host_info.json`。
+- **不要**把来自SharedMergeTree / `cloud_mode = 1`集群的`onprem` bundle当作整个集群来读，除非其`execution_log.txt`头部写着`collection: onprem → cloud`（v0.7+ 在grants允许时会自行切换）——即便有这一行，也只有按replica采集的表（query_log、part_log、errors、metric_log、text_log……）覆盖每个replica；`parts`、`tables`、`replicas`、`replication_queue`、`mutations`、`detached_parts`只是某一个replica的副本。没有这一行，它就是N个replica中的一个（parts、errors、part_log、query_log、text_log都是按replica的）：要说明是哪个节点（`node:`头部），并提议授予`REMOTE` + `CREATE TEMPORARY TABLE`后重跑，或使用`-mode cloud`。
+- 头部带负载均衡器 **`Warning:`** 的bundle，**不要**当作任何单一节点的全貌：每张system表都来自当时应答该查询的那个replica。前缀很关键——在cloud模式下同一行是 **`Note:`**，因为Cloud端点本来就按设计在服务的各replica之间做负载均衡，没有可优先选择的按replica端点，采集也是为此设计的：按replica的表会扇出，共享表只读一次。读这条note是为了知道*哪个* replica提供了共享表，而不是作为不信任该bundle的理由。
+- **不要**仅凭`query_log`得出"Keeper没问题"的结论：后台merges、fetches和part提交从不出现在那里。要先读`metric_log_coordination_3_days`（每小时的`ZooKeeperHardwareExceptions`）和`part_log`的错误。
+- **不要**把 **essential** bundle（`execution_log.txt`的`collect: essential …`、dashboard横幅、预扫描的第一条finding）当作完整bundle来读：它的窗口只有1天，且按表采集的collector（parts、tables、columns、detached parts、clusters、stack_trace……）是故意跳过的——文件缺失说明不了健康状况。之所以退化为essential（负载、内存、并发、只读replica、无Keeper会话），本身就是一条finding；等节点恢复健康后要求用`-collect full`重新采集。
+- **不要**把缺失的`zookeeper_log_errors_1_day` / `blob_storage_log_7_days`当作任何证据——这两张表只在配置后才存在。
+- **不要**把缺失的`aggregated_zookeeper_log_*`文件当作证据——它们只从 ≥ 26.3的服务器采集。如果存在且怀疑涉及Keeper，要在向客户索取`zookeeper_log` **之前**先读它们（谁 / 何时 / 何地——HC-3.21–3.23、P-62–P-68）；对于早于其窗口的事故，把`reading-recipes.md` §3b中的实时查询交给客户。
+- **不要**把任何问题称为已知问题、说出你未核实过的修复版本，或引用你未打开过的issue。
+- **不要**在面向客户的文本中把测量结果升级为归因。
+- **不要**修改、重新打包或上传bundle；不要把`configuration/`、`logs/`、`host_info.json`或DDL原文粘贴到本机之外。
+- **不要**依赖alert的*名称*来判断错误码——要核对错误码（2026年9月之前的工具版本带有一条`too_many_simultaneous_queries`规则，实际过滤的是252 = TOO_MANY_PARTS；还有一条`too_many_parts`消息写成 "code 497"，而497是ACCESS_DENIED；这些版本产出的bundle会带有标注错误的alert文本）。
 
-## Output style
+## 输出风格
 
-Brief. Short paragraphs, one idea per line, no manual wrapping. Tables for the scorecard and evidence; prose for reasoning. Cite bundle files by glob (`system.parts_*.jsonl`). End with the follow-up prompts so the user can go one level deeper in a single message.
+简洁。短段落，一行一个观点，不手动折行。scorecard和证据用表格；推理用散文。用glob引用bundle文件（`system.parts_*.jsonl`）。以后续提示结尾，让用户能用一条消息再深入一层。

@@ -1,5 +1,5 @@
 -- tier: essential
--- 24.1+ variant: adds is_killed (system.mutations gained it in 24.1); the root file is the 22.8 baseline.
+-- 24.1+ 变体：增加 is_killed（system.mutations 在 24.1 获得它）；根目录文件是 22.8 基线。
 SELECT 
   hex(SHA256(concat(database, '%salt%'))) AS database,
   hex(SHA256(concat(table, '%salt%'))) AS table,
@@ -8,6 +8,6 @@ SELECT
   create_time,
   parts_to_do_names,
   parts_to_do,
-  -- 24.1+: a KILL MUTATION in progress is not a stuck mutation
+  -- 24.1+：正在进行的 KILL MUTATION 不是卡住的 mutation
   is_killed
 FROM system.mutations

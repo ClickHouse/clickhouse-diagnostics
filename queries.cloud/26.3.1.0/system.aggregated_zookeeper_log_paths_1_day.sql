@@ -1,35 +1,35 @@
--- Which Keeper paths took the load over the last day, across every replica,
--- and which are growing:
--- the 50 path classes with the most requests plus the 50 with the most net
--- creates (creates − removes), one row each. Built from
--- system.aggregated_zookeeper_log (on by default since 25.9).
---   path        parent path with every purely numeric segment replaced by N,
---               so thousands of children (…/_objects/15536/.dir,
---               …/block_numbers/20260918) add up to one class; table UUIDs
---               and names are kept — they say WHICH table (shard numbers
---               such as /tables/01/ also become N)
---   raw_paths   how many distinct paths the class merges
---   ops         every request on the class, sub-requests inside Multi
---               included (a batched read storm lives there); in_multi the
---               part that came inside Multi / MultiRead
---   creates / removes / net_creates   SUCCESSFUL create and remove requests
---               (a CreateIfNotExists answered ZNODEEXISTS or a Remove answered
---               ZNONODE changes nothing and is not counted). net_creates is a
---               request balance, not a znode count: one RemoveRecursive deletes
---               a whole subtree. A class with creates far above removes is
---               consistent with growth — confirm with zk_znode_count in
---               keeper/<member>.txt
---   avg_latency_us  weighted, standalone requests only
---   replicas    most replicas any one raw path of the class was used from
--- Cost: one scan of the day, grouped by raw path first (memory is per
--- distinct path, not per row), normalised on the distinct paths only.
--- Multi / MultiRead envelopes carry no path and are left out.
--- Operations are compared by Enum16 code, not name — the query check refuses
--- the word CREATE anywhere outside comments: creates = Create (1),
--- CreateIfNotExists (502); removes = Remove (2), RemoveRecursive (503),
--- TryRemove (505); reads = Exists (3), Get (4), List (12), FilteredList
--- (500), FilteredListWithStatsAndData (506), ListRecursive (507).
--- Version-only (26.3+, needs `is_subrequest`): older servers skip this file.
+-- 过去一天哪些 Keeper 路径承载了负载（覆盖每个副本），
+-- 以及哪些在增长：
+-- 请求最多的 50 个路径类别，加上净创建最多的 50 个
+-- 类别（creates − removes），每个类别一行。数据来自
+-- system.aggregated_zookeeper_log（自 25.9 起默认开启）。
+--   path        父路径，其中每个纯数字段替换为 N，
+--               这样数千个子路径（…/_objects/15536/.dir、
+--               …/block_numbers/20260918）会归为一个类别；表 UUID
+--               和名称保留——它们说明是“哪张”表（shard 编号
+--               例如 /tables/01/ 也会变成 N）
+--   raw_paths   该类别合并了多少个不同路径
+--   ops         该类别上的每个请求，包括 Multi 内部的
+--               子请求（批量读取风暴就在其中）；in_multi 是
+--               来自 Multi / MultiRead 内部的部分
+--   creates / removes / net_creates   成功的 create 和 remove 请求
+--               （CreateIfNotExists 返回 ZNODEEXISTS，或 Remove 返回
+--               ZNONODE 时没有改变任何东西，不计入）。net_creates 是
+--               请求平衡，不是 znode 计数：一次 RemoveRecursive 会删除
+--               整个子树。creates 远高于 removes 的类别
+--               与增长一致——请用 keeper/<member>.txt 中的 zk_znode_count
+--               确认
+--   avg_latency_us  加权，仅统计独立请求
+--   replicas    该类别中任一路径被使用过的最大副本数
+-- 开销：扫描一天的数据，先按 raw path 分组（内存取决于
+-- 不同路径数，而不是行数），仅对不同路径做归一化。
+-- Multi / MultiRead 外层不携带 path，已排除。
+-- 操作按 Enum16 编码比较，而不是按名称——查询检查会拒绝
+-- 注释之外的任何 CREATE 单词：creates = Create (1)、
+-- CreateIfNotExists (502)；removes = Remove (2)、RemoveRecursive (503)、
+-- TryRemove (505)；reads = Exists (3)、Get (4)、List (12)、FilteredList
+-- (500)、FilteredListWithStatsAndData (506)、ListRecursive (507)。
+-- 仅限特定版本（26.3+，需要 `is_subrequest`）：更旧的服务器会跳过本文件。
 SELECT path, ops, in_multi, creates, removes, net_creates, reads, avg_latency_us, raw_paths, replicas
 FROM
 (

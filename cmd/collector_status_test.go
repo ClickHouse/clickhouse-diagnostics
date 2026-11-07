@@ -6,9 +6,8 @@ import (
 	"clickhouse-diagnostic/internal/runlog"
 )
 
-// The checks and the dashboard learn from the execution log why a file is
-// missing: skipped and failed are named, a table the server does not have
-// is plain "not collected".
+// checks 和 dashboard 会从执行日志中了解某个文件为何缺失：会标明
+// skipped 和 failed，而服务器不存在的表则只是“未采集”。
 func TestCollectorStatus(t *testing.T) {
 	rec := runlog.New()
 	rec.Record(runlog.Entry{Stage: "collector", Name: "system.parts.sql", Status: "skipped", Extra: "essential collection"})
@@ -17,15 +16,15 @@ func TestCollectorStatus(t *testing.T) {
 	rec.Record(runlog.Entry{Stage: "collector", Name: "system.disks.sql", Status: "ok"})
 	st := collectorStatus(rec)
 	if st["system.parts"].State != "skipped" || st["system.parts"].Reason != "essential collection" {
-		t.Errorf("skipped: %+v", st["system.parts"])
+		t.Errorf("skipped 状态：%+v", st["system.parts"])
 	}
 	if st["system.errors"].State != "failed" {
-		t.Errorf("failed: %+v", st["system.errors"])
+		t.Errorf("failed 状态：%+v", st["system.errors"])
 	}
 	if _, ok := st["system.text_log"]; ok {
-		t.Error("an absent table is not a failure")
+		t.Error("不存在的表不算失败")
 	}
 	if len(st) != 2 {
-		t.Errorf("only skipped and failed collectors: %v", st)
+		t.Errorf("只应有 skipped 和 failed 的 collector：%v", st)
 	}
 }

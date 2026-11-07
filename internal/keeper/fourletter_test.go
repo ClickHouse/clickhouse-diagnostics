@@ -11,9 +11,9 @@ import (
 	"time"
 )
 
-// fakeKeeper answers four-letter words like Keeper does: read the word,
-// write the reply, close. An empty reply for a command models one that is
-// not in four_letter_word_white_list. hang makes it accept and never answer.
+// fakeKeeper 像 Keeper 一样应答四字命令：读取命令，写入回复，关闭。
+// 某条命令的空回复模拟它不在 four_letter_word_white_list 中。
+// hang 让它接受连接但从不回答。
 func fakeKeeper(t *testing.T, replies map[string]string, hang bool) (host, port string, stop func()) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -61,26 +61,26 @@ func TestCollect_NormalReply(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(out) != 1 || out[0].Status != "ok" {
-		t.Fatalf("want one ok outcome, got %+v", out)
+		t.Fatalf("期望一个 ok 结果，得到 %+v", out)
 	}
 	want := filepath.Join(dir, DirName, h+"_"+p+".txt")
 	if out[0].File != want {
-		t.Errorf("file = %s, want %s", out[0].File, want)
+		t.Errorf("file = %s，期望 %s", out[0].File, want)
 	}
 	b, _ := os.ReadFile(want)
 	s := string(b)
 	for _, must := range []string{"# target: " + h + ":" + p, "# collected_at: 2026-10-02T12:00:00Z", "## ruok\nimok", "## srvr\nClickHouse Keeper version", "## mntr\nzk_version", "zk_server_state\tstandalone"} {
 		if !strings.Contains(s, must) {
-			t.Errorf("file lacks %q:\n%s", must, s)
+			t.Errorf("文件缺少 %q：\n%s", must, s)
 		}
 	}
 	if out[0].Bytes != int64(len(b)) {
-		t.Errorf("Bytes = %d, file is %d", out[0].Bytes, len(b))
+		t.Errorf("Bytes = %d，文件是 %d", out[0].Bytes, len(b))
 	}
 }
 
 func TestCollect_Refused(t *testing.T) {
-	// Listen, take the port, close: nothing answers there now.
+	// 监听、取走端口、关闭：现在那里没有东西应答。
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -93,12 +93,12 @@ func TestCollect_Refused(t *testing.T) {
 		t.Fatal(err)
 	}
 	if out[0].Status != "refused" {
-		t.Fatalf("status = %s (%s), want refused", out[0].Status, out[0].Err)
+		t.Fatalf("status = %s（%s），期望 refused", out[0].Status, out[0].Err)
 	}
-	// The file still exists so the bundle records the attempt.
+	// 文件仍然存在，以便 bundle 记录这次尝试。
 	b, rerr := os.ReadFile(out[0].File)
-	if rerr != nil || !strings.Contains(string(b), "error: connection refused") {
-		t.Errorf("attempt not recorded in file: %v %q", rerr, b)
+	if rerr != nil || !strings.Contains(string(b), "error: 连接被拒绝") {
+		t.Errorf("尝试未记录在文件中：%v %q", rerr, b)
 	}
 }
 
@@ -111,10 +111,10 @@ func TestCollect_Timeout(t *testing.T) {
 		t.Fatal(err)
 	}
 	if out[0].Status != "timeout" {
-		t.Fatalf("status = %s (%s), want timeout", out[0].Status, out[0].Err)
+		t.Fatalf("status = %s（%s），期望 timeout", out[0].Status, out[0].Err)
 	}
 	if el := time.Since(start); el > 3*time.Second {
-		t.Errorf("three commands at 150 ms read timeout took %s — the deadline is not applied", el)
+		t.Errorf("三条命令在 150 ms 读取超时下花了 %s——截止时间未生效", el)
 	}
 }
 
@@ -124,17 +124,17 @@ func TestCollect_PartialWhenCommandDisabled(t *testing.T) {
 	defer stop()
 	out, _ := Collect(t.TempDir(), []Target{{Host: h, Port: p}}, Options{})
 	if out[0].Status != "partial" {
-		t.Fatalf("status = %s, want partial", out[0].Status)
+		t.Fatalf("status = %s，期望 partial", out[0].Status)
 	}
 	b, _ := os.ReadFile(out[0].File)
 	if !strings.Contains(string(b), "four_letter_word_white_list") {
-		t.Errorf("empty reply not explained:\n%s", b)
+		t.Errorf("空回复未得到解释：\n%s", b)
 	}
 }
 
 func TestCollect_GovHashesHostAndFiltersAddresses(t *testing.T) {
-	// A reply that DOES carry a client address, to prove the gov filter
-	// removes it even though srvr/mntr do not print one today.
+	// 一条确实携带客户端地址的回复，用以证明 gov 过滤器会
+	// 移除它，即使 srvr/mntr 目前不会打印这种地址。
 	replies := map[string]string{
 		"ruok": "imok",
 		"srvr": "ClickHouse Keeper version: v26.7.5.10\nClients:\n 10.0.0.7:60155(recved=0,sent=0)\nMode: leader\n",
@@ -144,24 +144,24 @@ func TestCollect_GovHashesHostAndFiltersAddresses(t *testing.T) {
 	defer stop()
 	dir := t.TempDir()
 	out, _ := Collect(dir, []Target{{Host: h, Port: p}}, Options{GovSalt: "PR3TESTSALT01"})
-	// Same form as hex(SHA256(concat(host, salt))) in ClickHouse: for
-	// '127.0.0.1' + 'PR3TESTSALT01' the server returns this value.
+	// 与 ClickHouse 中 hex(SHA256(concat(host, salt))) 相同的形式：
+	// 对于 '127.0.0.1' + 'PR3TESTSALT01'，服务器返回此值。
 	if h == "127.0.0.1" {
 		const want = "348AB0C01381EBFC9D3E72FA52E6D8A4CE3E6A3D269119D2FA7794C924C532AC"
 		if out[0].Label != want {
-			t.Errorf("label = %s, want ClickHouse-compatible %s", out[0].Label, want)
+			t.Errorf("label = %s，期望与 ClickHouse 兼容的 %s", out[0].Label, want)
 		}
 	}
 	if strings.Contains(filepath.Base(out[0].File), h) {
-		t.Errorf("gov file name carries the raw host: %s", out[0].File)
+		t.Errorf("gov 文件名携带了原始主机：%s", out[0].File)
 	}
 	b, _ := os.ReadFile(out[0].File)
 	s := string(b)
 	if strings.Contains(s, h) || strings.Contains(s, "10.0.0.7") {
-		t.Errorf("gov file carries an address:\n%s", s)
+		t.Errorf("gov 文件携带了地址：\n%s", s)
 	}
 	if !strings.Contains(s, "Mode: leader") || !strings.Contains(s, "zk_server_state\tleader") {
-		t.Errorf("gov filter dropped more than the address line:\n%s", s)
+		t.Errorf("gov 过滤器丢弃了地址行之外的内容：\n%s", s)
 	}
 }
 
@@ -169,15 +169,15 @@ func TestParseTargets(t *testing.T) {
 	got := ParseTargets("k1\t9181\nk2\t9181\nk1\t9181\n\nbroken line\n\t9181\n")
 	want := []Target{{Host: "k1", Port: "9181", Ensemble: "default"}, {Host: "k2", Port: "9181", Ensemble: "default"}}
 	if len(got) != len(want) {
-		t.Fatalf("got %+v, want %+v", got, want)
+		t.Fatalf("得到 %+v，期望 %+v", got, want)
 	}
 	for i := range want {
 		if got[i] != want[i] {
-			t.Errorf("[%d] = %+v, want %+v", i, got[i], want[i])
+			t.Errorf("[%d] = %+v，期望 %+v", i, got[i], want[i])
 		}
 	}
 	if ParseTargets("") != nil {
-		t.Error("empty input must yield no targets")
+		t.Error("空输入必须不产生任何目标")
 	}
 }
 
@@ -200,21 +200,21 @@ func TestResolve(t *testing.T) {
 	for _, c := range cases {
 		skip, warn, err := Resolve(c.setting, c.mode)
 		if skip != c.skip || (warn != "") != c.warn || (err != nil) != c.err {
-			t.Errorf("Resolve(%q,%q) = skip %v warn %q err %v; want skip %v warn %v err %v", c.setting, c.mode, skip, warn, err, c.skip, c.warn, c.err)
+			t.Errorf("Resolve(%q,%q) = skip %v warn %q err %v；期望 skip %v warn %v err %v", c.setting, c.mode, skip, warn, err, c.skip, c.warn, c.err)
 		}
 	}
 }
 
 func TestFileName_SafeForIPv6(t *testing.T) {
 	if got := fileName("fd00::1", "9181"); strings.Contains(got, ":") {
-		t.Errorf("colons survive in %s", got)
+		t.Errorf("%s 中冒号仍然存在", got)
 	}
 }
 
-// The ensemble is declared in the server configuration, not in
-// system.zookeeper_connection (which names the connected member only). Both
-// config.d/ and the adjacent config.xml are read; a node without <port> gets
-// the ZooKeeper default; substitutions are skipped.
+// ensemble 在服务器配置中声明，而不是在
+// system.zookeeper_connection 中（后者只命名已连接的成员）。config.d/
+// 和相邻的 config.xml 都会被读取；没有 <port> 的节点使用
+// ZooKeeper 默认值；变量替换会被跳过。
 func TestTargetsFromConfig(t *testing.T) {
 	root := t.TempDir()
 	cd := filepath.Join(root, "config.d")
@@ -237,32 +237,32 @@ func TestTargetsFromConfig(t *testing.T) {
 	got := TargetsFromConfig(cd)
 	want := []Target{{Host: "keeper-a.example", Port: "9181", Ensemble: "default"}, {Host: "keeper-b.example", Port: DefaultPort, Ensemble: "default"}, {Host: "keeper-c.example", Port: "2181", Ensemble: "default"}}
 	if len(got) != len(want) {
-		t.Fatalf("targets = %v, want %v", got, want)
+		t.Fatalf("targets = %v，期望 %v", got, want)
 	}
 	for i := range want {
 		if got[i] != want[i] {
-			t.Errorf("target %d = %v, want %v", i, got[i], want[i])
+			t.Errorf("target %d = %v，期望 %v", i, got[i], want[i])
 		}
 	}
-	// A non-*.d directory must not volunteer its parent.
+	// 非 *.d 目录绝不能提供其父目录。
 	if got := TargetsFromConfig(root); len(got) != 1 || got[0].Host != "keeper-c.example" {
-		t.Errorf("plain dir: %v, want only the config.xml node", got)
+		t.Errorf("普通目录：%v，期望只有 config.xml 中的节点", got)
 	}
 	if TargetsFromConfig("") != nil || TargetsFromConfig(filepath.Join(root, "missing")) != nil {
-		t.Error("empty or unreadable dir must yield nil")
+		t.Error("空目录或不可读目录必须返回 nil")
 	}
 	merged := MergeTargets([]Target{{Host: "keeper-b.example", Port: DefaultPort, Ensemble: "default"}}, []Target{{Host: "keeper-b.example", Port: DefaultPort, Ensemble: "default"}})
 	if len(merged) != 1 {
-		t.Errorf("merge must dedupe: %v", merged)
+		t.Errorf("合并必须去重：%v", merged)
 	}
 	merged = MergeTargets([]Target{{Host: "keeper-b.example", Port: DefaultPort, Ensemble: "default"}}, want)
 	if len(merged) != 3 || merged[0].Host != "keeper-b.example" {
-		t.Errorf("merge keeps connected first and adds the rest: %v", merged)
+		t.Errorf("合并保留已连接者在前并加入其余：%v", merged)
 	}
 }
 
-// A member that answers part of mntr and then stalls until the deadline is
-// a timeout, not an ok: the partial text is kept but marked truncated.
+// 回答部分 mntr 然后停顿到截止时间的成员属于 timeout，
+// 而不是 ok：部分文本会保留，但标记为已截断。
 func TestCollect_PartialReplyThenStallIsTimeout(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -281,7 +281,7 @@ func TestCollect_PartialReplyThenStallIsTimeout(t *testing.T) {
 				buf := make([]byte, 4)
 				_, _ = c.Read(buf)
 				_, _ = c.Write([]byte("zk_version\tv1\nzk_avg_latency\t1\n"))
-				<-stop // never finish, never close: the client's deadline must end it
+				<-stop // 永不结束、永不关闭：必须由客户端的截止时间终止它
 			}(c)
 		}
 	}()
@@ -291,44 +291,44 @@ func TestCollect_PartialReplyThenStallIsTimeout(t *testing.T) {
 	dir := t.TempDir()
 	out, err := Collect(dir, []Target{{Host: host, Port: port}}, Options{DialTimeout: time.Second, ReadTimeout: 300 * time.Millisecond})
 	if err != nil || len(out) != 1 {
-		t.Fatalf("collect: %v %v", out, err)
+		t.Fatalf("collect：%v %v", out, err)
 	}
 	if out[0].Status != "timeout" {
-		t.Errorf("status = %q, want timeout (partial replies must not count as ok)", out[0].Status)
+		t.Errorf("status = %q，期望 timeout（部分回复绝不能计为 ok）", out[0].Status)
 	}
 	body, _ := os.ReadFile(out[0].File)
-	if !strings.Contains(string(body), "zk_avg_latency\t1") || !strings.Contains(string(body), "reply truncated") {
-		t.Errorf("file should keep the partial reply and mark it truncated:\n%s", body)
+	if !strings.Contains(string(body), "zk_avg_latency\t1") || !strings.Contains(string(body), "回复已截断") {
+		t.Errorf("文件应保留部分回复并标记为已截断：\n%s", body)
 	}
 }
 
-// IPv4-mapped and scoped IPv6 client addresses are addresses too.
+// IPv4 映射地址和带作用域的 IPv6 客户端地址也是地址。
 func TestGovFilter_IPv6Forms(t *testing.T) {
 	in := "zk_version\tv1\n /[::ffff:10.0.0.7]:60155[0](queued=0)\n /[fe80::1%eth0]:2181\n /10.0.0.7:60155\n /[2001:db8::1]:60155\nzk_znode_count\t5\n"
 	got := govFilter(in)
 	for _, bad := range []string{"::ffff:", "fe80::", "10.0.0.7", "2001:db8"} {
 		if strings.Contains(got, bad) {
-			t.Errorf("address %q survived the gov filter:\n%s", bad, got)
+			t.Errorf("地址 %q 在 gov 过滤器中幸存：\n%s", bad, got)
 		}
 	}
 	if !strings.Contains(got, "zk_version") || !strings.Contains(got, "zk_znode_count") {
-		t.Errorf("counter lines must survive:\n%s", got)
+		t.Errorf("计数器行必须保留：\n%s", got)
 	}
 }
 
-// ClickHouse's stock config.xml ships a complete <zookeeper> example inside an
-// XML comment (example1 / example2 / example3, port 2181). Reading it as
-// configuration made an onprem run against the default -config-dir report four
-// Keeper members on a one-member cluster, write three files full of DNS
-// failures, and attempt to reach hosts the operator never named. Observed in a
-// container built from clickhouse/clickhouse-server:26.7.
+// ClickHouse 自带的 config.xml 在 XML 注释中带有完整的
+// <zookeeper> 示例（example1 / example2 / example3，端口 2181）。
+// 把它当作配置读取，会让针对默认 -config-dir 的 onprem 运行在
+// 单成员集群上报告四个 Keeper 成员、写出三个满是 DNS 失败的
+// 文件，并尝试连接运维人员从未指定的主机。该问题在由
+// clickhouse/clickhouse-server:26.7 构建的容器中观察到。
 func TestTargetsFromConfig_IgnoresCommentedBlocks(t *testing.T) {
 	root := t.TempDir()
 	cd := filepath.Join(root, "config.d")
 	if err := os.Mkdir(cd, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	// The parent config.xml, in the stock shape: the example block is commented.
+	// 父目录的 config.xml，采用自带配置的形态：示例块被注释掉。
 	if err := os.WriteFile(filepath.Join(root, "config.xml"), []byte(`<clickhouse>
     <!-- ZooKeeper is used to store metadata about replicas, when using Replicated tables.
       -->
@@ -342,7 +342,7 @@ func TestTargetsFromConfig_IgnoresCommentedBlocks(t *testing.T) {
 </clickhouse>`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// The operator's real block, in config.d, uncommented.
+	// 运维人员的真实配置块，位于 config.d，未注释。
 	if err := os.WriteFile(filepath.Join(cd, "10-keeper.xml"), []byte(
 		`<clickhouse><zookeeper><node><host>keeper-a</host><port>9181</port></node></zookeeper></clickhouse>`), 0o644); err != nil {
 		t.Fatal(err)
@@ -350,16 +350,17 @@ func TestTargetsFromConfig_IgnoresCommentedBlocks(t *testing.T) {
 
 	got := TargetsFromConfig(cd)
 	if len(got) != 1 || got[0] != (Target{Host: "keeper-a", Port: "9181", Ensemble: "default"}) {
-		t.Fatalf("targets = %v, want only the uncommented keeper-a:9181", got)
+		t.Fatalf("targets = %v，期望只有未注释的 keeper-a:9181", got)
 	}
 	for _, tg := range got {
 		if strings.HasPrefix(tg.Host, "example") {
-			t.Errorf("a commented-out example host became a target: %v", tg)
+			t.Errorf("被注释掉的示例主机变成了目标：%v", tg)
 		}
 	}
 }
 
-// fullReplies is a 26.8 member answering every command the collector sends.
+// fullReplies 是一个 26.8 成员对各条命令的完整应答，
+// 覆盖采集器发送的所有命令。
 var fullReplies = map[string]string{
 	"ruok": "imok",
 	"isro": "rw",
@@ -370,7 +371,7 @@ var fullReplies = map[string]string{
 	"dirs": "snapshot_dir_size: 7200000000\nlog_dir_size: 3372003\n",
 }
 
-// recordingKeeper is fakeKeeper that also records the order commands arrive in.
+// recordingKeeper 是同时记录命令到达顺序的 fakeKeeper。
 func recordingKeeper(t *testing.T, replies map[string]string, hangOn string) (host, port string, seen func() []string, stop func()) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -409,9 +410,9 @@ func recordingKeeper(t *testing.T, replies map[string]string, hangOn string) (ho
 }
 
 func TestCollect_SendsTheCommandsThatAnswerWhenNotServingFirst(t *testing.T) {
-	// isro and lgif answer even on a member that is not serving (Keeper's
-	// own code checks isServerActive() only for srvr, mntr, conf, dirs…),
-	// so they go before anything that can hang or refuse.
+	// isro 和 lgif 即使在不提供服务的成员上也会应答（Keeper
+	// 自己的代码只对 srvr、mntr、conf、dirs……检查 isServerActive()），
+	// 因此它们排在任何可能挂起或拒绝的命令之前。
 	h, p, seen, stop := recordingKeeper(t, fullReplies, "")
 	defer stop()
 	out, err := Collect(t.TempDir(), []Target{{Host: h, Port: p}}, Options{})
@@ -419,40 +420,40 @@ func TestCollect_SendsTheCommandsThatAnswerWhenNotServingFirst(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got, want := strings.Join(seen(), ","), "ruok,isro,lgif,srvr,mntr,conf,dirs"; got != want {
-		t.Errorf("commands sent %s, want %s", got, want)
+		t.Errorf("发送的命令 %s，期望 %s", got, want)
 	}
 	if out[0].Status != "ok" {
-		t.Errorf("status = %s (%s)", out[0].Status, out[0].Err)
+		t.Errorf("status = %s（%s）", out[0].Status, out[0].Err)
 	}
 	b, _ := os.ReadFile(out[0].File)
 	for _, must := range []string{"## lgif\nfirst_log_idx\t9000000000", "## conf\nserver_id=2", "snapshot_transfer_chunk_size=0", "## dirs\nsnapshot_dir_size: 7200000000", "## isro\nrw"} {
 		if !strings.Contains(string(b), must) {
-			t.Errorf("file lacks %q", must)
+			t.Errorf("文件缺少 %q", must)
 		}
 	}
 }
 
 func TestCollect_StopsAMemberAfterItsFirstTimeout(t *testing.T) {
-	// A real quorum loss: the member accepted connections but never answered.
+	// 真实的 quorum 丢失：成员接受了连接但从不回答。
 	h, p, seen, stop := recordingKeeper(t, fullReplies, "srvr")
 	defer stop()
 	start := time.Now()
 	out, _ := Collect(t.TempDir(), []Target{{Host: h, Port: p}}, Options{ReadTimeout: 300 * time.Millisecond})
 	if el := time.Since(start); el > 600*time.Millisecond {
-		t.Errorf("took %s: after one timeout the remaining commands must be skipped, not each waited out", el)
+		t.Errorf("耗时 %s：一次超时后其余命令必须跳过，而不是逐个等满超时", el)
 	}
 	if got := strings.Join(seen(), ","); got != "ruok,isro,lgif,srvr" {
-		t.Errorf("commands sent %s, want ruok,isro,lgif,srvr (then stop)", got)
+		t.Errorf("发送的命令 %s，期望 ruok,isro,lgif,srvr（然后停止）", got)
 	}
 	b, _ := os.ReadFile(out[0].File)
 	if !strings.Contains(string(b), "## lgif\nfirst_log_idx") {
-		t.Error("lgif, answered before the hang, is missing")
+		t.Error("在挂起之前应答的 lgif 缺失")
 	}
 	if !strings.Contains(string(b), "## mntr\nskipped") {
-		t.Errorf("the commands after the timeout are not marked skipped:\n%s", b)
+		t.Errorf("超时之后的命令未被标记为 skipped：\n%s", b)
 	}
 	if out[0].Status != "partial" {
-		t.Errorf("status = %s, want partial", out[0].Status)
+		t.Errorf("status = %s，期望 partial", out[0].Status)
 	}
 }
 
@@ -466,11 +467,11 @@ func TestCollect_MembersInParallel(t *testing.T) {
 	start := time.Now()
 	out, _ := Collect(t.TempDir(), targets, Options{ReadTimeout: 400 * time.Millisecond})
 	if el := time.Since(start); el > 900*time.Millisecond {
-		t.Errorf("three hung members took %s — they are asked one after another", el)
+		t.Errorf("三个挂起成员耗时 %s——它们被逐个询问", el)
 	}
 	for i, o := range out {
 		if o.Target != targets[i] || o.Status != "timeout" {
-			t.Errorf("outcome %d = %+v; want target %v in order, status timeout", i, o, targets[i])
+			t.Errorf("结果 %d = %+v；期望按顺序对应目标 %v，status 为 timeout", i, o, targets[i])
 		}
 	}
 }
@@ -483,21 +484,21 @@ func TestCollect_NotServing(t *testing.T) {
 	defer stop()
 	out, _ := Collect(t.TempDir(), []Target{{Host: h, Port: p}}, Options{})
 	if out[0].Status != "not serving" {
-		t.Errorf("status = %s, want not serving — the member answers but has no quorum", out[0].Status)
+		t.Errorf("status = %s，期望 not serving——成员有应答但没有 quorum", out[0].Status)
 	}
 }
 
 func TestCollect_OlderKeeperWithoutTheNewCommands(t *testing.T) {
-	// okReplies answers only ruok/srvr/mntr: a 22.8 Keeper has no lgif.
+	// okReplies 只应答 ruok/srvr/mntr：22.8 的 Keeper 没有 lgif。
 	h, p, stop := fakeKeeper(t, okReplies, false)
 	defer stop()
 	out, _ := Collect(t.TempDir(), []Target{{Host: h, Port: p}}, Options{})
 	if out[0].Status != "ok" {
-		t.Errorf("status = %s; a member answering ruok/srvr/mntr is ok even without the newer commands", out[0].Status)
+		t.Errorf("status = %s；应答 ruok/srvr/mntr 的成员即使没有较新命令也是 ok", out[0].Status)
 	}
 	b, _ := os.ReadFile(out[0].File)
 	if !strings.Contains(string(b), "## lgif\n(empty reply") {
-		t.Errorf("an absent newer command is not recorded:\n%s", b)
+		t.Errorf("缺失的较新命令未被记录：\n%s", b)
 	}
 }
 
@@ -508,25 +509,26 @@ func TestCollect_GovRemovesConfPaths(t *testing.T) {
 	b, _ := os.ReadFile(gov[0].File)
 	s := string(b)
 	if strings.Contains(s, "/var/lib/clickhouse-keeper") || !strings.Contains(s, "log_storage_path=REMOVED") || !strings.Contains(s, "snapshot_transfer_chunk_size=0") {
-		t.Errorf("gov conf must drop path values and keep the settings:\n%s", s)
+		t.Errorf("gov conf 必须丢弃路径值并保留设置：\n%s", s)
 	}
 	plain, _ := Collect(t.TempDir(), []Target{{Host: h, Port: p}}, Options{})
 	if b, _ := os.ReadFile(plain[0].File); !strings.Contains(string(b), "log_storage_path=/var/lib/clickhouse-keeper/log") {
-		t.Error("outside gov the path is kept")
+		t.Error("gov 之外路径会保留")
 	}
 }
 
-// system.zookeeper_connection lists the default connection AND every
-// auxiliary one, each a different ensemble; the name keeps them apart so
-// the pre-pass never compares one ensemble's Raft log with another's.
+// system.zookeeper_connection 列出默认连接以及每个
+// 辅助连接，各自属于不同的 ensemble；名称将它们区分开，
+// 使预检脚本绝不会把一个 ensemble 的 Raft 日志与另一个 ensemble 的
+// 相比较。
 func TestParseTargets_KeepsTheEnsemble(t *testing.T) {
 	got := ParseTargets("default\tk1\t9181\naux_zk\tz1\t2181\n")
 	want := []Target{{Host: "k1", Port: "9181", Ensemble: "default"}, {Host: "z1", Port: "2181", Ensemble: "aux_zk"}}
 	if len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
-		t.Errorf("ParseTargets = %+v, want %+v", got, want)
+		t.Errorf("ParseTargets = %+v，期望 %+v", got, want)
 	}
 	if !strings.Contains(TargetsQuery, "name") {
-		t.Error("TargetsQuery must select the connection name")
+		t.Error("TargetsQuery 必须选出连接名称")
 	}
 }
 
@@ -535,15 +537,15 @@ func TestCollect_WritesTheEnsemble(t *testing.T) {
 	defer stop()
 	out, _ := Collect(t.TempDir(), []Target{{Host: h, Port: p, Ensemble: "aux_zk"}}, Options{})
 	if b, _ := os.ReadFile(out[0].File); !strings.Contains(string(b), "# ensemble: aux_zk\n") {
-		t.Errorf("no ensemble line:\n%s", b)
+		t.Errorf("没有 ensemble 行：\n%s", b)
 	}
 	gov, _ := Collect(t.TempDir(), []Target{{Host: h, Port: p, Ensemble: "aux_zk"}}, Options{GovSalt: "PR3TESTSALT01"})
 	if b, _ := os.ReadFile(gov[0].File); strings.Contains(string(b), "aux_zk") || !strings.Contains(string(b), "# ensemble: ") {
-		t.Errorf("gov must hash an auxiliary ensemble's name:\n%s", b)
+		t.Errorf("gov 必须哈希辅助 ensemble 的名称：\n%s", b)
 	}
 }
 
-// ---- review round 2: gov identifiers, shared endpoints, auxiliary blocks
+// ---- 评审第二轮：gov 标识符、共享端点、辅助配置块
 
 func TestCollect_GovConfKeepsOnlyValuesThatIdentifyNothing(t *testing.T) {
 	keeperConf := "server_id=2\nsnapshot_distance=100000\nsnapshot_transfer_chunk_size=0\ncompress_snapshots_with_zstd_format=true\nraft_logs_level=information\n" +
@@ -559,32 +561,32 @@ func TestCollect_GovConfKeepsOnlyValuesThatIdentifyNothing(t *testing.T) {
 		s := string(b)
 		for _, leak := range []string{"/data/", "acme", "zk1.", "10.20.30.41", "0.0.0.0"} {
 			if strings.Contains(s, leak) {
-				t.Errorf("%s: gov conf carries %q:\n%s", name, leak, s)
+				t.Errorf("%s：gov conf 携带了 %q：\n%s", name, leak, s)
 			}
 		}
 		for _, keep := range []string{"snapshot_distance=100000", "snapshot_transfer_chunk_size=0", "compress_snapshots_with_zstd_format=true", "raft_logs_level=information", "tickTime=2000", "maxClientCnxns=60"} {
 			if strings.Contains(conf, keep) && !strings.Contains(s, keep) {
-				t.Errorf("%s: gov dropped the setting %q", name, keep)
+				t.Errorf("%s：gov 丢弃了设置 %q", name, keep)
 			}
 		}
 	}
 }
 
 func TestCollect_SharedEndpointAcrossEnsemblesGetsTwoFiles(t *testing.T) {
-	// Default and auxiliary connections to one host:port (different chroots).
+	// 默认连接和辅助连接指向同一个 host:port（不同的 chroot）。
 	h, p, stop := fakeKeeper(t, fullReplies, false)
 	defer stop()
 	out, _ := Collect(t.TempDir(), []Target{{Host: h, Port: p, Ensemble: "default"}, {Host: h, Port: p, Ensemble: "aux_zk"}}, Options{})
 	if out[0].File == out[1].File {
-		t.Fatalf("both ensembles wrote %s — one overwrites the other", out[0].File)
+		t.Fatalf("两个 ensemble 都写入了 %s——一个覆盖了另一个", out[0].File)
 	}
 	for i, ens := range []string{"default", "aux_zk"} {
 		if b, _ := os.ReadFile(out[i].File); !strings.Contains(string(b), "# ensemble: "+ens+"\n") {
-			t.Errorf("file %d lost its ensemble %q", i, ens)
+			t.Errorf("文件 %d 丢失了其 ensemble %q", i, ens)
 		}
 	}
 	if filepath.Base(out[0].File) != h+"_"+p+".txt" {
-		t.Errorf("a default member keeps the existing name, got %s", filepath.Base(out[0].File))
+		t.Errorf("默认成员保留既有名称，得到 %s", filepath.Base(out[0].File))
 	}
 }
 
@@ -601,19 +603,19 @@ func TestTargetsFromConfig_AuxiliaryBlockNamedZookeeperIsNotDefault(t *testing.T
 	}
 	got := TargetsFromConfig(dir)
 	if len(got) != 1 || got[0].Host != "keeper-main.example" {
-		t.Errorf("TargetsFromConfig = %+v; the auxiliary block must not be read as the default ensemble", got)
+		t.Errorf("TargetsFromConfig = %+v；辅助配置块绝不能被当作默认 ensemble 读取", got)
 	}
 }
 
-// Apache ZooKeeper words it differently ("This ZooKeeper instance is not
-// currently serving requests"); a member answering that is not serving
-// either, and must not be reported ok.
+// Apache ZooKeeper 的措辞不同（"This ZooKeeper instance is not
+// currently serving requests"）；这样回答的成员同样不在服务，
+// 绝不能报告为 ok。
 func TestCollect_ZooKeeperNotServing(t *testing.T) {
 	const zk = "This ZooKeeper instance is not currently serving requests"
 	h, p, stop := fakeKeeper(t, map[string]string{"ruok": "imok", "srvr": zk, "mntr": zk}, false)
 	defer stop()
 	out, _ := Collect(t.TempDir(), []Target{{Host: h, Port: p}}, Options{})
 	if out[0].Status != "not serving" {
-		t.Errorf("status = %s, want not serving for ZooKeeper's wording", out[0].Status)
+		t.Errorf("status = %s，ZooKeeper 的措辞应判为 not serving", out[0].Status)
 	}
 }

@@ -1,10 +1,10 @@
--- Every text_log row for the focus query_id, in chronological order.
--- Verbose but invaluable when the targeted snapshots above do not
--- surface the issue. Cap at 5000 rows to keep the file size sane.
--- Run when --query-id is set.
+-- 按时间顺序给出目标 query_id 的每一行 text_log。
+-- 内容冗长，但当上面的定向快照无法
+-- 暴露问题时非常有价值。上限 5000 行，以免文件过大。
+-- 当设置了 --query-id 时运行。
 --
--- Root variant for the oldest supported servers (22.8+):
--- message_format_string was added in 23.1 — see 23.1.1.0/.
+-- 面向最旧受支持服务器（22.8+）的根变体：
+-- message_format_string 在 23.1 新增——见 23.1.1.0/。
 SELECT
     event_time_microseconds                                AS ts,
     thread_id,

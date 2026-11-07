@@ -14,9 +14,9 @@ import (
 	"testing"
 )
 
-// labRows is system.clusters as a 2-shard x 2-replica lab cluster reports it
-// from its first node: the real cluster, a second cluster over the same four
-// hosts, and the stock image's `default` cluster, which lists only localhost.
+// labRows 是一个 2 分片 x 2 副本的实验集群从首个节点报告的 system.clusters：
+// 真实集群、同一批四台主机上的第二个集群，以及只列出 localhost 的
+// 官方镜像 `default` 集群。
 func row(cluster string, shard, replica int, host, address string, local, errors int) Row {
 	return Row{Cluster: cluster, ShardNum: shard, ReplicaNum: replica, HostName: host,
 		HostAddress: address, IsLocal: local, ErrorsCount: errors}
@@ -73,7 +73,7 @@ func has(args []string, flag string) bool {
 	return false
 }
 
-// ---- discovery ------------------------------------------------------------
+// ---- 发现 ------------------------------------------------------------
 
 func TestDiscover_EveryMachineOnce(t *testing.T) {
 	var hosts []string
@@ -81,12 +81,12 @@ func TestDiscover_EveryMachineOnce(t *testing.T) {
 		hosts = append(hosts, n.Host)
 	}
 	if got := strings.Join(hosts, ","); got != "ch-s1r1,ch-s1r2,ch-s2r1,ch-s2r2" {
-		t.Errorf("hosts = %s", got)
+		t.Errorf("主机 = %s", got)
 	}
 }
 
 func TestDiscover_LocalNodeFoldsItsLoopbackRow(t *testing.T) {
-	// 127.0.0.1 in `default` and 172.20.0.5 in prod_cluster are one server.
+	// `default` 中的 127.0.0.1 和 prod_cluster 中的 172.20.0.5 是同一台服务器。
 	var local []Node
 	for _, n := range mustDiscover(t, labRows, "") {
 		if n.Local {
@@ -94,7 +94,7 @@ func TestDiscover_LocalNodeFoldsItsLoopbackRow(t *testing.T) {
 		}
 	}
 	if len(local) != 1 || local[0].Host != "ch-s1r1" {
-		t.Errorf("local nodes = %+v, want only ch-s1r1", local)
+		t.Errorf("本地节点 = %+v，期望只有 ch-s1r1", local)
 	}
 }
 
@@ -102,35 +102,35 @@ func TestDiscover_LabelsComeFromTheClusterWithMostShards(t *testing.T) {
 	want := map[string][2]int{"ch-s1r1": {1, 1}, "ch-s1r2": {1, 2}, "ch-s2r1": {2, 1}, "ch-s2r2": {2, 2}}
 	for h, n := range byHost(mustDiscover(t, labRows, "")) {
 		if got := [2]int{n.Shard, n.Replica}; got != want[h] {
-			t.Errorf("%s = shard/replica %v, want %v", h, got, want[h])
+			t.Errorf("%s = shard/replica %v，期望 %v", h, got, want[h])
 		}
 	}
 }
 
 func TestDiscover_DefaultClusterIsOnlyThisServer(t *testing.T) {
 	if n := mustDiscover(t, labRows, "default"); len(n) != 1 {
-		t.Errorf("the stock `default` cluster gave %d hosts, want 1", len(n))
+		t.Errorf("官方 `default` 集群给出了 %d 台主机，期望 1", len(n))
 	}
 }
 
 func TestDiscover_OtherLoopbackRowsAreDropped(t *testing.T) {
 	rows := append(append([]Row{}, labRows...), row("test_cluster_two_shards", 2, 1, "127.0.0.2", "127.0.0.2", 0, 0))
 	if n := mustDiscover(t, rows, ""); len(n) != 4 {
-		t.Errorf("got %d hosts, want 4", len(n))
+		t.Errorf("得到 %d 台主机，期望 4", len(n))
 	}
 }
 
 func TestDiscover_UnknownClusterListsTheRealNames(t *testing.T) {
 	_, err := Discover(labRows, "default_cluster")
 	if err == nil || !strings.Contains(err.Error(), "prod_cluster") {
-		t.Errorf("err = %v, want it to list prod_cluster", err)
+		t.Errorf("err = %v，期望它列出 prod_cluster", err)
 	}
 }
 
 func TestDiscover_ConnectionErrorsAreKept(t *testing.T) {
 	rows := append(append([]Row{}, labRows[:len(labRows)-1]...), row("prod_cluster", 2, 2, "ch-s2r2", "172.20.0.8", 0, 3))
 	if n := byHost(mustDiscover(t, rows, ""))["ch-s2r2"]; n.Errors != 3 {
-		t.Errorf("ch-s2r2 errors = %d, want 3", n.Errors)
+		t.Errorf("ch-s2r2 errors = %d，期望 3", n.Errors)
 	}
 }
 
@@ -152,14 +152,14 @@ func TestParseRows_ReadsJSONEachRow(t *testing.T) {
 	}
 }
 
-// ---- commands -------------------------------------------------------------
+// ---- 命令 -------------------------------------------------------------
 
 func TestHereArgs_RemoteHostsNeverCollectLocalFiles(t *testing.T) {
 	o := opts()
 	o.LocalFiles = true
 	args := HereArgs(byHost(mustDiscover(t, labRows, ""))["ch-s2r1"], o)
 	if argValue(args, "-host-info") != "off" || argValue(args, "-logs") != "off" || !has(args, "-skip-config") {
-		t.Errorf("remote run reads local files: %v", args)
+		t.Errorf("远程运行读取了本地文件：%v", args)
 	}
 	if argValue(args, "-host") != "ch-s2r1" {
 		t.Errorf("-host = %q", argValue(args, "-host"))
@@ -171,22 +171,22 @@ func TestHereArgs_LocalNodeCollectsFilesOnlyWhenRunOnIt(t *testing.T) {
 	on, elsewhere := opts(), opts()
 	on.LocalFiles = true
 	if has(HereArgs(local, on), "-skip-config") {
-		t.Error("run on the node itself, but configs are skipped")
+		t.Error("在节点本机运行，但配置被跳过了")
 	}
 	if !has(HereArgs(local, elsewhere), "-skip-config") {
-		t.Error("run elsewhere, but this machine's configs would be collected as the node's")
+		t.Error("在其他机器上运行，但本机的配置会被当作该节点的配置采集")
 	}
 	if argValue(HereArgs(local, on), "-host") != "ch-s1r1" {
-		t.Error("the local node must be reached through -host as given")
+		t.Error("本地节点必须通过给定的 -host 访问")
 	}
 }
 
 func TestCommands_EveryRunIsSingleNode(t *testing.T) {
-	// Without it a SharedMergeTree cluster switches to clusterAllReplicas on
-	// EVERY run and collects the whole cluster once per host.
+	// 没有它，SharedMergeTree 集群会在每次运行时切换到 clusterAllReplicas，
+	// 并且每台主机都会采集一遍整个集群。
 	for _, n := range mustDiscover(t, labRows, "") {
 		if !has(HereArgs(n, opts()), "-single-node") || !has(EachNodeArgs(n, opts()), "-single-node") {
-			t.Errorf("%s: -single-node missing", n.Host)
+			t.Errorf("%s：缺少 -single-node", n.Host)
 		}
 	}
 }
@@ -194,7 +194,7 @@ func TestCommands_EveryRunIsSingleNode(t *testing.T) {
 func TestCommands_NeverCarryAPassword(t *testing.T) {
 	for _, n := range mustDiscover(t, labRows, "") {
 		if has(HereArgs(n, opts()), "-password") || has(EachNodeArgs(n, opts()), "-password") {
-			t.Errorf("%s: -password on a command line", n.Host)
+			t.Errorf("%s：命令行上出现了 -password", n.Host)
 		}
 	}
 }
@@ -205,13 +205,13 @@ func TestHereArgs_EachHostHasItsOwnOutputDir(t *testing.T) {
 		dirs[argValue(HereArgs(n, opts()), "-output-dir")] = true
 	}
 	if len(dirs) != 4 {
-		t.Errorf("%d distinct output dirs, want 4", len(dirs))
+		t.Errorf("%d 个不同的输出目录，期望 4", len(dirs))
 	}
 }
 
 func TestEachNodeArgs_RunOnTheHostItself(t *testing.T) {
 	if got := argValue(EachNodeArgs(byHost(mustDiscover(t, labRows, ""))["ch-s1r2"], opts()), "-host"); got != "localhost" {
-		t.Errorf("-host = %q, want localhost", got)
+		t.Errorf("-host = %q，期望 localhost", got)
 	}
 }
 
@@ -221,7 +221,7 @@ func TestCommands_ExtraArgumentsReachEveryRun(t *testing.T) {
 	n := mustDiscover(t, labRows, "")[1]
 	for _, args := range [][]string{HereArgs(n, o), EachNodeArgs(n, o)} {
 		if got := strings.Join(args[len(args)-2:], " "); got != "-from 2026-10-01" {
-			t.Errorf("tail = %q", got)
+			t.Errorf("尾部 = %q", got)
 		}
 	}
 }
@@ -233,9 +233,9 @@ func TestShown_QuotesAndMasks(t *testing.T) {
 	}
 }
 
-// ---- Main, end to end -----------------------------------------------------
+// ---- Main，端到端 -----------------------------------------------------
 
-// fakeServer answers the discovery query with labRows.
+// fakeServer 用 labRows 应答发现查询。
 func fakeServer(t *testing.T) (host, port string) {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -256,14 +256,14 @@ func fakeServer(t *testing.T) (host, port string) {
 }
 
 func TestMain_RequiresThePasswordInTheEnvironment(t *testing.T) {
-	t.Setenv(PasswordEnvVar, "") // restored after the test
+	t.Setenv(PasswordEnvVar, "") // 测试后恢复
 	os.Unsetenv(PasswordEnvVar)
 	var out, errOut bytes.Buffer
 	if code := Main([]string{"-user", "diag"}, strings.NewReader(""), &out, &errOut); code != 2 {
-		t.Errorf("exit = %d, want 2", code)
+		t.Errorf("exit = %d，期望 2", code)
 	}
 	if !strings.Contains(errOut.String(), PasswordEnvVar) {
-		t.Errorf("stderr does not name %s: %s", PasswordEnvVar, errOut.String())
+		t.Errorf("stderr 未提到 %s：%s", PasswordEnvVar, errOut.String())
 	}
 }
 
@@ -274,31 +274,29 @@ func TestMain_EachNodePrintsOneCommandPerHost(t *testing.T) {
 	code := Main([]string{"-host", host, "-port", port, "-user", "diag", "-collect-from", "each-node"},
 		strings.NewReader(""), &out, &errOut)
 	if code != 0 {
-		t.Fatalf("exit = %d: %s", code, errOut.String())
+		t.Fatalf("exit = %d：%s", code, errOut.String())
 	}
 	if n := strings.Count(out.String(), "-host localhost"); n != 4 {
-		t.Errorf("%d per-host commands, want 4:\n%s", n, out.String())
+		t.Errorf("%d 条按主机命令，期望 4：\n%s", n, out.String())
 	}
 	if strings.Contains(out.String(), "pw") {
-		t.Error("the password appears in the output")
+		t.Error("输出中出现了密码")
 	}
 }
 
-// fakeBinary stands in for clickhouse-diagnostic: it records its arguments
-// and whether the password arrived through the environment, then writes a
-// real archive into -output-dir — except for failHost, which fails like a
-// node that is down.
+// fakeBinary 代替 clickhouse-diagnostic：它记录自己的参数以及密码是否通过
+// 环境变量传入，然后向 -output-dir 写入一个真实归档——但 failHost 例外，
+// 它会像一台已下线的主机那样失败。
 func fakeBinary(t *testing.T, failHost string) string {
 	return fakeBinaryWith(t, map[string]string{failHost: "down"})
 }
 
-// fakeBinaryWith takes a behaviour per host: "down" writes nothing,
-// "truncated" leaves a cut-off archive and exits 0, "exit3" writes a valid
-// archive and exits 3.
+// fakeBinaryWith 为每台主机指定一种行为："down" 不写任何东西，
+// "truncated" 留下被截断的归档并以 0 退出，"exit3" 写入有效归档并以 3 退出。
 func fakeBinaryWith(t *testing.T, behaviour map[string]string) string {
 	t.Helper()
 	if runtime.GOOS == "windows" {
-		t.Skip("shell-script stand-in")
+		t.Skip("shell 脚本替身")
 	}
 	var cases strings.Builder
 	for h, b := range behaviour {
@@ -360,21 +358,21 @@ func TestMain_HereRunsEveryHostAndReportsTheFailedOne(t *testing.T) {
 	code := Main([]string{"-host", host, "-port", port, "-user", "diag", "-yes", "-output-dir", "bundles"},
 		strings.NewReader(""), &out, &errOut)
 	if code != 1 {
-		t.Errorf("exit = %d, want 1 (one host failed)\n%s%s", code, out.String(), errOut.String())
+		t.Errorf("exit = %d，期望 1（一台主机失败）\n%s%s", code, out.String(), errOut.String())
 	}
 	summary, err := os.ReadFile(filepath.Join(dir, "bundles", "summary.txt"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Count(string(summary), " ok ") != 3 || !strings.Contains(string(summary), "no archive") {
-		t.Errorf("summary:\n%s", summary)
+	if strings.Count(string(summary), " ok ") != 3 || !strings.Contains(string(summary), "无归档") {
+		t.Errorf("摘要：\n%s", summary)
 	}
 	seen, err := os.ReadFile(filepath.Join(dir, "bundles", "s1r2_ch-s1r2", "seen.txt"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(seen), "env=pw") {
-		t.Errorf("the run did not inherit %s: %s", PasswordEnvVar, seen)
+		t.Errorf("运行没有继承 %s：%s", PasswordEnvVar, seen)
 	}
 }
 
@@ -390,15 +388,15 @@ func TestMain_AsksBeforeRunning(t *testing.T) {
 	var out, errOut bytes.Buffer
 	code := Main([]string{"-host", host, "-port", port, "-user", "diag", "-output-dir", "bundles"},
 		strings.NewReader("n\n"), &out, &errOut)
-	if code != 0 || !strings.Contains(out.String(), "Nothing run") {
-		t.Errorf("exit = %d, out:\n%s", code, out.String())
+	if code != 0 || !strings.Contains(out.String(), "未运行任何采集") {
+		t.Errorf("exit = %d，out：\n%s", code, out.String())
 	}
 	if _, err := os.Stat(filepath.Join(dir, "bundles")); err == nil {
-		t.Error("declined, but the output directory was created")
+		t.Error("已拒绝，但输出目录被创建了")
 	}
 }
 
-// ---- review round: flags the command owns, stale archives, TLS, locality, log permissions
+// ---- 评审轮次：命令自有 flag、过期归档、TLS、本机判定、日志权限
 
 func TestMain_RejectsFlagsTheCommandOwns(t *testing.T) {
 	t.Setenv(PasswordEnvVar, "pw")
@@ -410,14 +408,14 @@ func TestMain_RejectsFlagsTheCommandOwns(t *testing.T) {
 	} {
 		var out, errOut bytes.Buffer
 		code := Main(append([]string{"-user", "diag", "--"}, extra...), strings.NewReader(""), &out, &errOut)
-		if code != 2 || !strings.Contains(errOut.String(), "cannot be passed through") {
-			t.Errorf("-- %v: exit %d, stderr %q — want it refused before discovery", extra, code, errOut.String())
+		if code != 2 || !strings.Contains(errOut.String(), "不能透传") {
+			t.Errorf("-- %v：exit %d，stderr %q —— 期望在发现集群前就被拒绝", extra, code, errOut.String())
 		}
 		if strings.Contains(out.String()+errOut.String(), "s3cret") {
-			t.Errorf("-- %v: the password was printed", extra)
+			t.Errorf("-- %v：密码被打印了", extra)
 		}
 		if strings.Contains(extra[0], "password") && !strings.Contains(errOut.String(), PasswordEnvVar) {
-			t.Errorf("-- %v: the refusal should point to %s: %s", extra, PasswordEnvVar, errOut.String())
+			t.Errorf("-- %v：拒绝信息应指向 %s：%s", extra, PasswordEnvVar, errOut.String())
 		}
 	}
 }
@@ -425,7 +423,7 @@ func TestMain_RejectsFlagsTheCommandOwns(t *testing.T) {
 func TestValidateExtra_AllowsCollectionOptions(t *testing.T) {
 	if err := validateExtra([]string{"-from", "2026-10-01", "-to", "2026-10-02", "-salt", "abc12345",
 		"--normalized-query-hash", "123", "-skip-dashboard", "-logs-max-mb=200", "-keeper-mntr", "off"}); err != nil {
-		t.Errorf("collection options rejected: %v", err)
+		t.Errorf("采集选项被拒绝：%v", err)
 	}
 }
 
@@ -441,21 +439,21 @@ func TestMain_RetryDoesNotReuseAPreviousArchive(t *testing.T) {
 	executable = func() (string, error) { return ok, nil }
 	var out, errOut bytes.Buffer
 	if code := Main(args, strings.NewReader(""), &out, &errOut); code != 0 {
-		t.Fatalf("first run: exit %d\n%s%s", code, out.String(), errOut.String())
+		t.Fatalf("首次运行：exit %d\n%s%s", code, out.String(), errOut.String())
 	}
 
-	// Retry into the same directory with ch-s2r2 now down: its folder still
-	// holds the first run's archive, which must not count for this run.
+	// 用 ch-s2r2 现已下线的状态重试到同一目录：它的文件夹仍保留着首次运行
+	// 的归档，而该归档不能计入本次运行。
 	down := fakeBinary(t, "ch-s2r2")
 	executable = func() (string, error) { return down, nil }
 	out.Reset()
 	if code := Main(args, strings.NewReader(""), &out, &errOut); code != 1 {
-		t.Errorf("retry: exit %d, want 1 — a stale archive was accepted\n%s", code, out.String())
+		t.Errorf("重试：exit %d，期望 1 —— 接受了过期归档\n%s", code, out.String())
 	}
 	summary, _ := os.ReadFile(filepath.Join(dir, "bundles", "summary.txt"))
 	for _, line := range strings.Split(string(summary), "\n") {
-		if strings.HasPrefix(line, "ch-s2r2 ") && !strings.Contains(line, "no archive") {
-			t.Errorf("ch-s2r2 reported as %q", line)
+		if strings.HasPrefix(line, "ch-s2r2 ") && !strings.Contains(line, "无归档") {
+			t.Errorf("ch-s2r2 被报告为 %q", line)
 		}
 	}
 }
@@ -465,13 +463,13 @@ func TestEachNodeArgs_HTTPSConnectsByTheNodeName(t *testing.T) {
 	o.Protocol = "https"
 	nodes := byHost(mustDiscover(t, labRows, ""))
 	if got := argValue(EachNodeArgs(nodes["ch-s1r2"], o), "-host"); got != "ch-s1r2" {
-		t.Errorf("https -host = %q, want the node's name (its certificate does not cover localhost)", got)
+		t.Errorf("https -host = %q，期望节点名称（其证书不覆盖 localhost）", got)
 	}
 	if got := argValue(EachNodeArgs(nodes["ch-s1r1"], o), "-host"); got != o.Host {
-		t.Errorf("https -host for the discovery node = %q, want %q", got, o.Host)
+		t.Errorf("发现节点的 https -host = %q，期望 %q", got, o.Host)
 	}
 	if got := argValue(EachNodeArgs(nodes["ch-s1r2"], opts()), "-host"); got != "localhost" {
-		t.Errorf("http -host = %q, want localhost", got)
+		t.Errorf("http -host = %q，期望 localhost", got)
 	}
 }
 
@@ -486,21 +484,21 @@ func TestIsThisMachine(t *testing.T) {
 	}
 	for host, want := range map[string]bool{
 		"localhost": true, "127.0.0.1": true, "::1": true,
-		"10.0.0.5": true, // this machine's own address
+		"10.0.0.5": true, // 本机自己的地址
 		"10.0.0.6": false,
 		"ch-01":    true, "CH-01.site-a": true,
-		"ch-01.site-b": false, // another site's ch-01: both qualified, so exact match only
+		"ch-01.site-b": false, // 另一个站点的 ch-01：两者都带域名，因此只做精确匹配
 		"ch-02":        false,
 	} {
 		if got := isThisMachine(host); got != want {
-			t.Errorf("isThisMachine(%q) = %v, want %v", host, got, want)
+			t.Errorf("isThisMachine(%q) = %v，期望 %v", host, got, want)
 		}
 	}
 }
 
 func TestMain_RunLogIsOwnerOnly(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("POSIX permissions")
+		t.Skip("POSIX 权限")
 	}
 	host, port := fakeServer(t)
 	t.Setenv(PasswordEnvVar, "pw")
@@ -510,7 +508,7 @@ func TestMain_RunLogIsOwnerOnly(t *testing.T) {
 	executable = func() (string, error) { return bin, nil }
 	t.Cleanup(func() { executable = prev })
 
-	// A run.log left world-readable by an earlier run must be tightened too.
+	// 先前运行留下、对所有用户可读的 run.log 也必须收紧权限。
 	stale := filepath.Join(dir, "bundles", "s1r2_ch-s1r2", "run.log")
 	if err := os.MkdirAll(filepath.Dir(stale), 0o755); err != nil {
 		t.Fatal(err)
@@ -522,7 +520,7 @@ func TestMain_RunLogIsOwnerOnly(t *testing.T) {
 	Main([]string{"-host", host, "-port", port, "-user", "diag", "-yes", "-output-dir", "bundles"}, strings.NewReader(""), &out, &errOut)
 	logs, _ := filepath.Glob(filepath.Join(dir, "bundles", "*", "run.log"))
 	if len(logs) != 4 {
-		t.Fatalf("%d run.log files, want 4", len(logs))
+		t.Fatalf("%d 个 run.log 文件，期望 4", len(logs))
 	}
 	for _, l := range logs {
 		fi, err := os.Stat(l)
@@ -530,18 +528,18 @@ func TestMain_RunLogIsOwnerOnly(t *testing.T) {
 			t.Fatal(err)
 		}
 		if fi.Mode().Perm()&0o077 != 0 {
-			t.Errorf("%s is %v — gov runs print raw database/table names into it", l, fi.Mode().Perm())
+			t.Errorf("%s 的权限是 %v —— gov 运行会把原始数据库/表名写入其中", l, fi.Mode().Perm())
 		}
 	}
 }
 
-// ---- review round 2: salt, unusable archives, literal paths
+// ---- 评审轮次 2：salt、不可用归档、字面路径
 
 func TestShown_MasksSaltAndPasswordInEverySpelling(t *testing.T) {
 	got := Shown("./clickhouse-diagnostic", []string{"-salt", "abc12345", "--salt=def67890", "-password=pw1", "--password", "pw2"})
 	for _, secret := range []string{"abc12345", "def67890", "pw1", "pw2"} {
 		if strings.Contains(got, secret) {
-			t.Errorf("%q shown in %s", secret, got)
+			t.Errorf("%q 出现在 %s 中", secret, got)
 		}
 	}
 }
@@ -553,14 +551,14 @@ func TestEachNodeArgs_LeavesTheSaltOut(t *testing.T) {
 	args := EachNodeArgs(mustDiscover(t, labRows, "")[1], o)
 	joined := strings.Join(args, " ")
 	if strings.Contains(joined, "salt") || strings.Contains(joined, "abc12345") || strings.Contains(joined, "def67890") {
-		t.Errorf("salt in a command to run on a host: %s", joined)
+		t.Errorf("要在主机上执行的命令中出现了 salt：%s", joined)
 	}
 	if !strings.Contains(joined, "-from 2026-10-01") {
-		t.Errorf("other pass-through arguments lost: %s", joined)
+		t.Errorf("其他透传参数丢失了：%s", joined)
 	}
-	// The run from this machine has no terminal to ask on, so it keeps it.
+	// 从本机发起的运行没有终端可提示，因此保留它。
 	if !has(HereArgs(mustDiscover(t, labRows, "")[1], o), "abc12345") {
-		t.Error("the here-run needs the salt")
+		t.Error("本机运行需要 salt")
 	}
 }
 
@@ -580,10 +578,10 @@ func TestMain_GovNeverPrintsTheSalt(t *testing.T) {
 		Main([]string{"-host", host, "-port", port, "-user", "diag", "-mode", "gov", "-yes", "-collect-from", from,
 			"-output-dir", "b-" + from, "--", "-salt", "abc12345"}, strings.NewReader(""), &out, &errOut)
 		if strings.Contains(out.String()+errOut.String(), "abc12345") {
-			t.Errorf("%s: the salt was printed:\n%s", from, out.String())
+			t.Errorf("%s：salt 被打印了：\n%s", from, out.String())
 		}
-		if strings.Contains(out.String(), "log files and configs") {
-			t.Errorf("%s: gov never collects log files or configs, but the output offers them", from)
+		if strings.Contains(out.String(), "日志文件和配置") {
+			t.Errorf("%s：gov 从不采集日志文件和配置，但输出中提供了它们", from)
 		}
 	}
 }
@@ -601,18 +599,18 @@ func TestMain_UnusableArchivesAreNotOK(t *testing.T) {
 	code := Main([]string{"-host", host, "-port", port, "-user", "diag", "-yes", "-output-dir", "bundles"},
 		strings.NewReader(""), &out, &errOut)
 	if code != 1 {
-		t.Errorf("exit = %d, want 1\n%s", code, out.String())
+		t.Errorf("exit = %d，期望 1\n%s", code, out.String())
 	}
 	summary, _ := os.ReadFile(filepath.Join(dir, "bundles", "summary.txt"))
 	for _, h := range []string{"ch-s1r2", "ch-s2r1"} {
 		for _, line := range strings.Split(string(summary), "\n") {
 			if strings.HasPrefix(line, h+" ") && strings.Contains(line, " ok ") {
-				t.Errorf("%s reported ok: %q", h, line)
+				t.Errorf("%s 被报告为 ok：%q", h, line)
 			}
 		}
 	}
 	if strings.Count(string(summary), " ok ") != 2 {
-		t.Errorf("want the 2 good hosts ok:\n%s", summary)
+		t.Errorf("期望两台正常主机为 ok：\n%s", summary)
 	}
 }
 
@@ -627,13 +625,12 @@ func TestMain_OutputDirWithGlobCharacters(t *testing.T) {
 	var out, errOut bytes.Buffer
 	if code := Main([]string{"-host", host, "-port", port, "-user", "diag", "-yes", "-output-dir", "support[123]"},
 		strings.NewReader(""), &out, &errOut); code != 0 {
-		t.Errorf("exit = %d with -output-dir 'support[123]'\n%s", code, out.String())
+		t.Errorf("使用 -output-dir 'support[123]' 时 exit = %d\n%s", code, out.String())
 	}
 }
 
-// Bundles are renamed clickhouse_diagnostic_<ts>; releases before that wrote
-// clickhouse_backup_<ts>. A host is ok with either, whichever release of the
-// binary runs.
+// bundle 已改名为 clickhouse_diagnostic_<ts>；更早的版本写的是
+// clickhouse_backup_<ts>。无论运行的是哪个版本的二进制，两种名字都算 ok。
 func TestMain_AcceptsBothBundleNames(t *testing.T) {
 	host, port := fakeServer(t)
 	t.Setenv(PasswordEnvVar, "pw")
@@ -646,6 +643,6 @@ func TestMain_AcceptsBothBundleNames(t *testing.T) {
 	var out, errOut bytes.Buffer
 	if code := Main([]string{"-host", host, "-port", port, "-user", "diag", "-yes", "-output-dir", "bundles"},
 		strings.NewReader(""), &out, &errOut); code != 0 {
-		t.Errorf("exit = %d with clickhouse_diagnostic_ archives\n%s", code, out.String())
+		t.Errorf("使用 clickhouse_diagnostic_ 归档时 exit = %d\n%s", code, out.String())
 	}
 }

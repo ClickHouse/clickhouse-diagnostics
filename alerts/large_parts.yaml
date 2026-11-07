@@ -1,22 +1,19 @@
 name: large_parts
-title: "Individual part exceeds 150 GB"
+title: "单个part超过150 GB"
 severity: warning
 description: |
-  A single active data part is larger than 150 GB on disk.
-  Very large parts can slow down merges, increase memory pressure during
-  queries, and make backup/restore operations slower. Consider reviewing
-  the partition key for the affected table so that parts are split more
-  granularly.
-# Scans per-table data: not run in an essential collection.
+  单个活跃数据part在磁盘上超过150 GB。过大的part会拖慢merge、
+  增加查询期间的内存压力，并使备份/恢复操作变慢。考虑检查受影响表的分区键，
+  让part能被更细粒度地拆分。
+# 扫描逐表数据：在essential采集中不运行。
 tier: full
 tags:
   - storage
   - parts
   - performance
 
-# Evaluated by the Go check over the files already collected (no second
-# query to the server). query: below is the same test in SQL, for the
-# customer to run live; the check mirrors it.
+# 由Go check在已采集的文件上评估（不会再次查询服务器）。下方query:是同一
+# 测试的SQL版本，供客户在线执行；check镜像同一逻辑。
 check: go:large_parts
 source:
   - system.parts
@@ -37,4 +34,4 @@ query: |
     AND bytes_on_disk > 150 * 1024 * 1024 * 1024
   ORDER BY bytes_on_disk DESC
 
-message: "Part {part_name} of {database}.{table} on disk '{disk_name}' is {size_on_disk} (compression ratio {compression_ratio}x)"
+message: "{database}.{table}的part {part_name}位于磁盘'{disk_name}'上，大小为{size_on_disk}（压缩比{compression_ratio}x）"

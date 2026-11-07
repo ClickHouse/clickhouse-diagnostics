@@ -1,14 +1,14 @@
 package internal
 
-// QueryFile represents a query file with its metadata
+// QueryFile 表示一个查询文件及其元数据
 type QueryFile struct {
-	Path     string // Relative path from queries directory
-	Name     string // Filename
-	DirName  string // Parent directory name (empty for root queries)
-	FullPath string // Absolute path to the file
+	Path     string // 相对于 queries 目录的路径
+	Name     string // 文件名
+	DirName  string // 父目录名（根查询为空）
+	FullPath string // 文件的绝对路径
 }
 
-// Version represents a ClickHouse version with semantic versioning
+// Version 表示带有语义化版本号的 ClickHouse 版本
 type Version struct {
 	Major int
 	Minor int
@@ -16,14 +16,14 @@ type Version struct {
 	Build int
 }
 
-// Config represents configuration collection settings
+// Config 表示配置采集设置
 type Config struct {
 	SourceDir     string
 	DestDir       string
 	KeepPasswords bool
 }
 
-// ArchiveOptions represents options for archive creation
+// ArchiveOptions 表示创建归档的选项
 type ArchiveOptions struct {
 	Name        string
 	Directories []string

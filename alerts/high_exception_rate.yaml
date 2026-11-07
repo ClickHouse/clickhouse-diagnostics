@@ -1,29 +1,26 @@
 name: high_exception_rate
-title: "High query exception rate for one error code in an hour"
+title: "某一小时内单一错误码的查询异常率偏高"
 severity: warning
 description: |
-  More than 50 query exceptions with the same exception code occurred
-  within a single hour of the last 24 hours (one alert instance per hour
-  and code, worst 24 first). A sustained rate like this usually points to
-  a systematic problem — a misbehaving client, a schema mismatch, missing
-  permissions, resource limits being hit, or an outage of a dependency
-  (Keeper, object storage) — rather than isolated bad queries.
+  最近24小时中的某一小时内，同一异常码的查询异常超过50次
+  （每小时、每个错误码各生成一个告警实例，最严重的24个排在最前）。
+  这样的持续速率通常指向系统性问题——行为异常的客户端、schema不匹配、
+  权限缺失、触发资源限制，或某个依赖（Keeper、对象存储）故障——
+  而不是孤立的坏查询。
 
-  The window is a day rather than an hour because bundles are usually
-  collected after recovery; an hour-only rule would miss the incident.
+  窗口是一天而不是一小时，因为bundle通常是在恢复之后采集的；
+  只看一小时的规则会错过该事件。
 
-  Investigate: use the example message and exception code to identify the
-  affected queries; check whether one user or one query pattern
-  (normalized_query_hash) dominates; correlate the hour with metric_log,
-  part_log and text_log.
+  排查：用示例message和异常码定位受影响的查询；检查是否某个用户
+  或某种查询模式（normalized_query_hash）占主导；将该小时与
+  metric_log、part_log和text_log关联分析。
 tags:
   - exceptions
   - reliability
   - query-log
 
-# Evaluated by the Go check over the files already collected (no second
-# query to the server). query: below is the same test in SQL, for the
-# customer to run live; the check mirrors it.
+# 由Go check在已采集的文件上评估（不会再次查询服务器）。下方query:是同一
+# 测试的SQL版本，供客户在线执行；check镜像同一逻辑。
 check: go:high_exception_rate
 source:
   - system.query_log_exceptions_1_day
@@ -43,4 +40,4 @@ query: |
   ORDER BY error_count DESC
   LIMIT 24
 
-message: "Exception code {exception_code} fired {error_count} times in the hour starting {hour} — example: {example_message}"
+message: "异常码{exception_code}在{hour}开始的一小时内触发了{error_count}次——示例：{example_message}"

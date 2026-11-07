@@ -1,18 +1,18 @@
--- Each replica's newest block number and last part time for its 200 most
--- recently written partitions — the raw numbers a parts-propagation lag is
--- computed from. On SharedMergeTree every replica keeps its own view of
--- system.parts; a replica that has not yet fetched the newest part of a
--- partition shows a lower max_block_number than its siblings, and the gap in
--- last_visible says for how long. Block numbers are allocated per partition,
--- so the grain is the partition; a per-table max would mix partitions.
+-- 每个副本最近写入的 200 个分区的最新 block 编号和最后 part 时间——
+-- 计算 parts 传播延迟所用的原始数字。在 SharedMergeTree 上，
+-- 每个副本保留自己的 system.parts 视图；尚未 fetch 到某个分区
+-- 最新 part 的副本会显示比同类更低的 max_block_number，而
+-- last_visible 中的差距说明落后了多久。Block 编号按分区分配，
+-- 因此粒度是分区；按表取最大值会混合不同
+-- 分区。
 --
--- Cost: one pass over system.parts (in-memory) with five narrow columns,
--- grouped per partition; 200 rows per host.
--- Cloud: fans out on purpose — the cloud collector otherwise reads
--- system.parts from ONE replica (SharedSystemTables). LIMIT 200 BY hostname
--- so every replica contributes its own 200 and the busiest one cannot take
--- the whole cap; the same partition therefore appears once per replica and
--- the rows compare directly. The derived lag is in parts_max_block_by_replica.
+-- 开销：对 system.parts（内存中）做一次扫描，使用五个窄列，
+-- 按分区分组；每台主机 200 行。
+-- Cloud：有意 fan-out——cloud collector 原本只从
+-- 一个副本读取 system.parts（SharedSystemTables）。LIMIT 200 BY hostname
+-- 使每个副本贡献自己的 200 行，最繁忙的副本无法占满
+-- 全部上限；因此同一分区每个副本出现一次，
+-- 行可直接比较。推导出的延迟在 parts_max_block_by_replica 中。
 SELECT
     hostName()               AS hostname,
     database,

@@ -5,8 +5,8 @@ import (
 	"testing"
 )
 
-// Review finding on #36: every error from the visibility probe was reported
-// as a privilege problem with GRANT advice. Only the server's own denial is.
+// #36 的评审发现：可见性探测产生的每个错误都被报告为权限问题并附上
+// GRANT 建议。只有服务器自身的拒绝才应如此。
 func TestDatabaseVisibilityVerdict(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -28,11 +28,11 @@ func TestDatabaseVisibilityVerdict(t *testing.T) {
 		c := c
 		t.Run(c.name, func(t *testing.T) {
 			if got := databaseVisibilityVerdict(c.count, c.err); got != c.want {
-				t.Errorf("verdict = %v, want %v", got, c.want)
+				t.Errorf("verdict = %v，期望 %v", got, c.want)
 			}
 		})
 	}
 	if isAccessDenied(nil) {
-		t.Error("nil error must not read as access denied")
+		t.Error("nil 错误不得被判定为访问被拒绝")
 	}
 }

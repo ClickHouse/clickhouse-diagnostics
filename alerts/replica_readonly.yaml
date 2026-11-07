@@ -1,26 +1,24 @@
 name: replica_readonly
-title: "Replica entered read-only mode"
+title: "replica进入read-only模式"
 severity: critical
 description: |
-  One or more replicated tables are in read-only mode. In this state
-  the affected table accepts SELECT queries but all INSERT and DDL
-  operations will be rejected. Read-only mode is usually caused by:
-  - Lost or expired Keeper/ZooKeeper session
-  - Disk full condition
-  - Network partition isolating the replica from Keeper
-  - Metadata corruption requiring manual recovery
+  一个或多个replicated表处于read-only模式。在此状态下，受影响的表
+  接受SELECT查询，但所有INSERT和DDL操作都会被拒绝。read-only模式
+  通常由以下原因引起：
+  - Keeper/ZooKeeper会话丢失或过期
+  - 磁盘写满
+  - 网络分区使replica与Keeper隔离
+  - 元数据损坏，需要手动恢复
 
-  The replica will attempt to recover automatically when the root cause
-  is resolved. If it does not recover within a few minutes, check Keeper
-  connectivity and server logs (system.text_log) for the error details.
+  根因解决后，replica会尝试自动恢复。如果几分钟内未恢复，
+  请检查Keeper连通性和服务器日志（system.text_log）以获取错误详情。
 tags:
   - replication
   - reliability
   - keeper
 
-# Evaluated by the Go check over the files already collected (no second
-# query to the server). query: below is the same test in SQL, for the
-# customer to run live; the check mirrors it.
+# 由Go check在已采集的文件上评估（不会再次查询服务器）。下方query:是同一
+# 测试的SQL版本，供客户在线执行；check镜像同一逻辑。
 check: go:replica_readonly
 source:
   - system.replicas
@@ -40,4 +38,4 @@ query: |
   WHERE (database, table) IN (SELECT database, table FROM {sys.replicas} WHERE is_readonly = 1)
     AND is_readonly = 1
 
-message: "{database}.{table} is in read-only mode (session_expired={is_session_expired}, delay={absolute_delay}s, active_replicas={active_replicas}/{total_replicas})"
+message: "{database}.{table}处于read-only模式（session_expired={is_session_expired}，delay={absolute_delay}s，active_replicas={active_replicas}/{total_replicas}）"

@@ -1,7 +1,7 @@
 -- tier: essential
--- Gov: additionally drops every per-object gauge (DiskUsed_<disk>,
--- NetworkSendBytes_<iface>, BlockReadOps_<device>, …) — the suffix is an
--- infrastructure name that cannot be hashed inside a metric name.
+-- Gov：还额外丢弃每个按对象区分的 gauge（DiskUsed_<disk>、
+-- NetworkSendBytes_<iface>、BlockReadOps_<device>、…）—— 后缀是
+-- 基础设施名称，无法在指标名内部做哈希。
 SELECT
     metric,
     value,

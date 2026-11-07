@@ -8,42 +8,41 @@ import (
 	"clickhouse-diagnostic/internal/collection"
 )
 
-// Collector handles collection of configuration files
+// Collector 处理配置文件的采集
 type Collector struct {
 	sanitizer *collection.Sanitizer
 }
 
-// NewCollector creates a new configuration collector
+// NewCollector 创建一个新的配置采集器
 func NewCollector() *Collector {
 	return &Collector{
 		sanitizer: collection.NewSanitizer(),
 	}
 }
 
-// Collect collects configuration files from configDir into destDir.
+// Collect 将配置文件从 configDir 采集到 destDir。
 //
-// destDir is supplied by the caller rather than fixed here so that
-// configs land inside the run's own results directory, like every other
-// artefact the tool produces. A process-wide directory would persist
-// between runs, and since files are written by name, a second run
-// against a different host would archive whatever the first run left
-// behind — under the second run's timestamp, with nothing to flag it.
+// destDir 由调用方提供，而不是在这里固定，这样配置会像工具产出的
+// 其他产物一样，落到本次运行自己的结果目录内。进程级目录会在多次运行之间
+// 残留，而且由于文件按名称写入，第二次针对不同主机的运行
+// 会把第一次运行留下的内容归档——挂在第二次运行的时间戳下，
+// 且没有任何提示。
 func (c *Collector) Collect(configDir, destDir string, keepPasswords bool) error {
-	fmt.Printf("Collecting configuration files from '%s'...\n", configDir)
+	fmt.Printf("正在从 '%s' 采集配置文件...\n", configDir)
 
-	// Check if the source directory exists
+	// 检查源目录是否存在
 	_, err := os.Stat(configDir)
 	if os.IsNotExist(err) {
-		fmt.Printf("Config directory '%s' does not exist, skipping collection\n", configDir)
+		fmt.Printf("配置目录 '%s' 不存在，跳过采集\n", configDir)
 		return nil
 	}
 
-	// Create the destination directory
+	// 创建目标目录
 	if err := os.MkdirAll(destDir, 0750); err != nil {
-		return fmt.Errorf("error creating configuration directory: %w", err)
+		return fmt.Errorf("创建配置目录失败：%w", err)
 	}
 
-	// Walk through the config directory
+	// 遍历配置目录
 	fileCount := 0
 	passwordCount := 0
 
@@ -52,22 +51,22 @@ func (c *Collector) Collect(configDir, destDir string, keepPasswords bool) error
 			return err
 		}
 
-		// Skip directories
+		// 跳过目录
 		if info.IsDir() {
 			return nil
 		}
 
-		// Read the file content
+		// 读取文件内容
 		content, err := os.ReadFile(path)
 		if err != nil {
-			fmt.Printf("Error reading config file '%s': %v\n", path, err)
+			fmt.Printf("读取配置文件 '%s' 失败：%v\n", path, err)
 			return nil
 		}
 
-		// Sanitize content if needed. Fail closed: if the sanitizer
-		// can't parse the file we skip it entirely — sending an
-		// un-parsable config to support is safer than potentially
-		// leaking a credential that survived a regex-only fallback.
+		// 需要时脱敏内容。失败即关闭：如果脱敏器
+		// 无法解析文件，我们就完全跳过该文件——把无法解析的
+		// 配置发给支持人员，比可能泄漏某个在仅靠正则的
+		// 回退中幸存下来的凭据更安全。
 		var sanitizedContent []byte
 		var passwordsFound int
 
@@ -79,37 +78,37 @@ func (c *Collector) Collect(configDir, destDir string, keepPasswords bool) error
 				sanitizedContent, passwordsFound, err = c.sanitizer.SanitizeXMLContent(content)
 			}
 			if err != nil {
-				fmt.Printf("WARNING: could not sanitise '%s' (%v) — file SKIPPED from configuration archive\n",
+				fmt.Printf("警告：无法脱敏 '%s'（%v）——该文件已从配置归档中跳过\n",
 					filepath.Base(path), err)
 				return nil
 			}
 			if passwordsFound > 0 {
-				fmt.Printf("Found and removed %d credentials in file '%s'\n", passwordsFound, filepath.Base(path))
+				fmt.Printf("在文件 '%s' 中发现并移除了 %d 个凭据\n", filepath.Base(path), passwordsFound)
 				passwordCount += passwordsFound
 			}
 		} else {
 			sanitizedContent = content
 		}
 
-		// Mirror the tree below configDir rather than flattening to the
-		// base name. config.d/storage.xml and users.d/storage.xml are both
-		// ordinary names; flattening silently overwrites one with the
-		// other, and drops the directory each came from — which is what
-		// determines ClickHouse's config merge order.
+		// 在 configDir 下镜像目录树，而不是压平到
+		// 基本文件名。config.d/storage.xml 和 users.d/storage.xml 都是
+		// 常见名称；压平会静默地用一个覆盖另一个，
+		// 并丢失它们各自的来源目录——而正是目录
+		// 决定 ClickHouse 的配置合并顺序。
 		relPath, err := filepath.Rel(configDir, path)
 		if err != nil {
-			fmt.Printf("Error resolving path for '%s': %v\n", path, err)
+			fmt.Printf("解析 '%s' 的路径失败：%v\n", path, err)
 			return nil
 		}
 		destPath := filepath.Join(destDir, relPath)
 		if err := os.MkdirAll(filepath.Dir(destPath), 0750); err != nil {
-			fmt.Printf("Error creating directory for '%s': %v\n", relPath, err)
+			fmt.Printf("为 '%s' 创建目录失败：%v\n", relPath, err)
 			return nil
 		}
 
-		// Write the file to the destination
+		// 将文件写入目标位置
 		if err := os.WriteFile(destPath, sanitizedContent, 0600); err != nil {
-			fmt.Printf("Error saving config file '%s': %v\n", relPath, err)
+			fmt.Printf("保存配置文件 '%s' 失败：%v\n", relPath, err)
 			return nil
 		}
 
@@ -118,12 +117,12 @@ func (c *Collector) Collect(configDir, destDir string, keepPasswords bool) error
 	})
 
 	if err != nil {
-		return fmt.Errorf("error walking through config directory: %w", err)
+		return fmt.Errorf("遍历配置目录失败：%w", err)
 	}
 
-	fmt.Printf("Collected %d configuration files to '%s'\n", fileCount, destDir)
+	fmt.Printf("已采集 %d 个配置文件到 '%s'\n", fileCount, destDir)
 	if passwordCount > 0 {
-		fmt.Printf("Removed %d passwords from configuration files\n", passwordCount)
+		fmt.Printf("已从配置文件中移除 %d 个密码\n", passwordCount)
 	}
 
 	return nil

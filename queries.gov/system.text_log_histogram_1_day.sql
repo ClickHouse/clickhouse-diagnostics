@@ -1,18 +1,18 @@
 -- tier: essential
--- Warning-and-worse log volume per hour, level and logger CLASS over the last
--- day, with one example line. The logger name is normalised to its class
--- ("db.t (uuid)(PartsUpdateElection)" → PartsUpdateElection, "DDLWorker(db)" →
--- DDLWorker) so 25 000 tables do not become 25 000 rows. This is the file that
--- says WHEN errors started and WHICH component; system.text_log (2000 rows)
--- only shows the newest lines.
+-- 最近一天每小时的 Warning 及更严重日志量，按 level 和 logger 类别统计，
+-- 附带一行示例。logger 名称被归一到它的类别
+-- （"db.t (uuid)(PartsUpdateElection)" → PartsUpdateElection，"DDLWorker(db)" →
+-- DDLWorker），这样 25 000 张表不会变成 25 000 行。正是这个文件
+-- 说明错误何时开始、来自哪个组件；system.text_log（2000 行）
+-- 只显示最新的几行。
 --
--- Gov: the class stays readable — it is a ClickHouse component name, not
--- customer data. Three guards cover the shapes where a raw identifier could
--- survive normalisation: the class regexes accept digits/spaces
--- (S3ObjectStorage, "KafkaConsumer 1"), a "<disk>::" prefix is masked to "*::"
--- (disk names are hashed everywhere else in gov), and whatever still contains
--- a dot (a db.table that no pattern recognised) is hashed with the salt. The
--- example line is always hashed.
+-- Gov：类别保持可读 —— 它是 ClickHouse 组件名，不是
+-- 客户数据。三层守卫覆盖原始标识符可能在归一化后
+-- 残留的形状：类别正则接受数字/空格
+-- （S3ObjectStorage、"KafkaConsumer 1"），"<disk>::" 前缀被掩码为 "*::"
+-- （磁盘名在 gov 其他所有地方都会哈希），而任何仍包含
+-- 点的内容（未被任何模式识别的 db.table）会用盐哈希。
+-- 示例行始终哈希。
 SELECT
     toStartOfHour(event_time)          AS time,
     level,

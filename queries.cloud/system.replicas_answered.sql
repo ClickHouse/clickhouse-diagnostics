@@ -1,14 +1,14 @@
 -- tier: essential
--- Which replicas of the service answered this collection. Every request runs
--- with skip_unavailable_shards = 1, so a replica that is down no longer
--- fails the per-replica (clusterAllReplicas) collectors — it is simply
--- missing from them. This file says which, exactly: clusterAllReplicas
--- treats every replica as its own shard and numbers them in cluster order
--- (shard_num, then replica_num), so a reply's _shard_num IS the position of
--- the configured host that sent it. No host-name matching — aliases, IP
--- endpoints and replicas sharing a short name cannot mislead it.
---   pos       the host's position in the `default` cluster
---   answered  1 when a reply came from that position
+-- 本次采集中服务里哪些副本作出了响应。每个请求都以
+-- skip_unavailable_shards = 1 运行，因此宕机的副本不再使
+-- 按副本（clusterAllReplicas）的 collector 失败——它只是
+-- 从结果中缺失。本文件准确说明是哪些：clusterAllReplicas
+-- 把每个副本视为自己的 shard，并按集群顺序编号
+-- （先 shard_num，再 replica_num），因此响应的 _shard_num 就是
+-- 发送它的已配置主机的位置。不做主机名匹配——别名、IP
+-- 端点和共享短名称的副本都无法误导它。
+--   pos       主机在 `default` 集群中的位置
+--   answered  当响应来自该位置时为 1
 SELECT
     c.host_name,
     c.host_address,

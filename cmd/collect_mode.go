@@ -10,18 +10,16 @@ import (
 	"clickhouse-diagnostic/pkg"
 )
 
-// gentleSettings keep the tool from making a struggling server worse: few
-// threads, a memory cap, and the lowest scheduling priority (in ClickHouse a
-// larger priority value runs later).
+// gentleSettings 避免让本就吃力的服务器雪上加霜：减少线程数、内存上限，
+// 以及最低调度优先级（在 ClickHouse 中 priority 值越大越晚执行）。
 var gentleSettings = []struct{ name, value string }{
 	{"max_threads", "2"},
 	{"max_memory_usage", "1073741824"},
 	{"priority", "10"},
 }
 
-// setupCollection runs the load probe (not in dry-run, which may only send
-// metadata queries), decides the starting mode and returns the watchdog the
-// collectors run under.
+// setupCollection 执行负载探测（dry-run 下不执行，因为 dry-run 只允许发送
+// 元数据查询），决定起始模式，并返回各 collector 运行时所受的 watchdog。
 func setupCollection(client *pkg.ClickHouseClient, requested collectmode.Mode, budget time.Duration, dryRun bool) (collectmode.Decision, *collectmode.Watchdog) {
 	var d collectmode.Decision
 	if dryRun {
@@ -31,24 +29,22 @@ func setupCollection(client *pkg.ClickHouseClient, requested collectmode.Mode, b
 		d = collectmode.Decide(requested, s, err)
 	}
 	if requested == collectmode.Full {
-		// -collect full is a promise: no switch to essential, only the
-		// budget if one was given.
+		// -collect full 是一种承诺：不会切换到 essential，只在指定了
+		// 预算时受预算限制。
 		return d, collectmode.NewWatchdog(budget).Locked()
 	}
 	return d, collectmode.NewWatchdog(budget).WithTripBudget(collectmode.EssentialBudget)
 }
 
-// applyEssential makes the rest of the run gentle: a short per-query
-// timeout (unless the operator chose one) and the gentle settings. Each
-// setting is checked with SELECT 1, because a settings profile with a
-// constraint on it would otherwise make every later query fail; a refused
-// setting is left out and reported.
+// applyEssential 让后续运行更温和：较短的每查询超时（除非运维人员已自行指定）
+// 以及 gentle 设置。每个设置都会用 SELECT 1 验证，否则带约束的 settings
+// profile 会让后续所有查询失败；被拒绝的设置会被省略并报告。
 func applyEssential(client *pkg.ClickHouseClient, timeoutExplicit bool) []string {
 	var notes []string
 	client.SetClientMargin(5 * time.Second)
 	if !timeoutExplicit {
 		client.SetQueryTimeout(collectmode.EssentialQueryTimeout)
-		notes = append(notes, fmt.Sprintf("query timeout %v", collectmode.EssentialQueryTimeout))
+		notes = append(notes, fmt.Sprintf("查询超时 %v", collectmode.EssentialQueryTimeout))
 	}
 	var kept, refused []string
 	for _, s := range gentleSettings {
@@ -64,13 +60,13 @@ func applyEssential(client *pkg.ClickHouseClient, timeoutExplicit bool) []string
 		notes = append(notes, strings.Join(kept, ", "))
 	}
 	if len(refused) > 0 {
-		notes = append(notes, "refused by the settings profile, left out: "+strings.Join(refused, ", "))
+		notes = append(notes, "被设置配置拒绝，已省略："+strings.Join(refused, ", "))
 	}
 	return notes
 }
 
-// collectKind is "essential" if the run was essential at any point (chosen
-// up front or switched mid-run), else "full".
+// collectKind 在运行期间任一时刻为 essential（一开始就选择或中途切换）时
+// 返回 "essential"，否则返回 "full"。
 func collectKind(w *collectmode.Watchdog) string {
 	if tripped, _ := w.Tripped(); tripped {
 		return string(collectmode.Essential)
@@ -78,7 +74,7 @@ func collectKind(w *collectmode.Watchdog) string {
 	return string(collectmode.Full)
 }
 
-// skippedCollectors lists the collectors the run did not execute.
+// skippedCollectors 列出本次运行未执行的 collector。
 func skippedCollectors(rec *runlog.Recorder) []string {
 	var out []string
 	for _, e := range rec.Entries() {

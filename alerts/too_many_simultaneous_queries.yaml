@@ -1,25 +1,21 @@
 name: too_many_simultaneous_queries
-title: "Too many simultaneous queries (code 202)"
+title: "同时运行的查询过多（错误码202）"
 severity: warning
 description: |
-  More than 10 queries failed with "Too many simultaneous queries"
-  (exception code 202, TOO_MANY_SIMULTANEOUS_QUERIES) in the last hour. This means the server hit its
-  max_concurrent_queries limit. Clients will receive immediate errors
-  rather than waiting.
+  最近一小时内超过10个查询以“Too many simultaneous queries”
+  （异常码202，TOO_MANY_SIMULTANEOUS_QUERIES）失败。这意味着服务器
+  达到了max_concurrent_queries限制。客户端会立即收到错误，而不是等待。
 
-  Common causes: a traffic spike, runaway queries piling up, or a
-  misconfigured connection pool sending too many parallel requests.
-  Check system.processes for currently running queries and consider
-  tuning max_concurrent_queries or max_concurrent_select_queries in
-  the server configuration.
+  常见原因：流量激增、失控查询堆积，或连接池配置不当发送了过多并行请求。
+  检查system.processes中当前运行的查询，并考虑调整服务器配置中的
+  max_concurrent_queries或max_concurrent_select_queries。
 tags:
   - concurrency
   - performance
   - query-log
 
-# Evaluated by the Go check over the files already collected (no second
-# query to the server). query: below is the same test in SQL, for the
-# customer to run live; the check mirrors it.
+# 由Go check在已采集的文件上评估（不会再次查询服务器）。下方query:是同一
+# 测试的SQL版本，供客户在线执行；check镜像同一逻辑。
 check: go:too_many_simultaneous_queries
 source:
   - system.query_log_exceptions_1_day
@@ -33,4 +29,4 @@ query: |
     AND exception_code = 202
   HAVING error_count > 10
 
-message: "Too many simultaneous queries (code 202) occurred {error_count} times in the last hour — example: {example_message}"
+message: "同时运行的查询过多（错误码202）最近一小时内发生了{error_count}次——示例：{example_message}"

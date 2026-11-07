@@ -1,8 +1,8 @@
--- Side-by-side ProfileEvents for the slowest vs the fastest execution
--- of this normalized_query_hash, plus the percentage delta.
--- This is the single most diagnostic query in the bundle when the
--- question is "why was THIS execution slower than usual?".
--- Run when --normalized-query-hash is set (auto-derived from --query-id).
+-- 该 normalized_query_hash 最慢与最快执行的
+-- ProfileEvents 并列对比，以及百分比差值。
+-- 当问题为 "为什么这一次执行比平时慢？" 时，
+-- 这是 bundle 中最具诊断价值的单个查询。
+-- 当设置了 --normalized-query-hash 时运行（由 --query-id 自动推导）。
 WITH
     (SELECT argMax(query_id, query_duration_ms) FROM {sys.query_log}
         WHERE normalized_query_hash = {normalized_query_hash}
@@ -14,9 +14,9 @@ WITH
           AND event_time >= {from} AND event_time <= {to}
           AND type != 'QueryStart'
           AND NOT has(databases, 'system')) AS fast_id
--- ProfileEvents is a Map(String, UInt64); we ARRAY JOIN its keys and
--- values rather than `ARRAY JOIN ProfileEvents AS PE` + PE.1/PE.2,
--- which errors on 22.8 (see profile_events.sql for the details).
+-- ProfileEvents 是一个 Map(String, UInt64)；我们 ARRAY JOIN 它的键和
+-- 值，而不是 `ARRAY JOIN ProfileEvents AS PE` + PE.1/PE.2，
+-- 后者在 22.8 上会报错（详情见 profile_events.sql）。
 SELECT
     metric,
     anyIf(value, query_id = slow_id)                                                      AS slow_value,

@@ -1,11 +1,11 @@
 name: Release
 
-# Publish cross-platform Go binaries to GitHub Release Assets.
+# 将跨平台 Go 二进制发布到 GitHub Release Assets。
 #
-# Triggers when you push a semver tag, e.g.:
+# 推送 semver 标签时触发，例如：
 #   git tag v1.2.0 && git push origin v1.2.0
 #
-# You can also run it manually from the Actions tab against an existing tag.
+# 也可以从 Actions 页面对现有标签手动运行。
 on:
   push:
     tags:
@@ -13,44 +13,43 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing tag to build and release (e.g. v1.2.0)"
+        description: "用于构建和发布的现有标签（例如 v1.2.0）"
         required: true
 
 permissions:
-  contents: write # required to create the release and upload assets
+  contents: write # 创建 release 并上传资产所需
 
 jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: 检出代码
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
 
-      - name: Set up Go
+      - name: 设置 Go
         uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
           cache: true
 
-      - name: Build cross-platform archives
+      - name: 构建跨平台归档
         run: make release
 
-      - name: Generate checksums
+      - name: 生成校验和
         working-directory: dist
         run: sha256sum clickhouse-diagnostic-*.tar.gz clickhouse-diagnostic-*.zip > SHA256SUMS.txt
 
-      - name: Publish release with assets
+      - name: 发布 release 及资产
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           generate_release_notes: true
-          # Any tag containing a hyphen (e.g. v0.1.0-rc.1) is a pre-release,
-          # so it won't be shown as the repo's "Latest" release.
+          # 任何包含连字符的标签（例如 v0.1.0-rc.1）都是预发布，
+          # 因此不会显示为仓库的 "Latest" release。
           prerelease: ${{ contains(github.event.inputs.tag || github.ref_name, '-') }}
-          # Each archive bundles the binary with the queries.*/alerts data
-          # dirs the tool reads at runtime.
+          # 每个归档都把二进制与工具运行时读取的 queries.*/alerts 数据目录打包在一起。
           files: |
             dist/clickhouse-diagnostic-*.tar.gz
             dist/clickhouse-diagnostic-*.zip

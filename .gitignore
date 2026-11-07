@@ -1,7 +1,7 @@
-# If you prefer the allow list template instead of the deny list, see community template:
+# 如果你更喜欢允许列表模板而非拒绝列表，参见社区模板：
 # https://github.com/github/gitignore/blob/main/community/Golang/Go.AllowList.gitignore
 #
-# Binaries for programs and plugins
+# 程序和插件的二进制文件
 *.exe
 *.exe~
 *.dll
@@ -11,22 +11,22 @@
 # OSX
 .DS_store
 
-# diags collections
+# 诊断采集结果
 clickhousebook.local/*
 
-# testdata logs
+# testdata 日志
 testdata/*
 
-# Test binary, built with `go test -c`
+# 测试二进制，由 `go test -c` 构建
 *.test
 
-# Output of the go coverage tool, specifically when used with LiteIDE
+# go coverage 工具的输出，特别是配合 LiteIDE 使用时
 *.out
 
-# Dependency directories (remove the comment below to include it)
+# 依赖目录（取消下面这行注释即可包含它）
 # vendor/
 
-# Go workspace file
+# Go workspace 文件
 go.work
 
 .idea
@@ -35,24 +35,24 @@ output
 vendor
 dist/
 
-# Built binaries (do not commit — produced by `make build` / `go build`)
+# 构建出的二进制（不要提交——由 `make build` / `go build` 产生）
 /bin/
 /clickhouse-diagnostic
 /clickhouse-diagnostics
 /clickhouse_diagnostic
 /clickhouse-diagnostic-*
 
-# Local scripts (connect to private repos — not for public commit)
+# 本地脚本（连接私有仓库——不要公开提交）
 local/
 
-# Node.js (used by local scripts)
+# Node.js（供本地脚本使用）
 node_modules/
 package.json
 package-lock.json
 
-# Tool output — produced by every run. Never commit:
-#   the archive sent to support contains customer database/table data,
-#   the gov-mode mapping CSV is a local-only secret.
+# 工具输出——每次运行都会产生。绝不提交：
+#   发送给支持团队的归档包含客户数据库/表数据，
+#   gov 模式映射 CSV 是仅限本机的机密。
 clickhouse_results/
 clickhouse_backup_*/
 clickhouse_backup_*.tar.gz
@@ -61,12 +61,12 @@ clickhouse_diagnostic_*.tar.gz
 *_gov_name_mapping.csv
 configuration/
 
-# Customer-shipped diagnostic artifacts dropped at the repo root
-# (Grafana exports, dashboard JSON, etc.). Anchored with leading `/`
-# so legitimate JSON inside subdirectories is unaffected.
+# 客户交付的诊断产物，放在仓库根目录
+# （Grafana 导出、dashboard JSON 等）。以 `/` 锚定，
+# 因此子目录中合法的 JSON 不受影响。
 /*.json
 /*HomeDash*.json
 /S2HomeDash*.json
 
-# Python bytecode from the skill helper script
+# 来自 skill 辅助脚本的 Python 字节码
 __pycache__/

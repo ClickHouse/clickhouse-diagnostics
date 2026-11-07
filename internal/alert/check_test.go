@@ -34,14 +34,14 @@ func TestEvalFile_GoCheckRunsOverTheBundleNotTheServer(t *testing.T) {
 	ev := (&Evaluator{mode: "cloud", queryFn: func(string) (string, error) { sent++; return noRows, nil }}).WithBundle(bundle.Open(dir, nil))
 	r := ev.evalFile(writeRule(t, rule))
 	if sent != 0 {
-		t.Fatalf("a Go-check rule sent %d query(ies) to the server", sent)
+		t.Fatalf("Go-check 规则向服务器发送了 %d 条查询", sent)
 	}
 	if r.Error != "" || len(r.Rows) != 1 || r.Rows[0]["table"] != "t" {
-		t.Fatalf("result: %+v", r)
+		t.Fatalf("结果：%+v", r)
 	}
-	// The customer still gets the SQL to run on their cluster, expanded.
+	// 客户仍然会拿到可在其集群上运行的、已展开的 SQL。
 	if !strings.Contains(r.Query, "system.replicas") || strings.Contains(r.Query, "{sys.") {
-		t.Errorf("Query shown: %q", r.Query)
+		t.Errorf("展示的 Query：%q", r.Query)
 	}
 }
 
@@ -54,17 +54,17 @@ func TestEvalFile_GoCheckSourceNotCollectedIsNotApplicable(t *testing.T) {
 	ev := (&Evaluator{mode: "onprem"}).WithBundle(bundle.Open(t.TempDir(), map[string]bundle.Status{"system.parts": {State: "skipped", Reason: "essential collection"}}))
 	r := ev.evalFile(writeRule(t, rule))
 	if !r.Skipped || r.Error != "" || !strings.Contains(r.Reason, "system.parts") || !strings.Contains(r.Reason, "skipped") {
-		t.Fatalf("missing source: %+v", r)
+		t.Fatalf("缺少数据源：%+v", r)
 	}
 }
 
 func TestEvalFile_GoCheckErrorsAndUnknownChecks(t *testing.T) {
 	RegisterCheck("test_broken", func(*bundle.Bundle, string) ([]map[string]interface{}, error) { return nil, errors.New("boom") })
 	ev := (&Evaluator{mode: "onprem"}).WithBundle(bundle.Open(t.TempDir(), nil))
-	for check, want := range map[string]string{"go:test_broken": "boom", "go:no_such_check": "unknown check", "sql:x.sql": "unknown check"} {
+	for check, want := range map[string]string{"go:test_broken": "boom", "go:no_such_check": "未知 check", "sql:x.sql": "未知 check"} {
 		rule := "name: b\ntitle: B\nseverity: warning\nsource: [system.one]\ncheck: " + check + "\nquery: |\n  SELECT 1\nmessage: \"x\"\n"
 		if r := ev.evalFile(writeRule(t, rule)); !strings.Contains(r.Error, want) {
-			t.Errorf("%s: %+v", check, r)
+			t.Errorf("%s：%+v", check, r)
 		}
 	}
 }

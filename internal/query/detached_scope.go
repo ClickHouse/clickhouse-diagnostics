@@ -5,18 +5,17 @@ import (
 	"strings"
 )
 
-// Detached parts on a large SharedMergeTree server.
+// 大型 SharedMergeTree 服务器上的 detached part（分离 part）。
 //
-// system.detached_parts lists the detached/ directory of every table — one
-// listing per table, a remote call on object-storage disks whose metadata
-// lives in Keeper (seen at 20–300 s per run, 0 rows found, on servers with
-// tens of thousands of tables). On SharedMergeTree, broken parts showed
-// first in logs and errors in every escalation reviewed, so on such a server
-// an auto or full run lists every non-shared table plus the shared tables
-// that broken-part log lines name; -collect full lists everything.
+// system.detached_parts 会列出每张表的 detached/ 目录 —— 每张表一次列表操作，
+// 在元数据存放在 Keeper 的对象存储磁盘上属于远程调用（在拥有数万张表的服务器上
+// 曾观察到每次运行耗时 20–300 秒、返回 0 行）。在 SharedMergeTree 上，所审查的
+// 每次升级中 broken part 都最先出现在日志和错误里，因此在这类服务器上，
+// auto 或 full 运行会列出所有非 shared 表，加上 broken-part 日志行点名的 shared 表；
+// -collect full 则列出全部。
 
-// SignalTablesQuery finds tables named in recent broken-part log lines
-// (logger_name starts with "<database>.<table>").
+// SignalTablesQuery 查找近期 broken-part 日志行中点名的表
+// （logger_name 以 "<database>.<table>" 开头）。
 func SignalTablesQuery(mode string) string {
 	src := "system.text_log"
 	if mode == "cloud" {
@@ -34,8 +33,7 @@ LIMIT 1000
 FORMAT TSV`, src)
 }
 
-// ParseSignalTables reads SignalTablesQuery's TSV, dropping malformed rows
-// and duplicates.
+// ParseSignalTables 解析 SignalTablesQuery 的 TSV，丢弃格式错误和重复的行。
 func ParseSignalTables(tsv string) [][2]string {
 	var out [][2]string
 	seen := map[[2]string]bool{}
@@ -53,10 +51,9 @@ func ParseSignalTables(tsv string) [][2]string {
 	return out
 }
 
-// DetachedScope is the {detached_scope} predicate: "1" (every table) unless
-// limit is set, in which case every non-shared table plus the named ones.
-// qualifier prefixes the columns ("p." in gov files, where database is the
-// hashed alias).
+// DetachedScope 是 {detached_scope} 谓词：未设置 limit 时为 "1"（所有表），
+// 否则为所有非 shared 表加上被点名的表。qualifier 用作列前缀
+// （gov 文件中为 "p."，其中 database 是哈希后的别名）。
 func DetachedScope(limit bool, tables [][2]string, qualifier string) string {
 	if !limit {
 		return "1"

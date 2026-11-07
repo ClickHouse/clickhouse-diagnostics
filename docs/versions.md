@@ -1,72 +1,72 @@
-# Supported versions and version-specific queries
+# 支持的版本与版本特定查询
 
-*Moved from the main [README](../README.md), which keeps a short version of each section.*
+*从主 [README](../README.md) 移出，该文件保留每节的简短版本。*
 
-## Version-specific queries
+## 版本特定查询
 
-Inside each mode directory, you can override a query for a specific ClickHouse version by placing it in a subdirectory named `MAJOR.MINOR.PATCH.BUILD`. The tool picks the highest version ≤ the connected server.
+在每个模式目录内，你可以通过将查询放入名为 `MAJOR.MINOR.PATCH.BUILD` 的子目录，为特定 ClickHouse 版本覆盖查询。工具会选择不高于所连接服务器的最高版本。
 
 ```
 queries.onprem/
-├── system.detached_parts.sql     # default (works from 22.8)
+├── system.detached_parts.sql     # 默认（从 22.8 起可用）
 ├── 22.11.1.0/
-│   └── system.detached_parts.sql # adds bytes_on_disk/path (servers ≥ 22.11)
+│   └── system.detached_parts.sql # 增加 bytes_on_disk/path（服务器 ≥ 22.11）
 └── 23.11.1.0/
-    └── system.detached_parts.sql # also adds modification_time (servers ≥ 23.11)
+    └── system.detached_parts.sql # 还增加 modification_time（服务器 ≥ 23.11）
 ```
 
-Directories that don't parse as a version are skipped.
+无法解析为版本的目录会被跳过。
 
-The same convention applies to `queries.query_analysis/` (`.sql` files) and `alerts/` (`.yaml` rules): place a file with the same name in a `MAJOR.MINOR.PATCH.BUILD` subdirectory to override the root version for servers at or above that version.
+同样的约定适用于 `queries.query_analysis/`（`.sql` 文件）和 `alerts/`（`.yaml` 规则）：将同名文件放入 `MAJOR.MINOR.PATCH.BUILD` 子目录，即可为处于或高于该版本的服务器覆盖根版本。
 
 ```
 alerts/
-├── detached_parts_exist.yaml     # default rule (works from 22.8)
+├── detached_parts_exist.yaml     # 默认规则（从 22.8 起可用）
 └── 22.11.1.0/
-    └── detached_parts_exist.yaml # adds bytes_on_disk (column added in 22.11)
+    └── detached_parts_exist.yaml # 增加 bytes_on_disk（该列在 22.11 加入）
 ```
 
-A file that exists **only** in a version subdirectory (no root counterpart) is simply skipped on older servers — use this for queries against system tables that don't exist yet (e.g. `system.asynchronous_insert_log`, added in 22.10).
+**仅**存在于版本子目录中的文件（没有根目录对应文件）在较旧服务器上会被直接跳过——用于查询尚不存在的系统表（例如 `system.asynchronous_insert_log`，在 22.10 加入）。
 
-> **Overrides match by base filename, case-sensitively.** A file in a version subdirectory overrides a root file only when their names are identical, including case. If you rename the file in the version directory — or just change its case (`Foo.yaml` vs `foo.yaml`) — it is treated as a *separate* query/rule (both run), not an override. Keep the filename byte-for-byte identical to the root when you intend to override it.
+> **覆盖按基本文件名匹配，区分大小写。** 版本子目录中的文件只有在名称完全一致（包括大小写）时才覆盖根文件。如果你在版本目录中重命名了文件——或只是改变了大小写（`Foo.yaml` 与 `foo.yaml`）——它会被视为*独立的*查询/规则（两者都会运行），而不是覆盖。打算覆盖时，请保持文件名与根文件逐字节相同。
 
-## Supported ClickHouse versions
+## 支持的 ClickHouse 版本
 
-The tool targets **ClickHouse 22.8 and newer** for on-prem servers. Root-level query and alert files stick to columns and syntax available in 22.8; anything newer lives behind a version subdirectory. Current gates (verified against the ClickHouse changelogs):
+工具面向 on-prem 服务器的 **ClickHouse 22.8 及更新版本**。根级查询和告警文件只使用 22.8 可用的列和语法；更新的内容放在版本子目录之后。当前的版本门控（已对照 ClickHouse changelog 验证）：
 
-| Feature | Added in | Gated at |
+| 特性 | 加入版本 | 门控位置 |
 |---|---|---|
-| `ARRAY JOIN` over a `Map` (`ProfileEvents`) | after 22.8 | roots use `mapKeys()`/`mapValues()` (all versions) |
-| `system.asynchronous_insert_log` table | 22.10 | `queries.{onprem,gov}/22.10.1.0/` |
+| 对 `Map`（`ProfileEvents`）执行 `ARRAY JOIN` | 22.8 之后 | 根文件使用 `mapKeys()`/`mapValues()`（所有版本） |
+| `system.asynchronous_insert_log` 表 | 22.10 | `queries.{onprem,gov}/22.10.1.0/` |
 | `system.disks.unreserved_space` | 22.10 | `queries.{onprem,gov}/22.10.1.0/` |
-| `system.detached_parts.bytes_on_disk`, `path` | 22.11 | `queries.{onprem,gov}/22.11.1.0/`, `alerts/22.11.1.0/` (gov gates `bytes_on_disk` only — it never collects `path`/`disk`) |
-| `GROUP BY ALL` syntax | 22.12 | root files use explicit key lists |
-| `dateDiff('millisecond', …)` sub-second unit | after 22.12 | async latency uses float subtraction of `*_microseconds` |
+| `system.detached_parts.bytes_on_disk`、`path` | 22.11 | `queries.{onprem,gov}/22.11.1.0/`、`alerts/22.11.1.0/`（gov 仅门控 `bytes_on_disk`——它从不采集 `path`/`disk`） |
+| `GROUP BY ALL` 语法 | 22.12 | 根文件使用显式键列表 |
+| `dateDiff('millisecond', …)` 亚秒单位 | 22.12 之后 | 异步延迟使用 `*_microseconds` 的浮点减法 |
 | `system.text_log.message_format_string` | 23.1 | `queries.query_analysis/23.1.1.0/` |
-| `system.server_settings` table | 23.3 | `queries.{onprem,gov}/23.3.1.0/` (no root file — skipped below 23.3; cloud carries it at root) |
-| `system.asynchronous_insert_log.rows` | 23.4 | `queries.{onprem,gov}/23.4.1.0/` (22.10–23.3 report `bytes`) |
-| `system.settings.default` | 23.4 | `queries.{onprem,gov}/23.4.1.0/` (`default` is the only column their roots omit; the cloud root has it) |
-| `system.clusters` replicated-db columns (`database_shard_name`, `database_replica_name`, `name`; `is_active` deliberately not selected) | 23.5 | `queries.*/23.5.1.0/` |
+| `system.server_settings` 表 | 23.3 | `queries.{onprem,gov}/23.3.1.0/`（无根文件——低于 23.3 时跳过；cloud 在根级携带它） |
+| `system.asynchronous_insert_log.rows` | 23.4 | `queries.{onprem,gov}/23.4.1.0/`（22.10–23.3 报告 `bytes`） |
+| `system.settings.default` | 23.4 | `queries.{onprem,gov}/23.4.1.0/`（`default` 是它们根文件唯一省略的列；cloud 根文件有它） |
+| `system.clusters` 的 replicated-db 列（`database_shard_name`、`database_replica_name`、`name`；有意不选择 `is_active`） | 23.5 | `queries.*/23.5.1.0/` |
 | `system.query_log.query_cache_usage` | 23.8 | `queries.query_analysis/23.8.1.0/` |
-| `system.zookeeper_connection` table | 23.8 | `queries.*/23.8.1.0/` (no root file — skipped below 23.8 in every mode) |
-| `system.zookeeper_connection.xid`, `last_zxid_seen`, `availability_zone` | 24.3 | `queries.*/24.3.1.0/`; `alerts/24.3.1.0/keeper_xid_renewal_due.yaml` (no root rule — not applicable below 24.3) |
+| `system.zookeeper_connection` 表 | 23.8 | `queries.*/23.8.1.0/`（无根文件——所有模式下低于 23.8 时跳过） |
+| `system.zookeeper_connection.xid`、`last_zxid_seen`、`availability_zone` | 24.3 | `queries.*/24.3.1.0/`；`alerts/24.3.1.0/keeper_xid_renewal_due.yaml`（无根规则——低于 24.3 时不适用） |
 | `system.query_log.peak_threads_usage` | 23.9 | `queries.query_analysis/23.9.1.0/` |
-| `hostname` column in system log tables | 23.11 | `queries.*/23.11.1.0/` (roots use `hostName()`) |
-| `system.blob_storage_log` table (needs `<blob_storage_log>` config) | 23.11 | `queries.*/23.11.1.0/` (no root file — skipped below 23.11 in every mode) |
+| 系统日志表中的 `hostname` 列 | 23.11 | `queries.*/23.11.1.0/`（根文件使用 `hostName()`） |
+| `system.blob_storage_log` 表（需要 `<blob_storage_log>` 配置） | 23.11 | `queries.*/23.11.1.0/`（无根文件——所有模式下低于 23.11 时跳过） |
 | `system.tables.total_bytes_uncompressed` | 23.12 | `queries.query_analysis/23.12.1.0/` |
-| `system.view_refreshes` table | 23.12 | `queries.*/23.12.1.0/` (no root file — skipped below 23.12 in every mode) |
-| `system.mutations.is_killed` | 24.1 | `alerts/24.1.1.0/` (root omits the filter) |
-| `background_*_pool_size` moved from `system.settings` to `system.server_settings` | 23.3 | `alerts/23.3.1.0/` (`fetch_pool_saturated`, `schedule_pool_saturated`; `system.settings` still lists the names on newer servers with the old session defaults, so the root rule would compare against the wrong size there) |
+| `system.view_refreshes` 表 | 23.12 | `queries.*/23.12.1.0/`（无根文件——所有模式下低于 23.12 时跳过） |
+| `system.mutations.is_killed` | 24.1 | `alerts/24.1.1.0/`（根文件省略该过滤） |
+| `background_*_pool_size` 从 `system.settings` 移到 `system.server_settings` | 23.3 | `alerts/23.3.1.0/`（`fetch_pool_saturated`、`schedule_pool_saturated`；在较新服务器上 `system.settings` 仍以旧的会话默认值列出这些名称，因此根规则在那里会拿错误的 size 做比较） |
 | `system.tables.metadata_version` | 24.2 | `queries.*/24.2.1.0/` |
-| `system.error_log` table | 24.8 | `queries.*/24.8.1.0/` (no root file — skipped below 24.8 in every mode) |
-| `system.database_replicas` table | 25.9 | `queries.*/25.9.1.0/` (no root file — skipped below 25.9 in every mode) |
-| `system.aggregated_zookeeper_log` with `component` (26.2) and `is_subrequest` (26.3) | 26.3 | `queries.*/26.3.1.0/` (no root file — skipped below 26.3 in every mode: the table exists from 25.9, but before 26.3 sub-requests share buckets with standalone requests and carry the whole Multi's latency) |
-| `system.zookeeper_log.duration_microseconds` (replaces `duration_ms`) | 24.3 | `queries.*/24.3.1.0/` (roots use `duration_ms`; output stays in ms on every rung) |
-| `system.tables.parameterized_view_parameters` | 25.4 | `queries.{onprem,cloud}/25.4.1.0/` (gov: not collected) |
-| `system.tables.target_database`, `target_table` (an MV's write target, including the implicit `.inner_id.*` table) | 26.6 | `queries.*/26.6.1.0/` (gov hashes both) |
+| `system.error_log` 表 | 24.8 | `queries.*/24.8.1.0/`（无根文件——所有模式下低于 24.8 时跳过） |
+| `system.database_replicas` 表 | 25.9 | `queries.*/25.9.1.0/`（无根文件——所有模式下低于 25.9 时跳过） |
+| 带 `component`（26.2）和 `is_subrequest`（26.3）的 `system.aggregated_zookeeper_log` | 26.3 | `queries.*/26.3.1.0/`（无根文件——所有模式下低于 26.3 时跳过：该表从 25.9 起存在，但在 26.3 之前子请求与独立请求共享桶，并携带整个 Multi 的延迟） |
+| `system.zookeeper_log.duration_microseconds`（取代 `duration_ms`） | 24.3 | `queries.*/24.3.1.0/`（根文件使用 `duration_ms`；输出在每一层级都保持 ms） |
+| `system.tables.parameterized_view_parameters` | 25.4 | `queries.{onprem,cloud}/25.4.1.0/`（gov：不采集） |
+| `system.tables.target_database`、`target_table`（MV 的写入目标，包括隐式 `.inner_id.*` 表） | 26.6 | `queries.*/26.6.1.0/`（gov 对两者都做哈希） |
 
-The dashboard (`internal/dashboard/generator.go`) builds its SQL dynamically, so instead of version directories it probes the live schema at runtime (`hasColumn`/`hasTable`) and adapts each panel — covering the same columns (`error_count`, `is_killed`, `bytes_on_disk`, the async table/`rows`, `crash_log`) plus optional tables that may be disabled by config.
+dashboard（`internal/dashboard/generator.go`）动态构建其 SQL，因此它不使用版本目录，而是在运行时探测实时 schema（`hasColumn`/`hasTable`）并适配每个 panel——覆盖相同的列（`error_count`、`is_killed`、`bytes_on_disk`、异步表/`rows`、`crash_log`）以及可能被配置禁用的可选表。
 
-`queries.cloud/` targets managed ClickHouse Cloud, which always runs recent versions — it carries the recent rungs (`23.5.1.0/`, `23.11.1.0/`, `24.2.1.0/`, `25.4.1.0/`) but none of the sub-23.5 gating, because Cloud never runs that old. The **22.8 floor applies to `queries.onprem/` and `queries.gov/`** (both are self-hosted — gov is on-prem with hashed PII, and neither uses `clusterAllReplicas`) as well as the shared `queries.query_analysis/` + `alerts/` directories. Note gov's `system.tables` ladder deliberately tops out at `24.2.1.0/` — it does not collect `parameterized_view_parameters` (identifier-like values gov would otherwise have to hash).
+`queries.cloud/` 面向托管的 ClickHouse Cloud，它始终运行较新版本——因此携带较新的层级（`23.5.1.0/`、`23.11.1.0/`、`24.2.1.0/`、`25.4.1.0/`），但不包含任何低于 23.5 的门控，因为 Cloud 从不运行那么旧的版本。**22.8 下限适用于 `queries.onprem/` 和 `queries.gov/`**（两者都是自托管——gov 是带哈希 PII 的 on-prem，且都不使用 `clusterAllReplicas`），也适用于共享的 `queries.query_analysis/` + `alerts/` 目录。注意 gov 的 `system.tables` 层级刻意止于 `24.2.1.0/`——它不采集 `parameterized_view_parameters`（否则 gov 将不得不哈希这些类标识符值）。
 
-Overrides are matched **only** at the top level of each directory; a version subdirectory nested deeper (e.g. `alerts/foo/25.4.1.0/`) is not treated as a nested override of `alerts/foo/`.
+覆盖**仅在**每个目录的顶层匹配；更深层嵌套的版本子目录（例如 `alerts/foo/25.4.1.0/`）不会被当作 `alerts/foo/` 的嵌套覆盖。

@@ -1,28 +1,23 @@
 name: too_many_parts
-title: "Table partition approaching too-many-parts limit"
+title: "表分区接近part过多限制"
 severity: warning
 description: |
-  A table partition has more than 300 active parts. ClickHouse starts
-  delaying inserts at parts_to_delay_insert (default 1000 parts per
-  partition) and rejects them with error 252 TOO_MANY_PARTS once
-  parts_to_throw_insert (default 3000) is reached. High part counts indicate
-  that background merges are not keeping up with insert throughput —
-  common causes include excessive insert frequency, an unfavourable
-  partition key that creates too many narrow partitions, or a blocked
-  merge pool.
+  某个表分区有超过300个活跃part。ClickHouse在parts_to_delay_insert
+  （默认每个分区1000个part）开始延迟insert，一旦达到parts_to_throw_insert
+  （默认3000）就以错误252 TOO_MANY_PARTS拒绝。part数量过高说明
+  后台merge跟不上insert吞吐——常见原因包括insert频率过高、
+  不利的分区键造成过多窄分区，或merge pool被阻塞。
 
-  Investigate: check system.merges for active/queued merges, look at
-  insert throughput, and consider tuning max_insert_block_size or the
-  partition key.
+  排查：检查system.merges中的活跃/排队merge，查看insert吞吐，
+  并考虑调整max_insert_block_size或分区键。
 tags:
   - parts
   - performance
   - inserts
   - merges
 
-# Evaluated by the Go check over the files already collected (no second
-# query to the server). query: below is the same test in SQL, for the
-# customer to run live; the check mirrors it.
+# 由Go check在已采集的文件上评估（不会再次查询服务器）。下方query:是同一
+# 测试的SQL版本，供客户在线执行；check镜像同一逻辑。
 check: go:too_many_parts
 source:
   - system.parts_by_partition
@@ -39,4 +34,4 @@ query: |
   HAVING parts_count > 300
   ORDER BY parts_count DESC
 
-message: "{database}.{table} partition '{partition_id}' has {parts_count} active parts — inserts are delayed from 1000 parts (parts_to_delay_insert) and rejected with code 252 TOO_MANY_PARTS at 3000 (parts_to_throw_insert)"
+message: "{database}.{table}的分区'{partition_id}'有{parts_count}个活跃part——从1000个part（parts_to_delay_insert）起insert会被延迟，达到3000个（parts_to_throw_insert）时以错误码252 TOO_MANY_PARTS拒绝"

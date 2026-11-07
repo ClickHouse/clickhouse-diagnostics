@@ -1,13 +1,13 @@
--- One row per individual execution of the focus hash within the window.
--- Drives the per-execution scatter chart in the dashboard so each run
--- is visible as its own dot (the hourly hash_summary buckets hide this
--- when, for example, all 10 executions of a slow query happened in the
--- same hour).
+-- 窗口内目标 hash 的每次单独执行对应一行。
+-- 驱动 dashboard 中的逐次执行散点图，使每次运行
+-- 都显示为独立的点（当例如慢查询的全部 10 次执行
+-- 都发生在同一小时内时，按小时分桶的 hash_summary 会
+-- 掩盖这一点）。
 --
--- LIMIT 10000 caps the output for very high-traffic queries; the
--- ORDER BY event_time DESC means the most recent 10000 are kept,
--- which is usually what an investigation cares about.
--- Run when --normalized-query-hash is set (auto-derived from --query-id).
+-- 对于流量极高的查询，LIMIT 10000 限制输出；
+-- ORDER BY event_time DESC 意味着保留最近 10000 条，
+-- 这通常正是排查所关心的。
+-- 当设置了 --normalized-query-hash 时运行（由 --query-id 自动推导）。
 SELECT
     toString(event_time)                                    AS ts,
     event_time_microseconds                                 AS ts_micro,
@@ -17,18 +17,18 @@ SELECT
     query_duration_ms,
     memory_usage,
     formatReadableSize(memory_usage)                        AS memory_usage_human,
-    -- user CPU per execution, in microseconds → JS renders this as
-    -- seconds in the per-execution scatter. Coalesced because not
-    -- every ProfileEvents map has UserTimeMicroseconds (e.g. very
-    -- short queries that never spent CPU in user space).
+    -- 每次执行的 user CPU，单位为微秒 → JS 在逐次执行散点图中
+    -- 将其渲染为秒。使用 coalesce 是因为并非每个
+    -- ProfileEvents map 都有 UserTimeMicroseconds（例如从未在
+    -- 用户态消耗 CPU 的极短查询）。
     ProfileEvents['UserTimeMicroseconds']                   AS user_cpu_us,
     read_rows,
     read_bytes,
     formatReadableSize(read_bytes)                          AS read_bytes_human,
-    -- Root variant: the hostname COLUMN was added to query_log in 23.11
-    -- (see 23.11.1.0/). hostName() is evaluated on whichever server
-    -- serves the row, so it labels rows correctly even through
-    -- clusterAllReplicas.
+    -- 根变体：hostname 列在 23.11 才加入 query_log
+    -- （见 23.11.1.0/）。hostName() 在提供该行的服务器上
+    -- 求值，因此即使通过 clusterAllReplicas，
+    -- 也能正确标记各行。
     hostName()                                              AS hostname,
     user
 FROM {sys.query_log}

@@ -1,7 +1,7 @@
 -- tier: essential
--- Root variant for the oldest supported servers (22.8/22.9):
--- unreserved_space was added in 22.10 — see 22.10.1.0/system.disks.sql
--- for the richer variant used on newer servers.
+-- 面向最旧受支持服务器（22.8/22.9）的根变体：
+-- unreserved_space 是在 22.10 加入的——更丰富的变体见
+-- 22.10.1.0/system.disks.sql，用于较新的服务器。
 SELECT
     name,
     path,
@@ -12,8 +12,8 @@ SELECT
        round(free_space_b / total_space_b * 100, 1),
        0) AS free_pct,
     type,
-    -- exact bytes: free_pct is rounded to 0.1, and the low-space check must
-    -- not miss 14.96 % as 15.0
+    -- 精确字节数：free_pct 四舍五入到 0.1，低空间检查不能
+    -- 把 14.96 % 误当成 15.0 而漏报
     free_space_b  AS free_bytes,
     total_space_b AS total_bytes
 FROM (

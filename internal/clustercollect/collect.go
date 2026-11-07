@@ -1,9 +1,8 @@
-// Package clustercollect implements `clickhouse-diagnostic cluster`: it asks
-// one node which hosts the cluster has (system.clusters), prints the
-// clickhouse-diagnostic run for each, and — after confirmation — runs them
-// one host at a time, each as its own process of this same binary. The
-// collection itself is untouched: every per-host run is exactly what an
-// operator would type by hand.
+// Package clustercollect 实现 `clickhouse-diagnostic cluster`：它向一个节点
+// 询问集群有哪些主机（system.clusters），打印每台主机要执行的
+// clickhouse-diagnostic 运行命令，并在确认后逐台主机执行——每台主机都是
+// 同一个二进制的独立进程。采集本身没有改动：每次按主机运行都完全等同于
+// 运维人员手工输入的命令。
 package clustercollect
 
 import (
@@ -28,41 +27,36 @@ import (
 	"clickhouse-diagnostic/pkg"
 )
 
-// PasswordEnvVar carries the password to every per-host run. The cluster
-// command takes no -password flag, so the password never sits on a command
-// line where ps would show it.
+// PasswordEnvVar 把密码传给每次按主机运行。cluster 命令不接受 -password
+// 参数，因此密码从不出现在 ps 能看到的命令行上。
 const PasswordEnvVar = "CLICKHOUSE_PASSWORD"
 
-// portalCapBytes is the support portal's upload limit; each bundle is
-// uploaded on its own.
+// portalCapBytes 是支持门户的上传上限；每个 bundle 单独上传。
 const portalCapBytes = 200 << 20
 
-// DiscoveryQuery lists every host the node knows about.
+// DiscoveryQuery 列出节点知道的每台主机。
 const DiscoveryQuery = "SELECT cluster, shard_num, replica_num, host_name, host_address, " +
 	"is_local, errors_count FROM system.clusters FORMAT JSONEachRow"
 
-// executable, hostname and interfaceAddrs are the OS lookups, replaceable
-// in tests.
+// executable、hostname 和 interfaceAddrs 是操作系统查询函数，在测试中可替换。
 var (
 	executable     = os.Executable
 	hostname       = os.Hostname
 	interfaceAddrs = net.InterfaceAddrs
 )
 
-// ownedFlags are set by the cluster command for every run, so they cannot be
-// passed through after --: each one carries a per-host safeguard (-host and
-// -output-dir keep the bundles apart, -single-node stops a SharedMergeTree
-// fan-out on every run, -host-info/-logs/-skip-config keep this machine's
-// files out of remote bundles), the password travels only in the
-// environment, and -skip-archive / -dry-run would leave no archive to find.
+// ownedFlags 由 cluster 命令在每次运行时设置，因此不能在 -- 之后透传：
+// 每个都带有按主机的保护措施（-host 和 -output-dir 让各 bundle 相互隔离，
+// -single-node 阻止 SharedMergeTree 在每次运行时扇出到整个集群，
+// -host-info/-logs/-skip-config 避免把本机文件混入远程 bundle），
+// 密码只通过环境变量传递，而 -skip-archive / -dry-run 会导致找不到归档。
 var ownedFlags = map[string]bool{
 	"password": true, "host": true, "port": true, "protocol": true, "user": true, "mode": true,
 	"single-node": true, "output-dir": true, "host-info": true, "logs": true, "skip-config": true,
 	"skip-archive": true, "dry-run": true,
 }
 
-// validateExtra refuses pass-through arguments naming a flag the command
-// owns, in any of Go's spellings (-f, --f, -f=v, --f=v).
+// validateExtra 拒绝透传参数中指定命令自有 flag 的项，包括 Go 的各种写法（-f、--f、-f=v、--f=v）。
 func validateExtra(extra []string) error {
 	for _, a := range extra {
 		if !strings.HasPrefix(a, "-") {
@@ -76,14 +70,14 @@ func validateExtra(extra []string) error {
 			continue
 		}
 		if name == "password" {
-			return fmt.Errorf("-- -password cannot be passed through: set %s instead (the cluster command never puts the password on a command line)", PasswordEnvVar)
+			return fmt.Errorf("-- -password 不能透传：请改为设置 %s（cluster 命令从不把密码放在命令行上）", PasswordEnvVar)
 		}
-		return fmt.Errorf("-- -%s cannot be passed through: the cluster command sets it for every host", name)
+		return fmt.Errorf("-- -%s 不能透传：cluster 命令会为每台主机设置它", name)
 	}
 	return nil
 }
 
-// Row is one system.clusters row.
+// Row 是一行 system.clusters 记录。
 type Row struct {
 	Cluster     string `json:"cluster"`
 	ShardNum    int    `json:"shard_num"`
@@ -94,16 +88,16 @@ type Row struct {
 	ErrorsCount int    `json:"errors_count"`
 }
 
-// Node is one machine to collect from.
+// Node 是一台要采集的机器。
 type Node struct {
 	Host, Address  string
 	Shard, Replica int
-	Local          bool // the node the cluster was discovered from
-	Errors         int  // system.clusters errors_count: the node had trouble reaching it
-	MultiShard     bool // labelled from a cluster with more than one shard
+	Local          bool // 发现集群时查询的节点
+	Errors         int  // system.clusters 的 errors_count：曾难以连通该节点
+	MultiShard     bool // 标签来自一个不止一个分片的集群
 }
 
-// ParseRows reads the JSONEachRow answer to DiscoveryQuery.
+// ParseRows 读取 DiscoveryQuery 的 JSONEachRow 应答。
 func ParseRows(body string) ([]Row, error) {
 	var rows []Row
 	for _, line := range strings.Split(body, "\n") {
@@ -112,7 +106,7 @@ func ParseRows(body string) ([]Row, error) {
 		}
 		var r Row
 		if err := json.Unmarshal([]byte(line), &r); err != nil {
-			return nil, fmt.Errorf("unexpected system.clusters row %q: %w", line, err)
+			return nil, fmt.Errorf("system.clusters 中出现意外的数据行 %q：%w", line, err)
 		}
 		rows = append(rows, r)
 	}
@@ -126,19 +120,16 @@ func isLoopback(address string) bool {
 	return strings.EqualFold(address, "localhost")
 }
 
-// Discover turns system.clusters rows into one Node per machine.
+// Discover 把 system.clusters 的行转换为每台机器一个 Node。
 //
-//   - Every is_local = 1 row is the node that was asked, whatever address it
-//     uses: a stock config's `default` cluster lists it as 127.0.0.1 next to
-//     its real address in the real cluster.
-//   - Other loopback rows are test clusters pointing back at that server.
-//   - A machine appears once per cluster it belongs to. It is kept once,
-//     labelled from the cluster with the most shards, the one that carries
-//     the topology. A cluster named `default` is never preferred by name —
-//     on a stock install it is this one server.
+//   - 每条 is_local = 1 的行都是被询问的节点，无论它使用什么地址：默认配置的
+//     `default` 集群会把它列为 127.0.0.1，同时真实集群中还会列出它的真实地址。
+//   - 其他 loopback 行是指回该服务器的测试集群。
+//   - 一台机器每属于一个集群就出现一次。最终只保留一次，标签取自分片最多、
+//     承载拓扑的那个集群。名为 `default` 的集群从不按名称优先——
+//     在默认安装中它就是这一台服务器。
 //
-// cluster, when not empty, keeps only that cluster; an unknown name is an
-// error that lists the names that do exist.
+// cluster 非空时只保留该集群；未知名称会报错并列出实际存在的名称。
 func Discover(rows []Row, cluster string) ([]Node, error) {
 	if cluster != "" {
 		var kept []Row
@@ -150,7 +141,7 @@ func Discover(rows []Row, cluster string) ([]Node, error) {
 			}
 		}
 		if len(kept) == 0 {
-			return nil, fmt.Errorf("cluster %q not found in system.clusters; available: %s", cluster, strings.Join(sortedKeys(names), ", "))
+			return nil, fmt.Errorf("在 system.clusters 中找不到集群 %q；可用：%s", cluster, strings.Join(sortedKeys(names), ", "))
 		}
 		rows = kept
 	}
@@ -167,7 +158,7 @@ func Discover(rows []Row, cluster string) ([]Node, error) {
 		shards     int
 		notDefault bool
 	}
-	better := func(a, b ranked) bool { // a outranks b
+	better := func(a, b ranked) bool { // a 优先于 b
 		if a.shards != b.shards {
 			return a.shards > b.shards
 		}
@@ -228,8 +219,7 @@ func sortedKeys(m map[string]bool) []string {
 
 var unsafePath = regexp.MustCompile(`[^A-Za-z0-9._-]`)
 
-// Label is the folder name for one host: s<shard>r<replica>_<host>, safe as
-// a single path segment.
+// Label 是一台主机的文件夹名：s<shard>r<replica>_<host>，可安全用作单个路径段。
 func Label(n Node) string {
 	host := unsafePath.ReplaceAllString(n.Host, "_")
 	if host == "" {
@@ -238,15 +228,15 @@ func Label(n Node) string {
 	return fmt.Sprintf("s%dr%d_%s", n.Shard, n.Replica, host)
 }
 
-// Options are the settings shared by every per-host run.
+// Options 是每次按主机运行共享的设置。
 type Options struct {
 	Mode, Protocol, Host, Port, User string
 	OutputDir                        string
-	Extra                            []string // passed to every run
-	LocalFiles                       bool     // this machine is the discovery node
+	Extra                            []string // 传给每次运行
+	LocalFiles                       bool     // 本机是发现节点
 }
 
-// HereArgs is the clickhouse-diagnostic run, from this machine, for one node.
+// HereArgs 是从本机为一台节点执行的 clickhouse-diagnostic 运行。
 func HereArgs(n Node, o Options) []string {
 	host := n.Host
 	if n.Local {
@@ -255,20 +245,19 @@ func HereArgs(n Node, o Options) []string {
 	args := []string{"-mode", o.Mode, "-protocol", o.Protocol, "-host", host, "-port", o.Port,
 		"-user", o.User, "-single-node", "-output-dir", filepath.Join(o.OutputDir, Label(n))}
 	if !(n.Local && o.LocalFiles) {
-		// Host facts, logs and configs are read from the disk of the machine
-		// running the binary: for any other node they would describe THIS
-		// machine under that node's name.
+		// host facts、日志和配置都从运行二进制的机器磁盘读取：对任何其他节点而言，
+		// 它们会以该节点的名字描述本机。
 		args = append(args, "-host-info", "off", "-logs", "off", "-skip-config")
 	}
 	return append(args, o.Extra...)
 }
 
-// EachNodeArgs is the clickhouse-diagnostic run to execute ON the node
-// itself, which also collects its log files and configs. It carries no
-// password: the binary reads CLICKHOUSE_PASSWORD or asks for it there.
+// EachNodeArgs 是要在节点本机执行的 clickhouse-diagnostic 运行，它还会采集
+// 该节点的日志文件和配置。它不携带密码：二进制会读取 CLICKHOUSE_PASSWORD
+// 或在那里提示输入。
 //
-// Over https it connects by the node's name rather than localhost: the
-// server's certificate is normally issued for that name.
+// 使用 https 时它按节点名称而不是 localhost 连接：服务器证书通常就是为
+// 该名称签发的。
 func EachNodeArgs(n Node, o Options) []string {
 	host := "localhost"
 	if o.Protocol == "https" {
@@ -282,15 +271,14 @@ func EachNodeArgs(n Node, o Options) []string {
 	return append(args, withoutSalt(o.Extra)...)
 }
 
-// withoutSalt drops -salt and its value: a command meant to be read, copied
-// and run on another host must not carry it. Run without -salt, the binary
-// asks for it there, without echo.
+// withoutSalt 去掉 -salt 及其值：一条供人阅读、复制并在另一台主机上执行的
+// 命令不应携带它。不带 -salt 运行时，二进制会在那里提示输入，且不回显。
 func withoutSalt(extra []string) []string {
 	var out []string
 	for i := 0; i < len(extra); i++ {
 		if name, attached := flagName(extra[i]); name == "salt" {
 			if !attached {
-				i++ // its value
+				i++ // 它的值
 			}
 			continue
 		}
@@ -301,8 +289,7 @@ func withoutSalt(extra []string) []string {
 
 var shellSafe = regexp.MustCompile(`^[A-Za-z0-9_./:=@%+,-]+$`)
 
-// flagName is the name in a -f, --f, -f=v or --f=v argument, with whether
-// the value is attached; "" for an argument that is not a flag.
+// flagName 返回 -f、--f、-f=v 或 --f=v 参数中的名称，以及值是否附着；不是 flag 的参数返回 ""。
 func flagName(a string) (name string, attached bool) {
 	if !strings.HasPrefix(a, "-") {
 		return "", false
@@ -314,13 +301,11 @@ func flagName(a string) (name string, attached bool) {
 	return name, false
 }
 
-// secret flags are masked wherever a command is printed. The salt is as
-// local as the password: the binary reads it without echo so it stays out of
-// scrollback, recordings and ticket attachments.
+// secret 中的 flag 在任何打印命令的地方都会被打码。salt 和密码一样只留在本机：
+// 二进制读取时不回显，因此不会进入终端回滚、录屏和工单附件。
 var secret = map[string]bool{"password": true, "salt": true}
 
-// Shown renders a command for printing, shell-quoted, with every -password
-// and -salt value masked, in any spelling.
+// Shown 把命令渲染成可打印形式，按 shell 规则加引号，并把任何写法的 -password 和 -salt 值打码。
 func Shown(binary string, args []string) string {
 	parts := []string{binary}
 	for i, a := range args {
@@ -339,9 +324,9 @@ func Shown(binary string, args []string) string {
 	return strings.Join(parts, " ")
 }
 
-// bundlePrefixes are the archive names a run can leave:
-// clickhouse_diagnostic_<ts>.tar.gz, and clickhouse_backup_<ts>.tar.gz from
-// releases before the rename.
+// bundlePrefixes 是一次运行可能留下的归档名：
+// clickhouse_diagnostic_<ts>.tar.gz，以及改名之前版本留下的
+// clickhouse_backup_<ts>.tar.gz。
 var bundlePrefixes = []string{"clickhouse_diagnostic_", "clickhouse_backup_"}
 
 func isBundleArchive(name string) bool {
@@ -356,10 +341,9 @@ func isBundleArchive(name string) bool {
 	return false
 }
 
-// archivesIn maps each bundle archive in dir to its mtime.
-// The directory is listed literally rather than globbed: -output-dir may
-// hold pattern characters ('support[123]'), which filepath.Glob would read
-// as a pattern and so find nothing.
+// archivesIn 把 dir 中的每个 bundle 归档映射到其 mtime。
+// 目录按字面列出而不是用 glob：-output-dir 可能包含模式字符（'support[123]'），
+// filepath.Glob 会把它当作模式，从而什么也找不到。
 func archivesIn(dir string) map[string]time.Time {
 	seen := map[string]time.Time{}
 	entries, _ := os.ReadDir(dir)
@@ -375,9 +359,8 @@ func archivesIn(dir string) map[string]time.Time {
 	return seen
 }
 
-// verifyArchive reads the archive to its end: a cut-off or corrupt file —
-// a full disk, a killed process — fails here instead of reaching the
-// summary as ok.
+// verifyArchive 把归档一直读到结尾：被截断或损坏的文件——磁盘写满、进程被杀——
+// 会在这里失败，而不会以 ok 进入摘要。
 func verifyArchive(path string) error {
 	f, err := os.Open(path)
 	if err != nil {
@@ -404,13 +387,12 @@ func verifyArchive(path string) error {
 		entries++
 	}
 	if entries == 0 {
-		return errors.New("archive is empty")
+		return errors.New("归档为空")
 	}
 	return gz.Close()
 }
 
-// newArchive is the newest archive in dir that is not in before, or whose
-// mtime changed since; "" when the run produced none.
+// newArchive 是 dir 中不在 before 里、或 mtime 已变化的最新归档；本次运行没有产出时返回 ""。
 func newArchive(dir string, before map[string]time.Time) string {
 	newest := ""
 	for path, mtime := range archivesIn(dir) {
@@ -424,12 +406,11 @@ func newArchive(dir string, before map[string]time.Time) string {
 	return newest
 }
 
-// isThisMachine says whether host — the discovery node as the operator named
-// it — is the machine running the command, so its files may be collected.
-// An address is compared with this machine's interfaces. Names follow
-// cmd/node_identity.go's sameMachine: two qualified names must be equal
-// outright ("ch-01.site-a" and "ch-01.site-b" are two machines); only when one
-// side is bare does the first label decide.
+// isThisMachine 判断 host——运维人员指定的发现节点——是否就是运行命令的机器，
+// 从而可以采集其文件。地址会与本机网络接口比较。名称遵循
+// cmd/node_identity.go 的 sameMachine：两个带域名的名称必须完全相等
+// （"ch-01.site-a" 和 "ch-01.site-b" 是两台机器）；只有一侧不带域名时，
+// 才由第一个标签决定。
 func isThisMachine(host string) bool {
 	if isLoopback(host) {
 		return true
@@ -472,18 +453,18 @@ func human(n int64) string {
 	return fmt.Sprintf("%d B", n)
 }
 
-const usage = `Usage: clickhouse-diagnostic cluster [flags] [-- flags for every run]
+const usage = `用法：clickhouse-diagnostic cluster [flags] [-- 传给每次运行的参数]
 
-Runs clickhouse-diagnostic on every host of a self-managed cluster. Needs
-%s in the environment (the password is never taken as a flag).
+在自管理集群的每台主机上运行 clickhouse-diagnostic。需要在环境中设置
+%s（密码从不作为命令行参数传入）。
 
-  -collect-from here       run every collection from this machine (default).
-                           Other hosts: system tables only, incl. text_log and
-                           query_log; no server log files, configs or host facts.
-  -collect-from each-node  only print the command to run ON each host, which
-                           also collects its log files and configs.
+  -collect-from here       从本机执行全部采集（默认）。
+                           其他主机：仅采集系统表，含 text_log 和
+                           query_log；不采集服务器日志文件、配置或 host facts。
+  -collect-from each-node  仅打印需要在每台主机上执行的命令，该命令
+                           还会采集该主机的日志文件和配置。
 
-Flags:
+选项：
 `
 
 type result struct {
@@ -494,9 +475,9 @@ type result struct {
 	size    int64
 }
 
-// Main runs the cluster command and returns the process exit code:
-// 0 all hosts collected (or nothing run), 1 some host failed, 2 usage or
-// discovery error.
+// Main 运行 cluster 命令并返回进程退出码：
+// 0 表示所有主机都采集成功（或未运行任何采集），1 表示有主机失败，2 表示
+// 用法或发现错误。
 func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("cluster", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -504,16 +485,16 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, usage, PasswordEnvVar)
 		fs.PrintDefaults()
 	}
-	host := fs.String("host", "localhost", "node to discover the cluster from")
-	port := fs.String("port", "", "HTTP port, the same on every host (default 8123, 8443 with https)")
-	protocol := fs.String("protocol", "http", "http or https")
-	user := fs.String("user", "default", "ClickHouse user")
-	cluster := fs.String("cluster", "", "only this cluster from system.clusters (default: every host listed)")
+	host := fs.String("host", "localhost", "用于发现集群的节点")
+	port := fs.String("port", "", "HTTP 端口，所有主机相同（默认 8123，使用 https 时为 8443）")
+	protocol := fs.String("protocol", "http", "http 或 https")
+	user := fs.String("user", "default", "ClickHouse 用户")
+	cluster := fs.String("cluster", "", "仅使用 system.clusters 中的该集群（默认：列出的全部主机）")
 	collectFrom := fs.String("collect-from", "here", "here | each-node")
-	mode := fs.String("mode", "onprem", "clickhouse-diagnostic -mode: onprem | gov (gov needs -- -salt <salt>)")
-	outputDir := fs.String("output-dir", "", "where the bundles go (default ./cluster_bundles_<timestamp>)")
-	timeout := fs.Duration("timeout", 30*time.Minute, "time allowed per host")
-	yes := fs.Bool("yes", false, "run without asking for confirmation")
+	mode := fs.String("mode", "onprem", "clickhouse-diagnostic -mode：onprem | gov（gov 需要 -- -salt <salt>）")
+	outputDir := fs.String("output-dir", "", "bundle 的输出位置（默认 ./cluster_bundles_<timestamp>）")
+	timeout := fs.Duration("timeout", 30*time.Minute, "每台主机允许的耗时")
+	yes := fs.Bool("yes", false, "运行前不请求确认")
 	if err := fs.Parse(argv); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -525,15 +506,15 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 2
 	}
 	if *collectFrom != "here" && *collectFrom != "each-node" {
-		fmt.Fprintf(stderr, "-collect-from must be here or each-node, not %q\n", *collectFrom)
+		fmt.Fprintf(stderr, "-collect-from 必须是 here 或 each-node，而不是 %q\n", *collectFrom)
 		return 2
 	}
 	if *mode != "onprem" && *mode != "gov" {
-		fmt.Fprintf(stderr, "-mode must be onprem or gov (cloud already collects every replica in one run)\n")
+		fmt.Fprintf(stderr, "-mode 必须是 onprem 或 gov（cloud 已在一次运行中采集每个副本）\n")
 		return 2
 	}
 	if *protocol != "http" && *protocol != "https" {
-		fmt.Fprintf(stderr, "-protocol must be http or https\n")
+		fmt.Fprintf(stderr, "-protocol 必须是 http 或 https\n")
 		return 2
 	}
 	if *port == "" {
@@ -544,15 +525,15 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	password, ok := os.LookupEnv(PasswordEnvVar)
 	if !ok {
-		fmt.Fprintf(stderr, "Set the password first:  export %s='…'\n"+
-			"(the cluster command never takes it as a flag, so it is not visible in ps)\n", PasswordEnvVar)
+		fmt.Fprintf(stderr, "请先设置密码：  export %s='…'\n"+
+			"（cluster 命令从不把密码作为参数，因此在 ps 中不可见）\n", PasswordEnvVar)
 		return 2
 	}
 
 	client := pkg.NewClickHouseClient(*protocol, *host, *port, *user, password)
 	body, err := client.ExecuteQueryReal(DiscoveryQuery)
 	if err != nil {
-		fmt.Fprintf(stderr, "Cannot read system.clusters from %s:%s — %v\n", *host, *port, err)
+		fmt.Fprintf(stderr, "无法从 %s:%s 读取 system.clusters —— %v\n", *host, *port, err)
 		return 2
 	}
 	rows, err := ParseRows(body)
@@ -566,7 +547,7 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 2
 	}
 	if len(nodes) == 0 {
-		fmt.Fprintln(stderr, "system.clusters lists no hosts.")
+		fmt.Fprintln(stderr, "system.clusters 未列出任何主机。")
 		return 2
 	}
 
@@ -576,17 +557,17 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			clusters[r.Cluster] = true
 		}
 	}
-	fmt.Fprintf(stdout, "Discovered %d host(s) from %s (clusters: %s)\n\n", len(nodes), *host, strings.Join(sortedKeys(clusters), ", "))
+	fmt.Fprintf(stdout, "发现 %d 台主机（来源 %s；集群：%s）\n\n", len(nodes), *host, strings.Join(sortedKeys(clusters), ", "))
 	for _, n := range nodes {
-		where := fmt.Sprintf("replica %d", n.Replica)
+		where := fmt.Sprintf("副本 %d", n.Replica)
 		if n.MultiShard {
-			where = fmt.Sprintf("shard %d replica %d", n.Shard, n.Replica)
+			where = fmt.Sprintf("分片 %d 副本 %d", n.Shard, n.Replica)
 		}
 		if n.Local {
-			where += " (asked for the cluster)"
+			where += "（集群的发现节点）"
 		}
 		if n.Errors > 0 {
-			where += fmt.Sprintf("  ! %d connection errors", n.Errors)
+			where += fmt.Sprintf("  ! %d 次连接错误", n.Errors)
 		}
 		fmt.Fprintf(stdout, "  %-22s %-15s %s\n", n.Host, n.Address, where)
 	}
@@ -594,11 +575,11 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 
 	o := Options{Mode: *mode, Protocol: *protocol, Host: *host, Port: *port, User: *user, Extra: fs.Args()}
 	if *collectFrom == "each-node" {
-		fmt.Fprintf(stdout, "Run this ON each host (with %s set, or it asks for the password),\n"+
-			"then send back the .tar.gz archive from ./clickhouse_results/<folder>/:\n\n", PasswordEnvVar)
+		fmt.Fprintf(stdout, "请在每台主机上运行以下命令（已设置 %s，或由它提示输入密码），\n"+
+			"然后把 ./clickhouse_results/<folder>/ 中的 .tar.gz 归档发回：\n\n", PasswordEnvVar)
 		if *mode == "gov" {
-			fmt.Fprintln(stdout, "Each run asks for the salt: type the same one on every host, or the hashes\n"+
-				"will not match across the bundles.")
+			fmt.Fprintln(stdout, "每次运行都会询问 salt：请在每台主机上输入相同的值，否则各 bundle\n"+
+				"之间的哈希将无法对应。")
 			fmt.Fprintln(stdout)
 		}
 		for _, n := range nodes {
@@ -608,12 +589,12 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 
 	if _, err := os.Stat("queries." + *mode); err != nil {
-		fmt.Fprintf(stderr, "queries.%s/ not found in the current directory: run from the unpacked clickhouse-diagnostic release.\n", *mode)
+		fmt.Fprintf(stderr, "当前目录中找不到 queries.%s/：请从解包后的 clickhouse-diagnostic 发行版中运行。\n", *mode)
 		return 2
 	}
 	bin, err := executable()
 	if err != nil {
-		fmt.Fprintf(stderr, "Cannot locate this binary: %v\n", err)
+		fmt.Fprintf(stderr, "无法定位当前二进制文件：%v\n", err)
 		return 2
 	}
 	dir := *outputDir
@@ -626,24 +607,24 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	o.LocalFiles = isThisMachine(*host)
 
-	fmt.Fprintln(stdout, "Will run, one host at a time:")
+	fmt.Fprintln(stdout, "将逐台主机运行：")
 	fmt.Fprintln(stdout)
 	for _, n := range nodes {
 		fmt.Fprintf(stdout, "%s\n\n", Shown(bin, HereArgs(n, o)))
 	}
 	if *mode == "gov" {
-		fmt.Fprintln(stdout, "gov mode collects system tables only, on every host: no log files, configs or\n"+
-			"host facts, wherever it runs.")
+		fmt.Fprintln(stdout, "gov 模式在每台主机上都只采集系统表：无论在哪里运行，都不采集日志文件、配置或\n"+
+			"host facts。")
 	} else {
-		fmt.Fprintln(stdout, "Other hosts: system tables only (incl. text_log, query_log) — no server log\n"+
-			"files, configs or host facts. Use -collect-from each-node for those.")
+		fmt.Fprintln(stdout, "其他主机：仅采集系统表（含 text_log、query_log）——不采集服务器日志\n"+
+			"文件、配置或 host facts。这些内容请使用 -collect-from each-node 采集。")
 	}
 	fmt.Fprintln(stdout)
 	if !*yes {
-		fmt.Fprintf(stdout, "Run %d collection(s)? [y/N] ", len(nodes))
+		fmt.Fprintf(stdout, "运行 %d 个采集任务？[y/N] ", len(nodes))
 		answer, _ := bufio.NewReader(stdin).ReadString('\n')
 		if a := strings.ToLower(strings.TrimSpace(answer)); a != "y" && a != "yes" {
-			fmt.Fprintln(stdout, "Nothing run.")
+			fmt.Fprintln(stdout, "未运行任何采集。")
 			return 0
 		}
 	}
@@ -657,12 +638,12 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fmt.Fprintf(&sb, "%-22s %-11s %6s %9s  %s\n", "host", "status", "time", "size", "archive")
 	failed := 0
 	for _, r := range results {
-		size, where, note := "-", "see "+filepath.Join(Label(r.node), "run.log"), ""
+		size, where, note := "-", "见 "+filepath.Join(Label(r.node), "run.log"), ""
 		if r.archive != "" {
 			size = human(r.size)
 			where, _ = filepath.Rel(o.OutputDir, r.archive)
 			if r.size > portalCapBytes {
-				note = "  over the 200 MB portal limit"
+				note = "  超过 200 MB 门户上传上限"
 			}
 		}
 		if r.status != "ok" {
@@ -671,13 +652,13 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintf(&sb, "%-22s %-11s %5.0fs %9s  %s%s\n", r.node.Host, r.status, r.elapsed.Seconds(), size, where, note)
 	}
 	if err := os.WriteFile(filepath.Join(o.OutputDir, "summary.txt"), []byte(sb.String()), 0o644); err != nil {
-		fmt.Fprintf(stderr, "Warning: summary.txt not written: %v\n", err)
+		fmt.Fprintf(stderr, "警告：未能写入 summary.txt：%v\n", err)
 	}
-	fmt.Fprintf(stdout, "\n%s\nBundles in %s\n", sb.String(), o.OutputDir)
+	fmt.Fprintf(stdout, "\n%s\nbundle 位于 %s\n", sb.String(), o.OutputDir)
 
-	// gov never collects log files or configs, so there is nothing to add.
+	// gov 从不采集日志文件和配置，因此没有可补充的内容。
 	if *mode != "gov" {
-		fmt.Fprintln(stdout, "\nServer log files and configs are only read on the host itself. To add them,\nrun this ON each host:")
+		fmt.Fprintln(stdout, "\n服务器日志文件和配置只能在主机本机读取。如需补充，请在每台主机上运行以下命令：")
 		fmt.Fprintln(stdout)
 		for _, n := range nodes {
 			if !(n.Local && o.LocalFiles) {
@@ -691,9 +672,8 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// runOne collects one node: a separate process of this binary, its output in
-// <folder>/run.log. Success is an archive in the folder — the binary exits 0
-// even when it could not reach the server or write the archive.
+// runOne 采集一个节点：本二进制的独立进程，输出写入 <folder>/run.log。
+// 成功的标志是文件夹中出现归档——即使无法连接服务器或写入归档，二进制也会以 0 退出。
 func runOne(bin string, n Node, o Options, timeout time.Duration, stdout io.Writer) result {
 	folder := filepath.Join(o.OutputDir, Label(n))
 	r := result{node: n, status: "ok"}
@@ -704,9 +684,8 @@ func runOne(bin string, n Node, o Options, timeout time.Duration, stdout io.Writ
 		fmt.Fprintf(stdout, "failed: %v\n", err)
 		return r
 	}
-	// Owner-only: in gov mode the run prints the real database and table
-	// names next to their hashes. Chmod as well, for a log left by an
-	// earlier run, which OpenFile does not re-permission.
+	// 仅所有者可读：gov 模式下运行会在哈希旁边打印真实的数据库和表名。
+	// 还要 Chmod，以处理先前运行留下的日志，OpenFile 不会重新设置其权限。
 	logPath := filepath.Join(folder, "run.log")
 	logFile, err := os.OpenFile(logPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err == nil {
@@ -720,29 +699,27 @@ func runOne(bin string, n Node, o Options, timeout time.Duration, stdout io.Writ
 		fmt.Fprintf(stdout, "failed: %v\n", err)
 		return r
 	}
-	// A reused -output-dir still holds earlier archives; only one this run
-	// created or replaced counts, or a host that is down now would report
-	// the previous run's bundle as ok.
+	// 复用的 -output-dir 仍保留着先前的归档；只有本次运行创建或替换的才作数，
+	// 否则当前已下线的主机会把上一次运行的 bundle 报告为 ok。
 	before := archivesIn(folder)
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	cmd := exec.CommandContext(ctx, bin, HereArgs(n, o)...)
-	cmd.Stdout, cmd.Stderr = logFile, logFile // the environment, CLICKHOUSE_PASSWORD included, is inherited
+	cmd.Stdout, cmd.Stderr = logFile, logFile // 环境（含 CLICKHOUSE_PASSWORD）会被继承
 	runErr := cmd.Run()
 	cancel()
 	logFile.Close()
 	r.elapsed = time.Since(start)
 
-	// ok needs all three: the run exited 0, it left a new archive, and the
-	// archive reads to its end.
+	// ok 需要同时满足三点：运行以 0 退出、留下新归档、归档能读到结尾。
 	switch r.archive = newArchive(folder, before); {
 	case errors.Is(ctx.Err(), context.DeadlineExceeded):
-		r.status = "timed out"
+		r.status = "超时"
 	case runErr != nil:
 		r.status = "failed"
 	case r.archive == "":
-		r.status = "no archive"
+		r.status = "无归档"
 	case verifyArchive(r.archive) != nil:
-		r.status = "bad archive"
+		r.status = "归档损坏"
 	}
 	if r.archive != "" {
 		if fi, err := os.Stat(r.archive); err == nil {
@@ -750,14 +727,14 @@ func runOne(bin string, n Node, o Options, timeout time.Duration, stdout io.Writ
 		}
 	}
 	if r.status != "ok" {
-		r.archive = "" // not a bundle to send
-		fmt.Fprintf(stdout, "%s, %.0fs, see %s\n", r.status, r.elapsed.Seconds(), filepath.Join(Label(n), "run.log"))
+		r.archive = "" // 不是可发送的 bundle
+		fmt.Fprintf(stdout, "%s，耗时 %.0f 秒，见 %s\n", r.status, r.elapsed.Seconds(), filepath.Join(Label(n), "run.log"))
 		return r
 	}
 	note := ""
 	if r.size > portalCapBytes {
-		note = ", over the 200 MB portal limit"
+		note = "，超过 200 MB 门户上传上限"
 	}
-	fmt.Fprintf(stdout, "ok, %.0fs, %s%s\n", r.elapsed.Seconds(), human(r.size), note)
+	fmt.Fprintf(stdout, "ok，耗时 %.0f 秒，%s%s\n", r.elapsed.Seconds(), human(r.size), note)
 	return r
 }

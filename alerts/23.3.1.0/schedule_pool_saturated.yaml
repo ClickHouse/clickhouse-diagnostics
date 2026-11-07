@@ -1,50 +1,44 @@
-# 23.3 override: background_*_pool_size moved from system.settings to
-# system.server_settings in 23.3. system.settings still LISTS the names on
-# newer servers, with the old session-setting defaults (8 / 128) rather than
-# the server's real sizes (16 / 512), so the root rule would compare against
-# the wrong denominator there — this override reads the table that is right.
+# 23.3覆盖：background_*_pool_size在23.3从system.settings迁移到
+# system.server_settings。在较新服务器上system.settings仍会列出这些名称，
+# 但使用旧的session setting默认值（8 / 128），而不是服务器的真实大小
+# （16 / 512），因此根规则在那里会与错误的分母比较——本覆盖读取正确的表。
 name: schedule_pool_saturated
-title: "Background schedule pool saturated for hours"
+title: "后台schedule pool持续数小时饱和"
 severity: warning
 description: |
-  In at least 3 of the last 24 hours the hourly average of
-  CurrentMetric_BackgroundSchedulePoolTask on a replica was at or above 95% of
-  background_schedule_pool_size. The schedule pool runs every table's periodic
-  tasks — parts-set updates, replication queue processing and cleanup, TTL and
-  MV refresh scheduling — one task at a time per slot; with tens of thousands
-  of replicated tables it is the first pool to pin. When it is full the tasks
-  are not lost, they are late: a table's "parts updated" task waits for a slot,
-  so on SharedMergeTree new parts become visible minutes to hours after they
-  were written, and the replication queue on ReplicatedMergeTree is processed
-  behind schedule. A restart empties the pool only until the same tables fill
-  it again. The lasting fix is capacity: background_schedule_pool_size
-  (default 512; IncreaseOnly — a config reload raises it live with no
-  restart, only lowering it needs one; the pool's per-task-type cap adopts
-  the new size at the next restart, so plan a rolling restart after the
-  catch-up, not before), a longer
-  shared_merge_tree_leader_update_period_seconds (every table runs an
-  election per period on this pool), fewer replicated tables per replica
-  (empty ones included), fewer tiny partitions. A pinned schedule pool also
-  idles the fetch pool: the rounds that schedule fetches run here.
+  最近24小时中至少有3个小时，某个replica上
+  CurrentMetric_BackgroundSchedulePoolTask的小时均值达到或超过
+  background_schedule_pool_size的95%。schedule pool运行每张表的周期任务——
+  part集合更新、replication queue处理和清理、TTL与MV刷新调度——
+  每个slot一次只运行一个任务；面对数万张replicated表时，它是最先被占满的
+  pool。它满时任务不会丢失，只会延迟：某张表的“parts updated”任务等待
+  slot，因此在SharedMergeTree上，新part在写入后数分钟到数小时才可见，
+  而ReplicatedMergeTree上的replication queue也会延迟处理。重启只能清空
+  pool，直到同样的表再次填满它。长久的修复是容量：
+  background_schedule_pool_size（默认512；IncreaseOnly——配置重载可在
+  不重启的情况下在线提高，只有降低才需要重启；pool的逐任务类型上限会在
+  下次重启时采用新大小，因此请安排在追平之后进行滚动重启，而不是之前）、
+  更长的shared_merge_tree_leader_update_period_seconds（每张表每个周期
+  都在这个pool上运行一次选举）、每个replica更少的replicated表（包括空表）、
+  更少的小分区。被占满的schedule pool还会让fetch pool空转：
+  调度fetch的轮次就在这里运行。
 
-  Check: metric_log_7_days avg_/max_schedule_pool_tasks per hour against the
-  size; system.tables count of Replicated*/Shared* engines; alongside
-  fetch_pool_saturated (both pinned on every replica is the capacity
-  signature); on SMT, per-replica max_block_number for a hot table.
+  排查：每小时将metric_log_7_days的avg_/max_schedule_pool_tasks与pool
+  大小对比；system.tables中Replicated*/Shared*引擎的数量；结合
+  fetch_pool_saturated一起看（每个replica上两者都占满就是容量问题的
+  特征）；在SMT上，查看热表的逐replica max_block_number。
 tags:
   - background-pools
   - capacity
   - replication
 
-# Per replica (hostName()) on both sides: a cluster-wide average would hide
-# one saturated node among idle ones, and a cluster-wide pool size would
-# compare one replica's occupancy with another replica's denominator when
-# the sizes differ. In cloud mode {sys.server_settings} fans out too, so the
-# join on hostname pairs each replica with its own size; on one node both
-# sides are that node.
-# Evaluated by the Go check over the files already collected (no second
-# query to the server). query: below is the same test in SQL, for the
-# customer to run live; the check mirrors it.
+# 两侧都按replica（hostName()）分组：集群级平均值会掩盖空闲节点中某一个
+# 饱和节点；而集群级pool大小会在各replica大小不同时，用另一个replica的
+# 分母来比较本replica的占用。在cloud模式下{sys.server_settings}也会
+# fan out，因此按hostname连接会让每个replica与自己的大小配对；在单节点上
+# 两侧都是该节点。
+# 由Go check在已采集的文件上评估（不会再次查询服务器）。下方query:是同一
+# 测试的SQL版本，供客户在线执行；check镜像同一逻辑。
 check: go:schedule_pool_saturated
 source:
   - system.metric_log_7_days
@@ -87,10 +81,10 @@ query: |
   ORDER BY hours_saturated DESC, hostname
   LIMIT 100
 
-# Follow-ups the dashboard shows under a fired alert, for the customer to run
-# on their own cluster (never run by the tool; read-only, validated like query).
+# 在触发的告警下方，dashboard会展示这些后续查询，供客户在自己的集群上运行
+# （工具从不执行；只读，并按query的标准校验）。
 investigate:
-  - title: "Every background pool right now, per replica: busy slots against its size"
+  - title: "当前每个background pool在每replica上的情况：忙碌slot与其大小对比"
     query: |
       SELECT t.hostname AS hostname, t.pool AS pool, t.busy AS busy, s.size AS size,
              round(100 * t.busy / greatest(s.size, 1)) AS pct_busy
@@ -108,7 +102,7 @@ investigate:
       ) AS s USING (hostname, pool)
       ORDER BY pct_busy DESC, hostname, pool
       LIMIT 200
-  - title: "Each pool's hourly peak over the last 24 hours, per replica (busy slots, and the pool's size)"
+  - title: "最近24小时每个pool在每replica上的小时峰值（忙碌slot及pool大小）"
     query: |
       SELECT
         hostName() AS hostname,
@@ -120,4 +114,4 @@ investigate:
       ORDER BY hostname, hour
       LIMIT 1000
 
-message: "{hostname}: background schedule pool at {pct_of_size}% of its size ({avg_tasks_in_pool} of background_schedule_pool_size = {pool_size}) for {hours_saturated} of the last 24 hours"
+message: "{hostname}：background schedule pool达到其大小的{pct_of_size}%（{avg_tasks_in_pool} / background_schedule_pool_size = {pool_size}），最近24小时中有{hours_saturated}小时如此"

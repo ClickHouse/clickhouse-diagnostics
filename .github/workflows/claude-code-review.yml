@@ -3,7 +3,7 @@ name: Claude Code Review
 on:
   pull_request:
     types: [opened, synchronize, ready_for_review, reopened]
-    # Optional: Only run on specific file changes
+    # 可选：仅在特定文件变更时运行
     # paths:
     #   - "src/**/*.ts"
     #   - "src/**/*.tsx"
@@ -13,7 +13,7 @@ on:
 jobs:
   claude-review:
     if: github.event.pull_request.draft == false
-    # Optional: Filter by PR author
+    # 可选：按 PR 作者过滤
     # if: |
     #   github.event.pull_request.user.login == 'external-contributor' ||
     #   github.event.pull_request.user.login == 'new-developer' ||
@@ -27,12 +27,12 @@ jobs:
       id-token: write
 
     steps:
-      - name: Checkout repository
+      - name: 检出仓库
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
-      - name: Run Claude Code Review
+      - name: 运行 Claude Code Review
         id: claude-review
         uses: anthropics/claude-code-action@v1
         with:
@@ -41,6 +41,6 @@ jobs:
           plugins: 'code-review@claude-code-plugins'
           prompt: '/code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}'
           use_sticky_comment: true
-          # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
-          # or https://code.claude.com/docs/en/cli-reference for available options
+          # 参见 https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
+          # 或 https://code.claude.com/docs/en/cli-reference 了解可用选项
 

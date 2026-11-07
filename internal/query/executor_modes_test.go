@@ -22,7 +22,7 @@ type modesFixture struct {
 	mu      sync.Mutex
 	order   []string
 	queries map[string]internal.QueryFile
-	slow    string // a query whose text contains this answers TIMEOUT_EXCEEDED
+	slow    string // 文本中包含此字符串的查询会返回 TIMEOUT_EXCEEDED
 	client  *pkg.ClickHouseClient
 }
 
@@ -86,35 +86,35 @@ func TestExecutor_EssentialFirstThenByName(t *testing.T) {
 	f.run(nil, nil)
 	want := []string{"m_ess.sql", "z_ess.sql", "a_full.sql", "b_full.sql"}
 	if strings.Join(f.order, ",") != strings.Join(want, ",") {
-		t.Fatalf("order %v, want %v", f.order, want)
+		t.Fatalf("顺序 %v，期望 %v", f.order, want)
 	}
 }
 
 func TestExecutor_EssentialRunSkipsFullAndSaysWhy(t *testing.T) {
 	f := newModesFixture(t, modeFiles)
 	w := collectmode.NewWatchdog(0)
-	w.Trip("memory at 94 % of the server limit")
+	w.Trip("内存已达服务器上限的 94%")
 	rec := runlog.New()
 	f.run(w, rec)
 	if strings.Join(f.order, ",") != "m_ess.sql,z_ess.sql" {
-		t.Fatalf("essential run executed %v", f.order)
+		t.Fatalf("essential 运行执行了 %v", f.order)
 	}
 	skipped := 0
 	for _, e := range rec.Entries() {
 		if e.Status == "skipped" {
 			skipped++
-			if !strings.Contains(e.Extra, "essential collection") || !strings.Contains(e.Extra, "memory at 94 %") {
-				t.Errorf("skip reason %q", e.Extra)
+			if !strings.Contains(e.Extra, "essential collection") || !strings.Contains(e.Extra, "内存已达") {
+				t.Errorf("跳过原因 %q", e.Extra)
 			}
 		}
 	}
 	if skipped != 2 {
-		t.Fatalf("skipped %d, want 2", skipped)
+		t.Fatalf("跳过了 %d 个，期望 2 个", skipped)
 	}
 }
 
-// A timeout during a full run trips the watchdog: the essential collectors
-// still run, the full ones after the timeout are skipped.
+// full 运行期间的一次超时会触发 watchdog：essential collector 仍然运行，
+// 超时之后的 full collector 被跳过。
 func TestExecutor_TimeoutSwitchesTheRestToEssential(t *testing.T) {
 	f := newModesFixture(t, map[string]string{
 		"a_ess.sql": q("a_ess.sql", "essential"), "b_full.sql": q("b_full.sql", ""),
@@ -125,10 +125,10 @@ func TestExecutor_TimeoutSwitchesTheRestToEssential(t *testing.T) {
 	rec := runlog.New()
 	f.run(w, rec)
 	if got := strings.Join(f.order, ","); got != "a_ess.sql,b_full.sql" {
-		t.Fatalf("after the timeout the run still executed: %s", got)
+		t.Fatalf("超时之后运行仍执行了：%s", got)
 	}
 	if tripped, why := w.Tripped(); !tripped || !strings.Contains(why, "b_full.sql") {
-		t.Fatalf("watchdog not tripped: %q", why)
+		t.Fatalf("watchdog 未被触发：%q", why)
 	}
 }
 
@@ -140,17 +140,17 @@ func TestExecutor_BudgetSkipsEverythingLeft(t *testing.T) {
 	rec := runlog.New()
 	f.run(w, rec)
 	if len(f.order) != 0 {
-		t.Fatalf("over budget, yet executed %v", f.order)
+		t.Fatalf("已超出预算，却仍执行了 %v", f.order)
 	}
 	for _, e := range rec.Entries() {
-		if e.Status != "skipped" || !strings.Contains(e.Extra, "time budget") {
-			t.Errorf("entry %+v", e)
+		if e.Status != "skipped" || !strings.Contains(e.Extra, "时间预算") {
+			t.Errorf("记录 %+v", e)
 		}
 	}
 }
 
-// Once the run is essential, the collectors that still run get 1-day
-// windows instead of their 3- or 7-day defaults.
+// 一旦本次运行变为 essential，仍在运行的 collector 会得到 1 天的窗口，
+// 而不是它们默认的 3 天或 7 天。
 func TestExecutor_EssentialCapsWindows(t *testing.T) {
 	var seen []string
 	var mu sync.Mutex
@@ -175,7 +175,7 @@ func TestExecutor_EssentialCapsWindows(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(seen) != 1 || !strings.Contains(seen[0], "INTERVAL 24 HOUR") || strings.Contains(seen[0], "7 DAY") {
-		t.Fatalf("essential window not capped: %q", seen)
+		t.Fatalf("essential 窗口未被设上限：%q", seen)
 	}
 }
 
@@ -189,11 +189,11 @@ func TestExecutor_KeeperDownSkipsKeeperCollectors(t *testing.T) {
 		t.Fatal(err)
 	}
 	if strings.Join(f.order, ",") != "a_ess.sql" {
-		t.Fatalf("executed %v", f.order)
+		t.Fatalf("执行了 %v", f.order)
 	}
 	for _, e := range rec.Entries() {
-		if e.Name == "zk.sql" && (e.Status != "skipped" || !strings.Contains(e.Extra, "live Keeper session")) {
-			t.Errorf("zk.sql entry %+v", e)
+		if e.Name == "zk.sql" && (e.Status != "skipped" || !strings.Contains(e.Extra, "Keeper 会话")) {
+			t.Errorf("zk.sql 记录 %+v", e)
 		}
 	}
 }

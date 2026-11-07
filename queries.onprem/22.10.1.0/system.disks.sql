@@ -10,8 +10,8 @@ SELECT
        round(free_space_b / total_space_b * 100, 1),
        0) AS free_pct,
     type,
-    -- exact bytes: free_pct is rounded to 0.1, and the low-space check must
-    -- not miss 14.96 % as 15.0
+    -- 精确字节数：free_pct 四舍五入到 0.1，低空间检查不能
+    -- 把 14.96 % 误当成 15.0 而漏报
     free_space_b  AS free_bytes,
     total_space_b AS total_bytes
 FROM (

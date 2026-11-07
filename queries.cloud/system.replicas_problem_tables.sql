@@ -1,20 +1,20 @@
 -- tier: essential
 -- needs: keeper
--- The Keeper-backed columns of system.replicas, for the tables that need
--- them. Asking system.replicas for log_max_index, log_pointer,
--- total_replicas, active_replicas or zookeeper_exception makes the server
--- read EVERY table's status from Keeper — one round trip per replicated
--- table, minutes on a server with tens of thousands of tables (seen at
--- 18–97 s per run, plus the same again in alerts). system.replicas filters
--- on database/table BEFORE reading statuses, so this file asks for them only
--- for up to 200 tables chosen by the cheap columns: every table that is
--- read-only, session-expired, queued, delayed or checking parts first, then
--- a sample of healthy ones — enough to see a stale replica still registered
--- in Keeper (total_replicas above the servers that exist, P-43) and a
--- replica lagging the log (log_pointer far behind log_max_index).
--- The cheap columns for every table are in system.replicas.
--- Cloud: per replica. The IN subquery has no GLOBAL, so each replica picks
--- its own up-to-200 tables from its own system.replicas.
+-- system.replicas 中由 Keeper 支撑的列，仅用于需要它们的表。
+-- 向 system.replicas 请求 log_max_index、log_pointer、
+-- total_replicas、active_replicas 或 zookeeper_exception 会让服务器
+-- 从 Keeper 读取“每张”表的状态——每张复制表一次往返，
+-- 在拥有数万张表的服务器上要花数分钟（每次运行观察到
+-- 18–97 秒，告警中还要再来一遍）。system.replicas 会在读取状态前
+-- 按 database/table 过滤，因此本文件只对最多
+-- 200 张由廉价列选出的表请求这些列：先是所有只读、
+-- 会话过期、排队、延迟或正在检查 part 的表，然后
+-- 抽样一些健康表——足以看到一个仍注册在 Keeper 中的陈旧副本
+-- （total_replicas 高于实际存在的服务器数，P-43）以及一个
+-- 落后于日志的副本（log_pointer 远落后于 log_max_index）。
+-- 每张表的廉价列在 system.replicas 中。
+-- Cloud：按副本。IN 子查询没有 GLOBAL，因此每个副本从自己的
+-- system.replicas 中选择自己的最多 200 张表。
 SELECT
     hostName() AS hostname,
     database,

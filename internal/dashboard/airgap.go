@@ -5,37 +5,37 @@ import (
 	"strings"
 )
 
-// chartJS is Chart.js 4.4.3 (dist/chart.umd.js from the npm tarball). Only
-// -airgap uses it: by default the dashboard still loads the same release from
-// the CDN. airgap_test.go pins its checksum.
+// chartJS是Chart.js 4.4.3（来自npm tarball的dist/chart.umd.js）。只有
+// -airgap使用它：默认情况下dashboard仍从CDN加载同一版本。
+// airgap_test.go固定了它的校验和。
 //
 //go:embed assets/chart.umd.js
 var chartJS string
 
-// chartJSLicense is Chart.js's MIT licence. It is inlined in a comment ahead
-// of the library because a dashboard.html travels on its own, and MIT asks
-// for the full permission notice in every copy.
+// chartJSLicense是Chart.js的MIT许可证。它作为注释内联在
+// 库之前，因为dashboard.html会单独分发，而MIT要求
+// 每份副本都附带完整的许可声明。
 //
 //go:embed assets/LICENSE.chartjs.md
 var chartJSLicense string
 
-// chartJSCDNTag is the htmlTemplate line -airgap replaces.
+// chartJSCDNTag是-airgap要替换的htmlTemplate行。
 const chartJSCDNTag = `<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>`
 
 const (
-	cdnFooter    = "requires Chart.js CDN"
-	airgapFooter = "Chart.js 4.4.3 embedded (air-gap build, no network needed)"
+	cdnFooter    = "需要 Chart.js CDN"
+	airgapFooter = "已内嵌 Chart.js 4.4.3（air-gap 构建，无需网络）"
 )
 
-// WithAirgap makes Generate inline Chart.js into dashboard.html instead of
-// loading it from the CDN, so the page draws its charts with no network
-// access. See airgap/README.md. Returns the receiver for chaining.
+// WithAirgap让Generate把Chart.js内联到dashboard.html中，而不是
+// 从CDN加载，这样页面无需网络访问即可绘制图表。见
+// airgap/README.md。返回接收者以便链式调用。
 func (g *Generator) WithAirgap(on bool) *Generator {
 	g.airgap = on
 	return g
 }
 
-// inlineChartJS swaps the CDN <script> tag for the embedded library.
+// inlineChartJS把CDN的<script>标签替换为内嵌库。
 func inlineChartJS(html string) string {
 	inline := "<script>\n/*!\n" + chartJSLicense + "\n*/\n" + chartJS + "\n</script>"
 	html = strings.Replace(html, chartJSCDNTag, inline, 1)

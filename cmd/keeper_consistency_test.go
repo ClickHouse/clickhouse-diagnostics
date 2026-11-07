@@ -10,10 +10,10 @@ import (
 	"clickhouse-diagnostic/internal/keeper"
 )
 
-// The dashboard's Keeper members panel (Go, internal/keeper.ReadMembers) and
-// the pre-pass (Python, HC-3.18-3.20) read the same keeper/ files with the
-// same rules, written twice. This runs both on the same fixtures and requires
-// the same verdict for every member, so the two cannot drift apart.
+// dashboard 的 Keeper 成员面板（Go，internal/keeper.ReadMembers）和
+// pre-pass（Python，HC-3.18-3.20）以相同规则读取同样的 keeper/ 文件，实现
+// 写了两遍。本测试在同一批 fixture 上运行两者，并要求每个成员得到相同判定，
+// 从而确保二者不会产生偏差。
 func TestKeeperVerdicts_DashboardAndPrepassAgree(t *testing.T) {
 	conf26 := "snapshot_distance=1000000\nsnapshot_transfer_chunk_size=0\nwrite_snapshot_version=6"
 	ver := func(v, mode string) string { return "ClickHouse Keeper version: v" + v + "\nMode: " + mode }
@@ -54,7 +54,7 @@ func TestKeeperVerdicts_DashboardAndPrepassAgree(t *testing.T) {
 			run := writeKeeperBundle(t, ms)
 			out, errOut, code := runPrepass(t, "--json", run)
 			if code != 0 {
-				t.Fatalf("pre-pass exit %d: %s", code, errOut)
+				t.Fatalf("pre-pass 退出码 %d：%s", code, errOut)
 			}
 			var pp struct {
 				Findings []map[string]string `json:"findings"`
@@ -65,7 +65,7 @@ func TestKeeperVerdicts_DashboardAndPrepassAgree(t *testing.T) {
 			}
 			goMembers := keeper.ReadMembers(run)
 
-			// One verdict string per member and check, from each side.
+			// 每个成员和每项检查各产生一个判定字符串，双方各一份。
 			prepass, dashboard := map[string]bool{}, map[string]bool{}
 			for _, m := range pp.Members {
 				prepass[fmt.Sprintf("%v state=%v", m["member"], m["state"])] = true
@@ -74,7 +74,7 @@ func TestKeeperVerdicts_DashboardAndPrepassAgree(t *testing.T) {
 				dashboard[fmt.Sprintf("%v state=%v", m.Member, m.State)] = true
 				for _, f := range m.Flags {
 					if f.Check == "HC-3.18" {
-						continue // per-member "not serving" mark; the pre-pass groups it into one line
+						continue // 按成员的“not serving”标记；pre-pass 将其归并成一行
 					}
 					dashboard[fmt.Sprintf("%s %s %s", m.Member, strings.SplitN(f.Check, "/", 2)[0]+map[bool]string{true: "/P-61", false: ""}[strings.Contains(f.Check, "P-61")], f.Severity)] = true
 				}
@@ -85,16 +85,16 @@ func TestKeeperVerdicts_DashboardAndPrepassAgree(t *testing.T) {
 					continue
 				}
 				for _, m := range goMembers {
-					if strings.Contains(f["message"], m.Member) || (strings.HasPrefix(c, "HC-3.20/") && strings.Contains(f["message"], "on ") && strings.Contains(f["message"], m.Member)) {
+					if strings.Contains(f["message"], m.Member) || (strings.HasPrefix(c, "HC-3.20/") && strings.Contains(f["message"], "上") && strings.Contains(f["message"], m.Member)) {
 						prepass[fmt.Sprintf("%s %s %s", m.Member, c, f["severity"])] = true
 					}
 				}
 			}
 			if testing.Verbose() {
-				t.Logf("%d verdicts agreed: %s", len(prepass), strings.Join(keys(prepass), " | "))
+				t.Logf("%d 条判定一致：%s", len(prepass), strings.Join(keys(prepass), " | "))
 			}
 			if a, b := keys(prepass), keys(dashboard); strings.Join(a, "\n") != strings.Join(b, "\n") {
-				t.Errorf("verdicts differ\npre-pass:\n  %s\ndashboard:\n  %s", strings.Join(a, "\n  "), strings.Join(b, "\n  "))
+				t.Errorf("判定不一致\npre-pass:\n  %s\ndashboard:\n  %s", strings.Join(a, "\n  "), strings.Join(b, "\n  "))
 			}
 			leaderlessPrepass := false
 			for _, f := range pp.Findings {
@@ -103,7 +103,7 @@ func TestKeeperVerdicts_DashboardAndPrepassAgree(t *testing.T) {
 				}
 			}
 			if leaderlessPrepass != (len(keeper.Leaderless(goMembers)) > 0) {
-				t.Errorf("leaderless: pre-pass %v, dashboard %v", leaderlessPrepass, keeper.Leaderless(goMembers))
+				t.Errorf("leaderless：pre-pass %v，dashboard %v", leaderlessPrepass, keeper.Leaderless(goMembers))
 			}
 		})
 	}

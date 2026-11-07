@@ -19,9 +19,8 @@ func write(t *testing.T, path, content string) {
 	}
 }
 
-// TestLogPathsFromConfig covers the discovery that is the whole point of
-// this collector: following the configured location rather than assuming
-// the packaged one.
+// TestLogPathsFromConfig 覆盖的正是此采集器的核心：发现——
+// 跟随配置的位置，而不是假设打包默认位置。
 func TestLogPathsFromConfig(t *testing.T) {
 	root := t.TempDir()
 	confD := filepath.Join(root, "config.d")
@@ -37,7 +36,7 @@ func TestLogPathsFromConfig(t *testing.T) {
 <clickhouse><logger>
   <log>/mnt/big/other.log</log>
 </logger></clickhouse>`)
-	// Must be ignored: unresolved substitution and a relative path.
+	// 必须被忽略：未解析的变量替换和相对路径。
 	write(t, filepath.Join(confD, "weird.xml"), `
 <clickhouse><logger>
   <log>{some_macro}/x.log</log>
@@ -51,11 +50,11 @@ func TestLogPathsFromConfig(t *testing.T) {
 		"/mnt/big/other.log":                      true,
 	}
 	if len(got) != len(want) {
-		t.Fatalf("got %v, want %d absolute paths", got, len(want))
+		t.Fatalf("得到 %v，期望 %d 个绝对路径", got, len(want))
 	}
 	for _, p := range got {
 		if !want[p] {
-			t.Errorf("unexpected path %q (substitutions and relative paths must be skipped)", p)
+			t.Errorf("意外的路径 %q（变量替换和相对路径必须跳过）", p)
 		}
 	}
 }
@@ -65,17 +64,17 @@ func TestDiscoverDirs_ExplicitDirWins(t *testing.T) {
 	res := &Result{}
 	got := DiscoverDirs(Options{Dir: dir, ConfigDir: "/nonexistent"}, res)
 	if len(got) != 1 || got[0] != filepath.Clean(dir) {
-		t.Errorf("explicit dir should win, got %v", got)
+		t.Errorf("显式目录应当优先，得到 %v", got)
 	}
 
-	// A bad explicit dir must produce a note, not silently fall back —
-	// otherwise the operator thinks their flag was honoured.
+	// 错误的显式目录必须产生备注，而不是静默回退——
+	// 否则运维人员会以为自己的 flag 被采纳了。
 	res2 := &Result{}
 	if got := DiscoverDirs(Options{Dir: "/no/such/dir"}, res2); len(got) != 0 {
-		t.Errorf("expected no dirs, got %v", got)
+		t.Errorf("期望没有目录，得到 %v", got)
 	}
 	if len(res2.Notes) == 0 {
-		t.Error("a non-existent -logs-dir must be reported")
+		t.Error("不存在的 -logs-dir 必须被报告")
 	}
 }
 
@@ -84,13 +83,13 @@ func TestCollect_CopiesAndTailTruncates(t *testing.T) {
 	dest := t.TempDir()
 
 	write(t, filepath.Join(src, "clickhouse-server.log"), "line one\nline two\n")
-	// Oversized file: 4 KiB of numbered lines, capped to 1 KiB.
+	// 超大文件：4 KiB 带编号的文本行，上限为 1 KiB。
 	var big strings.Builder
 	for i := 0; big.Len() < 4096; i++ {
 		big.WriteString("0123456789 filler line to exceed the cap\n")
 	}
 	write(t, filepath.Join(src, "big.log"), big.String())
-	// Non-log files and archives must be skipped by default.
+	// 非日志文件和归档默认必须跳过。
 	write(t, filepath.Join(src, "notes.txt"), "ignore me")
 	write(t, filepath.Join(src, "old.log.gz"), "gzip-ish")
 
@@ -99,10 +98,10 @@ func TestCollect_CopiesAndTailTruncates(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(res.Copied) != 2 {
-		t.Fatalf("copied %v, want exactly the two .log files", res.Copied)
+		t.Fatalf("复制了 %v，期望恰好两个 .log 文件", res.Copied)
 	}
 	if len(res.Truncated) != 1 || res.Truncated[0] != "big.log" {
-		t.Errorf("truncated = %v, want [big.log]", res.Truncated)
+		t.Errorf("truncated = %v，期望 [big.log]", res.Truncated)
 	}
 
 	small, err := os.ReadFile(filepath.Join(dest, "logs", "clickhouse-server.log"))
@@ -110,7 +109,7 @@ func TestCollect_CopiesAndTailTruncates(t *testing.T) {
 		t.Fatal(err)
 	}
 	if string(small) != "line one\nline two\n" {
-		t.Errorf("small file should be copied verbatim, got %q", small)
+		t.Errorf("小文件应原样复制，得到 %q", small)
 	}
 
 	bigOut, err := os.ReadFile(filepath.Join(dest, "logs", "big.log"))
@@ -118,28 +117,28 @@ func TestCollect_CopiesAndTailTruncates(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !strings.HasPrefix(string(bigOut), "### support-diagnostic: TRUNCATED") {
-		t.Error("truncated file must start with the truncation marker so nobody " +
-			"reads the first surviving line as the start of the log")
+		t.Error("被截断的文件必须以截断标记开头，以免有人" +
+			"把第一条幸存的行当作日志的开头")
 	}
-	// Tail semantics: the END of the original must survive.
+	// 尾部语义：原始文件的末尾必须保留。
 	if !strings.HasSuffix(string(bigOut), "filler line to exceed the cap\n") {
-		t.Error("truncation must keep the tail, not the head")
+		t.Error("截断必须保留尾部，而不是头部")
 	}
-	// And it must resume on a line boundary, not mid-message.
+	// 而且必须从行边界恢复，而不是从消息中间。
 	body := strings.SplitN(string(bigOut), "\n", 2)[1]
 	if body != "" && !strings.HasPrefix(body, "0123456789") {
-		t.Errorf("expected a clean line boundary after the marker, got %.40q", body)
+		t.Errorf("期望标记之后是干净的行边界，得到 %.40q", body)
 	}
 }
 
 func TestCollect_MissingDirIsNoteNotError(t *testing.T) {
-	// Running remotely is normal; a missing log dir must not fail the run.
+	// 远程运行是常态；日志目录缺失绝不能导致运行失败。
 	res, err := Collect(t.TempDir(), Options{Dir: "/definitely/not/here"})
 	if err != nil {
-		t.Fatalf("missing dir should not be an error, got %v", err)
+		t.Fatalf("目录缺失不应是错误，得到 %v", err)
 	}
 	if len(res.Copied) != 0 || len(res.Notes) == 0 {
-		t.Errorf("expected 0 copied and an explanatory note, got %+v", res)
+		t.Errorf("期望复制 0 个并带说明性备注，得到 %+v", res)
 	}
 }
 
@@ -152,14 +151,13 @@ func TestCollect_IncludeArchives(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(res.Copied) != 2 {
-		t.Errorf("with IncludeArchives both files should be copied, got %v", res.Copied)
+		t.Errorf("启用 IncludeArchives 后两个文件都应被复制，得到 %v", res.Copied)
 	}
 }
 
-// TestSymlinksNotFollowed: the log directory is typically writable by the
-// clickhouse service account while the diagnostic often runs as root. A
-// planted `evil.log -> /etc/shadow` must not be copied into a bundle that
-// gets shared with support.
+// TestSymlinksNotFollowed：日志目录通常可由 clickhouse 服务账号写入，
+// 而诊断工具常以 root 运行。一个植入的 `evil.log -> /etc/shadow`
+// 绝不能进入与支持人员共享的 bundle。
 func TestSymlinksNotFollowed(t *testing.T) {
 	logDir := t.TempDir()
 	outDir := t.TempDir()
@@ -172,7 +170,7 @@ func TestSymlinksNotFollowed(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(secret, filepath.Join(logDir, "evil.log")); err != nil {
-		t.Skipf("cannot create symlink: %v", err)
+		t.Skipf("无法创建符号链接：%v", err)
 	}
 
 	res, err := Collect(outDir, Options{Dir: logDir, MaxBytesPerFile: 1 << 20})
@@ -181,11 +179,11 @@ func TestSymlinksNotFollowed(t *testing.T) {
 	}
 	for _, name := range res.Copied {
 		if strings.Contains(name, "evil") {
-			t.Fatalf("symlink was followed and copied: %v", res.Copied)
+			t.Fatalf("符号链接被跟随并复制了：%v", res.Copied)
 		}
 	}
 	if len(res.Copied) != 1 || !strings.Contains(res.Copied[0], "real") {
-		t.Errorf("expected exactly the real log, got %v", res.Copied)
+		t.Errorf("期望恰好只有真实日志，得到 %v", res.Copied)
 	}
 	found := false
 	for _, n := range res.Notes {
@@ -194,16 +192,16 @@ func TestSymlinksNotFollowed(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Error("skipped symlink was not reported in Notes; silent omission " +
-			"reads as a missing log rather than a refusal")
+		t.Error("被跳过的符号链接未在 Notes 中报告；静默遗漏" +
+			"会被读作日志缺失，而不是拒绝")
 	}
 }
 
-// TestTruncationHeaderIsExact pins the two claims the header makes after
-// the copilot-review fix: the "kept last N bytes" figure must equal the
-// actual payload that follows it (line alignment shaves up to one line off
-// the nominal cap), and Result.TotalBytes must count what was written to
-// the bundle — header included — not what was read from the source.
+// TestTruncationHeaderIsExact 固定住头部在 copilot-review 修复后做出的
+// 两项声明：“kept last N bytes”数字必须等于其后实际的有效载荷
+// （行对齐最多会从名义上限削掉一行），以及 Result.TotalBytes
+// 必须统计写入 bundle 的内容——包括头部——而不是从源
+// 读取的内容。
 func TestTruncationHeaderIsExact(t *testing.T) {
 	src := t.TempDir()
 	dest := t.TempDir()
@@ -225,62 +223,62 @@ func TestTruncationHeaderIsExact(t *testing.T) {
 	}
 	head, payload, found := strings.Cut(string(out), "###\n")
 	if !found {
-		t.Fatalf("no truncation header in %q", string(out)[:80])
+		t.Fatalf("%q 中没有截断头部", string(out)[:80])
 	}
 	m := regexp.MustCompile(`original (\d+) bytes, kept last (\d+) bytes`).FindStringSubmatch(head)
 	if m == nil {
-		t.Fatalf("header shape changed: %q", head)
+		t.Fatalf("头部形状变了：%q", head)
 	}
 	original, _ := strconv.Atoi(m[1])
 	kept, _ := strconv.Atoi(m[2])
 
 	if original != big.Len() {
-		t.Errorf("header says original %d bytes, source was %d", original, big.Len())
+		t.Errorf("头部声称原始 %d 字节，源文件是 %d", original, big.Len())
 	}
 	if kept != len(payload) {
-		t.Errorf("header says kept %d bytes, payload is actually %d", kept, len(payload))
+		t.Errorf("头部声称保留 %d 字节，有效载荷实际是 %d", kept, len(payload))
 	}
 	if kept > 1024 {
-		t.Errorf("kept %d exceeds the 1024-byte cap", kept)
+		t.Errorf("保留的 %d 字节超过了 1024 字节上限", kept)
 	}
 	if !strings.HasPrefix(payload, "0123456789") {
-		t.Errorf("payload does not start on a line boundary: %q", payload[:40])
+		t.Errorf("有效载荷未从行边界开始：%q", payload[:40])
 	}
 	if res.TotalBytes != int64(len(out)) {
-		t.Errorf("TotalBytes = %d, bundle file is %d bytes (header must be counted)",
+		t.Errorf("TotalBytes = %d，bundle 文件是 %d 字节（头部必须计入）",
 			res.TotalBytes, len(out))
 	}
 }
 
-// TestConfigParentScanOnlyForDotD pins review finding #8: with
-// -config-dir /etc/clickhouse-server the parent is /etc, and any unrelated
-// /etc/*.xml carrying a <log> element would volunteer a directory whose
-// files then land in the bundle. The parent is only scanned when the given
-// directory is a *.d overlay (which legitimately sits beside config.xml).
+// TestConfigParentScanOnlyForDotD 固定住评审发现 #8：使用
+// -config-dir /etc/clickhouse-server 时父目录是 /etc，任何无关的
+// /etc/*.xml 只要带有 <log> 元素，就会提供一个目录，其中的
+// 文件随后会进入 bundle。只有当给定目录是 *.d overlay
+// （它确实位于 config.xml 旁边）时才扫描父目录。
 func TestConfigParentScanOnlyForDotD(t *testing.T) {
 	parent := t.TempDir()
 	confDir := filepath.Join(parent, "clickhouse-server")
 	write(t, filepath.Join(confDir, "config.xml"), "<clickhouse><logger><log>/data/ch/a.log</log></logger></clickhouse>")
-	// An unrelated file in the PARENT (think /etc/foo.xml) with a log path.
+	// PARENT 中一个无关文件（可以想象 /etc/foo.xml），带有日志路径。
 	write(t, filepath.Join(parent, "unrelated.xml"), "<clickhouse><logger><log>/tmp/stolen.log</log></logger></clickhouse>")
 
 	got := LogPathsFromConfig(confDir)
 	for _, p := range got {
 		if p == "/tmp/stolen.log" {
-			t.Fatalf("parent of a non-.d config dir was scanned: %v", got)
+			t.Fatalf("扫描了非 .d 配置目录的父目录：%v", got)
 		}
 	}
 	if len(got) != 1 || got[0] != "/data/ch/a.log" {
-		t.Errorf("expected only the config dir's own path, got %v", got)
+		t.Errorf("期望只有配置目录自身的路径，得到 %v", got)
 	}
 
-	// But for a config.d directory, the parent (which holds config.xml)
-	// must still be scanned — that is where the main log path usually is.
+	// 但对于 config.d 目录，仍必须扫描父目录（其中存放
+	// config.xml）——主日志路径通常就在那里。
 	confD := filepath.Join(confDir, "config.d")
 	write(t, filepath.Join(confD, "override.xml"), "<clickhouse><logger><log>/data/ch/b.log</log></logger></clickhouse>")
 	got = LogPathsFromConfig(confD)
 	want := map[string]bool{"/data/ch/a.log": true, "/data/ch/b.log": true}
 	if len(got) != 2 || !want[got[0]] || !want[got[1]] {
-		t.Errorf("config.d must scan its parent too, got %v", got)
+		t.Errorf("config.d 也必须扫描其父目录，得到 %v", got)
 	}
 }

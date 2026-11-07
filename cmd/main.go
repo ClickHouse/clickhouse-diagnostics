@@ -29,73 +29,75 @@ import (
 )
 
 func main() {
-	// `clickhouse-diagnostic cluster …` runs this binary once per host of a
-	// self-managed cluster; it never reaches the flags below.
+	// `clickhouse-diagnostic cluster …` 会为自管理集群的每台主机运行一次
+	// 本二进制；它永远不会走到下面的标志解析。
 	if len(os.Args) > 1 && os.Args[1] == "cluster" {
 		os.Exit(clustercollect.Main(os.Args[2:], os.Stdin, os.Stdout, os.Stderr))
 	}
 
-	// Define command line flags
-	hostFlag := flag.String("host", "", "ClickHouse Host")
-	portFlag := flag.String("port", "", "ClickHouse Port")
-	userFlag := flag.String("user", "", "Username")
-	passwordFlag := flag.String("password", "", "Password (not recommended for security reasons)")
-	protocolFlag := flag.String("protocol", "", "Protocol (http or https)")
-	modeFlag := flag.String("mode", "onprem", "Query mode (cloud, onprem, gov)")
-	outputDirFlag := flag.String("output-dir", "./clickhouse_results", "Directory for results output")
-	configDirFlag := flag.String("config-dir", "", "ClickHouse config directory to collect (default: /etc/clickhouse-server/config.d/)")
-	skipConfigFlag := flag.Bool("skip-config", false, "Skip collecting configuration files")
-	skipArchiveFlag := flag.Bool("skip-archive", false, "Skip creating archive of results and configuration")
-	skipDashboardFlag := flag.Bool("skip-dashboard", false, "Skip generating HTML dashboard")
-	airgapFlag := flag.Bool("airgap", false, "Embed Chart.js in dashboard.html so it opens with no network access (see airgap/README.md)")
-	skipAlertsFlag := flag.Bool("skip-alerts", false, "Skip evaluating alert rules")
-	singleNodeFlag := flag.Bool("single-node", false, "On a SharedMergeTree cluster (cloud_mode = 1), keep -mode onprem collecting THIS node only instead of switching to cloud collection over clusterAllReplicas(default, ...)")
-	alertsDirFlag := flag.String("alerts-dir", "./alerts", "Directory containing alert YAML rule files")
-	saltFlag := flag.String("salt", "", "Gov-mode hashing salt (8–64 alphanumeric chars; prompts interactively if empty)")
-	queryIDFlag := flag.String("query-id", "", "Run query analysis focused on this query_id (UUID)")
-	normalizedHashFlag := flag.String("normalized-query-hash", "", "Run query analysis focused on this normalized_query_hash (uint64)")
-	fromFlag := flag.String("from", "", "Start of the collection window (RFC3339 or YYYY-MM-DD). "+
-		"Overrides the per-query default look-back (7 days for most log tables, 1 day for text_log). "+
-		"Also sets the query-analysis window")
-	toFlag := flag.String("to", "", "End of the collection window (RFC3339 or YYYY-MM-DD; default: now). "+
-		"Also sets the query-analysis window")
-	analysisDirFlag := flag.String("analysis-dir", "./queries.query_analysis", "Directory containing query-analysis SQL files")
-	hostInfoFlag := flag.String("host-info", "auto", "Collect host OS/kernel/CPU/memory/disk/process facts: auto|on|off. "+
-		"auto = on for onprem, off for cloud (the tool would profile the machine it runs on, not the managed server) "+
-		"and off for gov (never collected — hostnames and command lines cannot be hashed)")
-	logsFlag := flag.String("logs", "auto", "Collect ClickHouse server log files from disk: auto|on|off. "+
-		"auto = on for onprem, off for cloud (logs live on the managed nodes, not locally) and off for gov")
-	logsDirFlag := flag.String("logs-dir", "", "Directory holding ClickHouse server logs. Default: discovered from the server configuration's <log>/<errorlog>, falling back to /var/log/clickhouse-server")
-	logsMaxMBFlag := flag.Int("logs-max-mb", 50, "Per-file size cap for collected logs, in MiB. Larger files are tail-truncated (the recent end is kept)")
-	logsArchivesFlag := flag.Bool("logs-include-archives", false, "Also collect rotated log archives (*.gz, *.zst). Off by default — they are often larger than the rest of the bundle combined")
-	keeperMntrFlag := flag.String("keeper-mntr", "auto", "Ask every Keeper member in system.zookeeper_connection for ruok / isro / lgif / srvr / mntr / conf / dirs "+
-		"(leader or follower, Raft log position, snapshot size and settings, outstanding requests, latency, version) and write keeper/<host>_<port>.txt: auto|on|off. "+
-		"auto = on for onprem and gov (the tool runs beside the cluster; gov hashes the host), off for cloud (a managed service's Keeper is not reachable)")
-	collectTextLogFlag := flag.Bool("collect-text-log", false, "Collect a time-bounded slice of system.text_log. Requires --from and --to; not available in gov mode")
-	textLogLevelFlag := flag.String("text-log-level", "", "Minimum severity for --collect-text-log (Fatal|Critical|Error|Warning|Notice|Information|Debug|Trace). Default: all levels")
-	textLogLimitFlag := flag.Int("text-log-limit", 0, fmt.Sprintf("Row cap for --collect-text-log (default %d)", query.DefaultTextLogRowLimit))
+	// 定义命令行标志
+	flag.Usage = func() {
+		fmt.Fprintf(flag.CommandLine.Output(), "用法：%s [flags]\n", os.Args[0])
+		flag.PrintDefaults()
+	}
+	hostFlag := flag.String("host", "", "ClickHouse 主机")
+	portFlag := flag.String("port", "", "ClickHouse 端口")
+	userFlag := flag.String("user", "", "用户名")
+	passwordFlag := flag.String("password", "", "密码（出于安全原因不推荐）")
+	protocolFlag := flag.String("protocol", "", "协议（http 或 https）")
+	modeFlag := flag.String("mode", "onprem", "查询模式（cloud、onprem、gov）")
+	outputDirFlag := flag.String("output-dir", "./clickhouse_results", "结果输出目录")
+	configDirFlag := flag.String("config-dir", "", "要采集的 ClickHouse 配置目录（默认：/etc/clickhouse-server/config.d/）")
+	skipConfigFlag := flag.Bool("skip-config", false, "跳过采集配置文件")
+	skipArchiveFlag := flag.Bool("skip-archive", false, "跳过创建结果与配置的归档包")
+	skipDashboardFlag := flag.Bool("skip-dashboard", false, "跳过生成 HTML dashboard")
+	airgapFlag := flag.Bool("airgap", false, "将 Chart.js 内嵌进 dashboard.html，使其在无网络访问时也能打开（见 airgap/README.md）")
+	skipAlertsFlag := flag.Bool("skip-alerts", false, "跳过评估 alert rule")
+	singleNodeFlag := flag.Bool("single-node", false, "在 SharedMergeTree 集群（cloud_mode = 1）上，让 -mode onprem 只采集本节点，而不是切换到通过 clusterAllReplicas(default, ...) 的 cloud 采集")
+	alertsDirFlag := flag.String("alerts-dir", "./alerts", "包含 alert YAML 规则文件的目录")
+	saltFlag := flag.String("salt", "", "gov 模式的哈希 salt（8–64 个字母数字字符；为空时交互式提示）")
+	queryIDFlag := flag.String("query-id", "", "运行以该 query_id（UUID）为中心的查询分析")
+	normalizedHashFlag := flag.String("normalized-query-hash", "", "运行以该 normalized_query_hash（uint64）为中心的查询分析")
+	fromFlag := flag.String("from", "", "采集窗口的起点（RFC3339 或 YYYY-MM-DD）。"+
+		"覆盖每个查询默认的回看范围（大多数日志表为 7 天，text_log 为 1 天）。"+
+		"同时设置查询分析窗口")
+	toFlag := flag.String("to", "", "采集窗口的终点（RFC3339 或 YYYY-MM-DD；默认：当前时间）。"+
+		"同时设置查询分析窗口")
+	analysisDirFlag := flag.String("analysis-dir", "./queries.query_analysis", "包含查询分析 SQL 文件的目录")
+	hostInfoFlag := flag.String("host-info", "auto", "采集主机 OS/内核/CPU/内存/磁盘/进程信息：auto|on|off。"+
+		"auto = onprem 时为 on，cloud 时为 off（否则工具会剖析它所在的机器，而不是托管服务器），"+
+		"gov 时为 off（从不采集——主机名和命令行无法哈希）")
+	logsFlag := flag.String("logs", "auto", "从磁盘采集 ClickHouse 服务器日志文件：auto|on|off。"+
+		"auto = onprem 时为 on，cloud 时为 off（日志位于托管节点而非本地），gov 时为 off")
+	logsDirFlag := flag.String("logs-dir", "", "存放 ClickHouse 服务器日志的目录。默认：从服务器配置的 <log>/<errorlog> 中发现，回退到 /var/log/clickhouse-server")
+	logsMaxMBFlag := flag.Int("logs-max-mb", 50, "采集日志的单个文件大小上限，单位为 MiB。更大的文件会被尾部截断（保留最近的部分）")
+	logsArchivesFlag := flag.Bool("logs-include-archives", false, "同时采集轮转日志归档（*.gz、*.zst）。默认关闭——它们通常比 bundle 其余部分加起来还大")
+	keeperMntrFlag := flag.String("keeper-mntr", "auto", "向 system.zookeeper_connection 中的每个 Keeper 成员发送 ruok / isro / lgif / srvr / mntr / conf / dirs "+
+		"（leader 或 follower、Raft 日志位置、快照大小与设置、未完成请求、延迟、版本），并写入 keeper/<host>_<port>.txt：auto|on|off。"+
+		"auto = onprem 和 gov 时为 on（工具运行在集群旁；gov 会对主机名做哈希），cloud 时为 off（托管服务的 Keeper 不可达）")
+	collectTextLogFlag := flag.Bool("collect-text-log", false, "采集 system.text_log 中限定时间的一片数据。需要 --from 和 --to；gov 模式不可用")
+	textLogLevelFlag := flag.String("text-log-level", "", "--collect-text-log 的最低严重级别（Fatal|Critical|Error|Warning|Notice|Information|Debug|Trace）。默认：所有级别")
+	textLogLimitFlag := flag.Int("text-log-limit", 0, fmt.Sprintf("--collect-text-log 的行数上限（默认 %d）", query.DefaultTextLogRowLimit))
 	outputFormatFlag := flag.String("output-format", query.DefaultOutputFormat.Name,
-		fmt.Sprintf("Serialisation format for query results: %s. jsonl is one self-describing "+
-			"JSON object per line (grep- and jq-able); native is the ClickHouse binary format; "+
-			"tsv carries names and types in its first two lines. 64-bit integers are exact in "+
-			"all three", query.OutputFormatNames()))
+		fmt.Sprintf("查询结果的序列化格式：%s。jsonl 每行一个自描述 "+
+			"JSON 对象（可用 grep 和 jq 处理）；native 是 ClickHouse 二进制格式；"+
+			"tsv 在前两行携带名称和类型。三者中的 64 位整数都精确", query.OutputFormatNames()))
 	queryTimeoutFlag := flag.Duration("query-timeout", pkg.DefaultQueryTimeout,
-		"Server-side limit for each collected query (max_execution_time). The HTTP client waits 60s longer, "+
-			"so a slow query fails with a clean Code: 159 in the customer's query_log instead of a silent "+
-			"client disconnect that leaves the server still executing. 0 disables both limits.")
-	collectFlag := flag.String("collect", "auto", "How much to collect: auto (default) probes the server's load first and collects only the essential, cheap tables — with 1-day windows, a 30 s per-query timeout and gentle query settings — when it is struggling (slow to answer, near max_concurrent_queries or its memory limit, high load, read-only replicas), and switches to essential mid-run if queries start timing out; essential forces that; full always collects everything")
-	timeBudgetFlag := flag.Duration("time-budget", 0, "Overall limit for the collectors; whatever has not run by then is skipped and listed in execution_log.txt. Default: none for a full collection, 3m for an essential one")
-	dryRunFlag := flag.Bool("dry-run", false, "List every query the tool would execute (with the system tables each touches and an EXPLAIN ESTIMATE per SELECT) and exit. Does NOT write results or create an archive. EXPLAIN ESTIMATE is a read-only metadata query — it reports the rows/marks/parts the SELECT WOULD scan without reading any data.")
+		"每个采集查询的服务端限制（max_execution_time）。HTTP 客户端会多等 60 秒，"+
+			"因此慢查询会在客户的 query_log 中以清晰的 Code: 159 失败，而不是客户端静默断开、"+
+			"服务器却仍在执行。0 表示同时禁用两项限制。")
+	collectFlag := flag.String("collect", "auto", "采集多少：auto（默认）先探测服务器负载，仅在其吃力时（响应缓慢、接近 max_concurrent_queries 或内存上限、高负载、只读副本）采集必要且便宜的表——使用 1 天窗口、每查询 30 秒超时和温和的查询设置——并在查询开始超时时于运行中途切换到 essential；essential 强制使用该模式；full 始终采集全部")
+	timeBudgetFlag := flag.Duration("time-budget", 0, "采集器的总时限；届时尚未运行的内容会被跳过并列入 execution_log.txt。默认：full 采集无限制，essential 采集为 3m")
+	dryRunFlag := flag.Bool("dry-run", false, "列出工具将执行的每个查询（包括各自触及的系统表，以及每个 SELECT 的 EXPLAIN ESTIMATE）后退出。不会写入结果，也不会创建归档包。EXPLAIN ESTIMATE 是只读元数据查询——它报告该 SELECT 将会扫描的行/mark/part，而不读取任何数据。")
 
-	// Parse command line flags
+	// 解析命令行标志
 	flag.Parse()
 
-	// -mode defaults to onprem, so its VALUE cannot say whether the operator
-	// chose onprem or simply said nothing. flag.Visit reports only the flags
-	// actually present on the command line, which is the distinction
-	// resolveMode needs to fail loudly on a typo while still defaulting.
-	// -password is recorded the same way: an explicit -password "" prompted
-	// before CLICKHOUSE_PASSWORD was read, and still must.
+	// -mode 默认是 onprem，因此其值无法说明运维人员是主动选择了 onprem，
+	// 还是根本没写。flag.Visit 只报告命令行上实际出现的标志，这正是
+	// resolveMode 需要的区分：既能对拼写错误大声报错，又能保留默认值。
+	// -password 以同样方式记录：显式的 -password "" 在读取 CLICKHOUSE_PASSWORD
+	// 之前会触发提示，现在仍然必须如此。
 	modeExplicit, passwordExplicit, timeoutExplicit := false, false, false
 	flag.Visit(func(f *flag.Flag) {
 		switch f.Name {
@@ -109,15 +111,15 @@ func main() {
 	})
 	collectRequested, err := collectmode.Parse(*collectFlag)
 	if err != nil {
-		fmt.Printf("Error: %v\n", err)
+		fmt.Printf("错误：%v\n", err)
 		os.Exit(1)
 	}
 	if *timeBudgetFlag < 0 {
-		fmt.Println("Error: -time-budget cannot be negative")
+		fmt.Println("错误：-time-budget 不能为负数")
 		os.Exit(1)
 	}
 
-	// Initialize variables with defaults
+	// 用默认值初始化变量
 	var (
 		host           = *hostFlag
 		port           = *portFlag
@@ -150,259 +152,237 @@ func main() {
 		textLogLevel   = *textLogLevelFlag
 		textLogLimit   = *textLogLimitFlag
 	)
-	// --from / --to narrow the collection window of every query that
-	// declares one. Parsed before anything blocking (the password prompt,
-	// the connection) so a malformed or inverted window fails immediately.
+	// --from / --to 收窄每个声明了采集窗口的查询的窗口。在任何阻塞操作
+	//（密码提示、连接）之前解析，这样格式错误或起止颠倒的窗口会立即失败。
 	//
-	// Parsed separately from analysisOpts: analysis substitutes its own
-	// event-time-centred defaults when the flags are absent, whereas the
-	// collection queries fall back to the per-query defaults they declare.
+	// 与 analysisOpts 分开解析：标志缺省时，analysis 会替换为自己以事件
+	// 时间为基准的默认值，而采集查询则回退到它们各自声明的按查询默认值。
 	collectFrom, err := query.ParseTimeFlag(fromStr)
 	if err != nil {
-		fmt.Printf("Error: invalid --from: %v\n", err)
+		fmt.Printf("错误：无效的 --from：%v\n", err)
 		return
 	}
 	collectTo, err := query.ParseTimeFlag(toStr)
 	if err != nil {
-		fmt.Printf("Error: invalid --to: %v\n", err)
+		fmt.Printf("错误：无效的 --to：%v\n", err)
 		return
 	}
 	if !collectFrom.IsZero() && !collectTo.IsZero() && collectTo.Before(collectFrom) {
-		fmt.Println("Error: --to is earlier than --from")
+		fmt.Println("错误：--to 早于 --from")
 		return
 	}
-	// A -to left over from an earlier incident silently truncates every log
-	// table at that instant while system.errors, system.parts and the other
-	// point-in-time tables still describe now — so the bundle looks complete
-	// and the recent hours are simply absent. One real case ran -to 2026-09-16
-	// on the 24th and lost the two session losses that had happened since.
+	// 早前故障遗留的 -to 会在那一刻静默截断每张日志表，而 system.errors、
+	// system.parts 和其他时间点表仍描述当前状态——于是 bundle 看起来完整，
+	// 最近几小时却根本不在其中。一个真实案例在 24 日运行了 -to 2026-09-16，
+	// 丢掉了此后发生的两次会话丢失。
 	if !collectTo.IsZero() {
 		if lag := time.Since(collectTo); lag > 2*time.Hour {
-			fmt.Printf("Warning: -to is %.0f hours in the past, so query_log, part_log, metric_log and "+
-				"text_log all stop there. Anything after that is missing from the bundle rather than "+
-				"healthy — widen -to if the problem is still live.\n", lag.Hours())
+			fmt.Printf("警告：-to 距今已有 %.0f 小时，因此 query_log、part_log、metric_log 和 "+
+				"text_log 都停在该时刻。此后的任何内容都会从 bundle 中缺失，而不是显示为健康——"+
+				"如果问题仍在发生，请放宽 -to。\n", lag.Hours())
 		}
 	}
 
 	outputFormat, err := query.ParseOutputFormat(*outputFormatFlag)
 	if err != nil {
-		fmt.Printf("Error: %v\n", err)
+		fmt.Printf("错误：%v\n", err)
 		return
 	}
 
-	// --dry-run is read-only by definition — silence the side effects
-	// that would write empty/garbage artefacts to disk.
+	// --dry-run 按定义是只读的——静默那些会向磁盘写入空/垃圾产物的副作用。
 	if dryRun {
 		skipConfig = true
 		skipArchive = true
 	}
 
-	// Get user input for missing parameters
+	// 获取缺失参数的用户输入
 	if err := getUserInput(&protocol, &host, &port, &username, &password, &mode, &configDir, skipConfig, modeExplicit, passwordExplicit); err != nil {
-		// Exit NON-ZERO. A rejected mode that exits 0 is barely better than the
-		// silent onprem fallback it replaces: the scripted collections this
-		// protects check $?, not stdout. Nothing is deferred this early.
-		fmt.Printf("Error: %v\n", err)
+		// 以非零码退出。被拒绝的模式若以 0 退出，几乎不比它所替代的静默
+		// onprem 回退更好：这里保护的脚本化采集检查的是 $?，而不是 stdout。
+		// 这么早还没有任何 defer。
+		fmt.Printf("错误：%v\n", err)
 		os.Exit(1)
 	}
 
-	// Gov never collects configuration files: they embed raw hostnames —
-	// <macros> shard/replica names, <remote_servers>, <zookeeper> hosts —
-	// which are exactly the identifiers gov hashing protects, and an XML
-	// tree cannot be hashed while remaining mergeable or comparable.
-	// Unconditional, like the host-facts and log refusals below.
+	// gov 绝不采集配置文件：它们内嵌原始主机名——<macros> 的 shard/replica
+	// 名、<remote_servers>、<zookeeper> 主机——正是 gov 哈希要保护的标识符，
+	// 而 XML 树一旦哈希就无法保持可合并或可比较。与下面的 host facts 和
+	// 日志拒绝一样，这是无条件的。
 	if govWithholdsConfig(mode) && !skipConfig {
 		skipConfig = true
-		fmt.Println("Gov mode: not collecting configuration files " +
-			"(they embed raw hostnames — macros, remote_servers, zookeeper — that cannot be hashed).")
+		fmt.Println("gov 模式：不采集配置文件 " +
+			"（它们内嵌了无法哈希的原始主机名——macros、remote_servers、zookeeper）。")
 	}
 
-	// Cloud runs the tool somewhere other than the ClickHouse server, so
-	// there is no local config directory to read by default. An explicit
-	// -config-dir still opts in (self-hosted SharedMergeTree clusters run
-	// -mode cloud from a node), which is why this is a default, not a
-	// refusal like gov above.
+	// cloud 在 ClickHouse 服务器之外的某处运行工具，因此默认没有可读取的
+	// 本地配置目录。显式的 -config-dir 仍可主动启用（自托管的
+	// SharedMergeTree 集群会从某个节点以 -mode cloud 运行），所以这是一条
+	// 默认行为，而不是像上面 gov 那样的拒绝。
 	if cloudSkipsConfig(mode, configDir) && !skipConfig {
 		skipConfig = true
-		fmt.Println("Cloud mode: not collecting configuration files " +
-			"(the server's config directory is not on this machine; pass -config-dir to collect one anyway).")
+		fmt.Println("cloud 模式：不采集配置文件 " +
+			"（服务器的配置目录不在此机器上；要采集请传入 -config-dir）。")
 	}
 
-	// Resolve the two local-filesystem collectors against the run mode.
-	// Both read the machine the tool is EXECUTING on, which is only the
-	// ClickHouse server in onprem deployments — hence the mode-dependent
-	// default rather than a plain on/off.
+	// 根据运行模式解析这两个本地文件系统 collector。二者读取的都是工具
+	// 正在执行的那台机器，而这只在 onprem 部署中才是 ClickHouse 服务器——
+	// 因此默认值随模式变化，而不是简单的 on/off。
 	//
-	// This MUST run after getUserInput: that call normalises the mode
-	// (lowercasing "-mode GOV") and lets an interactive user change it at
-	// the prompt. Resolving against the raw flag value allowed
-	// `-mode GOV -host-info=on` to slip host facts into a gov bundle.
+	// 这必须在 getUserInput 之后运行：该调用会规范化模式（把 "-mode GOV"
+	// 转成小写），并允许交互式用户在提示符处修改它。若按原始标志值解析，
+	// `-mode GOV -host-info=on` 就会把 host facts 混进 gov bundle。
 	skipHostInfo, err := resolveLocalCollector(hostInfoMode, mode, "host-info")
 	if err != nil {
-		fmt.Printf("Error: %v\n", err)
+		fmt.Printf("错误：%v\n", err)
 		return
 	}
 	skipLogs, err := resolveLocalCollector(logsMode, mode, "logs")
 	if err != nil {
-		fmt.Printf("Error: %v\n", err)
+		fmt.Printf("错误：%v\n", err)
 		return
 	}
-	// Keeper four-letter commands go over the network to the Keeper
-	// members, not to the local filesystem, so they have their own resolver
-	// (gov is allowed — the host is hashed; cloud is off by default because
-	// a managed service's Keeper is not reachable). Same post-getUserInput
-	// ordering as the two resolvers above.
+	// Keeper four-letter command 通过网络发往 Keeper 成员，而不是访问本地
+	// 文件系统，因此它们有自己的解析器（允许 gov——主机会被哈希；cloud
+	// 默认关闭，因为托管服务的 Keeper 不可达）。与上面两个解析器一样，
+	// 都在 getUserInput 之后运行。
 	skipKeeper, keeperWarn, err := keeper.Resolve(keeperMntrMode, mode)
 	if err != nil {
-		fmt.Printf("Error: %v\n", err)
+		fmt.Printf("错误：%v\n", err)
 		return
 	}
 	if keeperWarn != "" {
 		fmt.Println(keeperWarn)
 	}
 	if dryRun {
-		// Host facts and log files are filesystem copies, not queries;
-		// there is nothing meaningful to "preview", so skip them rather
-		// than write files a dry run promised not to write.
+		// host facts 和日志文件是文件系统拷贝而非查询；没有值得“预览”的
+		// 内容，因此跳过它们，而不是写入 dry run 承诺不会写入的文件。
 		skipHostInfo = true
 		skipLogs = true
 	}
 
-	// Map mode to queries directory
+	// 将 mode 映射到 queries 目录
 	queriesDir, err := getQueriesDir(mode)
 	if err != nil {
-		fmt.Printf("Error: %v\n", err)
+		fmt.Printf("错误：%v\n", err)
 		os.Exit(1)
 	}
 
-	// Create the output folder if it doesn't exist
+	// 若输出目录不存在则创建
 	if err := os.MkdirAll(outputDir, 0750); err != nil {
-		fmt.Printf("Error creating output folder: %v\n", err)
+		fmt.Printf("创建输出目录失败：%v\n", err)
 		return
 	}
 
-	// Check if queries folder exists
+	// 检查 queries 目录是否存在
 	if _, err := os.Stat(queriesDir); os.IsNotExist(err) {
-		fmt.Printf("Error: Queries folder '%s' does not exist\n", queriesDir)
+		fmt.Printf("错误：queries 目录 '%s' 不存在\n", queriesDir)
 		return
 	}
 
-	// Display connection information
-	fmt.Printf("\nConnecting to ClickHouse at %s://%s:%s\n", protocol, host, port)
+	// 显示连接信息
+	fmt.Printf("\n正在连接 ClickHouse：%s://%s:%s\n", protocol, host, port)
 	if username != "" {
-		fmt.Printf("Using authentication with user: %s\n", username)
+		fmt.Printf("使用用户认证：%s\n", username)
 	}
-	fmt.Printf("Using query mode: %s (queries from: %s)\n", mode, queriesDir)
+	fmt.Printf("使用查询模式：%s（查询来自：%s）\n", mode, queriesDir)
 
-	// Configuration files are collected further down, alongside the other
-	// on-disk collectors, because they are written into the run's results
-	// directory and that does not exist until ExecuteQueries creates it.
+	// 配置文件稍后与其他磁盘 collector 一起采集，因为它们会写入本次运行的
+	// 结果目录，而该目录要等 ExecuteQueries 创建后才存在。
 
-	// Create ClickHouse client
+	// 创建 ClickHouse 客户端
 	client := pkg.NewClickHouseClient(protocol, host, port, username, password)
 	if *queryTimeoutFlag < 0 {
-		fmt.Println("Error: -query-timeout cannot be negative (use 0 to disable the limit).")
+		fmt.Println("错误：-query-timeout 不能为负数（使用 0 禁用该限制）。")
 		return
 	}
 	client.SetQueryTimeout(*queryTimeoutFlag)
-	// One replica that is down must not fail every clusterAllReplicas query:
-	// without this the SharedMergeTree fan-out probe below fails and the run
-	// silently collects one node, and in cloud mode every per-replica
-	// collector errors. Queries that do not fan out are unaffected. Which
-	// replicas did not answer is recorded by system.replicas_answered.
+	// 一个 replica 下线不能让每个 clusterAllReplicas 查询都失败：否则下面的
+	// SharedMergeTree fan-out 探测会失败，运行会静默地只采集一个节点，而在
+	// cloud 模式下每个按 replica 的 collector 都会报错。不分发的查询不受影响。
+	// 哪些 replica 未应答由 system.replicas_answered 记录。
 	client.SetSetting("skip_unavailable_shards", "1")
 	if *queryTimeoutFlag == 0 {
-		fmt.Println("Warning: -query-timeout=0 — queries run unbounded on the server and the client " +
-			"waits indefinitely. A slow query will stall the collection rather than fail.")
+		fmt.Println("警告：-query-timeout=0——查询在服务端不受限制地运行，客户端会无限等待。慢查询将拖住采集而不是失败。")
 	}
 
-	// Check ClickHouse version
-	fmt.Println("Checking ClickHouse server version...")
+	// 检查 ClickHouse 服务器版本
+	fmt.Println("正在检查 ClickHouse 服务器版本...")
 	versionResult, err := client.ExecuteQuery("SELECT version()")
 	if err != nil {
-		fmt.Printf("Error checking ClickHouse version: %v\n", err)
+		fmt.Printf("检查 ClickHouse 版本失败：%v\n", err)
 		return
 	}
 
-	// Parse the version string
+	// 解析版本字符串
 	parser := version.NewParser()
 	serverVersion, err := parser.ParseClickHouseVersion(versionResult)
 	if err != nil {
-		fmt.Printf("Error parsing ClickHouse version: %v\n", err)
+		fmt.Printf("解析 ClickHouse 版本失败：%v\n", err)
 		return
 	}
 
-	fmt.Printf("ClickHouse server version: %d.%d.%d.%d\n",
+	fmt.Printf("ClickHouse 服务器版本：%d.%d.%d.%d\n",
 		serverVersion.Major, serverVersion.Minor, serverVersion.Patch, serverVersion.Build)
 
-	// Without the object-listing grants a run still "succeeds": the protected
-	// system tables fail with 497 and system.databases/tables/columns are
-	// filtered down to nothing, so the archive is a few hundred KB that
-	// describes no user data at all. Five nodes of one cluster were collected
-	// that way and sent on before anyone noticed. Say it at the point where it
-	// can still be fixed, not in the execution log.
+	// 没有对象列举授权时，运行仍会“成功”：受保护的系统表以 497 失败，
+	// system.databases/tables/columns 被过滤为空，于是归档只有几百 KB，
+	// 完全描述不了任何用户数据。某个集群的五个节点就是这样被采集并在无人
+	// 察觉的情况下发出的。要在还能补救的地方说出来，而不是写进执行日志。
 	//
-	// Not in dry-run: no query is really sent there (the client returns a
-	// synthetic empty response), so there is nothing to conclude from it.
+	// dry-run 下不执行：那里不会真正发送查询（客户端返回合成的空响应），
+	// 因此无法从中得出任何结论。
 	if !client.IsDryRun() {
 		dbCount, dbErr := client.ExecuteQuery(
 			"SELECT count() FROM system.databases WHERE name NOT IN ('system','INFORMATION_SCHEMA','information_schema')",
 		)
 		grants := func() {
-			fmt.Println("    Grant the diagnostic privileges and re-run:")
+			fmt.Println("    授予诊断权限后重新运行：")
 			fmt.Println("    GRANT SHOW DATABASES, SHOW TABLES, SHOW COLUMNS ON *.* TO " + username + ";")
 			fmt.Println("    GRANT SELECT ON system.* TO " + username + ";")
 		}
-		// Three outcomes, only two of which are about privileges. A refused
-		// query is a grants problem only when the server says so (Code: 497,
-		// ACCESS_DENIED); a timeout, a network error or an old server's parse
-		// error is not, and telling the operator to GRANT for those would send
-		// them the wrong way.
+		// 三种结果，其中只有两种与权限有关。查询被拒绝只有在服务器明说
+		//（Code: 497、ACCESS_DENIED）时才是授权问题；超时、网络错误或旧版
+		// 服务器的解析错误都不是，为这些情况让运维人员去 GRANT 会误导他们。
 		switch databaseVisibilityVerdict(dbCount, dbErr) {
 		case visibilityDenied:
-			fmt.Printf("Warning: user '%s' is not allowed to read system.databases (%v), so most "+
-				"collectors will fail with Code: 497 and the bundle will be nearly empty.\n", username, dbErr)
+			fmt.Printf("警告：用户 '%s' 无权读取 system.databases（%v），因此大多数 collector "+
+				"会以 Code: 497 失败，bundle 将几乎为空。\n", username, dbErr)
 			grants()
 		case visibilityNone:
-			fmt.Printf("Warning: user '%s' can see no databases outside system, so this bundle will "+
-				"not describe any of your tables, parts or replicas — the files will be empty rather "+
-				"than missing.\n", username)
+			fmt.Printf("警告：用户 '%s' 看不到 system 之外的任何数据库，因此此 bundle 将不会描述你的任何表、part 或 replica——文件会是空的，而不是缺失。\n", username)
 			grants()
 		case visibilityUnknown:
-			fmt.Printf("Warning: could not check which databases user '%s' can see (%v). Collection "+
-				"continues; if system.databases, system.tables and system.columns come back with 0 rows, "+
-				"the diagnostic grants are the fix:\n", username, dbErr)
+			fmt.Printf("警告：无法检查用户 '%s' 能看到哪些数据库（%v）。采集继续；"+
+				"如果 system.databases、system.tables 和 system.columns 返回 0 行，"+
+				"则需要授予诊断权限：\n", username, dbErr)
 			fmt.Println("    GRANT SHOW DATABASES, SHOW TABLES, SHOW COLUMNS ON *.* TO " + username + ";")
 			fmt.Println("    GRANT SELECT ON system.* TO " + username + ";")
 		}
 	}
 
-	// Execution log: every collector with its outcome and wall time, every
-	// alert rule, every phase — written into the bundle as execution_log.txt
-	// so a reader can tell a failed collector from an empty table and see
-	// which queries are expensive on this server.
+	// 执行日志：每个 collector 及其结果与耗时、每条 alert rule、每个阶段——
+	// 以 execution_log.txt 写入 bundle，读者可据此区分失败的 collector 和
+	// 空表，并看出哪些查询在这台服务器上开销大。
 	rec := runlog.New().WithGov(mode == "gov")
 
-	// Who answered, and for how long has it been up. Two bundles in one
-	// escalation were read against the wrong node — one collected through a
-	// load balancer, one on a sibling of the host the case was about — and a
-	// third described a replica restarted minutes before collection. The
-	// probe is three cheap round trips; a failure (no grant, dry run) leaves
-	// the header without a node line and the warnings silent.
+	// 谁应答的，以及它已经运行了多久。一次升级处理中的两个 bundle 被误读
+	// 了节点——一个经由负载均衡器采集，一个是在案例所涉主机的同级节点上
+	// 采集的——还有第三个描述的是采集前几分钟刚重启的 replica。探测只是
+	// 三次廉价的往返；失败时（无授权、dry run）头部就没有节点行，警告也
+	// 保持静默。
 	var identity nodeIdentity
 	if !dryRun {
 		identity = probeNodeIdentity(client)
 	}
 
-	// SharedMergeTree clusters keep per-replica system tables; a -mode onprem
-	// run there collects one node of N. The run switches to cloud collection
-	// (per-replica system tables over clusterAllReplicas; shared tables such as
-	// system.parts stay single-copy — see query.SharedSystemTables) while keeping this node's
-	// host facts, configuration and log files — cloud mode alone never
-	// collects those. effectiveMode drives the query set, the alerts and the
-	// dashboard from here on; `mode` still says what the operator asked for.
-	// Skipped in dry-run: that contract allows only the version / preflight /
-	// EXPLAIN metadata queries to reach the server, and the probes are neither.
+	// SharedMergeTree 集群按 replica 保留系统表；在那里使用 -mode onprem
+	// 只会采集 N 个节点中的一个。运行会切换到 cloud 采集（按 replica 的系统表
+	// 通过 clusterAllReplicas 读取；system.parts 等共享表保持单副本——见
+	// query.SharedSystemTables），同时保留本节点的 host facts、配置和日志
+	// 文件——仅用 cloud 模式绝不会采集这些。从此以后 effectiveMode 决定查询集、
+	// alert 和 dashboard；`mode` 仍表示运维人员请求的内容。
+	// dry-run 下跳过：该约定只允许 version / preflight / EXPLAIN 元数据查询
+	// 到达服务器，而这些探测都不属于其中。
 	effectiveMode := mode
 	collectionNote := ""
 	serverIsSMT := mode == "cloud"
@@ -419,34 +399,31 @@ func main() {
 			if d.EffectiveMode != mode {
 				effectiveMode = d.EffectiveMode
 				if queriesDir, err = getQueriesDir(effectiveMode); err != nil {
-					fmt.Printf("Error: %v\n", err)
+					fmt.Printf("错误：%v\n", err)
 					os.Exit(1)
 				}
-				fmt.Printf("Using query mode: %s (queries from: %s)\n", effectiveMode, queriesDir)
+				fmt.Printf("使用查询模式：%s（查询来自：%s）\n", effectiveMode, queriesDir)
 			}
 		}
 	}
 
-	// The identity warnings are derived HERE, not at the probe above, because
-	// how a load-balanced endpoint reads depends on how the bundle was
-	// actually collected — and that is only known after the SharedMergeTree
-	// decision. A -mode onprem run that switched to cloud collection writes
-	// `mode: cloud` in the header and fans the per-replica tables out, so the
-	// strong onprem warning ("the bundle describes no single node") would
-	// contradict its own bundle. effectiveMode is what the reader sees, so
-	// effectiveMode is what decides the wording. The mixed-host warning is
-	// unaffected: the hybrid really does read host facts, configuration and
-	// logs from the collector machine, and nodeWarnings still says so.
+	// 身份警告在这里派生，而不是在上面的探测处，因为负载均衡端点的解读
+	// 方式取决于 bundle 实际是如何采集的——而这只有在 SharedMergeTree 决策
+	// 之后才知道。一次切换到 cloud 采集的 -mode onprem 运行会在头部写入
+	// `mode: cloud` 并分发按 replica 的表，因此强烈的 onprem 警告
+	//（“bundle 不描述任何单一节点”）会与它自己的 bundle 相矛盾。
+	// 读者看到的是 effectiveMode，因此由 effectiveMode 决定措辞。混合主机
+	// 警告不受影响：这种混合运行确实从 collector 所在机器读取 host facts、
+	// 配置和日志，nodeWarnings 仍会说明这一点。
 	if !dryRun {
 		localHostname, _ := os.Hostname()
 		warnings := nodeWarnings(identity, host, localHostname, effectiveMode, !skipHostInfo || !skipLogs || !skipConfig)
 		for _, w := range warnings {
 			fmt.Println(w)
 		}
-		// The warnings name hosts; gov keeps host names out of the log. The
-		// load-balancer line is a "Note:" in cloud collection and a
-		// "Warning:" otherwise — see nodeWarnings — and the pre-pass reads
-		// that prefix rather than the presence of the line.
+		// 警告会点名主机；gov 不让主机名进入日志。负载均衡那条在 cloud
+		// 采集中是 "Note:"，其他情形是 "Warning:"——见 nodeWarnings——pre-pass
+		// 读取的是这个前缀，而不是该行是否存在。
 		if len(warnings) > 0 && mode != "gov" {
 			rec.SetMeta("warnings", strings.Join(warnings, " | "))
 		}
@@ -455,9 +432,9 @@ func main() {
 	rec.SetMeta("mode", effectiveMode)
 	rec.SetMeta("server", fmt.Sprintf("%d.%d.%d.%d", serverVersion.Major, serverVersion.Minor, serverVersion.Patch, serverVersion.Build))
 	if mode == "gov" {
-		// The host is customer infrastructure; gov hashes host names in every
-		// result file, so the log must not carry it in clear either.
-		rec.SetMeta("target", fmt.Sprintf("(host redacted in gov mode) via %s", protocol))
+		// 主机是客户基础设施；gov 会在每个结果文件中哈希主机名，因此日志也
+		// 不得以明文携带它。
+		rec.SetMeta("target", fmt.Sprintf("（gov 模式下已隐去主机）via %s", protocol))
 	} else {
 		rec.SetMeta("target", fmt.Sprintf("%s:%s (%s)", host, port, protocol))
 		if identity.Err == nil && identity.Host != "" {
@@ -480,47 +457,46 @@ func main() {
 	} else {
 		rec.SetMeta("window", describeWindow(collectFrom, collectTo))
 	}
-	// How much to collect: the load probe decides the starting mode (auto),
-	// and the watchdog can still switch a full run to essential when the
-	// server starts timing out.
+	// 采集多少：负载探测决定起始模式（auto），而当服务器开始超时时，
+	// watchdog 仍可把 full 运行切换为 essential。
 	decision, watch := setupCollection(client, collectRequested, *timeBudgetFlag, dryRun)
 	collectLine := decision.Summary()
 	if decision.Mode == collectmode.Essential {
 		notes := applyEssential(client, timeoutExplicit)
 		why := strings.Join(decision.Reasons, "; ")
 		if why == "" {
-			why = "requested with -collect essential"
+			why = "通过 -collect essential 请求"
 		}
 		watch.Trip(why)
-		collectLine += " — " + strings.Join(append(notes, "1-day windows", "full-tier collectors skipped"), "; ")
+		collectLine += " — " + strings.Join(append(notes, "1 天窗口", "跳过 full 层级的 collector"), "; ")
 	}
 	watch.OnTrip(func(reason string) {
 		notes := applyEssential(client, timeoutExplicit)
-		fmt.Printf("\nSwitching to an essential collection: %s (%s)\n", reason, strings.Join(notes, "; "))
-		rec.SetMeta("collect", "started full, switched to essential: "+reason+" — "+strings.Join(append(notes, "1-day windows", "remaining full-tier collectors skipped"), "; "))
+		fmt.Printf("\n正在切换到 essential 采集：%s（%s）\n", reason, strings.Join(notes, "; "))
+		rec.SetMeta("collect", "started full, switched to essential: "+reason+" — "+strings.Join(append(notes, "1 天窗口", "跳过其余 full 层级的 collector"), "; "))
 	})
-	// No Keeper session while replicated tables are read-only: the queries
-	// that wait for a session are skipped, with this reason, everywhere.
+	// replicated 表只读时没有 Keeper 会话：所有等待会话的查询都会以这个
+	// 原因被跳过。
 	keeperDownReason := ""
 	if decision.KeeperDown {
-		keeperDownReason = fmt.Sprintf("the load probe saw no Keeper session while %d replicated table(s) are read-only", decision.Signals.ReadonlyReplicas)
-		collectLine += " — Keeper queries skipped (no Keeper session)"
+		keeperDownReason = fmt.Sprintf("负载探测发现，在 %d 个 replicated 表处于只读状态时没有 Keeper 会话", decision.Signals.ReadonlyReplicas)
+		collectLine += " — 跳过 Keeper 查询（没有 Keeper 会话）"
 	}
 
-	// Detached parts on a large SharedMergeTree server: list every non-shared
-	// table plus the shared ones broken-part log lines name, instead of every
-	// table's directory (query.DetachedScope). -collect full lists all.
+	// 大型 SharedMergeTree 服务器上的 detached part：列出每个非共享表，
+	// 以及 broken-part 日志行点名的共享表，而不是每个表的目录
+	//（query.DetachedScope）。-collect full 会列出全部。
 	detachedScope, detachedScopeP := "", ""
 	if decision.Large && serverIsSMT && collectRequested != collectmode.Full && !dryRun {
 		raw, _ := client.ExecuteQueryReal(query.SignalTablesQuery(effectiveMode))
 		signal := query.ParseSignalTables(raw)
 		detachedScope = query.DetachedScope(true, signal, "")
 		detachedScopeP = query.DetachedScope(true, signal, "p.")
-		note := fmt.Sprintf("detached parts listed for non-shared tables and %d shared table(s) named in broken-part log lines (%d tables on a SharedMergeTree server; -collect full lists every table)", len(signal), decision.Signals.Tables)
+		note := fmt.Sprintf("为非共享表以及 broken-part 日志行中提到的 %d 个共享表列出 detached part（SharedMergeTree 服务器上共有 %d 个表；-collect full 会列出每个表）", len(signal), decision.Signals.Tables)
 		collectLine += " — " + note
 		fmt.Println("Note: " + note)
 	}
-	fmt.Printf("Collection: %s\n", collectLine)
+	fmt.Printf("采集情况：%s\n", collectLine)
 	rec.SetMeta("collect", collectLine)
 	if b := watch.Budget(); b > 0 {
 		rec.SetMeta("budget", fmt.Sprintf("%v for the collectors (-time-budget)", b))
@@ -531,124 +507,111 @@ func main() {
 		rec.SetMeta("dry-run", "yes — no query was sent to the server, durations are not meaningful")
 	}
 
-	// Query analysis is not available in gov mode: its results embed raw
-	// query text, exception messages, identifiers and full DDL
-	// (query_details, failed_queries, tables_for_query, text_log slices),
-	// which gov-mode hashing cannot cover — the archive would leak the
-	// names gov exists to protect. Refuse the flags rather than silently
-	// producing an unhashed bundle. Checked before the dry-run banner so
-	// an unsupported combination fails immediately.
+	// gov 模式下不提供查询分析：其结果内嵌原始查询文本、异常消息、标识符
+	// 和完整 DDL（query_details、failed_queries、tables_for_query、text_log
+	// 切片），gov 模式哈希无法覆盖——归档会泄露 gov 本要保护的名称。拒绝
+	// 这些标志，而不是静默生成未哈希的 bundle。在 dry-run 横幅之前检查，
+	// 使不支持的组合立即失败。
 	if mode == "gov" && (queryID != "" || normalizedHash != "") {
-		fmt.Println("Error: --query-id / --normalized-query-hash are not supported in gov mode " +
-			"(query-analysis output contains raw query text and identifiers that cannot be hashed)")
+		fmt.Println("错误：gov 模式不支持 --query-id / --normalized-query-hash " +
+			"（查询分析输出包含无法哈希的原始查询文本和标识符）")
 		return
 	}
 
-	// Same reasoning for text_log: its messages are free-form text carrying
-	// raw SQL, identifiers and file paths. Hashing a log line destroys the
-	// only thing that makes it useful, so gov refuses rather than shipping
-	// it unhashed.
+	// text_log 同理：其消息是自由文本，携带原始 SQL、标识符和文件路径。
+	// 哈希日志行会毁掉它唯一有用的东西，因此 gov 拒绝，而不是未哈希地发送。
 	if mode == "gov" && collectTextLog {
-		fmt.Println("Error: --collect-text-log is not supported in gov mode " +
-			"(log messages embed raw queries and identifiers that cannot be hashed)")
+		fmt.Println("错误：gov 模式不支持 --collect-text-log " +
+			"（日志消息内嵌了无法哈希的原始查询和标识符）")
 		return
 	}
 
-	// Fail fast on the required window rather than after the collection run.
+	// 对必需的时间窗口快速失败，而不是等到采集运行之后。
 	if collectTextLog && (fromStr == "" || toStr == "") {
-		fmt.Println("Error: --collect-text-log requires both --from and --to " +
-			"(system.text_log is high-volume; an unbounded dump would be very large " +
-			"and would itself load the server)")
+		fmt.Println("错误：--collect-text-log 需要同时提供 --from 和 --to " +
+			"（system.text_log 数据量很大；无界导出会非常庞大，" +
+			"而且本身就会给服务器增加负载）")
 		return
 	}
 
-	// Say why a local collector is off, so its absence from the bundle
-	// reads as a deliberate choice rather than a silent failure.
-	// resolveLocalCollector already made the decision; this only reports
-	// it — per collector, since one can be off while the other runs.
+	// 说明本地 collector 为何关闭，使它在 bundle 中的缺席读起来是有意选择，
+	// 而不是静默失败。resolveLocalCollector 已作出决定；这里只负责报告——
+	// 按 collector 分别报告，因为可能一个关闭而另一个仍在运行。
 	if !dryRun {
 		var off []string
 		if skipHostInfo {
-			off = append(off, "host facts")
+			off = append(off, "host facts（主机信息）")
 		}
 		if skipLogs {
-			off = append(off, "server log files")
+			off = append(off, "服务器日志文件")
 		}
 		if len(off) > 0 {
-			what := strings.Join(off, " or ")
+			what := strings.Join(off, " 或 ")
 			switch mode {
 			case "gov":
-				fmt.Printf("Gov mode: not collecting %s "+
-					"(hostnames, mount paths, process command lines and log bodies cannot be hashed).\n", what)
+				fmt.Printf("gov 模式：不采集 %s "+
+					"（主机名、挂载路径、进程命令行和日志正文无法哈希）。\n", what)
 			case "cloud":
-				fmt.Printf("Cloud mode: not collecting %s — they would describe this machine, "+
-					"not the managed service. Pass --host-info=on / --logs=on to override "+
-					"when running on a self-managed node.\n", what)
+				fmt.Printf("cloud 模式：不采集 %s——它们描述的是本机器，"+
+					"而不是托管服务。在自管理节点上运行时，可传入 --host-info=on / --logs=on 覆盖此行为。\n", what)
 			}
 		}
 	}
 
-	// Dry-run: activate AFTER the version probe so version detection
-	// still works, but BEFORE everything else. resolveAnalysisOpts
-	// uses ExecuteQueryReal for its pre-flight lookups, which bypasses
-	// the dry-run intercept — that way the derived query_id / hash
-	// flow into the printed SQL instead of leaving `{query_id}`
-	// markers unbound.
+	// dry-run：在版本探测之后激活，这样版本检测仍然可用，但要在其他一切
+	// 之前。resolveAnalysisOpts 的预检查询使用 ExecuteQueryReal，绕过
+	// dry-run 拦截——这样派生出的 query_id / hash 会流入打印的 SQL，而不是
+	// 留下未绑定的 `{query_id}` 标记。
 	if dryRun {
-		fmt.Println("\n=== DRY RUN ===")
-		fmt.Println("No data will be written to disk.")
-		fmt.Println("No archive will be created.")
-		fmt.Println("Each SELECT is printed with the system tables it would touch and an")
-		fmt.Println("EXPLAIN ESTIMATE block (read-only metadata, no data parts scanned).")
-		fmt.Println("Empty estimates render as `this table is empty` — that's the planner")
-		fmt.Println("confirming nothing matches the query predicate.")
+		fmt.Println("\n=== DRY RUN（试运行）===")
+		fmt.Println("不会向磁盘写入任何数据。")
+		fmt.Println("不会创建归档包。")
+		fmt.Println("每个 SELECT 都会打印它触及的系统表，以及一个")
+		fmt.Println("EXPLAIN ESTIMATE 块（只读元数据，不扫描任何数据 part）。")
+		fmt.Println("空估算会显示为 `this table is empty`——这是 planner")
+		fmt.Println("在确认没有任何数据匹配查询谓词。")
 		fmt.Println()
-		// EXPLAIN ESTIMATE is always on under --dry-run — one flag,
-		// one behavior. The pre-flight queries (PreflightForX) use
-		// ExecuteQueryReal to bypass the interception, so derived
-		// values flow into the printed SQL.
+		// --dry-run 下 EXPLAIN ESTIMATE 始终开启——一个标志，一种行为。
+		// 预检查询（PreflightForX）使用 ExecuteQueryReal 绕过拦截，因此
+		// 派生值会流入打印的 SQL。
 		client.SetDryRun(os.Stdout, true)
 		tmpDir, err := os.MkdirTemp("", "diag-dryrun-*")
 		if err != nil {
-			fmt.Printf("Error creating dry-run temp dir: %v\n", err)
+			fmt.Printf("创建 dry-run 临时目录失败：%v\n", err)
 			return
 		}
 		defer os.RemoveAll(tmpDir)
 		outputDir = tmpDir
 	}
 
-	// Resolve query-analysis options up front so an invalid --query-id
-	// or --normalized-query-hash fails fast, before any heavy work runs.
-	// effectiveMode, not mode: after an onprem → cloud switch the --query-id /
-	// --normalized-query-hash preflight must search the same scope the
-	// analysis collector will read (every replica), or it can reject an id
-	// that exists on another replica.
+	// 提前解析查询分析选项，使无效的 --query-id 或
+	// --normalized-query-hash 在任何繁重工作之前快速失败。
+	// 用 effectiveMode 而不是 mode：onprem → cloud 切换后，--query-id /
+	// --normalized-query-hash 预检必须搜索分析 collector 将要读取的同一
+	// 范围（每个 replica），否则可能拒绝一个存在于其他 replica 上的 id。
 	analysisOpts, err := resolveAnalysisOpts(client, effectiveMode, queryID, normalizedHash, fromStr, toStr)
 	if err != nil {
-		fmt.Printf("Error: %v\n", err)
+		fmt.Printf("错误：%v\n", err)
 		return
 	}
 
-	// Gov mode requires a customer-supplied salt so hashes in the
-	// support-bound artifacts cannot be reversed by a public rainbow
-	// table. Prompt for it now (with no echo) if it wasn't passed via
-	// --salt. Salt never leaves the operator's machine.
+	// gov 模式要求客户提供 salt，使要发送给支持的产物中的哈希无法被公开的
+	// 彩虹表反推。若未通过 --salt 传入，现在就提示输入（不回显）。salt
+	// 永远不会离开运维人员的机器。
 	//
-	// In dry-run we skip the prompt and use a placeholder so the
-	// printed `.sql` files still show what would substitute; nothing
-	// is written and no archive is built, so the placeholder cannot
-	// leak.
+	// dry-run 下跳过提示并使用占位符，这样打印的 `.sql` 文件仍能展示替换
+	// 结果；不会写入任何内容，也不会构建归档，因此占位符不会泄露。
 	if mode == "gov" && !dryRun {
 		if govSalt == "" {
 			s, err := promptForGovSalt()
 			if err != nil {
-				fmt.Printf("Error reading gov-mode salt: %v\n", err)
+				fmt.Printf("读取 gov 模式 salt 失败：%v\n", err)
 				return
 			}
 			govSalt = s
 		}
 		if err := internal.ValidateGovSalt(govSalt); err != nil {
-			fmt.Printf("Invalid gov-mode salt: %v\n", err)
+			fmt.Printf("gov 模式 salt 无效：%v\n", err)
 			return
 		}
 	} else if mode == "gov" && dryRun && govSalt == "" {
@@ -656,10 +619,10 @@ func main() {
 	}
 
 	if !collectFrom.IsZero() || !collectTo.IsZero() {
-		fmt.Printf("Collection window: %s\n", describeWindow(collectFrom, collectTo))
+		fmt.Printf("采集窗口：%s\n", describeWindow(collectFrom, collectTo))
 	}
 
-	// Find and execute queries - get the specific folder path
+	// 查找并执行查询——获取具体的文件夹路径
 	queryManager := query.NewManager().WithOutputFormat(outputFormat).
 		WithWindow(collectFrom, collectTo).WithMode(effectiveMode).WithRecorder(rec).WithWatchdog(watch).
 		WithDetachedScope(detachedScope, detachedScopeP).WithKeeperDown(keeperDownReason)
@@ -668,15 +631,15 @@ func main() {
 	finalOutputDir, err := queryManager.ExecuteQueries(client, queriesDir, serverVersion, outputDir, govSalt)
 	rec.Phase("collectors", time.Since(phaseStart), "")
 	if err != nil {
-		fmt.Printf("Error executing queries: %v\n", err)
+		fmt.Printf("执行查询失败：%v\n", err)
 		return
 	}
 
-	// Time-bounded system.text_log slice (opt-in, --from/--to required).
-	// Runs before the dry-run summary so --dry-run previews the SQL.
+	// 限定时间的 system.text_log 切片（可选，需 --from/--to）。
+	// 在 dry-run 摘要之前运行，使 --dry-run 能预览该 SQL。
 	if collectTextLog {
-		// collectFrom/collectTo were parsed and validated with the other
-		// flags, and --collect-text-log has already insisted both are set.
+		// collectFrom/collectTo 已与其他标志一起解析并校验，且
+		// --collect-text-log 已坚持要求两者都设置。
 		tlOpts := query.TextLogOpts{
 			From:     collectFrom,
 			To:       collectTo,
@@ -688,29 +651,27 @@ func main() {
 		path, err := tlColl.Collect(tlOpts, finalOutputDir, serverVersion)
 		tlStatus, tlErr := "ok", ""
 		if err != nil {
-			fmt.Printf("Warning: text_log collection failed: %v\n", err)
+			fmt.Printf("警告：text_log 采集失败：%v\n", err)
 			tlStatus, tlErr = "failed", err.Error()
 		} else if path != "" {
-			fmt.Printf("  text_log written to %s\n", path)
+			fmt.Printf("  text_log 已写入 %s\n", path)
 		}
 		rec.Record(runlog.Entry{Stage: "text_log", Name: "--collect-text-log slice", Status: tlStatus, Duration: time.Since(phaseStart), Rows: -1, Extra: filepath.Base(path), Error: tlErr})
 		rec.Phase("text_log slice", time.Since(phaseStart), "")
 	}
 
-	// Query analysis bundle (only when --query-id or
-	// --normalized-query-hash was set). Runs the .sql files under
-	// analysisDir against the focus parameters and writes results into
-	// <finalOutputDir>/query_analysis/. Runs BEFORE the dry-run summary
-	// so --dry-run previews the analysis SQL too (Collect's IsDryRun
-	// handling prints each file instead of writing results) — otherwise
-	// "list every query the tool would execute" would omit the bundle.
+	// 查询分析 bundle（仅在设置了 --query-id 或 --normalized-query-hash 时）。
+	// 以聚焦参数运行 analysisDir 下的 .sql 文件，并把结果写入
+	// <finalOutputDir>/query_analysis/。在 dry-run 摘要之前运行，使
+	// --dry-run 也能预览分析 SQL（Collect 的 IsDryRun 处理会打印每个文件而
+	// 不写入结果）——否则“列出工具将执行的每个查询”会漏掉这个 bundle。
 	if analysisOpts.Enabled() {
 		coll := query.NewAnalysisCollector(client, effectiveMode).WithOutputFormat(outputFormat)
 		phaseStart = time.Now()
 		written, skipped, err := coll.Collect(analysisOpts, analysisDir, finalOutputDir, serverVersion)
 		qaStatus, qaErr := "ok", ""
 		if err != nil {
-			fmt.Printf("Warning: query analysis failed: %v\n", err)
+			fmt.Printf("警告：查询分析失败：%v\n", err)
 			qaStatus, qaErr = "failed", err.Error()
 		}
 		rec.Record(runlog.Entry{Stage: "analysis", Name: "query_analysis/ (--query-id / --normalized-query-hash)", Status: qaStatus,
@@ -718,67 +679,61 @@ func main() {
 		rec.Phase("query analysis", time.Since(phaseStart), "")
 	}
 
-	// Keeper's own view: the four-letter replies of the Keeper members
-	// (keeper.Commands). Server-side facts no system table carries — leader
-	// or follower, Raft log position, snapshot size and transfer settings,
-	// outstanding requests, Keeper's own latency, version — written as
-	// keeper/<host>_<port>.txt. Two sources make the member list:
-	// system.zookeeper_connection names the member each configured
-	// connection is ON right now (one row per connection, not per ensemble
-	// member), and the server configuration's <zookeeper><node> entries name
-	// the whole ensemble when the tool runs on the server. Union of both,
-	// so a follower this server is not connected to is probed too — that
-	// is the member a Keeper incident is usually about. An unreachable
-	// member is an outcome in the file and the execution log, never a
-	// failed run. Under --dry-run the members are listed and nothing is
-	// contacted; the member query itself is a metadata pre-flight read like
-	// the version probe, executed for real with ExecuteQueryReal and printed
-	// so the dry run still shows every SELECT that reached the server.
+	// Keeper 自身的视角：Keeper 成员的 four-letter command 应答
+	//（keeper.Commands）。这些是任何系统表都不携带的服务端事实——leader
+	// 还是 follower、Raft 日志位置、快照大小与传输设置、未完成请求、Keeper
+	// 自身延迟、版本——写入 keeper/<host>_<port>.txt。成员列表来自两个来源：
+	// system.zookeeper_connection 指明每个已配置连接当前 ON 的成员（每连接
+	// 一行，而非每个 ensemble 成员一行），服务器配置的 <zookeeper><node>
+	// 条目则在工具运行于服务器上时指明整个 ensemble。两者取并集，因此本
+	// 服务器未连接的 follower 也会被探测——那通常正是 Keeper 事故所涉及的
+	// 成员。不可达的成员是文件和执行日志中的一种结果，绝不是运行失败。
+	// --dry-run 下只列出成员而不联系任何对象；成员查询本身与版本探测一样是
+	// 元数据预检读取，使用 ExecuteQueryReal 真实执行并打印，使 dry run 仍能
+	// 展示每个到达服务器的 SELECT。
 	if !skipKeeper {
 		phaseStart = time.Now()
 		if dryRun {
-			fmt.Printf("\n-- pre-flight (executed, metadata only): %s\n", keeper.TargetsQuery)
+			fmt.Printf("\n-- pre-flight（已执行，仅元数据）：%s\n", keeper.TargetsQuery)
 		}
-		// With no Keeper session, system.zookeeper_connection waits for its
-		// timeout instead of answering; the members then come from the
-		// server configuration only — which is where a failed ensemble is
-		// declared anyway.
+		// 没有 Keeper 会话时，system.zookeeper_connection 会等到超时而不是
+		// 应答；此时成员仅来自服务器配置——失败 ensemble 的判定本也来自那里。
 		var raw string
 		var qerr error
 		if keeperDownReason == "" {
 			raw, qerr = client.ExecuteQueryReal(keeper.TargetsQuery)
 		} else {
-			qerr = fmt.Errorf("not read: %s", keeperDownReason)
+			qerr = fmt.Errorf("未读取：%s", keeperDownReason)
 		}
 		connected := keeper.ParseTargets(raw)
 		configured := keeper.TargetsFromConfig(configDir)
 		targets := keeper.MergeTargets(connected, configured)
 		switch {
 		case qerr != nil && len(targets) == 0:
-			// system.zookeeper_connection exists from 23.8; a server without
-			// a <zookeeper> block has an empty one, not an error.
-			fmt.Printf("Keeper facts: skipped — system.zookeeper_connection could not be read (%s)\n", firstLine(qerr.Error()))
+			// system.zookeeper_connection 自 23.8 起存在；没有 <zookeeper>
+			// 块的服务器得到空表，而不是错误。
+			fmt.Printf("Keeper 信息：已跳过——无法读取 system.zookeeper_connection（%s）\n", firstLine(qerr.Error()))
 			rec.Record(runlog.Entry{Stage: "keeper", Name: "system.zookeeper_connection", Status: "skipped",
 				Duration: time.Since(phaseStart), Rows: -1, Extra: "-keeper-mntr: no member list", Error: qerr.Error()})
 		case len(targets) == 0:
-			fmt.Println("Keeper facts: skipped — no Keeper member in system.zookeeper_connection or the server configuration (no <zookeeper> configured)")
+			fmt.Println("Keeper 信息：已跳过——system.zookeeper_connection 或服务器配置中都没有 Keeper 成员（未配置 <zookeeper>）")
 			rec.Record(runlog.Entry{Stage: "keeper", Name: "system.zookeeper_connection", Status: "skipped",
 				Duration: time.Since(phaseStart), Rows: -1, Extra: "-keeper-mntr: no Keeper member configured"})
 		case dryRun:
-			fmt.Printf("\nKeeper facts (dry run): would send %s over TCP to %d member(s) and write %s/<host>_<port>.txt — contacting none now:\n",
-				strings.Join(keeper.Commands, ", "), len(targets), keeper.DirName)
+			fmt.Printf("\nKeeper 信息（dry run）：将通过 TCP 向 %d 个成员发送 %s，并写入 %s/<host>_<port>.txt——现在不联系任何成员：\n",
+				len(targets), strings.Join(keeper.Commands, ", "), keeper.DirName)
 			for _, t := range targets {
 				fmt.Printf("  %s:%s\n", keeper.Label(t.Host, govSalt), t.Port)
 			}
 		default:
-			src := fmt.Sprintf("%d connected", len(connected))
+			src := fmt.Sprintf("%d 个已连接", len(connected))
 			if extra := len(targets) - len(connected); extra > 0 {
-				src += fmt.Sprintf(" + %d more from the server configuration", extra)
+				src += fmt.Sprintf(" + %d 个来自服务器配置", extra)
 			}
-			fmt.Printf("Collecting Keeper facts from %d member(s) (%s; %s)...\n", len(targets), src, strings.Join(keeper.Commands, " / "))
+			fmt.Printf("正在从 %d 个成员采集 Keeper 信息（%s；%s）...\n", len(targets), src, strings.Join(keeper.Commands, " / "))
 			outcomes, kerr := keeper.Collect(finalOutputDir, targets, keeper.Options{GovSalt: govSalt})
 			if kerr != nil {
-				fmt.Printf("Warning: Keeper facts could not be written: %v\n", kerr)
+				fmt.Printf("警告：Keeper 信息无法写入：%v\n", kerr)
 			}
 			fmt.Print(keeper.Summary(outcomes))
 			for _, o := range outcomes {
@@ -794,52 +749,48 @@ func main() {
 	}
 
 	if dryRun {
-		fmt.Println("\n=== DRY RUN SUMMARY ===")
-		fmt.Println("Above are the queries that would be executed.")
-		fmt.Println("To run for real, re-invoke without --dry-run.")
+		fmt.Println("\n=== DRY RUN 摘要 ===")
+		fmt.Println("以上是将要执行的查询。")
+		fmt.Println("要真正运行，请去掉 --dry-run 后重新调用。")
 		return
 	}
-	// Gov mode: print + save a local mapping from real database/table
-	// names to the hex(SHA256(name+salt)) form that appears in the
-	// support-bound output files. Saved outside the archive folder.
-	// Skipped in dry-run — the mapping is a local artefact, no point
-	// producing it (the SQL itself is still printed via the
-	// intercepting client when the function runs).
+	// gov 模式：打印并保存本地映射，从真实数据库/表名映射到出现在要发送给
+	// 支持的输出文件中的 hex(SHA256(name+salt)) 形式。保存在归档文件夹之外。
+	// dry-run 下跳过——该映射是本地产物，生成它没有意义（函数运行时 SQL
+	// 本身仍会通过拦截客户端打印）。
 	if mode == "gov" && !dryRun {
 		if err := internal.PrintGovNameMapping(client, outputDir, finalOutputDir, govSalt); err != nil {
-			fmt.Printf("Warning: gov-mode name mapping failed: %v\n", err)
+			fmt.Printf("警告：gov 模式名称映射失败：%v\n", err)
 		}
 	}
 
-	// Host facts: the OS/kernel/hardware context that explains what the
-	// ClickHouse system tables report. Read from /proc, /sys and /etc — so
-	// it only yields anything when run ON the server, and degrades to
-	// "unavailable" with a note otherwise rather than failing the run.
-	// Held beyond the block so the dashboard can render the same facts that
-	// land in host_info.json; nil when host-info was skipped.
+	// host facts：解释 ClickHouse 系统表所报告内容的 OS/内核/硬件上下文。
+	// 从 /proc、/sys 和 /etc 读取——因此只有在服务器上运行时才有内容，否则
+	// 会降级为 "unavailable" 并附一条说明，而不是让运行失败。保留到该代码块
+	// 之外，使 dashboard 能渲染与写入 host_info.json 相同的事实；host-info
+	// 被跳过时为 nil。
 	var hostReport *hostinfo.Report
 	if !skipHostInfo {
-		fmt.Println("Collecting host OS and hardware facts...")
+		fmt.Println("正在采集主机 OS 和硬件信息...")
 		phaseStart = time.Now()
 		report := hostinfo.Collect()
 		rec.Phase("host facts", time.Since(phaseStart), "")
 		hostReport = report
 		if path, err := hostinfo.WriteJSON(finalOutputDir, report); err != nil {
-			fmt.Printf("Warning: host info could not be written: %v\n", err)
+			fmt.Printf("警告：host info 无法写入：%v\n", err)
 		} else {
 			fmt.Print(report.Summary())
 			for _, n := range report.Notes {
-				fmt.Printf("  note: %s\n", n)
+				fmt.Printf("  说明：%s\n", n)
 			}
-			fmt.Printf("  written to %s\n", filepath.Base(path))
+			fmt.Printf("  已写入 %s\n", filepath.Base(path))
 		}
 	}
 
-	// ClickHouse server log files from disk. The directory is discovered
-	// from the server configuration when not given explicitly, because
-	// operators relocate logs far more often than anything else.
+	// 从磁盘采集 ClickHouse 服务器日志文件。未显式给出目录时从服务器配置中
+	// 发现，因为运维人员移动日志位置远比移动其他东西频繁。
 	if !skipLogs {
-		fmt.Println("Collecting ClickHouse server log files...")
+		fmt.Println("正在采集 ClickHouse 服务器日志文件...")
 		phaseStart = time.Now()
 		res, err := logfiles.Collect(finalOutputDir, logfiles.Options{
 			Dir:             logsDir,
@@ -848,39 +799,37 @@ func main() {
 			MaxBytesPerFile: int64(logsMaxMB) << 20,
 		})
 		if err != nil {
-			fmt.Printf("Warning: log collection failed: %v\n", err)
+			fmt.Printf("警告：日志采集失败：%v\n", err)
 		} else {
 			fmt.Print(res.Summary())
 		}
 		rec.Phase("log files", time.Since(phaseStart), "")
 	}
 
-	// ClickHouse configuration files from disk. Written under the run
-	// directory so the archive only ever contains configs from this host
-	// and this run.
+	// 从磁盘采集 ClickHouse 配置文件。写入运行目录之下，使归档永远只包含
+	// 本主机、本次运行的配置。
 	if !skipConfig {
 		configDest := filepath.Join(finalOutputDir, "configuration")
 		phaseStart = time.Now()
 		if err := config.NewCollector().Collect(configDir, configDest, false); err != nil {
-			// Reading /etc/clickhouse-server/config.d/ usually needs root or
-			// the clickhouse group, so an unprivileged run fails here. Warn
-			// rather than fail the run — the query results are still worth
-			// having — but never leave it silent.
-			fmt.Printf("Warning: configuration collection failed: %v\n", err)
+			// 读取 /etc/clickhouse-server/config.d/ 通常需要 root 或
+			// clickhouse 组，因此无特权运行会在这里失败。给出警告而不是让
+			// 运行失败——查询结果仍然有价值——但绝不保持沉默。
+			fmt.Printf("警告：配置采集失败：%v\n", err)
 		}
 		rec.Phase("configuration", time.Since(phaseStart), "")
 	}
 
-	// Evaluate alert rules if not skipped
+	// 若未跳过则评估 alert rule
 	var alertResults []alert.Result
 	if !skipAlerts {
-		fmt.Println("Evaluating alert rules...")
+		fmt.Println("正在评估 alert rule...")
 		phaseStart = time.Now()
 		essentialRun, _ := watch.Tripped()
 		ev := alert.NewEvaluator(client, effectiveMode).WithEssential(essentialRun).
 			WithDetachedScope(detachedScope).WithKeeperDown(keeperDownReason).WithStop(watch.OverBudget)
-		// The checks read JSONEachRow files; with -output-format native or
-		// tsv the rules run their queries live instead.
+		// 检查会读取 JSONEachRow 文件；使用 -output-format native 或 tsv 时，
+		// 规则改为实时运行它们的查询。
 		if outputFormat.Name == query.FormatJSONL.Name {
 			ev = ev.WithBundle(bundle.Open(finalOutputDir, collectorStatus(rec)).WithWindowEnd(collectTo))
 		}
@@ -903,29 +852,26 @@ func main() {
 			rec.Record(runlog.Entry{Stage: "alert", Name: ruleName, Source: ruleDir, Status: status, Duration: time.Duration(r.DurationMs) * time.Millisecond,
 				Rows: -1, Extra: fmt.Sprintf("%d instance(s)%s", len(r.Rows), map[bool]string{true: "; " + r.Reason, false: ""}[r.Reason != ""]), Error: r.Error})
 		}
-		// "checked" counts only rules that produced an answer: both skipped
-		// (table not present here) and errored (query failed) rules are
-		// excluded, because reporting either as checked would imply a
-		// verification that never happened. See alert.Summarize.
+		// “checked”只统计产出了答案的规则：skipped（此处没有该表）和
+		// errored（查询失败）的规则都被排除，因为把任一者报告为已检查都会
+		// 暗示发生过一次并不存在的验证。见 alert.Summarize。
 		evaluated, fired, errored, skipped := alert.Summarize(alertResults)
-		fmt.Printf("Alert evaluation complete: %d rule(s) checked, %d fired, %d errored, %d not applicable\n",
+		fmt.Printf("alert 评估完成：已检查 %d 条规则，%d 条触发，%d 条出错，%d 条不适用\n",
 			evaluated, fired, errored, skipped)
 		if errored > 0 {
-			fmt.Printf("  (%d rule(s) could not run — see the [alert] ERROR lines above; "+
-				"these are NOT findings)\n", errored)
+			fmt.Printf("  （%d 条规则无法运行——请查看上方的 [alert] ERROR 行；"+
+				"这些不是 finding）\n", errored)
 		}
 	}
 
-	// Generate HTML dashboard if not skipped.
+	// 若未跳过则生成 HTML dashboard。
 	//
-	// Not produced in gov mode: dashboard.html lands in the same archive as
-	// the hashed result files, but its queries are built in Go and select
-	// raw identifiers (database/table names for up to 2000 tables, disk
-	// paths, users, plus server-generated text like last_exception and
-	// last_error_message) — the very values the queries.gov/*.sql files
-	// hash. Shipping it would defeat gov-mode hashing, so it is refused for
-	// the same reason query analysis is. Hashing every dashboard panel is
-	// the follow-up that would restore it.
+	// gov 模式下不生成：dashboard.html 与哈希后的结果文件落在同一个归档中，
+	// 但它的查询在 Go 中构建，会选择原始标识符（最多 2000 个表的数据库/表名、
+	// 磁盘路径、用户，以及 last_exception、last_error_message 之类的服务器
+	// 生成文本）——正是 queries.gov/*.sql 会哈希的那些值。发送它会破坏
+	// gov 模式哈希，因此与查询分析一样被拒绝。对每个 dashboard 面板做哈希是
+	// 恢复它的后续工作。
 	dashboardWritten := false
 	if generate, skipReason := dashboardDecision(skipDashboard, effectiveMode); !generate {
 		fmt.Println(skipReason)
@@ -940,21 +886,20 @@ func main() {
 			WithDetachedScope(detachedScope).
 			WithKeeperDown(keeperDownReason != "").
 			WithStop(watch.OverBudget)
-		// The panels read the collected JSONEachRow files; with -output-format
-		// native or tsv they query the server, as before.
+		// 面板读取已采集的 JSONEachRow 文件；使用 -output-format native 或
+		// tsv 时则像以前一样查询服务器。
 		if outputFormat.Name == query.FormatJSONL.Name {
 			gen = gen.WithBundle(bundle.Open(finalOutputDir, collectorStatus(rec)).WithWindowEnd(collectTo)).
 				WithWindow(collectFrom, collectTo)
 		}
-		// Write the execution log once now so the dashboard's Collected Files
-		// panel indexes it; the final write below refreshes it with the
-		// dashboard phase itself.
+		// 现在先写一次执行日志，使 dashboard 的 Collected Files 面板能为它
+		// 建立索引；下面的最终写入会用 dashboard 阶段本身来刷新它。
 		if _, err := rec.Write(finalOutputDir); err != nil {
-			fmt.Printf("Warning: execution log could not be written: %v\n", err)
+			fmt.Printf("警告：execution log 无法写入：%v\n", err)
 		}
 		phaseStart = time.Now()
 		if err := gen.Generate(finalOutputDir, alertResults); err != nil {
-			fmt.Printf("Warning: dashboard generation failed: %v\n", err)
+			fmt.Printf("警告：dashboard 生成失败：%v\n", err)
 			rec.Phase("dashboard", time.Since(phaseStart), "failed: "+err.Error())
 		} else {
 			dashboardWritten = true
@@ -962,54 +907,50 @@ func main() {
 		}
 	}
 
-	// The dashboard is the only OTHER consumer of alertResults, so whenever it
-	// isn't produced — gov mode, --skip-dashboard, or a generation failure —
-	// the archive would carry no alert record at all: the rules ran, a
-	// critical one may have fired, and the artifact the customer ships back
-	// says nothing. Write rule-level metadata instead: name/title/severity/
-	// state and the instance COUNT, never the matched rows (their columns are
-	// rule-defined, so in gov mode they would carry raw identifiers).
+	// dashboard 是 alertResults 的唯一另一个消费者，因此只要它未生成——
+	// gov 模式、--skip-dashboard 或生成失败——归档就完全不带 alert 记录：
+	// 规则运行了，某条 critical 的规则可能触发了，而客户发回的产物却什么也
+	// 没说。改为写入规则级元数据：name/title/severity/state 和实例数量，
+	// 绝不包含匹配到的行（它们的列由规则定义，因此在 gov 模式下会携带原始
+	// 标识符）。
 	if !skipAlerts && !dashboardWritten && len(alertResults) > 0 {
 		if err := alert.WriteSummaryJSON(finalOutputDir, alertResults, effectiveMode); err != nil {
-			fmt.Printf("Warning: alert summary could not be written: %v\n", err)
+			fmt.Printf("警告：alert 摘要无法写入：%v\n", err)
 		} else {
-			fmt.Println("Wrote alerts_summary.json (rule outcomes and instance counts; " +
-				"matched rows are never included).")
+			fmt.Println("已写入 alerts_summary.json（规则结果和实例计数；" +
+				"绝不包含匹配到的行）。")
 		}
 	}
 
-	// Execution log — last, so it covers every phase above; the archive
-	// then carries it. Never fatal: the results are worth having without it.
+	// 执行日志——放在最后，使其覆盖上面每个阶段；随后归档会携带它。
+	// 绝不致命：即使没有它，结果仍然有价值。
 	if path, err := rec.Write(finalOutputDir); err != nil {
-		fmt.Printf("Warning: execution log could not be written: %v\n", err)
+		fmt.Printf("警告：execution log 无法写入：%v\n", err)
 	} else {
-		fmt.Printf("Execution log written: %s (per-collector outcome and wall time)\n", path)
+		fmt.Printf("execution log 已写入：%s（每个 collector 的结果和耗时）\n", path)
 	}
 
-	// Create archive if not skipped - use the specific folder that was created
+	// 若未跳过则创建归档包——使用实际创建的那个具体文件夹
 	if !skipArchive {
 		if err := createArchiveWithTimestamp(finalOutputDir); err != nil {
-			// Non-zero, so a script or the cluster command does not take a
-			// run without a bundle for a successful one. Nothing deferred is
-			// skipped: the only defer in main is dry-run's, which never
-			// reaches the archive.
-			fmt.Printf("Error creating archive: %v\n", err)
+			// 非零退出，使脚本或 cluster 命令不会把一次没有 bundle 的运行
+			// 当作成功。不会跳过任何 defer：main 中唯一的 defer 属于 dry-run，
+			// 它永远不会走到归档。
+			fmt.Printf("创建归档包失败：%v\n", err)
 			os.Exit(1)
 		}
 	}
 }
 
-// passwordEnvVar is read when -password is not given, before prompting —
-// the name clickhouse-client uses. The cluster command depends on it: each
-// per-host run inherits the variable, so no password is put on a command
-// line, where ps would show it.
+// passwordEnvVar 在未给出 -password 时、提示之前读取——这是
+// clickhouse-client 使用的名称。cluster 命令依赖它：每个按主机的运行都
+// 继承该变量，因此不会把密码放到命令行上，以免被 ps 看到。
 const passwordEnvVar = clustercollect.PasswordEnvVar
 
-// resolvePassword returns the -password value when it was given, else the
-// environment variable when it is set — even to the empty string, which is
-// an explicit empty password. found=false means: prompt. A -password given
-// as "" prompts, as it did before the variable was read, rather than letting
-// another client's exported password stand in for it.
+// resolvePassword 在给出 -password 时返回其值，否则在环境变量已设置时
+// 返回它——即使是空字符串，那也是一个显式的空密码。found=false 表示：
+// 提示输入。以 "" 给出的 -password 会提示，与读取该变量之前一样，
+// 而不是让另一个客户端导出的密码顶替它。
 func resolvePassword(flagValue string, flagSet bool, lookup func(string) (string, bool)) (string, bool) {
 	if flagSet {
 		return flagValue, flagValue != ""
@@ -1017,31 +958,30 @@ func resolvePassword(flagValue string, flagSet bool, lookup func(string) (string
 	return lookup(passwordEnvVar)
 }
 
-// modeExplicit reports whether -mode was actually passed. The flag defaults
-// to onprem, so the value alone cannot distinguish "not set" from
-// "deliberately onprem", and the two must behave differently.
+// modeExplicit 报告 -mode 是否真的被传入。该标志默认是 onprem，因此仅凭
+// 值无法区分“未设置”与“有意选择 onprem”，而二者必须有不同的行为。
 func getUserInput(protocol, host, port, username, password, mode, configDir *string, skipConfig, modeExplicit, passwordExplicit bool) error {
 	reader := bufio.NewReader(os.Stdin)
 
-	// Get protocol if not provided
+	// 未提供时获取协议
 	if *protocol == "" {
-		fmt.Print("Select protocol (http/https) [default: http]: ")
+		fmt.Print("选择协议（http/https）[默认：http]：")
 		input, _ := reader.ReadString('\n')
 		*protocol = strings.TrimSpace(input)
 		if *protocol == "" {
 			*protocol = "http"
 		}
 	}
-	// Validate protocol value
+	// 校验协议值
 	*protocol = strings.ToLower(*protocol)
 	if *protocol != "http" && *protocol != "https" {
-		fmt.Printf("Invalid protocol '%s'. Using http instead.\n", *protocol)
+		fmt.Printf("协议 '%s' 无效。改用 http。\n", *protocol)
 		*protocol = "http"
 	}
 
-	// Get host if not provided
+	// 未提供时获取主机
 	if *host == "" {
-		fmt.Print("Enter ClickHouse Host [default: localhost]: ")
+		fmt.Print("输入 ClickHouse 主机 [默认：localhost]：")
 		input, _ := reader.ReadString('\n')
 		*host = strings.TrimSpace(input)
 		if *host == "" {
@@ -1049,13 +989,13 @@ func getUserInput(protocol, host, port, username, password, mode, configDir *str
 		}
 	}
 
-	// Get port if not provided
+	// 未提供时获取端口
 	if *port == "" {
 		defaultPort := "8123"
 		if *protocol == "https" {
 			defaultPort = "8443"
 		}
-		fmt.Printf("Enter ClickHouse Port [default: %s]: ", defaultPort)
+		fmt.Printf("输入 ClickHouse 端口 [默认：%s]：", defaultPort)
 		input, _ := reader.ReadString('\n')
 		*port = strings.TrimSpace(input)
 		if *port == "" {
@@ -1063,33 +1003,33 @@ func getUserInput(protocol, host, port, username, password, mode, configDir *str
 		}
 	}
 
-	// Get username if not provided
+	// 未提供时获取用户名
 	if *username == "" {
-		fmt.Print("Enter Username: ")
+		fmt.Print("输入用户名：")
 		input, _ := reader.ReadString('\n')
 		*username = strings.TrimSpace(input)
 	}
 
-	// Get password if not provided: -password, then CLICKHOUSE_PASSWORD,
-	// then the prompt.
+	// 未提供时获取密码：先 -password，再 CLICKHOUSE_PASSWORD，
+	// 最后提示输入。
 	if *password == "" && *username != "" {
 		if p, found := resolvePassword(*password, passwordExplicit, os.LookupEnv); found {
 			*password = p
-			fmt.Printf("Using the password from %s\n", passwordEnvVar)
+			fmt.Printf("使用来自 %s 的密码\n", passwordEnvVar)
 		} else {
-			fmt.Print("Enter Password: ")
+			fmt.Print("输入密码：")
 			passwordBytes, _ := term.ReadPassword(int(syscall.Stdin))
 			*password = string(passwordBytes)
-			fmt.Println() // Add a newline after password input
+			fmt.Println() // 密码输入后换行
 		}
 	}
 
-	// Resolve the mode. An unparseable one is an error, never a quiet
-	// downgrade to onprem — see resolveMode for why the direction matters.
+	// 解析模式。无法解析的模式是错误，绝不静默降级到 onprem——方向为何
+	// 重要见 resolveMode。
 	resolved, notice, err := resolveMode(*mode, modeExplicit,
 		term.IsTerminal(int(syscall.Stdin)),
 		func() (string, error) {
-			fmt.Print("Select query mode (cloud/onprem/gov) [default: onprem]: ")
+			fmt.Print("选择查询模式（cloud/onprem/gov）[默认：onprem]：")
 			return reader.ReadString('\n')
 		})
 	if err != nil {
@@ -1100,14 +1040,13 @@ func getUserInput(protocol, host, port, username, password, mode, configDir *str
 		fmt.Println(notice)
 	}
 
-	// Display available modes for user reference
-	fmt.Printf("Available modes: %s\n", strings.Join(canonicalModes, ", "))
+	// 显示可用模式供用户参考
+	fmt.Printf("可用模式：%s\n", strings.Join(canonicalModes, "、"))
 
-	// Get config directory if not provided and not skipping config
-	// collection. Gov never collects configs and cloud has none on this
-	// machine, so neither mode asks.
+	// 未提供且未跳过配置采集时获取配置目录。gov 绝不采集配置，cloud 在本机
+	// 也没有配置，因此这两种模式都不询问。
 	if *configDir == "" && !skipConfig && !govWithholdsConfig(*mode) && !cloudSkipsConfig(*mode, *configDir) {
-		fmt.Print("Enter ClickHouse config directory to collect [default: /etc/clickhouse-server/config.d/]: ")
+		fmt.Print("输入要采集的 ClickHouse 配置目录 [默认：/etc/clickhouse-server/config.d/]：")
 		input, _ := reader.ReadString('\n')
 		*configDir = strings.TrimSpace(input)
 		if *configDir == "" {
@@ -1118,20 +1057,18 @@ func getUserInput(protocol, host, port, username, password, mode, configDir *str
 	return nil
 }
 
-// resolveAnalysisOpts builds the query-analysis options from the raw
-// CLI flag strings. When --query-id is set without
-// --normalized-query-hash, a pre-flight SELECT against system.query_log
-// derives the hash and (when found) the query's event_time — the
-// default time window is then centred on that event_time instead of
-// "last N days from now," so a slow query from a week ago isn't missed
-// by a present-time default.
+// resolveAnalysisOpts 从原始 CLI 标志字符串构建查询分析选项。当设置了
+// --query-id 而未设置 --normalized-query-hash 时，一次针对 system.query_log
+// 的预检 SELECT 会派生哈希以及（找到时）查询的 event_time——随后默认时间
+// 窗口就以该 event_time 为中心，而不是“从现在起最近 N 天”，这样一周前的
+// 慢查询不会被以当前时间为基准的默认值漏掉。
 func resolveAnalysisOpts(client *pkg.ClickHouseClient, mode, queryID, normalizedHash, fromStr, toStr string) (query.AnalysisOpts, error) {
 	opts := query.AnalysisOpts{
 		QueryID:             queryID,
 		NormalizedQueryHash: normalizedHash,
 	}
 	if !opts.Enabled() {
-		return opts, nil // neither set; analysis stays off, validation skipped
+		return opts, nil // 两者都未设置；分析保持关闭，跳过校验
 	}
 
 	from, err := query.ParseTimeFlag(fromStr)
@@ -1144,67 +1081,61 @@ func resolveAnalysisOpts(client *pkg.ClickHouseClient, mode, queryID, normalized
 	}
 	opts.From, opts.To = from, to
 
-	// Pre-flight: when only query_id is set, derive the hash and the
-	// query's event_time. Skipped when the user already supplied the
-	// hash or when no query_id was given.
+	// 预检：当只设置了 query_id 时，派生哈希和查询的 event_time。若用户
+	// 已提供哈希，或未给出 query_id，则跳过。
 	if opts.QueryID != "" && opts.NormalizedQueryHash == "" {
 		hash, eventTime, err := query.PreflightForQueryID(client, mode, opts.QueryID)
 		if err != nil {
 			return opts, err
 		}
 		opts.NormalizedQueryHash = hash
-		fmt.Printf("Pre-flight: query_id %s → normalized_query_hash %s (event_time %s)\n",
+		fmt.Printf("pre-flight：query_id %s → normalized_query_hash %s（event_time %s）\n",
 			opts.QueryID, hash, eventTime.Format(time.RFC3339))
-		// If the user didn't pin --from/--to, center the default 3-day
-		// window on the derived event_time so the slow execution is
-		// definitely inside the analysis window.
+		// 若用户未固定 --from/--to，则把默认的 3 天窗口以派生出的
+		// event_time 为中心，使那次慢执行一定落在分析窗口内。
 		if opts.From.IsZero() && opts.To.IsZero() && !eventTime.IsZero() {
 			opts.From = eventTime.Add(-36 * time.Hour)
 			opts.To = eventTime.Add(12 * time.Hour)
 		}
 	}
 
-	// Validate runs the default-window logic for whatever fields are
-	// still empty. We need a populated window before the reverse
-	// pre-flight (hash → slowest query_id) can run.
+	// Validate 为仍然为空的字段运行默认窗口逻辑。反向预检
+	//（hash → 最慢 query_id）运行之前，需要一个已填充的窗口。
 	if err := opts.Validate(time.Now().UTC()); err != nil {
 		return opts, err
 	}
 
-	// Reverse pre-flight: when only --normalized-query-hash is set,
-	// pick the slowest finished execution as the representative
-	// query_id so the single-id queries (ProfileEvents, text_log,
-	// tables-referenced …) have something to filter on. Without
-	// this, hash-only mode shipped a dashboard with most cards
-	// empty (the user's main complaint).
+	// 反向预检：当只设置了 --normalized-query-hash 时，选取最慢的一次已完成
+	// 执行作为代表性 query_id，使那些按单个 id 查询的文件（ProfileEvents、
+	// text_log、tables-referenced …）有可过滤的对象。没有它时，仅给哈希的
+	// 模式会生成一个大多数卡片为空的 dashboard（用户的主要抱怨）。
 	if opts.NormalizedQueryHash != "" && opts.QueryID == "" {
 		qid, eventTime, err := query.PreflightForHash(client, mode, opts.NormalizedQueryHash, opts.From, opts.To)
 		if err != nil {
 			return opts, err
 		}
 		if qid == "" {
-			fmt.Printf("Pre-flight: no QueryFinish row found for normalized_query_hash %s in the window — single-id files will be skipped\n",
+			fmt.Printf("pre-flight：在窗口内没有找到 normalized_query_hash %s 的 QueryFinish 行——将跳过 single-id 文件\n",
 				opts.NormalizedQueryHash)
 		} else {
 			opts.QueryID = qid
-			fmt.Printf("Pre-flight: normalized_query_hash %s → slowest query_id %s (event_time %s)\n",
+			fmt.Printf("pre-flight：normalized_query_hash %s → 最慢的 query_id %s（event_time %s）\n",
 				opts.NormalizedQueryHash, qid, eventTime.Format(time.RFC3339))
 		}
 	}
 	return opts, nil
 }
 
-// promptForGovSalt asks the operator for the gov-mode salt without
-// echoing it to the terminal. The salt is the customer's local secret
-// — keeping it off the screen avoids accidental capture in screen-share
-// recordings, ticket attachments, or terminal scrollback.
+// promptForGovSalt 向运维人员询问 gov 模式 salt，而不在终端回显。salt 是
+// 客户的本地机密——让它不出现在屏幕上，可避免在屏幕共享录像、工单附件或
+// 终端回滚中被意外捕获。
 func promptForGovSalt() (string, error) {
 	fmt.Println()
-	fmt.Println("Gov mode: enter a salt used to hash database / table names in the output.")
-	fmt.Println("  - 8–64 alphanumeric characters (A–Z, a–z, 0–9)")
-	fmt.Println("  - Keep this value local; do NOT share it with ClickHouse support.")
-	fmt.Println("  - Use the same salt across runs if you want hashes to be comparable.")
-	fmt.Print("Salt: ")
+	fmt.Println("gov 模式：请输入用于哈希输出中数据库 / 表名的 salt。")
+	fmt.Println("  - 8–64 个字母数字字符（A–Z、a–z、0–9）")
+	fmt.Println("  - 请将此值保留在本地；不要与 ClickHouse 支持团队共享。")
+	fmt.Println("  - 如果希望哈希可比较，请在多次运行中使用相同的 salt。")
+	fmt.Print("Salt：")
 	saltBytes, err := term.ReadPassword(int(syscall.Stdin))
 	fmt.Println()
 	if err != nil {
@@ -1213,14 +1144,13 @@ func promptForGovSalt() (string, error) {
 	return strings.TrimSpace(string(saltBytes)), nil
 }
 
-// canonicalModes is the operator-facing list, in the order it is printed.
+// canonicalModes 是面向运维人员的列表，按打印顺序排列。
 var canonicalModes = []string{"cloud", "onprem", "gov"}
 
-// modeAliases maps every spelling we accept onto a canonical mode.
+// modeAliases 把我们接受的每种拼写映射到规范模式。
 //
-// gov deliberately has NO alias. It is the protective mode, and the whole
-// point of this table is that a near-miss must be rejected rather than
-// resolved by guesswork — a wrong guess there ships unhashed identifiers.
+// gov 刻意没有别名。它是保护模式，而这张表的全部意义就在于：近似写法必须
+// 被拒绝，而不是靠猜测解决——那里猜错就会发送未哈希的标识符。
 var modeAliases = map[string]string{
 	"cloud": "cloud", "ch-cloud": "cloud", "clickhouse-cloud": "cloud",
 
@@ -1232,19 +1162,17 @@ var modeAliases = map[string]string{
 	"gov": "gov",
 }
 
-// canonicalMode normalises a spelling to cloud/onprem/gov, or returns "" when
-// it recognises nothing.
+// canonicalMode 把一种拼写规范化为 cloud/onprem/gov，无法识别时返回 ""。
 //
-// The TrimSpace is load-bearing, not tidiness: `-mode " gov"` survived the old
-// ToLower, failed the == "gov" comparison, and fell through to onprem.
+// TrimSpace 是关键，不是整洁：`-mode " gov"` 过去能挺过 ToLower，却通不过
+// == "gov" 比较，于是落到 onprem。
 func canonicalMode(raw string) string {
 	return modeAliases[strings.ToLower(strings.TrimSpace(raw))]
 }
 
-// nearestMode returns the canonical mode within two edits of raw, or "" when
-// nothing is close enough to be worth suggesting. Two edits catches the
-// realistic slips ("govv", "clod", "onrem") without proposing "gov" for an
-// unrelated word.
+// nearestMode 返回与 raw 编辑距离不超过 2 的规范模式；若没有足够接近、值得
+// 建议的，则返回 ""。距离 2 能抓住现实中的笔误（"govv"、"clod"、"onrem"），
+// 又不会为无关单词建议 "gov"。
 func nearestMode(raw string) string {
 	s := strings.ToLower(strings.TrimSpace(raw))
 	best, bestDist := "", 3
@@ -1256,7 +1184,7 @@ func nearestMode(raw string) string {
 	return best
 }
 
-// editDistance is Levenshtein over runes, used only to suggest a mode.
+// editDistance 是 rune 上的 Levenshtein 距离，仅用于建议模式。
 func editDistance(a, b string) int {
 	ar, br := []rune(a), []rune(b)
 	prev := make([]int, len(br)+1)
@@ -1278,29 +1206,27 @@ func editDistance(a, b string) int {
 	return prev[len(br)]
 }
 
-// invalidModeErr names the valid modes and, when one is close, suggests it.
+// invalidModeErr 点明有效模式，并在有接近者时给出建议。
 func invalidModeErr(raw string) error {
 	if s := nearestMode(raw); s != "" {
-		return fmt.Errorf("invalid mode %q — choose %s; did you mean %q?",
+		return fmt.Errorf("模式 %q 无效——请选择 %s；你是指 %q 吗？",
 			strings.TrimSpace(raw), strings.Join(canonicalModes, ", "), s)
 	}
-	return fmt.Errorf("invalid mode %q — choose %s",
+	return fmt.Errorf("模式 %q 无效——请选择 %s",
 		strings.TrimSpace(raw), strings.Join(canonicalModes, ", "))
 }
 
-// resolveMode turns the -mode flag into exactly one of cloud/onprem/gov, or
-// fails. It is a pure function so the policy below is testable without a
-// terminal.
+// resolveMode 把 -mode 标志转换为恰好 cloud/onprem/gov 之一，否则失败。
+// 它是纯函数，因此下面的策略无需终端即可测试。
 //
-// The rule that matters is the DIRECTION of the fallback. onprem is the least
-// protective of the three, so guessing it when the operator's intent did not
-// parse is the one answer that can do harm: `-mode govv` used to print a
-// single line and then collect an onprem bundle — unhashed database and table
-// names from a run that asked for gov. With stdin closed, as in any CI job or
-// scripted collection, nothing ever read that line.
+// 真正重要的规则是回退的“方向”。onprem 是三者中保护最弱的，因此在运维
+// 人员意图无法解析时猜它，是唯一可能造成伤害的答案：`-mode govv` 过去只
+// 打印一行，然后采集 onprem bundle——一次请求 gov 的运行却得到未哈希的
+// 数据库和表名。当 stdin 关闭时，如同任何 CI 任务或脚本化采集，没有人会
+// 读那一行。
 //
-// So an explicitly provided mode is either understood or an error. The default
-// survives only where it is unambiguous: no -mode at all.
+// 因此显式提供的模式要么被理解，要么报错。默认值只在无歧义的地方保留：
+// 完全没给 -mode。
 func resolveMode(raw string, explicit, interactive bool, prompt func() (string, error)) (mode, notice string, err error) {
 	if explicit {
 		if m := canonicalMode(raw); m != "" {
@@ -1308,17 +1234,16 @@ func resolveMode(raw string, explicit, interactive bool, prompt func() (string, 
 		}
 		return "", "", invalidModeErr(raw)
 	}
-	// Nothing was asked for and nobody is there to ask. Announce the default
-	// rather than adopting it silently.
+	// 没有请求任何模式，也没有人可以问。通告默认值，而不是静默采用它。
 	if !interactive {
-		return "onprem", "No -mode given and stdin is not a terminal; using onprem.", nil
+		return "onprem", "未提供 -mode，且 stdin 不是终端；使用 onprem。", nil
 	}
 	answer, perr := prompt()
 	answer = strings.TrimSpace(answer)
 	if perr != nil && answer == "" {
-		return "", "", fmt.Errorf("reading mode: %w", perr)
+		return "", "", fmt.Errorf("读取模式失败：%w", perr)
 	}
-	// Enter at the prompt accepts the offered default; a typo does not.
+	// 在提示符处回车接受所提供的默认值；拼写错误则不行。
 	if answer == "" {
 		return "onprem", "", nil
 	}
@@ -1328,7 +1253,7 @@ func resolveMode(raw string, explicit, interactive bool, prompt func() (string, 
 	return "", "", invalidModeErr(answer)
 }
 
-// getQueriesDir maps the mode to the corresponding queries directory.
+// getQueriesDir 把 mode 映射到对应的 queries 目录。
 func getQueriesDir(mode string) (string, error) {
 	switch canonicalMode(mode) {
 	case "cloud":
@@ -1338,148 +1263,131 @@ func getQueriesDir(mode string) (string, error) {
 	case "gov":
 		return "./queries.gov", nil
 	}
-	// Unreachable once resolveMode has run — which is exactly why it must not
-	// guess. This used to fall back to ./queries.onprem, making it the second
-	// place an unrecognised mode could quietly become an unhashed collection.
-	return "", fmt.Errorf("unrecognised mode %q — cannot choose a queries directory", mode)
+	// resolveMode 运行后不可达——这正是它不得猜测的原因。这里过去会回退到
+	// ./queries.onprem，使其成为无法识别的模式悄悄变成未哈希采集的第二处。
+	return "", fmt.Errorf("无法识别的模式 %q——无法选择 queries 目录", mode)
 }
 
-// createArchiveWithTimestamp archives the run directory into
-// <output-dir>/<run-dir-name>.tar.gz, next to the directory it packs. It used
-// to write <run-dir-name>.tar.gz to the current directory: the run directory
-// is named by the second the run started, so two runs started in the same
-// second overwrote each other's archive even with different -output-dir
-// values, and the loss was silent.
+// createArchiveWithTimestamp 把运行目录归档为
+// <output-dir>/<run-dir-name>.tar.gz，放在它所打包的目录旁边。它过去会把
+// <run-dir-name>.tar.gz 写到当前目录：运行目录按运行启动的那一秒命名，因此
+// 同一秒启动的两次运行即使 -output-dir 不同也会互相覆盖归档，而且丢失是
+// 静默的。
 func createArchiveWithTimestamp(specificDir string) error {
 	archiveName := filepath.Clean(specificDir) + ".tar.gz"
-	// One directory: configuration/ now lives inside the run directory
-	// along with every other artefact, so there is nothing else to add.
+	// 一个目录：configuration/ 现在与其他所有产物一起位于运行目录内，
+	// 因此没有其他内容需要添加。
 	return internal.CreateArchive(archiveName, specificDir)
 }
 
-// resolveLocalCollector decides whether to run one of the two collectors
-// that read the LOCAL filesystem (host facts, server log files), returning
-// skip=true when it should not run.
+// resolveLocalCollector 决定是否运行两个读取本地文件系统的 collector
+// （host facts、服务器日志文件）之一，不应运行时返回 skip=true。
 //
-// The default is mode-dependent because these collectors describe the
-// machine the tool executes on:
+// 默认值随模式变化，因为这些 collector 描述的是工具所执行的机器：
 //
-//   - onprem — that machine IS the ClickHouse server, so collect (on).
-//   - cloud  — ClickHouse Cloud is managed and reached over the network, so
-//     the local /proc and /var/log describe the operator's laptop or
-//     bastion. Collecting them would put confidently wrong data in a
-//     support archive, which is worse than collecting nothing (off).
-//   - gov    — never, at any setting: hostnames, mount paths, process
-//     command lines and log bodies are exactly what gov hashing protects,
-//     and none of them can be hashed while staying useful.
+//   - onprem——那台机器就是 ClickHouse 服务器，因此采集（on）。
+//   - cloud——ClickHouse Cloud 是托管的、通过网络访问，因此本地 /proc 和
+//     /var/log 描述的是运维人员的笔记本或堡垒机。采集它们会把看似确定实则
+//     错误的数据放进支持归档，这比什么都不采集更糟（off）。
+//   - gov——任何设置下都绝不：主机名、挂载路径、进程命令行和日志正文正是
+//     gov 哈希要保护的内容，而它们一旦哈希就不再有用。
 //
-// "on" forces collection anyway (e.g. cloud mode against a self-managed
-// node), except in gov where the refusal is absolute.
+// "on" 仍会强制采集（例如 cloud 模式针对自管理节点），gov 除外，那里的
+// 拒绝是绝对的。
 func resolveLocalCollector(setting, mode, name string) (skip bool, err error) {
-	// Normalise the mode here as well as at the call site. The caller is
-	// expected to pass the post-getUserInput value, but this function
-	// gates a gov privacy guarantee — it must not depend on every future
-	// caller remembering that ("GOV" once slipped past the == "gov" check).
+	// 这里和调用点都规范化模式。调用方本应传入 getUserInput 之后的值，
+	// 但这个函数守卫着 gov 的隐私保证——它不能依赖每个未来的调用方都记得
+	// 这一点（"GOV" 曾绕过 == "gov" 检查）。
 	mode = strings.ToLower(strings.TrimSpace(mode))
 	switch strings.ToLower(strings.TrimSpace(setting)) {
 	case "off":
 		return true, nil
 	case "on":
 		if mode == "gov" {
-			return true, fmt.Errorf("--%s=on is not allowed in gov mode "+
-				"(host facts and log bodies contain identifiers that cannot be hashed)", name)
+			return true, fmt.Errorf("--%s=on 在 gov 模式下不允许 "+
+				"（host facts 和日志正文包含无法哈希的标识符）", name)
 		}
 		if mode == "cloud" {
-			fmt.Printf("Warning: --%s=on in cloud mode collects facts about the machine "+
-				"running this tool, not the managed ClickHouse nodes.\n", name)
+			fmt.Printf("警告：cloud 模式下 --%s=on 采集的是运行此工具的机器信息，"+
+				"而不是托管的 ClickHouse 节点。\n", name)
 		}
 		return false, nil
 	case "auto", "":
 		return mode != "onprem", nil
 	default:
-		return true, fmt.Errorf("--%s must be auto, on or off (got %q)", name, setting)
+		return true, fmt.Errorf("--%s 必须是 auto、on 或 off（实际为 %q）", name, setting)
 	}
 }
 
-// describeWindow renders the resolved --from / --to window for the
-// operator, spelling out which end fell back to the query's own default
-// so a half-specified window is not mistaken for a full one.
+// describeWindow 为运维人员渲染解析后的 --from / --to 窗口，明确说明哪一端
+// 回退到了查询自身的默认值，以免把只指定了一半的窗口误认为完整窗口。
 func describeWindow(from, to time.Time) string {
 	const layout = "2006-01-02 15:04:05 UTC"
 	switch {
 	case from.IsZero():
-		return "each query's own default start → " + to.UTC().Format(layout)
+		return "每个查询自己的默认起点 → " + to.UTC().Format(layout)
 	case to.IsZero():
-		return from.UTC().Format(layout) + " → now"
+		return from.UTC().Format(layout) + " → 当前时间"
 	default:
 		return from.UTC().Format(layout) + " → " + to.UTC().Format(layout)
 	}
 }
 
-// govWithholdsConfig reports whether configuration collection must be
-// withheld for this mode. Separate and mode-normalising for the same
-// reason as resolveLocalCollector: it gates a gov privacy guarantee, and
-// "-mode GOV" once slipped a collector past a bare == "gov" comparison.
+// govWithholdsConfig 报告该模式下是否必须暂缓配置采集。它单独存在并做模式
+// 规范化，理由与 resolveLocalCollector 相同：它守卫着 gov 的隐私保证，而
+// "-mode GOV" 曾让一个 collector 绕过裸的 == "gov" 比较。
 func govWithholdsConfig(mode string) bool {
 	return strings.ToLower(strings.TrimSpace(mode)) == "gov"
 }
 
-// cloudSkipsConfig reports whether cloud mode should skip configuration
-// collection: it does when no -config-dir was given, because the tool is
-// not running on the ClickHouse server and the default path would only
-// produce a "directory does not exist" notice. An explicit -config-dir is
-// honoured, the same opt-in that -host-info=on / -logs=on give the other
-// local-filesystem collectors in cloud mode. Normalises the mode itself
-// for the same reason resolveLocalCollector does.
+// cloudSkipsConfig 报告 cloud 模式是否应跳过配置采集：未给出 -config-dir 时
+// 应跳过，因为工具并非运行在 ClickHouse 服务器上，默认路径只会产生一条
+// “目录不存在”的提示。显式的 -config-dir 会被遵守，这与 cloud 模式下
+// -host-info=on / -logs=on 给其他本地文件系统 collector 的主动启用相同。
+// 它自身也做模式规范化，理由与 resolveLocalCollector 相同。
 func cloudSkipsConfig(mode, configDir string) bool {
 	return strings.ToLower(strings.TrimSpace(mode)) == "cloud" && strings.TrimSpace(configDir) == ""
 }
 
-// dashboardDecision reports whether to build dashboard.html, and why not when
-// the answer is no. Extracted from the call site purely so the gov refusal is
-// testable: it is a disclosure rule, and an inline switch is one careless
-// refactor away from silently shipping a gov dashboard.
+// dashboardDecision 报告是否构建 dashboard.html，并在答案为否时说明原因。
+// 从调用点抽出来纯粹是为了让 gov 拒绝可测试：这是一条披露规则，而内联的
+// switch 只差一次粗心的重构就会静默发送 gov dashboard。
 //
-// Gov mode NEVER gets a dashboard. Its panels are built in Go and select raw
-// identifiers — database and table names for up to 2000 tables, disk paths,
-// users, and server-generated text like last_exception and last_error_message —
-// which are exactly the values queries.gov/*.sql hashes. The file lands in the
-// same support-bound archive as those hashed results, so shipping it would
-// defeat the hashing. Hashing every panel is the follow-up that would restore
-// it; until then the answer is no.
+// gov 模式永远不会得到 dashboard。其面板在 Go 中构建，会选择原始标识符——
+// 最多 2000 个表的数据库和表名、磁盘路径、用户，以及 last_exception、
+// last_error_message 之类的服务器生成文本——正是 queries.gov/*.sql 哈希的
+// 那些值。该文件与那些哈希后的结果落在同一个要发送给支持的归档中，因此
+// 发送它会破坏哈希。对每个面板做哈希是恢复它的后续工作；在那之前答案是
+// 否。
 func dashboardDecision(skipDashboard bool, mode string) (generate bool, skipReason string) {
-	// An explicit --skip-dashboard is reported first: a user who asked to skip
-	// it should be told their flag was honoured, not that gov policy withheld
-	// it. Same outcome either way.
+	// 先报告显式的 --skip-dashboard：要求跳过它的用户应当被告知其标志已
+	// 被遵守，而不是 gov 策略暂缓了它。两种情况下结果相同。
 	if skipDashboard {
-		return false, "Skipping HTML dashboard (--skip-dashboard)."
+		return false, "跳过 HTML dashboard（--skip-dashboard）。"
 	}
-	// Normalise here as well as at the call site, for the same reason
-	// resolveLocalCollector does: this gates a disclosure rule and must not
-	// depend on every future caller having already lowercased the mode
-	// ("GOV" once slipped past a == "gov" check elsewhere in this file).
+	// 这里和调用点都做规范化，理由与 resolveLocalCollector 相同：这守卫着
+	// 一条披露规则，不能依赖每个未来的调用方都已把模式转为小写
+	//（"GOV" 曾在本文件其他地方绕过 == "gov" 检查）。
 	if strings.ToLower(strings.TrimSpace(mode)) == "gov" {
-		return false, "Skipping HTML dashboard in gov mode: its panels select raw identifiers " +
-			"(table names, disk paths, users, exception text) that cannot be hashed, and the " +
-			"dashboard is part of the support-bound archive."
+		return false, "gov 模式下跳过 HTML dashboard：其面板选择无法哈希的原始标识符" +
+			"（表名、磁盘路径、用户、异常文本），而 dashboard 属于要发送给支持的归档包。"
 	}
 	return true, ""
 }
 
-// Outcomes of the pre-collection visibility probe (SELECT count() FROM
-// system.databases WHERE name NOT IN (system, …)).
+// 采集前可见性探测的结果
+// （SELECT count() FROM system.databases WHERE name NOT IN (system, …)）。
 type visibilityVerdict int
 
 const (
-	visibilityOK      visibilityVerdict = iota // at least one user database is visible
-	visibilityNone                             // query ran, count is 0: SELECT on system.* without the SHOW grants
-	visibilityDenied                           // the server refused the query itself with Code: 497 / ACCESS_DENIED
-	visibilityUnknown                          // any other error: network, timeout, a server that could not parse it
+	visibilityOK      visibilityVerdict = iota // 至少有一个用户数据库可见
+	visibilityNone                             // 查询已执行，count 为 0：对 system.* 有 SELECT 但无 SHOW 授权
+	visibilityDenied                           // 服务器以 Code: 497 / ACCESS_DENIED 拒绝了查询本身
+	visibilityUnknown                          // 其他任何错误：网络、超时、无法解析该查询的服务器
 )
 
-// databaseVisibilityVerdict classifies the probe. Only an explicit access
-// denial is a grants problem; every other error means the check could not be
-// made, which is a different message with different advice.
+// databaseVisibilityVerdict 对探测结果进行分类。只有显式的访问拒绝才是授权
+// 问题；其他任何错误都意味着无法完成检查，那是另一条消息、另一套建议。
 func databaseVisibilityVerdict(count string, err error) visibilityVerdict {
 	if err != nil {
 		if isAccessDenied(err) {
@@ -1493,8 +1401,8 @@ func databaseVisibilityVerdict(count string, err error) visibilityVerdict {
 	return visibilityOK
 }
 
-// isAccessDenied recognises ClickHouse's privilege error in the HTTP client's
-// error text: "Code: 497. DB::Exception: …: Not enough privileges. … (ACCESS_DENIED)".
+// isAccessDenied 在 HTTP 客户端的错误文本中识别 ClickHouse 的权限错误：
+// "Code: 497. DB::Exception: …: Not enough privileges. … (ACCESS_DENIED)"。
 func isAccessDenied(err error) bool {
 	if err == nil {
 		return false
@@ -1503,17 +1411,16 @@ func isAccessDenied(err error) bool {
 	return strings.Contains(msg, "Code: 497") || strings.Contains(msg, "ACCESS_DENIED")
 }
 
-// collectorStatus says, per collector without a file, why: the alert checks
-// report "not applicable: skipped (reason)" instead of a clean result.
+// collectorStatus 按没有文件的 collector 说明原因：alert 检查会报告
+// "not applicable: skipped (reason)"，而不是干净的结果。
 func collectorStatus(rec *runlog.Recorder) map[string]bundle.Status {
 	out := map[string]bundle.Status{}
 	for _, e := range rec.Entries() {
 		if e.Stage != "collector" || (e.Status != "skipped" && e.Status != "failed") {
 			continue
 		}
-		// A table this server does not have (text_log disabled, crash_log on
-		// a server that never crashed) is not a failure: "not collected",
-		// like a collector gated by version.
+		// 本服务器没有的表（text_log 被禁用、crash_log 在从未崩溃过的
+		// 服务器上）不是失败：应记为“未采集”，与受版本门控的 collector 一样。
 		if e.Status == "failed" && strings.Contains(e.Error, "UNKNOWN_TABLE") {
 			continue
 		}

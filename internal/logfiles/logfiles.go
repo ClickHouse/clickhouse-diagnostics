@@ -1,17 +1,14 @@
-// Package logfiles copies ClickHouse's on-disk server logs into the
-// diagnostic bundle.
+// Package logfiles 将 ClickHouse 的磁盘服务器日志复制到诊断 bundle 中。
 //
-// The useful part is not the copying but the DISCOVERY: rather than
-// assuming /var/log/clickhouse-server, it reads the server configuration
-// and follows the <log>/<errorlog> paths actually in effect. Operators
-// relocate logs far more often than they change anything else, and a bundle
-// that silently contains no logs because they live on a data volume is the
-// failure this avoids.
+// 有用的部分不是复制，而是发现：它不假设 /var/log/clickhouse-server，
+// 而是读取服务器配置并跟随实际生效的 <log>/<errorlog> 路径。
+// 运维人员迁移日志位置的频率远高于改动其他任何东西，
+// 而一个因为日志位于数据卷上就静默不含日志的 bundle，
+// 正是这里要避免的失败。
 //
-// Not collected in gov mode: log lines contain raw queries, table names and
-// file paths as free text. That cannot be hashed without destroying the
-// thing that makes a log useful, which is the same reasoning that withholds
-// the query-analysis bundle.
+// gov 模式下不采集：日志行以自由文本形式包含原始查询、表名和
+// 文件路径。哈希这些内容会摧毁日志之所以有用的东西，
+// 这与不提供查询分析 bundle 的理由相同。
 package logfiles
 
 import (
@@ -27,31 +24,31 @@ import (
 	"clickhouse-diagnostic/internal/config"
 )
 
-// DefaultLogDir is the packaged location, used when configuration yields
-// nothing (or can't be read for permission reasons).
+// DefaultLogDir 是打包默认位置，在配置未给出任何结果
+// （或因权限原因无法读取）时使用。
 const DefaultLogDir = "/var/log/clickhouse-server"
 
-// reLogPath matches <log> and <errorlog> elements in the server config.
-// Deliberately a targeted regex rather than a full XML parse: ClickHouse
-// configs use includes, substitutions and mixed XML/YAML, and we only need
-// two well-known leaf elements — a partial parse must not fail the run.
+// reLogPath 匹配服务器配置中的 <log> 和 <errorlog> 元素。
+// 特意使用定向正则而不是完整 XML 解析：ClickHouse
+// 配置使用 include、变量替换和 XML/YAML 混合，而我们只需要
+// 两个众所周知的叶子元素——部分解析绝不能导致运行失败。
 var reLogPath = regexp.MustCompile(`(?is)<(log|errorlog)>\s*([^<\s][^<]*?)\s*</(?:log|errorlog)>`)
 
-// Options controls collection. Zero values are safe defaults.
+// Options 控制采集。零值是安全的默认值。
 type Options struct {
-	// Dir, when set, is used verbatim and discovery is skipped.
+	// Dir 设置时按原样使用，并跳过发现流程。
 	Dir string
-	// ConfigDir is searched for <log>/<errorlog> paths when Dir is empty.
+	// Dir 为空时，在 ConfigDir 中搜索 <log>/<errorlog> 路径。
 	ConfigDir string
-	// IncludeArchives also copies rotated *.gz logs (off by default: they
-	// are frequently larger than everything else in the bundle combined).
+	// IncludeArchives 同时复制轮转的 *.gz 日志（默认关闭：
+	// 它们经常比 bundle 中其他所有内容加起来还大）。
 	IncludeArchives bool
-	// MaxBytesPerFile caps each copied file. Larger files are TAIL-copied —
-	// the recent end is what explains a current incident.
+	// MaxBytesPerFile 限制每个被复制的文件。更大的文件会做尾部复制——
+	// 近期的一端才能解释当前的故障。
 	MaxBytesPerFile int64
 }
 
-// Result reports what happened, so the caller can print an honest summary.
+// Result 报告发生了什么，以便调用方打印诚实的摘要。
 type Result struct {
 	Dirs       []string
 	Copied     []string
@@ -60,11 +57,11 @@ type Result struct {
 	Notes      []string
 }
 
-const defaultMaxBytes = 50 << 20 // 50 MiB per file
+const defaultMaxBytes = 50 << 20 // 每个文件 50 MiB
 
-// Collect copies logs into <destDir>/logs/ and returns what it did.
-// Never returns an error for "nothing found" — a missing log directory is a
-// normal condition when running remotely, and is reported as a note.
+// Collect 将日志复制到 <destDir>/logs/ 并返回其行为。
+// 对“什么也没找到”绝不返回错误——远程运行时日志目录缺失是
+// 正常情况，会以备注形式报告。
 func Collect(destDir string, opts Options) (*Result, error) {
 	if opts.MaxBytesPerFile <= 0 {
 		opts.MaxBytesPerFile = defaultMaxBytes
@@ -81,7 +78,7 @@ func Collect(destDir string, opts Options) (*Result, error) {
 
 	outDir := filepath.Join(destDir, "logs")
 	if err := os.MkdirAll(outDir, 0750); err != nil {
-		return res, fmt.Errorf("create logs output dir: %w", err)
+		return res, fmt.Errorf("创建日志输出目录失败：%w", err)
 	}
 
 	for _, dir := range dirs {
@@ -94,20 +91,20 @@ func Collect(destDir string, opts Options) (*Result, error) {
 			if e.IsDir() || !wanted(e.Name(), opts.IncludeArchives) {
 				continue
 			}
-			// Regular files only. copyTail would follow a symlink, and the
-			// log directory is typically writable by the clickhouse service
-			// account while this tool often runs as root — a planted
-			// `evil.log -> /etc/shadow` must not end up in a bundle that
-			// gets shared with support. Refusing (with a note) rather than
-			// resolving keeps the decision visible in the output.
+			// 仅限普通文件。copyTail 会跟随符号链接，而
+			// 日志目录通常可由 clickhouse 服务账号写入，同时本工具
+			// 常以 root 运行——一个植入的
+			// `evil.log -> /etc/shadow` 绝不能进入与支持人员共享的
+			// bundle。拒绝（并记录备注）而不是解析，
+			// 可以让这一决定在输出中可见。
 			if !e.Type().IsRegular() {
 				res.Notes = append(res.Notes,
 					fmt.Sprintf("%s: skipped (not a regular file)", filepath.Join(dir, e.Name())))
 				continue
 			}
 			src := filepath.Join(dir, e.Name())
-			// Flatten into one directory but keep provenance when the same
-			// filename appears in two log dirs.
+			// 压平到一个目录，但同一文件名出现在两个日志目录时
+			// 保留来源。
 			dst := filepath.Join(outDir, uniqueName(outDir, e.Name()))
 			n, truncated, err := copyTail(src, dst, opts.MaxBytesPerFile)
 			if err != nil {
@@ -125,9 +122,9 @@ func Collect(destDir string, opts Options) (*Result, error) {
 	return res, nil
 }
 
-// DiscoverDirs resolves which directories to read, in precedence order:
-// explicit flag, then paths declared in the configuration, then the
-// packaged default. Results are de-duplicated and existence-checked.
+// DiscoverDirs 按优先顺序解析要读取的目录：
+// 显式 flag，然后是配置中声明的路径，最后是
+// 打包默认值。结果会去重并做存在性检查。
 func DiscoverDirs(opts Options, res *Result) []string {
 	if opts.Dir != "" {
 		if isDir(opts.Dir) {
@@ -158,18 +155,18 @@ func DiscoverDirs(opts Options, res *Result) []string {
 	return dirs
 }
 
-// LogPathsFromConfig scans the configuration directory (and the adjacent
-// main config.xml) for <log>/<errorlog> values.
+// LogPathsFromConfig 扫描配置目录（以及相邻的
+// 主配置 config.xml）中的 <log>/<errorlog> 值。
 func LogPathsFromConfig(configDir string) []string {
 	if configDir == "" {
 		return nil
 	}
 	var candidates []string
 	candidates = append(candidates, configDir)
-	// config.d/ sits beside config.xml, so the parent is worth scanning —
-	// but ONLY for a *.d directory. For "-config-dir /etc/clickhouse-server"
-	// the parent is /etc, and any unrelated /etc/*.xml with a <log> element
-	// would volunteer a directory whose files then land in the bundle.
+	// config.d/ 位于 config.xml 旁边，因此值得扫描父目录——
+	// 但仅限 *.d 目录。对于 "-config-dir /etc/clickhouse-server"，
+	// 父目录是 /etc，任何无关的 /etc/*.xml 只要带有 <log> 元素，
+	// 就会提供一个目录，其中的文件随后会进入 bundle。
 	if base := filepath.Base(filepath.Clean(configDir)); strings.HasSuffix(base, ".d") {
 		if parent := filepath.Dir(filepath.Clean(configDir)); parent != "." {
 			candidates = append(candidates, parent)
@@ -195,16 +192,15 @@ func LogPathsFromConfig(configDir string) []string {
 			if err != nil {
 				continue
 			}
-			// Commented-out examples are not configuration: a <log> path
-			// inside a comment would otherwise put a directory the operator
-			// never configured on the list of places to copy files from.
-			// Not observably wrong on today's stock config.xml, whose real
-			// <log>/<errorlog> are live, but the same class as the
-			// <zookeeper> example that was.
+			// 注释掉的示例不是配置：否则注释中的 <log> 路径
+			// 会把运维人员从未配置过的目录列入要复制文件的
+			// 位置清单。在当今自带的 config.xml 上并无可观察到的错误，
+			// 因为其中真实的 <log>/<errorlog> 是生效的，
+			// 但这与曾经的 <zookeeper> 示例属于同一类问题。
 			for _, m := range reLogPath.FindAllStringSubmatch(string(config.StripComments(blob)), -1) {
 				p := strings.TrimSpace(m[2])
-				// Skip unresolved substitutions like <log from_env="..."/>
-				// and relative paths we can't anchor reliably.
+				// 跳过未解析的变量替换，如 <log from_env="..."/>
+				// 以及无法可靠定位的相对路径。
 				if p == "" || strings.Contains(p, "{") || !filepath.IsAbs(p) || seen[p] {
 					continue
 				}
@@ -230,8 +226,8 @@ func isDir(p string) bool {
 	return err == nil && fi.IsDir()
 }
 
-// uniqueName avoids clobbering when two log directories hold the same
-// filename (e.g. two shards' clickhouse-server.log).
+// uniqueName 在两个日志目录含有相同文件名时避免覆盖
+// （例如两个 shard 的 clickhouse-server.log）。
 func uniqueName(dir, name string) string {
 	if _, err := os.Stat(filepath.Join(dir, name)); os.IsNotExist(err) {
 		return name
@@ -247,17 +243,17 @@ func uniqueName(dir, name string) string {
 	return name
 }
 
-// copyTail copies src to dst, keeping only the last max bytes of oversized
-// files. It reports how many bytes were written and whether it truncated.
+// copyTail 将 src 复制到 dst，对于超大文件只保留最后 max 字节。
+// 它报告写入了多少字节以及是否发生截断。
 //
-// Truncation keeps the END of the file because incidents are diagnosed from
-// recent lines; a header records that data was dropped so nobody reads the
-// first surviving line as the start of the log.
+// 截断保留文件的末尾，因为故障诊断依据的是近期日志行；
+// 头部会记录数据已被丢弃，以免有人把第一条幸存的行
+// 当作日志的开头。
 func copyTail(src, dst string, max int64) (written int64, truncated bool, err error) {
-	// O_NOFOLLOW (unix) closes the race left by the directory-scan check:
-	// the same threat model that motivated refusing symlinks — a log dir
-	// writable by the service account, the tool running as root — permits
-	// swapping a symlink in between the scan and this open.
+	// O_NOFOLLOW（unix）关闭目录扫描检查留下的竞态：
+	// 促使我们拒绝符号链接的同一威胁模型——日志目录可由服务账号
+	// 写入、工具以 root 运行——允许在扫描与本次 open 之间
+	// 替换符号链接。
 	in, err := openNoFollow(src)
 	if err != nil {
 		return 0, false, err
@@ -268,12 +264,12 @@ func copyTail(src, dst string, max int64) (written int64, truncated bool, err er
 	if err != nil {
 		return 0, false, err
 	}
-	// fstat on the open fd — unraceable. Catches a FIFO, device or
-	// directory swapped in; a symlink is already refused by openNoFollow.
-	// A HARDLINK to a sensitive file is a regular file and passes both
-	// checks — Linux fs.protected_hardlinks=1 (the default) prevents an
-	// unprivileged user creating one, but that is a default, not a
-	// guarantee this code can provide.
+	// 对已打开的 fd 做 fstat——无竞态。能捕获被换入的
+	// FIFO、设备或目录；符号链接已被 openNoFollow 拒绝。
+	// 指向敏感文件的硬链接是普通文件，会通过两项
+	// 检查——Linux fs.protected_hardlinks=1（默认值）阻止
+	// 非特权用户创建这种链接，但那是默认值，不是
+	// 本代码能提供的保证。
 	if !fi.Mode().IsRegular() {
 		return 0, false, fmt.Errorf("%s: not a regular file", src)
 	}
@@ -286,17 +282,17 @@ func copyTail(src, dst string, max int64) (written int64, truncated bool, err er
 		if cerr := out.Close(); err == nil {
 			err = cerr
 		}
-		// A half-written file would be archived while appearing in neither
-		// Copied nor TotalBytes; remove it so failure is visible as absence
-		// plus a note, not as a silently short log.
+		// 半写入的文件会被归档，却既不出现于
+		// Copied 也不计入 TotalBytes；删除它，让失败表现为缺失
+		// 加一条备注，而不是一份静默变短的日志。
 		if err != nil {
 			os.Remove(dst)
 		}
 	}()
 
-	// Copy a SNAPSHOT: limit to the size we measured, so an actively
-	// written log cannot push the copy past the cap (or past what the
-	// truncation header claims).
+	// 复制一个快照：限制在已测量的大小内，这样正在被
+	// 写入的日志不会让副本超过上限（也不会超过截断头部
+	// 所声称的大小）。
 	limit := fi.Size()
 	if fi.Size() > max {
 		truncated = true
@@ -304,14 +300,14 @@ func copyTail(src, dst string, max int64) (written int64, truncated bool, err er
 		if _, err := in.Seek(start, io.SeekStart); err != nil {
 			return 0, true, err
 		}
-		// Drop the partial first line BEFORE writing the header, so the
-		// header states the exact number of payload bytes kept rather
-		// than the nominal cap (the alignment shaves up to one line off).
+		// 在写入头部之前丢弃不完整的首行，让头部
+		// 报告保留的精确有效载荷字节数，而不是名义上的
+		// 上限（行对齐最多会削掉一行）。
 		skip, err := lengthToNewline(in)
 		if err != nil {
 			return 0, true, err
 		}
-		// lengthToNewline read ahead; reposition to the line boundary.
+		// lengthToNewline 已向前读取；重新定位到行边界。
 		if _, err := in.Seek(start+skip, io.SeekStart); err != nil {
 			return 0, true, err
 		}
@@ -326,17 +322,16 @@ func copyTail(src, dst string, max int64) (written int64, truncated bool, err er
 		written += int64(hn)
 	}
 
-	// written includes the truncation header: it reports bytes produced in
-	// the bundle (what Result.TotalBytes sums), not bytes read from src.
+	// written 包含截断头部：它报告的是 bundle 中产出的字节数
+	// （Result.TotalBytes 所汇总的），而不是从 src 读取的字节数。
 	n, err := io.Copy(out, io.LimitReader(in, limit))
 	return written + n, truncated, err
 }
 
-// lengthToNewline returns how many bytes lie between the current position
-// and the end of the current line (newline included), scanning at most
-// 64 KiB in buffered chunks. If no newline appears within the bound (a
-// binary or single-line file), the whole bound is skipped. The caller must
-// re-Seek afterwards: reads here advance the fd past the answer.
+// lengthToNewline 返回当前位置与当前行末尾之间有多少字节
+// （包含换行符），最多以缓冲块扫描 64 KiB。如果界限内没有换行
+// （二进制或单行文件），则跳过整个界限。调用方之后必须
+// 重新 Seek：这里的读取会让 fd 越过答案位置。
 func lengthToNewline(f *os.File) (int64, error) {
 	const bound = 64 << 10
 	buf := make([]byte, 8<<10)
@@ -351,7 +346,7 @@ func lengthToNewline(f *os.File) (int64, error) {
 		}
 		if err != nil {
 			if err == io.EOF {
-				return consumed, nil // EOF: nothing left to align
+				return consumed, nil // EOF：没有需要对齐的内容
 			}
 			return consumed, err
 		}
@@ -359,20 +354,20 @@ func lengthToNewline(f *os.File) (int64, error) {
 	return bound, nil
 }
 
-// Summary renders a short operator-facing report.
+// Summary 渲染一份面向运维人员的简短报告。
 func (r *Result) Summary() string {
 	var b strings.Builder
 	if len(r.Copied) == 0 {
-		b.WriteString("  no log files collected\n")
+		b.WriteString("  未采集到日志文件\n")
 	} else {
-		fmt.Fprintf(&b, "  collected %d log file(s), %.1f MiB, from: %s\n",
+		fmt.Fprintf(&b, "  已采集 %d 个日志文件，共 %.1f MiB，来自：%s\n",
 			len(r.Copied), float64(r.TotalBytes)/(1<<20), strings.Join(r.Dirs, ", "))
 		if len(r.Truncated) > 0 {
-			fmt.Fprintf(&b, "  tail-truncated (size cap): %s\n", strings.Join(r.Truncated, ", "))
+			fmt.Fprintf(&b, "  尾部截断（受大小上限限制）：%s\n", strings.Join(r.Truncated, ", "))
 		}
 	}
 	for _, n := range r.Notes {
-		fmt.Fprintf(&b, "  note: %s\n", n)
+		fmt.Fprintf(&b, "  备注：%s\n", n)
 	}
 	return b.String()
 }

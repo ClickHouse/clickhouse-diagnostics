@@ -1,14 +1,14 @@
-# Running the tool
+# 运行工具
 
-*Moved from the main [README](../README.md), which keeps a short version of each section.*
+*已从主 [README](../README.md) 移出，README 中保留每一节的简短版本。*
 
-## Usage
+## 用法
 
-> These examples use `./clickhouse-diagnostic`. If you built via `make` the binary is at `./bin/clickhouse-diagnostic` — invoke that path or symlink it. See [Installation](building.md#installation) if you don't have a binary yet.
+> 这些示例使用 `./clickhouse-diagnostic`。若你通过 `make` 构建，二进制位于 `./bin/clickhouse-diagnostic` — 请调用该路径或为它建立符号链接。若还没有二进制，见[安装](building.md#安装)。
 
-### Required grants
+### 必需的 grant（授权）
 
-The tool is read-only and never reads customer tables — every query reads a `system` table. That bounds what it *queries*, not what reaches the bundle: some `system` tables describe customer data in free text (query text, exception messages, log lines), so see [Gov mode and hashed names](modes.md#gov-mode-and-hashed-names) for what is withheld or hashed when that matters. Two grants are enough for `onprem` and `gov` mode:
+工具是只读的，从不读取客户表 — 每条查询都读取 `system` 表。这只约束了它*查询*什么，而非什么会进入 bundle（诊断包）：部分 `system` 表会以自由文本描述客户数据（查询文本、异常消息、日志行），因此当这一点很重要时，请参见 [Gov 模式与名称哈希](modes.md#gov-模式与名称哈希)了解哪些内容会被扣留或哈希。`onprem` 与 `gov` 模式只需两个 grant：
 
 ```sql
 CREATE USER sys_read_only IDENTIFIED WITH sha256_password BY '<password>';
@@ -24,38 +24,38 @@ GRANT SELECT ON system.*                               TO sys_read_only;
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
-| Grant | Why it is needed |
+| Grant | 为什么需要 |
 |---|---|
-| `SELECT ON system.*` | Every diagnostic query, alert rule and dashboard panel reads a `system` table. Nothing outside `system` is ever selected. |
-| `SHOW DATABASES, SHOW TABLES, SHOW COLUMNS ON *.*` | ClickHouse filters the object-listing system tables down to what the user holds *some* privilege on. Without `SHOW DATABASES`/`SHOW TABLES` the tool sees only part of the cluster; without `SHOW COLUMNS`, `system.columns` comes back with **no rows for your databases** while every other file looks normal. |
+| `SELECT ON system.*` | 每条诊断查询、alert rule（告警规则）与 dashboard（仪表盘）面板都读取 `system` 表。`system` 之外的对象永远不会被选中。 |
+| `SHOW DATABASES, SHOW TABLES, SHOW COLUMNS ON *.*` | ClickHouse 会把对象列举类的 `system` 表过滤成用户持有*某种*权限的部分。缺少 `SHOW DATABASES`/`SHOW TABLES` 时，工具只能看到集群的一部分；缺少 `SHOW COLUMNS` 时，`system.columns` 会返回**你的数据库没有任何行**，而其他每个文件看起来都正常。 |
 
-> **Do not substitute `SELECT` on the data databases.** `GRANT SELECT ON <db>.*` also populates the listing tables, and collects exactly the same bundle — measured on 26.2.19.43, `system.tables` 2, `system.columns` 5, `system.databases` 2, `system.parts` 1 under either grant set — but it hands the diagnostic user read access to customer data, which the `SHOW` grants do not (a `SELECT` against a user table is refused with 497 under them).
+> **不要用数据数据库上的 `SELECT` 来替代。** `GRANT SELECT ON <db>.*` 同样能填充那些列举表，收集到的 bundle 完全一样 — 在 26.2.19.43 上测得，两种 grant 组合下 `system.tables` 为 2、`system.columns` 为 5、`system.databases` 为 2、`system.parts` 为 1 — 但它把客户数据的读权限交给了诊断用户，而 `SHOW` grant 不会（在 `SHOW` grant 下对用户表执行 `SELECT` 会被 497 拒绝）。
 
-> **A missing `SHOW` grant does not produce an error — it silently truncates the results.** Every query still reports success; the bundle just describes a fraction of the server. Measured on a test instance with one user database:
+> **缺少 `SHOW` grant 不会报错 — 它会静默地截断结果。** 每条查询仍然报告成功；bundle 只是描述了服务器的一小部分。在只有一个用户数据库的测试实例上测得：
 >
-> | Table | With the grant | Without it |
+> | 表 | 有该 grant | 没有该 grant |
 > |---|---|---|
 > | `system.tables` | 141 | 112 |
 > | `system.databases` | 5 | 1 |
 > | `system.columns` | 3258 | 2520 |
 > | `system.parts` | 102 | 101 |
 >
-> This is the failure mode to watch for: a bundle that looks complete but is missing the customer's own tables. If `system.databases` contains only `system`, the `SHOW` grant is missing — the tool now prints a warning at startup when it can see no database outside `system`, but an older binary will not.
+> 这就是要警惕的失败模式：一个看起来完整、却缺少客户自有表的 bundle。若 `system.databases` 中只有 `system`，说明缺少 `SHOW` grant — 工具现在会在启动时发现 `system` 之外没有任何数据库时打印警告，但较旧的二进制不会。
 >
-> With **neither** grant the run still completes: the protected system tables fail with `Code: 497 … Not enough privileges` (visible in `execution_log.txt`) while `system.tables`, `system.columns` and `system.databases` come back as **empty files** rather than errors, so the archive is a few hundred KB that describes nothing. Check the archive size against another node before sending it.
+> **两个** grant 都缺时，运行仍会完成：受保护的 system 表以 `Code: 497 … Not enough privileges` 失败（可在 `execution_log.txt` 中看到），而 `system.tables`、`system.columns` 和 `system.databases` 返回的是**空文件**而非错误，因此归档只有几百 KB，什么都描述不了。发送前请与其他节点的归档大小对比。
 
-Neither grant exposes customer data: `SHOW` reveals object *names* and metadata only, and `SELECT` is scoped to `system`.
+两个 grant 都不会暴露客户数据：`SHOW` 只揭示对象*名称*与元数据，而 `SELECT` 被限定在 `system` 上。
 
-#### Cloud mode needs two more
+#### cloud 模式还需要两个
 
-`cloud` mode wraps its queries in `clusterAllReplicas(...)` so results span every replica rather than only the node you connected to. Every request runs with `skip_unavailable_shards = 1`: a replica that is down is left out instead of failing every per-replica collector, and `system.replicas_answered` in the bundle says which replicas did not answer. Distributed execution needs two further grants:
+`cloud` 模式把查询包进 `clusterAllReplicas(...)`，使结果覆盖每个 replica（副本），而不只是你连接的那个节点。每个请求都以 `skip_unavailable_shards = 1` 运行：下线的 replica 会被略过，而不是让每个按 replica 的 collector（采集器）都失败，bundle 中的 `system.replicas_answered` 会说明哪些 replica 没有应答。分布式执行需要另外两个 grant：
 
 ```sql
 GRANT REMOTE                ON *.* TO sys_read_only;
 GRANT CREATE TEMPORARY TABLE ON *.* TO sys_read_only;
 ```
 
-So the full set for cloud is:
+因此 cloud 的完整集合是：
 
 ```
 ┌─GRANTS FOR sys_read_only────────────────────────────────────────────────────────────────────────────────┐
@@ -64,7 +64,7 @@ So the full set for cloud is:
 └─────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-Unlike the `SHOW` grant, these fail loudly rather than truncating:
+与 `SHOW` grant 不同，这些缺失时会明确报错，而不是截断：
 
 ```
 Code: 497. DB::Exception: Not enough privileges. To execute this query,
@@ -74,156 +74,155 @@ Code: 497. DB::Exception: Not enough privileges. To execute this query,
 it's necessary to have the grant CREATE TEMPORARY TABLE ON *.*. (ACCESS_DENIED)
 ```
 
-`onprem` and `gov` need neither — verified by revoking both and re-running (21/21 and 19/19 queries, 0 errors).
+`onprem` 与 `gov` 都不需要 — 通过撤销两者并重新运行已验证（分别为 21/21 与 19/19 条查询，0 错误）。
 
-#### What grants do *not* cover
+#### grant *不*覆盖的内容
 
-Config collection, `host_info.json` and `logs/` read the **local filesystem**, not the database, so they depend on OS permissions instead: read access to `/etc/clickhouse-server/`, `/var/log/clickhouse-server/` and `/proc`. See [Host facts and server logs](bundle.md#host-facts-and-server-logs).
+配置收集、`host_info.json` 和 `logs/` 读取的是**本地文件系统**，而非数据库，因此它们依赖的是操作系统权限：对 `/etc/clickhouse-server/`、`/var/log/clickhouse-server/` 和 `/proc` 的读权限。见[主机信息与服务器日志](bundle.md#host-facts主机信息与服务端日志)。
 
-### Interactive run
+### 交互式运行
 
 ```bash
 ./clickhouse-diagnostic
 ```
 
-You will be prompted for any value not supplied on the command line:
+命令行未提供的任何值都会被提示输入：
 
-| Prompt | Default |
+| 提示 | 默认值 |
 |---|---|
-| Protocol (http/https) | `http` |
-| ClickHouse host | `localhost` |
-| ClickHouse port | `8123` (http) / `8443` (https) |
-| Username | _empty_ |
-| Password (hidden) | _empty_ |
-| Mode (cloud/onprem/gov) | `onprem` — only when `-mode` is absent entirely; see below |
-| Config directory | `/etc/clickhouse-server/config.d/` — `onprem` only; `cloud` and `gov` do not ask (see below) |
-| Gov-mode salt (hidden, `gov` mode only) | _empty_ |
+| 协议（http/https） | `http` |
+| ClickHouse 主机 | `localhost` |
+| ClickHouse 端口 | `8123`（http）/ `8443`（https） |
+| 用户名 | _空_ |
+| 密码（隐藏输入） | _空_ |
+| 模式（cloud/onprem/gov） | `onprem` — 仅当完全没有 `-mode` 时；见下文 |
+| 配置目录 | `/etc/clickhouse-server/config.d/` — 仅 `onprem`；`cloud` 与 `gov` 不会询问（见下文） |
+| Gov 模式 salt（隐藏输入，仅 `gov` 模式） | _空_ |
 
-#### How `-mode` is resolved
+#### `-mode` 如何解析
 
-`onprem` is the least protective of the three modes, so the tool never *guesses* it. A `-mode` value it cannot parse is a hard error with a non-zero exit — it is not rounded down to `onprem`, because a mistyped `-mode gov` would then collect unhashed database and table names from a run that asked for hashing, and in a scripted collection nobody reads the warning:
+`onprem` 是三种模式中保护性最弱的，所以工具绝不会*猜测*它。无法解析的 `-mode` 值是硬错误并以非零码退出 — 它不会被向下归为 `onprem`，否则拼错的 `-mode gov` 会在一个要求哈希的运行中收集未哈希的数据库名与表名，而在脚本化采集中没有人会读那条警告：
 
 ```
 $ clickhouse-diagnostic -mode govv ...
-Error: invalid mode "govv" — choose cloud, onprem, gov; did you mean "gov"?
+模式 "govv" 无效——请选择 cloud, onprem, gov；你是指 "gov" 吗？
 $ echo $?
 1
 ```
 
-The `onprem` default applies only when `-mode` is absent altogether. On a terminal you are prompted and Enter accepts it; with stdin closed the default is used and announced:
+`onprem` 默认值只在完全没有 `-mode` 时生效。在终端中你会被提示，按 Enter 即接受；当 stdin 关闭时，会使用默认值并说明：
 
 ```
 No -mode given and stdin is not a terminal; using onprem.
 ```
 
-Values are trimmed and lower-cased, and these spellings are accepted:
+值会被去除空白并转为小写，且接受以下拼写：
 
-| Mode | Also accepted |
+| 模式 | 另被接受 |
 |---|---|
-| `cloud` | `ch-cloud`, `clickhouse-cloud` |
-| `onprem` | `on-prem`, `on_prem`, `on-premise(s)`, `onpremise(s)`, `self-hosted`, `selfhosted`, `self_hosted` |
-| `gov` | *nothing* — the protective mode takes no alias, so a near-miss is rejected rather than resolved by guesswork |
+| `cloud` | `ch-cloud`、`clickhouse-cloud` |
+| `onprem` | `on-prem`、`on_prem`、`on-premise(s)`、`onpremise(s)`、`self-hosted`、`selfhosted`、`self_hosted` |
+| `gov` | *无* — 保护性模式不接受别名，因此近似拼写会被拒绝，而不是靠猜测解析 |
 
-### Command-line flags
+### 命令行 flag
 
-Run `./clickhouse-diagnostic -help` to see the full list. Current flags:
+运行 `./clickhouse-diagnostic -help` 查看完整列表。当前 flag：
 
 ```
--host string           ClickHouse Host
--port string           ClickHouse Port
--user string           Username
--password string       Password (not recommended for security reasons)
--protocol string       Protocol (http or https)
--mode string           Query mode (cloud, onprem, gov) (default "onprem")
--output-dir string     Directory for results output (default "./clickhouse_results")
--config-dir string     ClickHouse config directory to collect
-                       (default: /etc/clickhouse-server/config.d/)
--alerts-dir string     Directory containing alert YAML rule files (default "./alerts")
--salt string           Gov-mode hashing salt (8–64 alphanumeric chars;
-                       prompts interactively if empty; gov mode only)
--query-id string       Run query analysis focused on this query_id (UUID).
-                       See "Query analysis mode" below.
+-host string           ClickHouse 主机
+-port string           ClickHouse 端口
+-user string           用户名
+-password string       密码（出于安全原因不推荐）
+-protocol string       协议（http 或 https）
+-mode string           查询模式（cloud、onprem、gov）（默认 "onprem"）
+-output-dir string     结果输出目录（默认 "./clickhouse_results"）
+-config-dir string     要采集的 ClickHouse 配置目录
+                       （默认：/etc/clickhouse-server/config.d/）
+-alerts-dir string     包含 alert YAML 规则文件的目录（默认 "./alerts"）
+-salt string           gov 模式的哈希 salt（8–64 个字母数字字符；
+                       为空时交互式提示；仅 gov 模式）
+-query-id string       运行以该 query_id（UUID）为中心的查询分析。
+                       见下文“查询分析模式”。
 -normalized-query-hash string
-                       Run query analysis focused on this normalized_query_hash
-                       (UInt64). Can be combined with --query-id, or used alone.
--from string           Time-window start for query analysis (RFC3339 or YYYY-MM-DD).
-                       Defaults to "last 3 days" when --query-id is set, or
-                       "last 7 days" when only --normalized-query-hash is set.
--to string             Time-window end for query analysis (default: now).
--analysis-dir string   Directory containing query-analysis SQL files
-                       (default "./queries.query_analysis")
--output-format string  Serialisation format for query results:
-                       jsonl|native|tsv (default "jsonl").
-                       See "Output format" below.
--host-info string      Collect host OS/CPU/memory/disk/process facts:
-                       auto|on|off (default "auto" — on for onprem only).
-                       See "Host facts and server logs" below.
--logs string           Collect ClickHouse server log files from disk:
-                       auto|on|off (default "auto" — on for onprem only).
--logs-dir string       Directory holding server logs (default: discovered
-                       from the server config, then /var/log/clickhouse-server)
--logs-max-mb int       Per-file cap for collected logs, in MiB (default 50).
-                       Larger files are tail-truncated.
--logs-include-archives Also collect rotated logs (*.gz, *.zst). Off by default.
--keeper-mntr string    Ask every Keeper member in system.zookeeper_connection
-                       for its read-only four-letter replies and write keeper/<host>_<port>.txt:
-                       auto|on|off (default "auto" — on for onprem and gov,
-                       off for cloud). See "Keeper facts" below.
--collect-text-log      Collect a time-bounded slice of system.text_log.
-                       Requires --from and --to; rejected in gov mode.
--text-log-level string Minimum severity for --collect-text-log
-                       (Fatal|Critical|Error|Warning|Notice|Information|
-                       Debug|Trace). Default: all levels.
--text-log-limit int    Row cap for --collect-text-log (default 500000)
--dry-run               List every query that would be executed (with the
-                       system tables each touches and a read-only
-                       EXPLAIN ESTIMATE per SELECT) and exit. No results,
-                       no archive. See "Dry-run mode" below.
--skip-config           Skip collecting configuration files
--skip-alerts           Skip evaluating alert rules
--single-node           On a SharedMergeTree cluster (cloud_mode = 1), keep -mode onprem
-                       collecting THIS node only instead of switching to cloud
-                       collection over clusterAllReplicas(default, ...)
--skip-dashboard        Skip generating HTML dashboard
--skip-archive          Skip creating archive of results and configuration
+                       运行以该 normalized_query_hash（UInt64）为中心的
+                       查询分析。可与 --query-id 组合，也可单独使用。
+-from string           查询分析的时间窗口起点（RFC3339 或 YYYY-MM-DD）。
+                       设置 --query-id 时默认“最近 3 天”，仅设置
+                       --normalized-query-hash 时默认“最近 7 天”。
+-to string             查询分析的时间窗口终点（默认：当前时间）。
+-analysis-dir string   包含查询分析 SQL 文件的目录
+                       （默认 "./queries.query_analysis"）
+-output-format string  查询结果的序列化格式：
+                       jsonl|native|tsv（默认 "jsonl"）。
+                       见下文“输出格式”。
+-host-info string      采集主机 OS/CPU/内存/磁盘/进程信息：
+                       auto|on|off（默认 "auto"——仅 onprem 为 on）。
+                       见下文“host facts 与服务器日志”。
+-logs string           从磁盘采集 ClickHouse 服务器日志文件：
+                       auto|on|off（默认 "auto"——仅 onprem 为 on）。
+-logs-dir string       存放服务器日志的目录（默认：从服务器配置中发现，
+                       然后回退到 /var/log/clickhouse-server）
+-logs-max-mb int       采集日志的单个文件上限，单位为 MiB（默认 50）。
+                       更大的文件会被尾部截断。
+-logs-include-archives 同时采集轮转日志（*.gz、*.zst）。默认关闭。
+-keeper-mntr string    向 system.zookeeper_connection 中的每个 Keeper 成员
+                       请求其只读 four-letter 回复，并写入 keeper/<host>_<port>.txt：
+                       auto|on|off（默认 "auto"——onprem 和 gov 为 on，
+                       cloud 为 off）。见下文“Keeper 信息”。
+-collect-text-log      采集 system.text_log 中限定时间的一片数据。
+                       需要 --from 和 --to；gov 模式会被拒绝。
+-text-log-level string --collect-text-log 的最低严重级别
+                       （Fatal|Critical|Error|Warning|Notice|Information|
+                       Debug|Trace）。默认：所有级别。
+-text-log-limit int    --collect-text-log 的行数上限（默认 500000）
+-dry-run               列出将执行的每个查询（包括各自触及的系统表
+                       以及每个 SELECT 的只读 EXPLAIN ESTIMATE）后退出。
+                       不写结果、不创建归档包。见下文“Dry-run 模式”。
+-skip-config           跳过采集配置文件
+-skip-alerts           跳过评估 alert rule
+-single-node           在 SharedMergeTree 集群（cloud_mode = 1）上，让 -mode onprem
+                       只采集本节点，而不是切换到通过
+                       clusterAllReplicas(default, ...) 的 cloud 采集
+-skip-dashboard        跳过生成 HTML dashboard
+-skip-archive          跳过创建结果与配置的归档包
 ```
 
-Any flag left empty on the command line is prompted for interactively (except the `-skip-*` toggles and `-output-dir` / `-alerts-dir`, which use their defaults silently).
+命令行中留空的任何 flag 都会被交互式提示输入（`-skip-*` 开关以及 `-output-dir` / `-alerts-dir` 除外，它们会静默使用默认值）。
 
-### Examples
+### 示例
 
-Run against a Cloud cluster (configuration files are skipped automatically in `cloud` mode: the server's config directory is not on the machine running the tool; pass `-config-dir` to collect one anyway):
+对 Cloud 集群运行（`cloud` 模式会自动跳过配置文件：服务器的配置目录不在运行工具的机器上；传入 `-config-dir` 可仍收集一个）：
 
 ```bash
 ./clickhouse-diagnostic -mode cloud -host my-service.us-east-1.aws.clickhouse.cloud \
   -port 8443 -protocol https -user default
 ```
 
-Run against an on-prem node, write everything to a custom directory:
+对 on-prem 节点运行，把所有内容写入自定义目录：
 
 ```bash
 ./clickhouse-diagnostic -mode onprem -host prod-ch-01 \
   -output-dir ./diagnostics-2026-05-13
 ```
 
-Run a quick check with only queries (no alerts, no dashboard, no archive):
+只跑查询的快速检查（无告警、无 dashboard、无归档）：
 
 ```bash
 ./clickhouse-diagnostic -mode onprem -host localhost \
   -skip-alerts -skip-dashboard -skip-archive
 ```
 
-Government / hashed-PII mode with a non-default alerts directory:
+政府 / 哈希化 PII 模式，并使用非默认的 alerts 目录：
 
 ```bash
-# Salt is prompted interactively (hidden input). To pass it explicitly:
+# Salt 会以隐藏输入交互式提示。若要显式传入：
 ./clickhouse-diagnostic -mode gov -host gov-ch-01 \
   -alerts-dir ./alerts.gov -salt myDeployment2026
 ```
 
-> **Gov mode requires a salt** — see [Gov mode and hashed names](modes.md#gov-mode-and-hashed-names) for what it does and why you need it.
+> **Gov 模式需要 salt** — 见 [Gov 模式与名称哈希](modes.md#gov-模式与名称哈希)了解它的作用以及为什么需要它。
 
-Fully non-interactive (CI / automation):
+完全非交互（CI / 自动化）：
 
 ```bash
 ./clickhouse-diagnostic -mode cloud \
@@ -232,93 +231,93 @@ Fully non-interactive (CI / automation):
   -skip-config
 ```
 
-> **Security:** prefer the interactive password prompt or an environment variable over `-password` — flags appear in `ps`/shell history.
+> **安全：** 优先使用交互式密码提示或环境变量，而不是 `-password` — flag 会出现在 `ps`/shell 历史中。
 
-## Essential or full collection (`-collect`)
+## Essential 或 full 采集（`-collect`）
 
-A server in trouble is exactly when a diagnostic is needed, and exactly when a full collection costs the most. Before collecting, the tool runs a short load probe (about a second, in-memory tables only) and picks how much to collect:
+服务器出问题时，恰恰是最需要诊断的时候，也恰恰是 full 采集代价最高的时候。采集之前，工具会运行一个短暂的负载探测（约一秒，仅内存表）并决定采集多少：
 
-| `-collect` | What happens |
+| `-collect` | 会发生什么 |
 |---|---|
-| `auto` (default) | **Full** collection, unless the probe sees a struggling server — `SELECT 1` slower than 1 s, `system.metrics` slower than 2 s, running queries at 80 % of `max_concurrent_queries`, memory at 90 % of the server limit, load average above 2× the cores, or read-only replicated tables. Then **essential**. A full run also switches to essential **mid-run** when a query times out or two in a row take more than 30 s. |
-| `essential` | Always essential. |
-| `full` | Always full — no switch, whatever the probe says. |
+| `auto`（默认） | **Full** 采集，除非探测看到服务器在挣扎 — `SELECT 1` 慢于 1 s、`system.metrics` 慢于 2 s、运行中的查询达到 `max_concurrent_queries` 的 80 %、内存达到服务器上限的 90 %、负载平均值高于核心数的 2×，或存在只读的复制表。此时改为 **essential**。full 运行在**运行中途**若某条查询超时或连续两条耗时超过 30 s，也会切换为 essential。 |
+| `essential` | 始终 essential。 |
+| `full` | 始终 full — 无论探测结果如何都不切换。 |
 
-An **essential** collection runs only the collectors marked `-- tier: essential` (version, metrics, processes, errors, replicas and replication queue, merges, mutations, Keeper session, disks, the last day of `query_log` / `part_log` / `metric_log` / `error_log` / `text_log`), with:
+**essential** 采集只运行标记为 `-- tier: essential` 的 collector（版本、指标、进程、错误、replica 与 replication queue（复制队列）、merge（合并）、mutation（变更）、Keeper 会话、磁盘，以及最近一天的 `query_log` / `part_log` / `metric_log` / `error_log` / `text_log`），并附带：
 
-- every 3- and 7-day window reduced to **1 day** (an explicit `-from` / `-to` still wins);
-- a **30 s** per-query timeout (unless `-query-timeout` was given) and a **3 min** budget for the whole run (`-time-budget` to change it) — what has not run by then is skipped and listed;
-- `max_threads = 2`, `max_memory_usage = 1 GiB` and the lowest `priority`, each checked first and left out if the user's settings profile refuses it;
-- the dashboard panels that read every table left out; an alert rule whose source file was not collected is reported as *not applicable*, naming the skipped collector.
+- 每个 3 天与 7 天窗口缩减为 **1 天**（显式的 `-from` / `-to` 仍然优先）；
+- 每查询 **30 s** 超时（除非给出了 `-query-timeout`），以及整个运行 **3 min** 的预算（用 `-time-budget` 修改）— 到时仍未运行的会被跳过并列出；
+- `max_threads = 2`、`max_memory_usage = 1 GiB` 与最低的 `priority`，每项都会先检查，若用户的 settings profile 拒绝则略去；
+- 读取每张表的 dashboard 面板被略去；源文件未被采集的 alert rule 会被报告为*不适用*，并指明被跳过的 collector。
 
-When the probe sees **no Keeper session while replicated tables are read-only**, the queries that wait for a session (`system.zookeeper_connection`, `system.database_replicas`, `system.replicas_problem_tables`, the dashboard's Keeper panel — and with them the alerts that read those files) are skipped instead of waiting for their timeout, and the Keeper four-letter commands take their members from the server configuration.
+当探测在**存在只读复制表却没有任何 Keeper 会话**时，那些等待会话的查询（`system.zookeeper_connection`、`system.database_replicas`、`system.replicas_problem_tables`、dashboard 的 Keeper 面板 — 以及随之读取这些文件的告警）会被跳过，而不是等到超时，而 Keeper four-letter command（四字命令）会从服务器配置中取得其成员。
 
-On a **large SharedMergeTree** server (10 000+ tables), an `auto` run lists detached parts only for non-shared tables and the shared tables named in broken-part log lines; `-collect full` lists every table.
+在**大型 SharedMergeTree** 服务器上（10 000+ 张表），`auto` 运行只会为非共享表以及 broken-part 日志行中提到的共享表列出 detached part（分离 part）；`-collect full` 会列出每张表。
 
-The decision and its reasons are the `collect:` line of `execution_log.txt`, a banner at the top of `dashboard.html`, and the first finding of the analysis skill's pre-pass. Every skipped collector is in the execution log with status `skipped` and why.
+该决定及其原因是 `execution_log.txt` 中的 `collect:` 行、`dashboard.html` 顶部的横幅，以及分析技能预检的第一个 finding（发现）。每个被跳过的 collector 都会出现在执行日志中，状态为 `skipped` 并附原因。
 
-## Collection window
+## 采集窗口
 
-Most collection queries look back over a fixed period. Each declares its **own** default, so a query whose scan is unusually expensive (or unusually cheap) can say so without changing the rest:
+大多数采集查询会回顾一个固定时段。每条查询声明**自己的**默认值，因此某条扫描异常昂贵（或异常便宜）的查询可以单独说明，而不影响其余查询：
 
-| Query | Default look-back |
+| 查询 | 默认回顾时长 |
 |---|---|
-| `system.query_log_details_7_days` | 7 days |
-| `system.query_log_exceptions_1_day` | 1 day |
-| `system.query_log_by_hour_7_days` | 7 days |
-| `system.query_log_by_pattern_7_days` | 7 days |
-| `system.part_log_3_days` | 3 days |
-| `system.query_views_log_3_days` | 3 days |
-| `system.metric_log_7_days` | 7 days |
-| `system.asynchronous_insert_log_7_days` | 7 days |
-| `system.metric_log_coordination_3_days` | 3 days |
-| `system.metric_log_by_host_3_days` | 3 days |
-| `system.blob_storage_log_7_days` | 7 days |
-| `system.error_log_7_days` | 7 days |
-| `system.distributed_ddl_queue` | 7 days |
-| `system.text_log` | 1 day |
-| `system.text_log_histogram_1_day` | 1 day |
-| `system.text_log_keeper_1_day` | 1 day |
-| `system.zookeeper_log_errors_1_day` | 1 day |
-| `system.aggregated_zookeeper_log_by_hour_2_days` | 2 days |
-| `system.aggregated_zookeeper_log_by_minute_1_day` | 1 day |
-| `system.aggregated_zookeeper_log_paths_1_day` | 1 day |
+| `system.query_log_details_7_days` | 7 天 |
+| `system.query_log_exceptions_1_day` | 1 天 |
+| `system.query_log_by_hour_7_days` | 7 天 |
+| `system.query_log_by_pattern_7_days` | 7 天 |
+| `system.part_log_3_days` | 3 天 |
+| `system.query_views_log_3_days` | 3 天 |
+| `system.metric_log_7_days` | 7 天 |
+| `system.asynchronous_insert_log_7_days` | 7 天 |
+| `system.metric_log_coordination_3_days` | 3 天 |
+| `system.metric_log_by_host_3_days` | 3 天 |
+| `system.blob_storage_log_7_days` | 7 天 |
+| `system.error_log_7_days` | 7 天 |
+| `system.distributed_ddl_queue` | 7 天 |
+| `system.text_log` | 1 天 |
+| `system.text_log_histogram_1_day` | 1 天 |
+| `system.text_log_keeper_1_day` | 1 天 |
+| `system.zookeeper_log_errors_1_day` | 1 天 |
+| `system.aggregated_zookeeper_log_by_hour_2_days` | 2 天 |
+| `system.aggregated_zookeeper_log_by_minute_1_day` | 1 天 |
+| `system.aggregated_zookeeper_log_paths_1_day` | 1 天 |
 
-> `system.text_log` and `system.zookeeper_log` stop at 1 day: they are by far the highest-volume tables here (a busy cluster writes millions of Keeper log rows an hour), and a 7-day slice is too large to be useful in a support bundle. Use `-from` when you need more.
+> `system.text_log` 与 `system.zookeeper_log` 止于 1 天：它们是这里数据量最大的表（繁忙集群每小时写入数百万行 Keeper 日志），7 天的切片太大，放在支持 bundle 中没有用处。需要更多时请使用 `-from`。
 
-`-from` and `-to` override **every** window at once:
+`-from` 与 `-to` 会一次性覆盖**每一个**窗口：
 
 ```bash
-# Everything from a specific incident window
+# 特定事故时间窗内的所有内容
 ./clickhouse-diagnostic -mode onprem -host prod-ch-01 \
   -from 2026-08-14T09:00:00Z -to 2026-08-14T13:00:00Z
 
-# Widen the look-back to 30 days instead of each query's default
+# 将回顾时长放宽到 30 天，而不是每条查询的默认值
 ./clickhouse-diagnostic -mode onprem -host prod-ch-01 -from 2026-07-21
 ```
 
-Either end may be given alone: `-from` with no `-to` runs to now, and `-to` with no `-from` leaves each query's own default start. The resolved window is printed at the start of the run. Times are RFC3339 or `YYYY-MM-DD`, interpreted as UTC.
+任一端都可单独给出：只有 `-from` 而无 `-to` 时运行到当前时间，只有 `-to` 而无 `-from` 时保留每条查询自己的默认起点。解析后的窗口会在运行开始时打印。时间为 RFC3339 或 `YYYY-MM-DD`，按 UTC 解释。
 
-The same flags also drive [query analysis](query-analysis.md#query-analysis-mode) when `-query-id` / `-normalized-query-hash` is set.
+当设置了 `-query-id` / `-normalized-query-hash` 时，同样的 flag 也驱动[查询分析](query-analysis.md#查询分析模式)。
 
-[Alert rules](alerts.md#alerts) keep their own look-back (e.g. *"exception spike in the last hour"*) — it is part of what the rule means. They read the collected files, so with `-to` that look-back ends at `-to`, where the files end; a `-from` narrower than a rule's look-back gives it only the hours collected.
+[Alert rule](alerts.md#告警) 保留自己的回顾时长（例如*“最近一小时的异常尖峰”*）— 这是规则语义的一部分。它们读取已采集的文件，因此有了 `-to`，该回顾时长就在 `-to` 结束，也就是文件结束处；比某条规则的回顾时长更窄的 `-from` 只会给它已采集的那些小时。
 
-> **A narrower window is the first thing to try on a slow or heavy collection.** The defaults are tuned for a general health check; on a busy cluster `-from` with a few hours is dramatically cheaper.
+> **在缓慢或繁重的采集上，第一个要尝试的就是缩窄窗口。** 默认值是为一般健康检查调优的；在繁忙集群上，用 `-from` 指定几小时会便宜得多。
 
-### For query authors
+### 给查询作者
 
-Windows are template placeholders, not literals, so they stay overridable:
+窗口是模板占位符而非字面量，因此保持可覆盖：
 
 ```sql
-WHERE event_time >  {from:7d}      -- --from if given, else now() - INTERVAL 7 DAY
-  AND event_time <= {to:now}       -- --to   if given, else now()
+WHERE event_time >  {from:7d}      -- 若给出 --from 则用之，否则 now() - INTERVAL 7 DAY
+  AND event_time <= {to:now}       -- 若给出 --to 则用之，否则 now()
 ```
 
-Accepted defaults are `now`, and `<N>d` / `<N>h` / `<N>m`. A malformed spec (`{from:7dd}`) is **not** substituted — the query is refused rather than silently run unbounded. A test asserts no shipped query hard-codes an interval, so a new one that does will fail CI rather than quietly ignore the flags.
+接受的默认值为 `now`，以及 `<N>d` / `<N>h` / `<N>m`。格式错误的 spec（`{from:7dd}`）**不会**被替换 — 查询会被拒绝，而不是静默地无界运行。有一个测试断言没有任何随附查询硬编码间隔，因此新增的硬编码查询会让 CI 失败，而不是悄悄忽略这些 flag。
 
-## Dry-run mode
+## Dry-run（试运行）模式
 
-Security-conscious customers can pass `-dry-run` to see exactly which queries the tool would execute, against which tables, **without** any actual data collection:
+注重安全的客户可以传入 `-dry-run`，查看工具将执行哪些查询、针对哪些表，**而不**进行任何实际数据采集：
 
 ```bash
 ./clickhouse-diagnostic -mode cloud -host my-service.region.aws.clickhouse.cloud \
@@ -326,24 +325,24 @@ Security-conscious customers can pass `-dry-run` to see exactly which queries th
   -dry-run
 ```
 
-What `-dry-run` does:
+`-dry-run` 会做什么：
 
-- Lists every SELECT that would be sent (file-based, query-analysis bundle, and any alert rule without a `check:`; the shipped alert rules and the dashboard read the collected files and send none)
-- Tags each query with the `system.*` tables it touches
-- Adds a read-only `EXPLAIN ESTIMATE` block under each SELECT — reports the rows/marks/parts the query **would** scan but reads no data parts. See [the EXPLAIN ESTIMATE docs](https://clickhouse.com/docs/sql-reference/statements/explain#explain-estimate).
-- Renders empty estimates as `this table is empty` (the planner's confirmation that nothing matches the predicate)
-- Skips `-skip-config` and `-skip-archive` automatically (no side-effect files)
+- 列出会被发送的每个 SELECT（基于文件的、查询分析 bundle，以及任何没有 `check:` 的 alert rule；随附的 alert rule 与 dashboard 读取已采集的文件，不发送任何查询）
+- 为每条查询标注它触及的 `system.*` 表
+- 在每个 SELECT 下添加一个只读的 `EXPLAIN ESTIMATE` 块 — 报告该查询**将**扫描的 rows/marks/parts，但不读取任何 data part。见 [EXPLAIN ESTIMATE 文档](https://clickhouse.com/docs/sql-reference/statements/explain#explain-estimate)。
+- 将空估算渲染为 `this table is empty`（规划器确认没有内容匹配谓词）
+- 自动跳过 `-skip-config` 与 `-skip-archive`（不产生副作用文件）
 
-What still reaches the server in dry-run:
+dry-run 中仍会到达服务器的内容：
 
-| Call | Why |
+| 调用 | 原因 |
 |---|---|
-| `SELECT version()` | Picks the right query variant for the server version |
-| Pre-flight for `--query-id` / `--normalized-query-hash` | Derives the hash + event_time (or the slowest query_id) so the printed analysis SQL has real values, not unbound `{query_id}` markers |
-| `SELECT DISTINCT host, port FROM system.zookeeper_connection` (`-keeper-mntr`) | Lists the Keeper members so the dry run can say which it would contact; printed when it runs |
-| `EXPLAIN ESTIMATE <query>` per SELECT | Read-only metadata only |
+| `SELECT version()` | 为服务器版本选择正确的查询变体 |
+| `--query-id` / `--normalized-query-hash` 的预检 | 推导哈希 + event_time（或最慢的 query_id），使打印出的分析 SQL 有真实值，而非未绑定的 `{query_id}` 标记 |
+| `SELECT DISTINCT host, port FROM system.zookeeper_connection`（`-keeper-mntr`） | 列出 Keeper 成员，使 dry run 能说明它会联系哪些成员；运行时打印 |
+| 每个 SELECT 的 `EXPLAIN ESTIMATE <query>` | 仅只读元数据 |
 
-Combine with the query-analysis flags to dry-run the focused bundle too:
+与查询分析 flag 组合，也可对聚焦 bundle 进行 dry-run：
 
 ```bash
 ./clickhouse-diagnostic -mode cloud -host ... \
@@ -351,7 +350,7 @@ Combine with the query-analysis flags to dry-run the focused bundle too:
   -normalized-query-hash 15477159632099527852
 ```
 
-Sample block of the output:
+输出样例块：
 
 ```
 [28]

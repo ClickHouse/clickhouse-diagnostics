@@ -1,14 +1,14 @@
--- Per-minute execution count for the focus hash. The dashboard's
--- count chart used to bucket by hour, but that hid the within-hour
--- spread of executions; per-minute bucketing gives finer granularity
--- without exploding the row count for typical investigation windows.
+-- 目标 hash 的每分钟执行次数。dashboard 的
+-- count 图表过去按小时分桶，但这掩盖了小时内的
+-- 执行分布；按分钟分桶提供更细的粒度，
+-- 又不会在典型的排查时间窗口内使行数爆炸。
 --
--- Value-based metrics (duration, memory, user CPU, read rows/bytes)
--- are now driven from executions_timeline.sql instead — one row per
--- execution rather than aggregated. So hash_summary now only carries
--- the count split (succeeded vs failed), which is the one chart
--- where per-execution doesn't make sense.
--- Run when --normalized-query-hash is set (auto-derived from --query-id).
+-- 基于值的指标（duration、memory、user CPU、read rows/bytes）
+-- 现在改由 executions_timeline.sql 驱动——每次
+-- 执行一行，而不是聚合。因此 hash_summary 现在只承载
+-- 计数拆分（succeeded vs failed），这是唯一一个
+-- 按每次执行没有意义的图表。
+-- 当设置了 --normalized-query-hash 时运行（由 --query-id 自动推导）。
 SELECT
     toString(toStartOfMinute(event_time))                   AS time_bucket,
     count()                                                 AS executions,

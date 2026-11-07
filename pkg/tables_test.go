@@ -54,7 +54,7 @@ func TestExtractTables(t *testing.T) {
 				return
 			}
 			if !reflect.DeepEqual(got, tc.want) {
-				t.Errorf("ExtractTables(%q) = %v, want %v", tc.sql, got, tc.want)
+				t.Errorf("ExtractTables(%q) = %v，期望 %v", tc.sql, got, tc.want)
 			}
 		})
 	}

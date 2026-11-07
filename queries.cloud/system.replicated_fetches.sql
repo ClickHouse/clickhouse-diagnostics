@@ -1,5 +1,5 @@
 -- tier: essential
--- Part fetches in flight on every replica.
+-- 每个副本上正在进行的 part fetch。
 SELECT
     hostName() AS hostname,
     database,

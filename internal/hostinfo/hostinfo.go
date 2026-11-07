@@ -1,16 +1,15 @@
-// Package hostinfo collects OS, kernel and hardware facts about the machine
-// running ClickHouse — the context that explains *why* the server behaves the
-// way the ClickHouse system tables say it does.
+// Package hostinfo 采集运行 ClickHouse 的机器上的操作系统、内核和硬件信息——
+// 这些上下文解释了服务器为何表现出 ClickHouse 系统表所描述的行为。
 //
-// Deliberately dependency-free: everything here is a read of /proc, /sys or
-// /etc, which keeps the tool a single static binary with no supply chain to
-// audit. That also means Linux is the first-class target (where ClickHouse
-// servers live); on other platforms each section degrades to
-// Available:false with a reason rather than failing the run.
+// 刻意保持零依赖：这里的一切都是对 /proc、/sys 或 /etc 的读取，
+// 因此本工具仍是单个静态二进制，没有需要审计的供应链。
+// 这也意味着 Linux 是一等目标（ClickHouse 服务器所在之处）；
+// 在其他平台上，各节会降级为 Available:false 并附带原因，
+// 而不是让整次运行失败。
 //
-// Not collected in gov mode — hostnames, mount paths and process command
-// lines are exactly the identifiers gov hashing exists to protect, and a
-// process command line cannot be meaningfully hashed.
+// gov 模式下不采集——主机名、挂载路径和进程命令行
+// 正是 gov 哈希旨在保护的标识符，而进程命令行
+// 无法被有意义地哈希。
 package hostinfo
 
 import (
@@ -27,7 +26,7 @@ import (
 	"unicode/utf8"
 )
 
-// Report is the whole collected picture, written as host_info.json.
+// Report 是采集到的完整画面，写入 host_info.json。
 type Report struct {
 	CollectedAt string     `json:"collected_at"`
 	OS          OSInfo     `json:"os"`
@@ -35,12 +34,12 @@ type Report struct {
 	Memory      MemoryInfo `json:"memory"`
 	Disks       []DiskInfo `json:"disks"`
 	Processes   []Process  `json:"top_processes_by_rss"`
-	// Tunables are the host settings that most often explain ClickHouse
-	// misbehaviour and are the first thing support asks for.
+	// Tunables 是那些最常解释 ClickHouse 异常行为、
+	// 也是支持人员最先索要的主机设置。
 	Tunables Tunables `json:"clickhouse_relevant_tunables"`
-	// Notes records why a section is empty, so a missing section is never
-	// mistaken for a healthy one (the same "don't report a check that
-	// didn't run as passing" rule the alert accounting follows).
+	// Notes 记录某一节为何为空，避免把缺失的节
+	// 误认为健康状态（与告警统计遵循的
+	// “不要把未运行的检查报告为通过”同一规则）。
 	Notes []string `json:"notes,omitempty"`
 }
 
@@ -63,7 +62,7 @@ type CPUInfo struct {
 	VendorID    string   `json:"vendor_id,omitempty"`
 	MHz         string   `json:"mhz,omitempty"`
 	LoadAvg     []string `json:"load_avg_1_5_15,omitempty"`
-	// Flags ClickHouse actually cares about for vectorised execution.
+	// Flags 是 ClickHouse 在向量化执行中真正关心的标志。
 	NotableFlags []string `json:"notable_flags,omitempty"`
 }
 
@@ -96,8 +95,8 @@ type Process struct {
 	Command  string `json:"command"`
 }
 
-// Tunables are host settings that materially affect ClickHouse. Each is a
-// raw string so an unreadable value is distinguishable from a set one.
+// Tunables 是切实影响 ClickHouse 的主机设置。每项都是
+// 原始字符串，以便区分不可读的值与已设置的值。
 type Tunables struct {
 	TransparentHugepages string `json:"transparent_hugepages,omitempty"`
 	THPDefrag            string `json:"transparent_hugepages_defrag,omitempty"`
@@ -110,21 +109,21 @@ type Tunables struct {
 	CgroupCPUMax         string `json:"cgroup_cpu_max,omitempty"`
 	ClickHouseNofileSoft string `json:"clickhouse_open_files_soft,omitempty"`
 	ClickHouseNofileHard string `json:"clickhouse_open_files_hard,omitempty"`
-	// ClickHouseNprocSoft is the "Max processes" soft limit from
-	// /proc/<pid>/limits — RLIMIT_NPROC, the OS cap on tasks (processes
-	// AND threads) for the service account. It is NOT the ClickHouse
-	// max_threads setting; the old name/key said it was.
+	// ClickHouseNprocSoft 是 /proc/<pid>/limits 中的 "Max processes"
+	// 软限制——RLIMIT_NPROC，即操作系统对服务账号任务数（进程和线程）
+	// 的上限。它不是 ClickHouse 的 max_threads 设置；
+	// 旧名称/键曾声称它是。
 	ClickHouseNprocSoft   string `json:"clickhouse_nproc_soft,omitempty"`
 	ClickHouseProcessName string `json:"clickhouse_process,omitempty"`
 }
 
 const (
 	procDir  = "/proc"
-	maxProcs = 25 // top-N by RSS; a full process table is noise in a bundle
+	maxProcs = 25 // 按 RSS 取前 N；完整进程表在 bundle 里是噪音
 )
 
-// Collect gathers everything it can, never failing the run: a section that
-// can't be read is marked unavailable and the reason recorded in Notes.
+// Collect 尽其所能否收集一切，绝不让运行失败：无法读取的节
+// 会被标记为不可用，原因记入 Notes。
 func Collect() *Report {
 	r := &Report{CollectedAt: time.Now().UTC().Format(time.RFC3339)}
 
@@ -134,7 +133,7 @@ func Collect() *Report {
 		if h, err := os.Hostname(); err == nil {
 			r.OS.Hostname = h
 		}
-		r.Disks, _ = collectDisks() // statfs may still work
+		r.Disks, _ = collectDisks() // statfs 可能仍然可用
 		return r
 	}
 
@@ -160,7 +159,7 @@ func Collect() *Report {
 
 func (r *Report) note(s string) { r.Notes = append(r.Notes, s) }
 
-// WriteJSON writes the report as host_info.json into dir.
+// WriteJSON 将报告以 host_info.json 写入 dir。
 func WriteJSON(dir string, r *Report) (string, error) {
 	blob, err := json.MarshalIndent(r, "", "  ")
 	if err != nil {
@@ -181,9 +180,9 @@ func collectOS(r *Report) OSInfo {
 	o.KernelVersion = strings.TrimSpace(readFile("/proc/sys/kernel/osrelease"))
 	o.KernelFull = strings.TrimSpace(readFile("/proc/version"))
 
-	// /etc/os-release is the portable distro identifier (systemd standard);
-	// their tool reports only a generic OS string, which doesn't tell you
-	// whether you're on RHEL 8 or Ubuntu 22.04 — often the actual answer.
+	// /etc/os-release 是可移植的发行版标识（systemd 标准）；
+	// 对方的工具只报告通用 OS 字符串，无法说明
+	// 你是在 RHEL 8 还是 Ubuntu 22.04 上——而这往往才是真正的答案。
 	for _, p := range []string{"/etc/os-release", "/usr/lib/os-release"} {
 		kv := parseKeyValueFile(p, "=")
 		if len(kv) == 0 {
@@ -206,11 +205,11 @@ func collectOS(r *Report) OSInfo {
 
 func collectCPU(r *Report) CPUInfo {
 	c := CPUInfo{Available: true}
-	// Flags worth reporting: these gate ClickHouse's vectorised code paths,
-	// and a binary built for one of them on a host without it is a real
-	// (and confusing) failure mode. Both architectures are listed — on
-	// aarch64 the kernel labels the line "Features" and names are entirely
-	// different, so an x86-only list silently reports nothing there.
+	// 值得报告的标志：它们决定 ClickHouse 是否走向量化代码路径，
+	// 而为某个标志构建的二进制却运行在缺少该标志的主机上，是一个真实
+	// （且令人困惑）的故障模式。两种架构都列出——在
+	// aarch64 上内核将这一行标为 "Features"，且名称完全不同，
+	// 因此仅含 x86 的列表在那里会静默地什么也不报告。
 	notable := map[string]bool{
 		// x86_64
 		"sse4_2": true, "avx": true, "avx2": true, "avx512f": true,
@@ -268,8 +267,8 @@ func collectMemory(r *Report) MemoryInfo {
 		m.Available = false
 		return m
 	}
-	// /proc/meminfo reports kB; normalise to bytes so every size in the
-	// bundle is directly comparable with ClickHouse's byte counters.
+	// /proc/meminfo 以 kB 报告；统一换算为字节，使
+	// bundle 中的每个大小都能与 ClickHouse 的字节计数器直接比较。
 	kb := func(k string) int64 {
 		fields := strings.Fields(kv[k])
 		if len(fields) == 0 {
@@ -291,9 +290,9 @@ func collectMemory(r *Report) MemoryInfo {
 	return m
 }
 
-// collectProcesses returns the top-N processes by RSS. Bounded on purpose:
-// a full table on a busy host is thousands of rows of noise, and the
-// question this answers is "what else is eating this machine's memory".
+// collectProcesses 返回按 RSS 排序的前 N 个进程。刻意设限：
+// 繁忙主机上的完整进程表是数千行噪音，而这里要回答的问题
+// 是“还有什么在吃这台机器的内存”。
 func collectProcesses() ([]Process, error) {
 	entries, err := os.ReadDir(procDir)
 	if err != nil {
@@ -304,11 +303,11 @@ func collectProcesses() ([]Process, error) {
 	for _, e := range entries {
 		pid, err := strconv.Atoi(e.Name())
 		if err != nil {
-			continue // not a pid directory
+			continue // 不是 pid 目录
 		}
 		statRaw := readFile(filepath.Join(procDir, e.Name(), "stat"))
 		if statRaw == "" {
-			continue // process exited between ReadDir and read — normal
+			continue // 进程在 ReadDir 和读取之间退出——正常
 		}
 		p, ok := parseProcStat(statRaw, pid, pageSize)
 		if !ok {
@@ -317,11 +316,11 @@ func collectProcesses() ([]Process, error) {
 		if cmd := readCmdline(filepath.Join(procDir, e.Name(), "cmdline")); cmd != "" {
 			p.Command = cmd
 		}
-		// Full command lines are kept only for ClickHouse's own binaries.
-		// Everything else is reduced to argv[0]: these are OTHER PEOPLE'S
-		// processes, argv routinely carries secrets (--password=…, tokens),
-		// and the bundle is shared with support. ClickHouse argv is kept
-		// (it is what we are diagnosing) but redacted just in case.
+		// 只为 ClickHouse 自己的二进制保留完整命令行。
+		// 其他一律缩减为 argv[0]：这些是别人的
+		// 进程，argv 通常携带机密（--password=…、token），
+		// 而 bundle 会与支持人员共享。ClickHouse 的 argv 保留
+		// （它正是我们要诊断的对象），但仍做脱敏以防万一。
 		if !strings.Contains(p.Command, "clickhouse") {
 			if i := strings.IndexByte(p.Command, ' '); i > 0 {
 				p.Command = p.Command[:i]
@@ -338,10 +337,9 @@ func collectProcesses() ([]Process, error) {
 	return procs, nil
 }
 
-// parseProcStat handles the one genuinely tricky part of /proc parsing: the
-// comm field is wrapped in parentheses and may itself contain spaces or
-// parentheses, so fields cannot simply be split on whitespace. Anchor on
-// the LAST ')' instead.
+// parseProcStat 处理 /proc 解析中唯一真正棘手的部分：comm 字段
+// 被圆括号包裹，本身可能包含空格或圆括号，因此字段不能简单地
+// 按空白切分。应以最后一个 ')' 为锚点。
 func parseProcStat(raw string, pid int, pageSize int64) (Process, bool) {
 	closeIdx := strings.LastIndex(raw, ")")
 	openIdx := strings.Index(raw, "(")
@@ -377,12 +375,12 @@ func collectTunables(procs []Process) Tunables {
 		FsNrOpen:             trimmed(readFile("/proc/sys/fs/nr_open")),
 		FsFileMax:            trimmed(readFile("/proc/sys/fs/file-max")),
 	}
-	// Per-process limits for the running server: the global fs.nr_open is
-	// often fine while the unit's own LimitNOFILE is the binding constraint.
-	// Matching is strict — clickhouse-server or "clickhouse server", never
-	// this diagnostic tool (its own name contains "clickhouse"), keeper or
-	// a client. Getting this wrong reports the limits of the wrong process
-	// with nothing in the JSON to say so.
+	// 正在运行的服务器的每进程限制：全局 fs.nr_open 常常
+	// 没问题，而 unit 自己的 LimitNOFILE 才是真正的约束。
+	// 匹配是严格的——clickhouse-server 或 "clickhouse server"，绝不是
+	// 本诊断工具（其自身名称包含 "clickhouse"）、keeper 或
+	// 客户端。匹配错误会把错误进程的限制当成服务器的，
+	// 而 JSON 中没有任何说明。
 	serverPID := 0
 	selfPID := os.Getpid()
 	for _, p := range procs {
@@ -407,19 +405,19 @@ func collectTunables(procs []Process) Tunables {
 		break
 	}
 
-	// Cgroup limits for the SERVER's cgroup, resolved via /proc/<pid>/cgroup.
-	// Reading the cgroupfs root only works inside a container namespace; on a
-	// systemd-managed host — exactly where -host-info defaults to on — the
-	// root has no memory.max and a MemoryMax= on clickhouse-server.service
-	// would never show up, which is the headline case for this field.
+	// SERVER 所在 cgroup 的限制，通过 /proc/<pid>/cgroup 解析。
+	// 读取 cgroupfs 根目录只在容器命名空间内有效；在
+	// systemd 管理的主机上——恰好是 -host-info 默认启用的场景——
+	// 根目录没有 memory.max，clickhouse-server.service 上的 MemoryMax=
+	// 永远不会出现，而这正是此字段的典型场景。
 	t.CgroupMemoryLimit, t.CgroupCPUMax = cgroupLimits(serverPID)
 	return t
 }
 
-// cgroupLimits resolves the memory and CPU limits binding on pid's cgroup,
-// walking UP the v2 hierarchy to the first ancestor that sets one (a limit
-// anywhere up the tree binds the leaf). pid 0, an unreadable tree, or a
-// non-Linux host all degrade to the container-root fallback, then to "".
+// cgroupLimits 解析作用于 pid 所在 cgroup 的内存和 CPU 限制，
+// 沿 v2 层级向上查找第一个设置了限制的祖先（树中任意位置的限制
+// 都会约束叶子）。pid 为 0、树不可读或非 Linux 主机
+// 都会降级为容器根回退，最后降级为 ""。
 func cgroupLimits(pid int) (mem, cpu string) {
 	if pid != 0 {
 		for _, line := range strings.Split(readFile(filepath.Join(procDir, strconv.Itoa(pid), "cgroup")), "\n") {
@@ -454,8 +452,8 @@ func cgroupLimits(pid int) (mem, cpu string) {
 			}
 		}
 	}
-	// Fallback: the cgroupfs root — correct inside a container namespace,
-	// where the "root" is the container's own limit.
+	// 回退：cgroupfs 根目录——在容器命名空间内是正确的，
+	// 那里的“根”就是容器自身的限制。
 	if mem == "" {
 		mem = firstNonEmpty(
 			trimmed(readFile("/sys/fs/cgroup/memory.max")),
@@ -469,7 +467,7 @@ func cgroupLimits(pid int) (mem, cpu string) {
 	return mem, cpu
 }
 
-// ── small helpers ────────────────────────────────────────────────────────
+// ── 小型辅助函数 ────────────────────────────────────────────────────────
 
 func readFile(path string) string {
 	b, err := os.ReadFile(path)
@@ -484,14 +482,14 @@ func readCmdline(path string) string {
 	if raw == "" {
 		return ""
 	}
-	// cmdline is NUL-separated; trailing NUL produces an empty final field.
+	// cmdline 以 NUL 分隔；末尾的 NUL 会产生一个空的末字段。
 	parts := strings.Split(strings.TrimRight(raw, "\x00"), "\x00")
 	cmd := strings.Join(parts, " ")
 	const max = 300
 	if len(cmd) > max {
 		cut := max
-		// Do not slice mid-rune: encoding/json would replace the torn
-		// UTF-8 sequence with U+FFFD.
+		// 不要在 rune 中间截断：encoding/json 会把
+		// 被撕裂的 UTF-8 序列替换为 U+FFFD。
 		for cut > 0 && !utf8.RuneStart(cmd[cut]) {
 			cut--
 		}
@@ -500,13 +498,12 @@ func readCmdline(path string) string {
 	return cmd
 }
 
-// reSecretArg matches an argv token whose NAME suggests a secret. The value
-// part (after =) is replaced; for the separated form ("--password s3cret")
-// redactArgs also blanks the FOLLOWING token.
+// reSecretArg 匹配名称暗示机密的 argv token。值部分
+// （= 之后）会被替换；对于分离形式（"--password s3cret"），
+// redactArgs 还会清空下一个 token。
 var reSecretArg = regexp.MustCompile(`(?i)^--?[^=]*(password|secret|token|credential|access[-_]?key|api[-_]?key)[^=]*`)
 
-// redactArgs strips likely secrets from a command line before it is stored
-// in the bundle.
+// redactArgs 在命令行存入 bundle 之前剥离其中可能的机密。
 func redactArgs(cmd string) string {
 	parts := strings.Split(cmd, " ")
 	for i, a := range parts {
@@ -522,11 +519,11 @@ func redactArgs(cmd string) string {
 	return strings.Join(parts, " ")
 }
 
-// isClickHouseServer reports whether p is the ClickHouse SERVER process —
-// not this diagnostic tool (whose own name contains "clickhouse"), not
-// clickhouse-keeper, not a stray clickhouse-client. Both launch styles are
-// recognised: the dedicated clickhouse-server binary and the multi-tool
-// form "clickhouse server".
+// isClickHouseServer 报告 p 是否为 ClickHouse SERVER 进程——
+// 不是本诊断工具（其自身名称包含 "clickhouse"），不是
+// clickhouse-keeper，也不是意外出现的 clickhouse-client。两种启动方式
+// 都能识别：专用的 clickhouse-server 二进制，以及多工具
+// 形式 "clickhouse server"。
 func isClickHouseServer(p Process, selfPID int) bool {
 	if p.PID == selfPID {
 		return false
@@ -560,8 +557,8 @@ func splitKV(line, sep string) (string, string, bool) {
 	return strings.TrimSpace(line[:i]), strings.TrimSpace(line[i+1:]), true
 }
 
-// bracketed extracts the selected option from a sysfs multi-choice value
-// such as "always [madvise] never".
+// bracketed 从 sysfs 的多选值中提取被选中的选项，
+// 例如 "always [madvise] never"。
 func bracketed(s string) string {
 	open := strings.Index(s, "[")
 	close := strings.Index(s, "]")
@@ -582,24 +579,24 @@ func firstNonEmpty(vals ...string) string {
 	return ""
 }
 
-// Summary is a one-line-per-fact rendering for the terminal, so the operator
-// sees the headline facts without opening the JSON.
+// Summary 是供终端使用的每行一项事实的渲染，让运维人员
+// 无需打开 JSON 就能看到概览事实。
 func (r *Report) Summary() string {
 	var b strings.Builder
 	if r.OS.Available {
-		fmt.Fprintf(&b, "  host: %s | %s %s | kernel %s | %s\n",
+		fmt.Fprintf(&b, "  主机：%s | %s %s | 内核 %s | %s\n",
 			r.OS.Hostname, r.OS.Distro, r.OS.DistroVersion, r.OS.KernelVersion, r.OS.Arch)
 	}
 	if r.CPU.Available {
-		fmt.Fprintf(&b, "  cpu:  %d logical | %s | load %s\n",
+		fmt.Fprintf(&b, "  CPU： %d 逻辑核 | %s | 负载 %s\n",
 			r.CPU.LogicalCPUs, r.CPU.ModelName, strings.Join(r.CPU.LoadAvg, " "))
 	}
 	if r.Memory.Available {
-		fmt.Fprintf(&b, "  mem:  %.1f GiB total | %.1f GiB available | swap %.1f GiB\n",
+		fmt.Fprintf(&b, "  内存： %.1f GiB 总计 | %.1f GiB 可用 | swap %.1f GiB\n",
 			gib(r.Memory.TotalBytes), gib(r.Memory.AvailableBytes), gib(r.Memory.SwapTotalBytes))
 	}
 	if r.Tunables.TransparentHugepages != "" {
-		fmt.Fprintf(&b, "  thp:  %s (swappiness %s)\n",
+		fmt.Fprintf(&b, "  THP： %s（swappiness %s）\n",
 			r.Tunables.TransparentHugepages, r.Tunables.Swappiness)
 	}
 	return b.String()

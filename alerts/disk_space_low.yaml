@@ -1,74 +1,65 @@
 name: disk_space_low
-title: "Disk free space below 15%"
+title: "磁盘可用空间低于15%"
 severity: critical
 description: |
-  One or more disks have less than 15% free space. ClickHouse needs
-  disk headroom for merges, mutations, and temporary files. When a disk
-  fills completely, inserts will fail and the server may enter read-only
-  mode. Act before reaching 5% free space.
+  一个或多个磁盘的可用空间不足15%。ClickHouse需要磁盘余量来执行
+  merge、mutation和临时文件写入。磁盘完全写满时，insert会失败，
+  服务器可能进入read-only模式。请在可用空间降到5%之前采取行动。
 
-  Immediate actions: drop old partitions or TTL-expired data, move
-  tables to a larger disk, or increase disk capacity. Check
-  system.parts for the largest tables and system.disks for per-disk
-  breakdown.
+  立即措施：删除旧分区或TTL已过期的数据，将表迁移到更大的磁盘，
+  或扩容磁盘。查看system.parts找出最大的表，查看system.disks获取
+  逐磁盘明细。
 
-  Only disks that hold user data are judged. A disk is counted when some user
-  table's storage policy puts a volume on it (system.storage_policies joined
-  with system.tables.storage_policy); when no user table declares a policy,
-  every disk is counted, because absence of evidence must not silence the
-  rule.
+  只评判承载用户数据的磁盘。当某张用户表的storage policy（存储策略）
+  在其上放置了volume时，该磁盘才纳入统计（system.storage_policies与
+  system.tables.storage_policy连接）；当没有任何用户表声明策略时，
+  所有磁盘都纳入统计，因为缺乏证据不能让规则沉默。
 
-  That filter exists because on a managed service the local disk is not
-  capacity at all. Measured on a healthy ClickHouse Cloud service (26.6,
-  three replicas): user tables are on the `s3_with_keeper` policy, whose only
-  disk is `s3WithKeeperDiskWithCache`, so the local `default` disk backs no
-  user data — it is the filesystem cache, sized to be filled, and it sat at
-  14.57 GiB free of 99.43 GiB, 14.7 %, firing this rule at critical with
-  nothing wrong. A critical that a healthy service produces on every run
-  teaches the reader to skip it.
+  该过滤存在的原因是：在托管服务上，本地磁盘根本不是容量。
+  在一套健康的ClickHouse Cloud服务（26.6，三个replica）上实测：
+  用户表位于`s3_with_keeper`策略，其唯一磁盘是
+  `s3WithKeeperDiskWithCache`，因此本地`default`磁盘不承载任何用户数据——
+  它是文件系统缓存，设计上就是要被填满的，当时在99.43 GiB中剩余
+  14.57 GiB（14.7%），在一切正常的情况下让本规则以critical触发。
+  一个健康服务每次运行都会产生的critical，会教会读者忽略它。
 
-  The filter is deliberately NOT a mode check. `-mode cloud` is a query
-  layout, not proof of a managed service, and the tool supports pointing it at
-  a self-managed cluster: there a hot local data disk alongside an
-  object-storage tier must still raise a critical, and it does, because that
-  disk is in a user table's policy. A self-managed server with one local disk
-  is unchanged — verified on 26.7 and on the 22.8 floor, where
-  system.storage_policies.disks already exists.
+  该过滤刻意不是mode检查。`-mode cloud`是一种查询布局，不是托管服务的
+  证明，而本工具支持将其指向自管理集群：在那里，与对象存储层并存的
+  繁忙本地数据磁盘仍必须触发critical，也确实会触发，因为该磁盘位于
+  某张用户表的策略中。只有一块本地磁盘的自管理服务器行为不变——
+  已在26.7和22.8最低版本上验证，那里system.storage_policies.disks
+  已存在。
 
-  The pre-pass applies the same test to a bundle and, for a disk that backs no
-  user data, reports it at a severity that matches what it is: information
-  below 15 % free, a warning below 5 %, because that filesystem still holds
-  temporary files for merges and spilled sorts.
+  预检查（pre-pass）对bundle应用同一测试；对于不承载用户数据的磁盘，
+  按其实际性质报告严重级别：可用空间低于15%时为information，低于5%时
+  为warning，因为该文件系统仍保存着merge和排序溢写所需的临时文件。
 tags:
   - storage
   - disk
   - reliability
 
 
-# Subquery aliases free_space / total_space to numeric *_b columns
-# first; the outer SELECT then formats and divides on the numeric
-# values. Without this split, in CH 25+ the alias
-# `formatReadableSize(free_space) AS free_space` shadows the source
-# UInt64 column in the WHERE clause, and `free_space / total_space`
-# becomes a String/String divide → ILLEGAL_TYPE_OF_ARGUMENT.
+# 子查询先把free_space / total_space别名到数值型*_b列；
+# 外层SELECT再基于数值进行格式化和除法。没有这层拆分，在CH 25+中
+# `formatReadableSize(free_space) AS free_space`这个别名会在WHERE子句中
+# 遮蔽源UInt64列，`free_space / total_space`就变成String/String除法
+# → ILLEGAL_TYPE_OF_ARGUMENT。
 #
-# {sys.disks} — not a hard-coded system.disks. Disks are per-replica, so in
-# cloud mode the placeholder fans out and a sibling at 3% free is found;
-# hostName() then says which replica reported the row. In onprem and gov it
-# resolves to the plain local table, so the rule sees only the node that
-# answered — cluster-wide coverage there means one bundle per node.
-# {sys.storage_policies} and {sys.tables} are shared tables, read once in
-# every mode, which is right: a storage policy is cluster-wide configuration.
+# {sys.disks}——不是硬编码的system.disks。磁盘是逐replica的，因此在
+# cloud模式下该占位符会fan out，并发现可用空间为3%的兄弟节点；
+# hostName()随后指出是哪一replica报告了该行。在onprem和gov中，
+# 它解析为普通的本地表，因此规则只能看到应答的节点——那里的全集群覆盖
+# 意味着每个节点一个bundle。
+# {sys.storage_policies}和{sys.tables}是共享表，在每种模式下只读取一次，
+# 这是正确的：storage policy是集群级配置。
 #
-# data_disks is the set of disks some user table's storage policy puts a
-# volume on. A disk outside it holds no user data — on a managed service that
-# is the local filesystem cache, sized to be filled, which would fire this
-# rule on every healthy run. An EMPTY set means no user table declares a
-# policy, and then every disk is judged: this filter must not become silence
-# on a server that has no tables yet and a full disk.
-# Evaluated by the Go check over the files already collected (no second
-# query to the server). query: below is the same test in SQL, for the
-# customer to run live; the check mirrors it.
+# data_disks是某些用户表storage policy在其上放置volume的磁盘集合。
+# 不在其中的磁盘不承载用户数据——在托管服务上那就是本地文件系统缓存，
+# 设计上会被填满，会让本规则在每次健康运行时都触发。空集合意味着没有
+# 任何用户表声明策略，此时评判所有磁盘：在尚无表而磁盘已满的服务器上，
+# 该过滤不能变成沉默。
+# 由Go check在已采集的文件上评估（不会再次查询服务器）。下方query:是同一
+# 测试的SQL版本，供客户在线执行；check镜像同一逻辑。
 check: go:disk_space_low
 source:
   - system.disks
@@ -112,4 +103,4 @@ query: |
   WHERE empty(dd.names) OR has(dd.names, d.disk_name)
   ORDER BY free_pct ASC
 
-message: "Disk '{disk_name}' on {hostname} is only {free_pct}% free ({free_space} of {total_space})"
+message: "主机{hostname}上的磁盘'{disk_name}'仅剩{free_pct}%可用（{free_space} / {total_space}）"

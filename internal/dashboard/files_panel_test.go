@@ -23,9 +23,9 @@ func TestCollectBundleFiles(t *testing.T) {
 	mk("host_info.json", 512)
 	mk("logs/clickhouse-server.log", 3145728)
 	mk("configuration/20-keeper.xml", 100)
-	mk("dashboard.html", 999)    // must not list itself
-	mk("schema_graph.html", 555) // its own graph page, opened from the Schema tab
-	mk(".DS_Store", 6148)        // OS turd, not an artifact
+	mk("dashboard.html", 999)    // 不能列出自身
+	mk("schema_graph.html", 555) // 它自己的图页面，从Schema标签页打开
+	mk(".DS_Store", 6148)        // 操作系统垃圾文件，不是产出物
 
 	got := collectBundleFiles(dir)
 	names := make([]string, len(got))
@@ -33,17 +33,17 @@ func TestCollectBundleFiles(t *testing.T) {
 		names[i] = f["file"].(string)
 	}
 	want := []string{
-		"host_info.json", "system.parts_2026.jsonl", // bundle root first
+		"host_info.json", "system.parts_2026.jsonl", // bundle根目录优先
 		"configuration/20-keeper.xml",
 		"logs/clickhouse-server.log",
 	}
 	if len(names) != len(want) {
-		t.Fatalf("got %v, want %v", names, want)
+		t.Fatalf("得到%v，期望%v", names, want)
 	}
-	// Grouped by folder, then by name, so the list reads like the archive.
+	// 先按文件夹分组，再按名称排序，使列表读起来像归档包。
 	for i := range want {
 		if names[i] != want[i] {
-			t.Errorf("position %d: got %q, want %q (full: %v)", i, names[i], want[i], names)
+			t.Errorf("位置%d：得到%q，期望%q（完整：%v）", i, names[i], want[i], names)
 		}
 	}
 
@@ -53,22 +53,22 @@ func TestCollectBundleFiles(t *testing.T) {
 	}
 	log := byName["logs/clickhouse-server.log"]
 	if log["href"] != "logs/clickhouse-server.log" {
-		t.Errorf("href must be bundle-relative and slash-separated, got %v", log["href"])
+		t.Errorf("href必须相对于bundle并以斜杠分隔，得到%v", log["href"])
 	}
 	if log["size"] != "3.0 MiB" {
-		t.Errorf("size = %v, want 3.0 MiB", log["size"])
+		t.Errorf("size = %v，期望3.0 MiB", log["size"])
 	}
 	if log["group"] != "logs" || log["kind"] != "log" {
-		t.Errorf("group/kind = %v/%v, want logs/log", log["group"], log["kind"])
+		t.Errorf("group/kind = %v/%v，期望logs/log", log["group"], log["kind"])
 	}
 	if byName["host_info.json"]["group"] != "" {
-		t.Errorf("a root file should have an empty group, got %v", byName["host_info.json"]["group"])
+		t.Errorf("根目录文件的group应为空，得到%v", byName["host_info.json"]["group"])
 	}
 }
 
 func TestCollectBundleFiles_MissingDir(t *testing.T) {
 	if got := collectBundleFiles(filepath.Join(t.TempDir(), "nope")); len(got) != 0 {
-		t.Errorf("missing dir should yield no rows, got %v", got)
+		t.Errorf("目录缺失时不应产生行，得到%v", got)
 	}
 }
 
@@ -78,26 +78,26 @@ func TestFormatBytes(t *testing.T) {
 		want string
 	}{{512, "512 B"}, {2048, "2.0 KiB"}, {3 << 20, "3.0 MiB"}, {5 << 30, "5.0 GiB"}} {
 		if got := formatBytes(c.in); got != c.want {
-			t.Errorf("formatBytes(%d) = %q, want %q", c.in, got, c.want)
+			t.Errorf("formatBytes(%d) = %q，期望%q", c.in, got, c.want)
 		}
 	}
 }
 
-// The bundle is indexed, never inlined. Raw server logs are tail-copied at up
-// to 50 MiB per file; embedding them would make the page unopenable.
+// bundle只做索引，绝不内联。原始服务器日志每个文件最多尾部复制50 MiB；
+// 嵌入它们会让页面无法打开。
 func TestTemplate_FilesPanelLinksAndDoesNotEmbed(t *testing.T) {
 	for _, want := range []string{
 		`id="sec-files"`, `id="nav-files"`, "const files=DATA.bundle_files||[];",
 		"if(!files.length) return;", "window.filesFilter", `target="_blank"`, "f.href.split('/').map(encodeURIComponent).join('/')",
 	} {
 		if !strings.Contains(htmlTemplate, want) {
-			t.Errorf("files panel missing %q", want)
+			t.Errorf("文件面板缺少%q", want)
 		}
 	}
 }
 
-// Cell values are customer-controlled — filenames included. Escaping is the
-// default; only markup this file builds opts out.
+// 单元格值由客户控制——包括文件名。转义是默认行为；
+// 只有本文件构建的标记可以选择跳过。
 func TestTemplate_TableCellsAreEscaped(t *testing.T) {
 	for _, want := range []string{
 		"function esc(v){",
@@ -106,12 +106,12 @@ func TestTemplate_TableCellsAreEscaped(t *testing.T) {
 		`'<td title="'+esc(r[k])+'">'+esc(r[k])+'</td>'`,
 	} {
 		if !strings.Contains(htmlTemplate, want) {
-			t.Errorf("renderTable escaping missing: %q", want)
+			t.Errorf("renderTable缺少转义：%q", want)
 		}
 	}
-	// Two opt-outs: the file link and the log-level badge — both markup this
-	// file builds. A third has to be deliberate.
+	// 两个例外：文件链接和日志级别徽章——都是本文件构建的标记。
+	// 第三个必须是刻意添加的。
 	if got := strings.Count(htmlTemplate, ",null,['"); got != 2 {
-		t.Errorf("expected exactly 2 htmlCols opt-outs (file link, level badge), found %d", got)
+		t.Errorf("期望恰好2个htmlCols例外（文件链接、级别徽章），实际找到%d", got)
 	}
 }

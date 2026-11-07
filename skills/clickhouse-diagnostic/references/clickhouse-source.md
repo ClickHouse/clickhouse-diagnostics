@@ -1,87 +1,87 @@
-# Pinning the customer's ClickHouse version to source, changelog and issues
+# 把客户的ClickHouse版本对应到源码、changelog和issue
 
-Only needed when the user wants version research (network required). The bundle always carries an exact version (`system.version_*.jsonl`, also `dashboard.html → DATA.version` and the startup banner in `logs/clickhouse-server.log`). Use it — never reason from "the latest ClickHouse".
+仅在用户要做版本研究时才需要（需要网络）。bundle（诊断包）总是带有精确版本（`system.version_*.jsonl`，还有`dashboard.html → DATA.version`和`logs/clickhouse-server.log`中的启动banner）。要用它——绝不要基于"最新版ClickHouse"来推理。
 
-## 1. Version string → git tag
+## 1. 版本字符串 → git tag
 
-`version()` returns `MAJOR.MINOR.PATCH.BUILD`, e.g. `25.3.2.39`. The release tag is `v25.3.2.39-lts` or `v25.3.2.39-stable` (older: `-prestable`, `-testing`). Resolve without guessing:
+`version()`返回`MAJOR.MINOR.PATCH.BUILD`，例如`25.3.2.39`。发布tag是`v25.3.2.39-lts`或`v25.3.2.39-stable`（更早的版本是`-prestable`、`-testing`）。不要猜，按下面方式解析：
 
 ```bash
 V=25.3.2.39
 gh api "repos/ClickHouse/ClickHouse/git/matching-refs/tags/v$V" --jq '.[].ref'        # → refs/tags/v25.3.2.39-lts
-gh release view "v$V-lts" -R ClickHouse/ClickHouse --json tagName,publishedAt,url   # release notes for that patch
+gh release view "v$V-lts" -R ClickHouse/ClickHouse --json tagName,publishedAt,url   # 该补丁版本的 release notes
 ```
-Without `gh`: open `https://github.com/ClickHouse/ClickHouse/tags?q=v25.3.2` in a browser.
+没有`gh`时：在浏览器中打开`https://github.com/ClickHouse/ClickHouse/tags?q=v25.3.2`。
 
-Cloud versions look like `26.2.1.558`; the Cloud build may include changes not in the OSS tag — say so when the bundle is from ClickHouse Cloud (mode `cloud`).
+Cloud版本形如`26.2.1.558`；Cloud构建可能包含OSS tag中没有的变更——当bundle来自ClickHouse Cloud（模式`cloud`）时要说明这一点。
 
-Release cadence: a new minor every month (`YY.M`); every March (`YY.3`) and August (`YY.8`) minor is an **LTS** supported for 12 months, other minors for 3. An on-prem server on a non-LTS minor older than ~3 months is out of support for fixes — worth stating in the summary.
+发布节奏：每月一个新的minor（`YY.M`）；每年3月（`YY.3`）和8月（`YY.8`）的minor是 **LTS**，支持12个月，其他minor支持3个月。非LTS minor上、版本超过约3个月的on-prem服务器已不再获得修复支持——值得在摘要中说明。
 
-## 2. Which source file answers which question
+## 2. 哪个源文件回答哪个问题
 
-Read files at the customer's tag: `https://github.com/ClickHouse/ClickHouse/blob/<tag>/<path>` (or `gh api repos/ClickHouse/ClickHouse/contents/<path>?ref=<tag> --jq .content | base64 -d`).
+在客户对应的tag上读文件：`https://github.com/ClickHouse/ClickHouse/blob/<tag>/<path>`（或`gh api repos/ClickHouse/ClickHouse/contents/<path>?ref=<tag> --jq .content | base64 -d`）。
 
-| Question | File at `<tag>` |
+| 问题 | `<tag>`处的文件 |
 |---|---|
-| What is error code N called / does it exist on this version? | `src/Common/ErrorCodes.cpp` |
-| Does query setting X exist, what is its default, when did it change? | `src/Core/Settings.cpp` (≤ 24.x: `src/Core/Settings.h`); history in `src/Core/SettingsChangesHistory.cpp` |
-| Does server-level setting X exist (config.xml keys like `max_server_memory_usage`, `background_pool_size`)? | `src/Core/ServerSettings.cpp` (≤ 24.x: `ServerSettings.h`) |
-| MergeTree table setting X (`parts_to_throw_insert`, `ttl_only_drop_parts`, `min_age_to_force_merge_seconds`…) — default and meaning | `src/Storages/MergeTree/MergeTreeSettings.cpp` (≤ 24.x: `MergeTreeSettings.h`) |
-| Which startup warnings does the server emit (THP, overcommit, low memory, `max_map_count`)? | `programs/server/Server.cpp` (search `warnings` / `Server::main`) |
-| What does the "Too many parts" message and its thresholds look like? | `src/Storages/MergeTree/MergeTreeData.cpp` (`delayInsertOrThrowIfNeeded`) |
-| Merge selection / why small parts are not merged | `src/Storages/MergeTree/MergeTreeDataMergerMutator.cpp`, `src/Storages/MergeTree/Compaction/` (≥ 25.x) |
-| Mutation head-of-line behaviour, parts locked by merges | `src/Storages/MergeTree/Compaction/MergePredicates/MergeTreeMergePredicate.cpp`, `src/Storages/StorageReplicatedMergeTree.cpp` |
-| Which `system.*` columns exist on this version | `src/Storages/System/StorageSystem<Table>.cpp` (e.g. `StorageSystemParts.cpp`, `StorageSystemReplicas.cpp`) |
-| ProfileEvents / CurrentMetrics names and meaning | `src/Common/ProfileEvents.cpp`, `src/Common/CurrentMetrics.cpp`, `src/Interpreters/ServerAsynchronousMetrics.cpp` |
-| Keeper client-side session/timeout behaviour | `src/Common/ZooKeeper/ZooKeeperImpl.cpp`, `src/Common/ZooKeeper/ZooKeeperArgs.cpp` |
+| 错误码N叫什么 / 该版本上是否存在？ | `src/Common/ErrorCodes.cpp` |
+| 查询设置X是否存在、默认值是什么、何时改过？ | `src/Core/Settings.cpp`（≤ 24.x：`src/Core/Settings.h`）；变更历史在`src/Core/SettingsChangesHistory.cpp` |
+| 服务器级设置X是否存在（如`max_server_memory_usage`、`background_pool_size`这类config.xml键）？ | `src/Core/ServerSettings.cpp`（≤ 24.x：`ServerSettings.h`） |
+| MergeTree表设置X（`parts_to_throw_insert`、`ttl_only_drop_parts`、`min_age_to_force_merge_seconds`……）——默认值与含义 | `src/Storages/MergeTree/MergeTreeSettings.cpp`（≤ 24.x：`MergeTreeSettings.h`） |
+| 服务器会发出哪些启动警告（THP、overcommit、内存不足、`max_map_count`）？ | `programs/server/Server.cpp`（搜索`warnings` / `Server::main`） |
+| "Too many parts" 消息及其阈值长什么样？ | `src/Storages/MergeTree/MergeTreeData.cpp`（`delayInsertOrThrowIfNeeded`） |
+| merge选择 / 为什么小part（数据分片）没有被合并 | `src/Storages/MergeTree/MergeTreeDataMergerMutator.cpp`、`src/Storages/MergeTree/Compaction/`（≥ 25.x） |
+| mutation（变更）的队头阻塞行为、被merge锁定的part | `src/Storages/MergeTree/Compaction/MergePredicates/MergeTreeMergePredicate.cpp`、`src/Storages/StorageReplicatedMergeTree.cpp` |
+| 该版本上有哪些`system.*`列 | `src/Storages/System/StorageSystem<Table>.cpp`（例如`StorageSystemParts.cpp`、`StorageSystemReplicas.cpp`） |
+| ProfileEvents / CurrentMetrics的名称与含义 | `src/Common/ProfileEvents.cpp`、`src/Common/CurrentMetrics.cpp`、`src/Interpreters/ServerAsynchronousMetrics.cpp` |
+| Keeper客户端的会话/超时行为 | `src/Common/ZooKeeper/ZooKeeperImpl.cpp`、`src/Common/ZooKeeper/ZooKeeperArgs.cpp` |
 
-Rule (non-negotiable): **do not describe, confirm or infer the behaviour or default of a setting you have not found in source or official docs for that version.** If it is not in `Settings.cpp` / `ServerSettings.cpp` / `MergeTreeSettings.cpp` at the tag, say "not present on this version".
+规则（不可协商）：**不要描述、确认或推断你未在该版本的源码或官方文档中找到的设置行为或默认值。** 如果在对应tag的`Settings.cpp` / `ServerSettings.cpp` / `MergeTreeSettings.cpp`中找不到，就说 "not present on this version"。
 
-Public docs: `https://clickhouse.com/docs/operations/settings/settings#<setting>`, `/docs/operations/server-configuration-parameters/settings`, `/docs/operations/settings/merge-tree-settings`. Docs describe the *current* version — for an older server prefer source at the tag.
+公开文档：`https://clickhouse.com/docs/operations/settings/settings#<setting>`、`/docs/operations/server-configuration-parameters/settings`、`/docs/operations/settings/merge-tree-settings`。文档描述的是*当前*版本——对于较旧的服务器，优先使用对应tag的源码。
 
-## 3. Changelog: what changed between the customer's version and a candidate upgrade
+## 3. Changelog：客户版本与候选升级版本之间改了什么
 
-- OSS changelog: `https://github.com/ClickHouse/ClickHouse/blob/master/CHANGELOG.md` (one section per minor, with **Backward Incompatible Change**, **New Feature**, **Performance Improvement**, **Bug Fix**). Docs mirror: `https://clickhouse.com/docs/whats-new/changelog`.
-- Per-patch release notes: `gh release view v25.3.3.42-lts -R ClickHouse/ClickHouse` — lists the backported bug fixes with PR numbers. Diff two patches of the same minor by reading the releases in between.
-- Cloud changelog: `https://clickhouse.com/docs/whats-new/cloud`.
-- When a finding "resembles a fixed bug", state the fix PR, the first version that carries it, and whether the customer's version is before or after it. Phrase it as in §4 below.
+- OSS changelog：`https://github.com/ClickHouse/ClickHouse/blob/master/CHANGELOG.md`（每个minor一节，包含 **Backward Incompatible Change**、**New Feature**、**Performance Improvement**、**Bug Fix**）。文档镜像：`https://clickhouse.com/docs/whats-new/changelog`。
+- 每个补丁的release notes：`gh release view v25.3.3.42-lts -R ClickHouse/ClickHouse`——列出回移植的bug修复及其PR编号。读取两个补丁之间的各个release，即可对比同一minor的两个补丁。
+- Cloud changelog：`https://clickhouse.com/docs/whats-new/cloud`。
+- 当某条finding（发现）"resembles a fixed bug" 时，要说明修复PR、包含该修复的第一个版本，以及客户版本是在其之前还是之后。按下面 §4的措辞表述。
 
-## 4. Searching issues and citing them — mandatory protocol
+## 4. 搜索并引用issue——强制协议
 
-Search:
+搜索：
 ```bash
 gh issue list -R ClickHouse/ClickHouse --state all --search '"<exact error text>" label:bug' --limit 10
 gh issue list -R ClickHouse/ClickHouse --state all --search 'TOO_MANY_PARTS merges not scheduled 25.3' --limit 10
 gh pr list    -R ClickHouse/ClickHouse --state merged --search 'fixes #<issue>' --limit 5
 ```
-Lead with the **exact error code/name or message fragment** — it beats symptom phrasing. Cast a wide net with 3–4 short queries, then filter.
+以**精确的错误码/名称或消息片段**开头——这比症状式描述更有效。用3–4个短查询先广泛搜索，再过滤。
 
-Before citing any issue, complete all four steps (adapted from the support methodology this skill inherits):
+在引用任何issue之前，完成以下四步（改编自本skill继承的支持方法论）：
 
-1. Read the full issue body and the key comments — not just the title.
-2. Find the associated fix PR/commit (`fixes #N`, `closes #N`) and the **first version** that includes it (release notes or `gh pr view <n> --json milestone,labels`; Cloud backports may differ).
-3. Check whether the customer's exact version is **before** the fix.
-4. Verify the customer's scenario satisfies the issue's distinguishing conditions (engine, setting, data type, feature in use) — from the bundle, not by assumption.
+1. 阅读完整issue正文和关键评论——不只是标题。
+2. 找到关联的修复PR/commit（`fixes #N`、`closes #N`）以及包含它的**第一个版本**（release notes或`gh pr view <n> --json milestone,labels`；Cloud的回移植可能不同）。
+3. 检查客户的确切版本是否**早于**该修复。
+4. 验证客户的场景满足该issue的区分条件（引擎、设置、数据类型、所用功能）——依据bundle，而不是假设。
 
-If any step cannot be completed, say so explicitly.
+如果任何一步无法完成，要明确说明。
 
-Language rules — what you may write:
+措辞规则——可以怎么写：
 
-| Situation | Allowed | Not allowed |
+| 情况 | 可以说 | 不可以说 |
 |---|---|---|
-| Symptom similarity only | "this pattern resembles ClickHouse/ClickHouse#NNNN" | "you are hitting #NNNN" |
-| All four steps done, conditions match | "the evidence is consistent with #NNNN; a ClickHouse engineer should confirm" | "this is a known bug tracked in #NNNN" |
-| A fix exists in a specific version | "a fix was merged in PR #MMMM (first in vX.Y.Z); worth confirming whether it applies" | "this was fixed in X.Y" |
-| No fix / issue still open | "this may be related to open issue #NNNN" | "this is a known issue" |
+| 仅有症状相似 | "this pattern resembles ClickHouse/ClickHouse#NNNN" | "you are hitting #NNNN" |
+| 四步都完成、条件吻合 | "the evidence is consistent with #NNNN; a ClickHouse engineer should confirm" | "this is a known bug tracked in #NNNN" |
+| 某个具体版本中已有修复 | "a fix was merged in PR #MMMM (first in vX.Y.Z); worth confirming whether it applies" | "this was fixed in X.Y" |
+| 没有修复 / issue仍开放 | "this may be related to open issue #NNNN" | "this is a known issue" |
 
-Never write "known issue" on the strength of pattern matching. Never invent issue numbers — only cite ones you have opened and read in this session.
+绝不要仅凭模式匹配就写 "known issue"。绝不要编造issue编号——只引用你在本次会话中打开并读过的issue。
 
-## 5. Useful public references to hand back to the user
+## 5. 可以回传给用户的实用公开参考
 
-- Docs: `https://clickhouse.com/docs/` (operations, settings, merge-tree, replication, keeper, TTL, async inserts, backups)
-- Knowledge base articles: `https://clickhouse.com/docs/knowledgebase`
-- Cloud vs OSS differences: `https://clickhouse.com/docs/cloud/reference/shared-merge-tree`
-- Self-managed upgrade guide: `https://clickhouse.com/docs/operations/update`
-- Keeper: `https://clickhouse.com/docs/guides/sre/keeper/clickhouse-keeper`
+- 文档：`https://clickhouse.com/docs/`（operations、settings、merge-tree、replication、keeper、TTL、异步插入、备份）
+- 知识库文章：`https://clickhouse.com/docs/knowledgebase`
+- Cloud与OSS的差异：`https://clickhouse.com/docs/cloud/reference/shared-merge-tree`
+- 自管理升级指南：`https://clickhouse.com/docs/operations/update`
+- Keeper：`https://clickhouse.com/docs/guides/sre/keeper/clickhouse-keeper`
 
-Include only links directly relevant to a finding; omit the section when nothing applies.
+只包含与某条finding直接相关的链接；没有适用内容时省略该节。

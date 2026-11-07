@@ -1,42 +1,38 @@
 name: merges_stalled
-title: "Parts were inserted but no merge completed for a whole hour"
+title: "整小时内插入了part但没有任何merge完成"
 severity: warning
 description: |
-  In one or more hours of the last 24, system.part_log recorded more than
-  100 NewPart events and zero successful MergeParts events on one replica.
-  The test is per replica: merges are assigned per node, so a cluster-wide
-  count of zero would require every replica to be stalled at once and would
-  miss the common case of one node stuck while its peers merge normally.
-  Inserts kept creating parts while nothing merged them — the state that
-  ends in TOO_MANY_PARTS (code 252) once parts_to_delay_insert /
-  parts_to_throw_insert are reached.
+  最近24小时的一个或多个小时里，system.part_log在某个replica上记录了
+  超过100次NewPart事件，且成功的MergeParts事件为零。
+  测试是逐replica进行的：merge按节点分配，集群级计数为零要求所有replica
+  同时停滞，会漏掉一个节点卡住而其同伴正常merge的常见情况。
+  insert不断创建part，却没有任何merge处理它们——一旦达到
+  parts_to_delay_insert / parts_to_throw_insert，这种状态最终会变成
+  TOO_MANY_PARTS（错误码252）。
 
-  Usual causes: Keeper unavailable (merges on replicated / shared tables
-  are assigned through Keeper), the merge pool saturated or paused
-  (SYSTEM STOP MERGES), or every merge failing (see failed_merges and
-  the background_operation_failures alert).
+  常见原因：Keeper不可用（replicated / shared表上的merge通过Keeper分配）、
+  merge pool饱和或暂停（SYSTEM STOP MERGES），或每次merge都失败
+  （见failed_merges和background_operation_failures告警）。
 
-  Check: metric_log for the same hours (ZooKeeperHardwareExceptions,
-  BackgroundMergesAndMutationsPoolTask), system.merges, system.parts
-  per partition, text_log 'Temporarily pause scheduling'.
+  排查：同一小时的metric_log（ZooKeeperHardwareExceptions、
+  BackgroundMergesAndMutationsPoolTask）、system.merges、逐分区查看
+  system.parts、text_log中的'Temporarily pause scheduling'。
 tags:
   - parts
   - merges
   - keeper
 
-# {sys.part_log} — part_log is per-replica, so in cloud mode it fans out via
-# clusterAllReplicas. Grouping by hour alone sums every replica into one
-# bucket, and `merges = 0` then demands that NO replica merged anything all
-# hour: the rule could never fire for the usual failure, one stalled node
-# among healthy peers. hostName() splits the test per replica and names the
-# node to act on.
+# {sys.part_log}——part_log是逐replica的，因此在cloud模式下经
+# clusterAllReplicas fan out。只按小时分组会把每个replica加总到一个桶里，
+# 而`merges = 0`随之要求没有任何replica在整个小时内做过任何merge：
+# 规则将永远无法针对常见故障（健康同伴中有一个卡住的节点）触发。
+# hostName()把测试按replica拆分，并指出需要处理的节点。
 #
-# Safe in gov: alert rows never leave the machine there — alerts_summary.json
-# records only counts (internal/alert/alert.go WriteSummaryJSON) and gov never
-# generates the dashboard, the only other consumer of matched rows.
-# Evaluated by the Go check over the files already collected (no second
-# query to the server). query: below is the same test in SQL, for the
-# customer to run live; the check mirrors it.
+# 在gov中安全：告警行绝不会离开本机——alerts_summary.json只记录计数
+# （internal/alert/alert.go WriteSummaryJSON），而gov从不生成dashboard，
+# 那是匹配行的唯一其他消费者。
+# 由Go check在已采集的文件上评估（不会再次查询服务器）。下方query:是同一
+# 测试的SQL版本，供客户在线执行；check镜像同一逻辑。
 check: go:merges_stalled
 source:
   - system.part_log_3_days
@@ -54,4 +50,4 @@ query: |
   HAVING new_parts > 100 AND merges = 0
   ORDER BY hour, hostname
 
-message: "hour starting {hour} on {hostname}: {new_parts} parts inserted, 0 merges completed ({failed_merges} merges failed) — merges were not running on that replica"
+message: "{hostname}上从{hour}开始的一小时：插入了{new_parts}个part，完成0次merge（{failed_merges}次merge失败）——该replica上merge没有运行"

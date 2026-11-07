@@ -1,15 +1,15 @@
--- Keeper requests per minute and replica over the last day: WHEN Keeper got
--- slow, busy or started failing, and on WHICH replica — the minute of a latency jump, a restart
--- burst, or traffic collapsing. Built from system.aggregated_zookeeper_log
--- (on by default since 25.9).
---   ops / in_multi      standalone requests / sub-requests inside Multi
---   avg_latency_us      weighted by count, standalone requests only
---   worst_group_latency_us  slowest (session, path, operation) group that minute
---   failed              non-ZOK responses; loss_failures the subset that means
---                       the session itself was in trouble (connection loss,
---                       session expired, operation timeout)
--- Up to 1 440 rows per replica (a 29-replica service is about 42 000).
--- Version-only (26.3+, needs `is_subrequest`): older servers skip this file.
+-- 过去一天每分钟、每个副本的 Keeper 请求：Keeper 何时变
+-- 慢、变忙或开始失败，以及在“哪个”副本上——延迟跳升、重启突发
+-- 或流量骤降的那一分钟。数据来自 system.aggregated_zookeeper_log
+-- （自 25.9 起默认开启）。
+--   ops / in_multi      独立请求 / Multi 内部的子请求
+--   avg_latency_us      按 count 加权，仅统计独立请求
+--   worst_group_latency_us  该分钟最慢的 (session, path, operation) 组
+--   failed              非 ZOK 响应；loss_failures 是其中表示
+--                       会话本身出了问题的子集（连接丢失、
+--                       会话过期、操作超时）
+-- 每个副本最多 1 440 行（29 个副本的服务约 42 000 行）。
+-- 仅限特定版本（26.3+，需要 `is_subrequest`）：更旧的服务器会跳过本文件。
 SELECT
     toStartOfMinute(event_time)                                     AS time,
     hostname,

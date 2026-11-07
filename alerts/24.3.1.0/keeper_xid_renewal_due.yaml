@@ -1,59 +1,49 @@
-# 24.3 rung only: system.zookeeper_connection.xid was added in 24.3. No root
-# rule — on older servers the check is not applicable, not failed.
+# 仅24.3层级：system.zookeeper_connection.xid在24.3中加入。没有根规则——
+# 在旧服务器上该检查不适用，而不是失败。
 name: keeper_xid_renewal_due
-title: "Keeper session request counter within a day of the 32-bit limit"
+title: "Keeper会话请求计数器距32位上限不足一天"
 severity: info
 description: |
-  A Keeper session numbers its requests with a counter (xid). With the default
-  32-bit counter the client must open a new session when it reaches 2^31: the
-  in-flight operations of the old session fail once, a short burst of
-  ZooKeeperHardwareExceptions and a few 999 / 319 appear on that replica, and
-  it carries on. At 8–12k requests per second that is roughly every 63 hours
-  per replica. This rule reports a session whose remaining headroom, at the
-  rate its host is actually observed to use, runs out within 24 hours — so a
-  burst of Keeper exceptions at that time can be read as the renewal it is
-  rather than as a Keeper incident.
+  Keeper会话用计数器（xid）为其请求编号。使用默认的32位计数器时，
+  客户端在达到2^31时必须打开新会话：旧会话的在途操作会失败一次，
+  该replica上出现一小阵ZooKeeperHardwareExceptions和少量999 / 319，
+  然后继续运行。按每秒8–12k请求计算，每个replica大约每63小时发生一次。
+  本规则报告这样的会话：按其主机实际观测到的速率，剩余余量将在24小时内
+  耗尽——这样彼时的一阵Keeper异常可以被理解为一次续期，而不是Keeper故障。
 
-  It is informational and deliberately conservative. It reports headroom, not
-  a certainty, because nothing in the system tables says how wide a session's
-  counter is:
+  它是信息性的，且刻意保守。它报告的是余量，而不是确定性，因为系统表中
+  没有任何信息表明会话计数器的位宽：
 
-    * With `use_xid_64` enabled in the `<zookeeper>` config (available from
-      24.10) the counter is 64-bit and the session never renews at 2^31. That
-      setting is not exposed in system.settings, system.server_settings,
-      system.zookeeper_connection or the Keeper feature flags (checked on
-      26.7), so this rule cannot test for it — read `<zookeeper>` in the
-      bundle's `configuration/` before treating a reported headroom as a
-      renewal that will happen. A session whose xid is already past 2^31 is
-      64-bit by proof and is excluded here.
-    * The rate comes from this host's ZooKeeperTransactions, which is
-      host-wide while each configured Keeper connection (the default one and
-      every auxiliary `<zookeeper>`) has its own xid. A host with more than
-      one live connection is therefore skipped rather than projected with
-      another session's traffic folded in.
-    * The rate is divided by the span metric_log actually covers, not by a
-      fixed 24 hours, and a host with less than 2 hours of samples is not
-      projected at all — otherwise a server that restarted this morning looks
-      four times quieter than it is and the renewal is missed.
+    * 在`<zookeeper>`配置中启用`use_xid_64`时（24.10起可用），
+      计数器为64位，会话永远不会在2^31处续期。该设置未暴露在
+      system.settings、system.server_settings、system.zookeeper_connection
+      或Keeper feature flags中（在26.7上检查过），因此本规则无法测试它——
+      在把报告的余量当作将会发生的续期之前，请查看bundle的`configuration/`
+      中的`<zookeeper>`。xid已超过2^31的会话可证明是64位，因此在这里
+      被排除。
+    * 速率来自该host的ZooKeeperTransactions，它是host级指标，而每个配置的
+      Keeper连接（默认连接和每个辅助`<zookeeper>`）都有自己的xid。
+      因此，有多个活动连接的host会被跳过，而不是把另一个会话的流量折进来
+      做预测。
+    * 速率除以metric_log实际覆盖的时间跨度，而不是固定的24小时；
+      样本不足2小时的host完全不预测——否则今早刚重启的服务器看起来会比
+      实际安静四倍，从而错过续期。
 
-  The renewal itself needs no action. It becomes a finding only if inserts
-  fail in those minutes — look for failed INSERTs in `query_log` (or failed
-  flushes in `asynchronous_insert_log`) at the burst, not in
-  `system.error_log`, which also counts background Keeper errors that no
-  query ever saw and which does not exist before 24.8 — or if a replica
-  renews far more often than its rate predicts, which is session loss rather
-  than counter exhaustion (see keeper_connection_blips).
+  续期本身不需要任何操作。只有当那些分钟里insert失败时，它才成为finding——
+  在异常爆发时查看`query_log`中失败的INSERT（或`asynchronous_insert_log`
+  中失败的flush），而不是`system.error_log`，后者还会统计没有任何查询
+  看到的background Keeper错误，且24.8之前不存在——或者当某个replica
+  续期频率远超其速率预测时，那是会话丢失而非计数器耗尽
+  （见keeper_connection_blips）。
 tags:
   - keeper
 
-# Per connection, and only where the host's traffic can be attributed to one
-# session. In cloud both {sys.*} fan out and the join on hostName() lines them
-# up; on one node both sides are that node.
-# Reads system.zookeeper_connection: needs a live Keeper session.
+# 逐连接，且仅在host流量可归因于单个会话时。在cloud中，两个{sys.*}
+# 都会fan out，按hostName()连接即可对齐；在单节点上两侧都是该节点。
+# 读取system.zookeeper_connection：需要一个活动的Keeper会话。
 needs: keeper
-# Evaluated by the Go check over the files already collected (no second
-# query to the server). query: below is the same test in SQL, for the
-# customer to run live; the check mirrors it.
+# 由Go check在已采集的文件上评估（不会再次查询服务器）。下方query:是同一
+# 测试的SQL版本，供客户在线执行；check镜像同一逻辑。
 check: go:keeper_xid_renewal_due
 source:
   - system.zookeeper_connection
@@ -113,4 +103,4 @@ query: |
   ORDER BY headroom_h
   LIMIT 100
 
-message: "{hostname}: Keeper session '{connection_name}' on {keeper_host} is at xid {xid} of 2^31 and doing {tx_per_s} req/s (measured over {measured_over_h} h) — about {headroom_h} h of headroom, a counter this rate exhausts every ~{period_at_this_rate_h} h. On a default 32-bit counter it renews then: one short burst of Keeper exceptions on this replica, handled. Check use_xid_64 in <zookeeper> (configuration/) — with it enabled there is no renewal."
+message: "{hostname}：{keeper_host}上的Keeper会话'{connection_name}'处于2^31的xid {xid}，速率为{tx_per_s} req/s（在{measured_over_h}小时内测得）——约剩{headroom_h}小时余量，按此速率计数器约每{period_at_this_rate_h}小时耗尽一次。在默认32位计数器上，它届时会续期：该replica上出现一小阵Keeper异常，已处理。检查<zookeeper>（configuration/）中的use_xid_64——启用后就不会续期。"

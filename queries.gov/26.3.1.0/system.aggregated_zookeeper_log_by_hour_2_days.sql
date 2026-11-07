@@ -1,17 +1,17 @@
--- Keeper requests per hour, ClickHouse component and operation over the last
--- two days: WHO in the server is loading Keeper, with what, and how slowly.
--- system.aggregated_zookeeper_log (on by default since 25.9) groups every
--- Keeper request by session, parent path, operation and component once a
--- second; this reads it at hour × component × operation.
---   ops        standalone requests (a Multi counts once)
---   in_multi   sub-requests carried inside Multi / MultiRead — where batched
---              reads hide (millions of Gets can sit inside a few Multis)
---   avg_latency_us  weighted by count, standalone requests only: a
---              sub-request reports 0 because the enclosing Multi carries it
---   errors     every non-ZOK error code with its count
--- Version-only (26.3+): needs `component` (26.2) and `is_subrequest` (26.3);
--- before 26.3 sub-requests share buckets with standalone requests and the
--- latency is misleading, so older servers skip this file.
+-- 最近两天每小时、按 ClickHouse 组件和操作统计的 Keeper 请求：
+-- 服务器中是谁在给 Keeper 施加负载、用什么操作、有多慢。
+-- system.aggregated_zookeeper_log（自 25.9 默认开启）每秒按会话、
+-- 父路径、操作和组件对所有 Keeper 请求做一次分组；
+-- 这里按小时 × 组件 × 操作读取它。
+--   ops        独立请求（一个 Multi 只计一次）
+--   in_multi   Multi / MultiRead 内部携带的子请求 —— 批量读取就藏在
+--              这里（数百万次 Get 可以塞进少数几个 Multi）
+--   avg_latency_us  按 count 加权，仅独立请求：子请求报 0，
+--              因为由外层 Multi 承担
+--   errors     每个非 ZOK 错误码及其数量
+-- 仅版本目录（26.3+）：需要 `component`（26.2）和 `is_subrequest`（26.3）；
+-- 26.3 之前子请求与独立请求共用桶，延迟会误导，
+-- 所以旧服务器跳过本文件。
 SELECT
     toStartOfHour(event_time)                                       AS time,
     component,

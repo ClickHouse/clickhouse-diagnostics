@@ -9,9 +9,8 @@ import (
 	"clickhouse-diagnostic/internal/collection"
 )
 
-// The redaction map is keyed by collector file name. A rename of
-// system.tables.sql would silently switch the redaction off, so every key must
-// still be a real file in every mode directory that has it.
+// 脱敏映射以 collector 文件名作为键。重命名 system.tables.sql 会悄悄关闭
+// 脱敏，因此每个键都必须仍是每个拥有该文件的模式目录中的真实文件。
 func TestSensitiveCollectorFieldsMatchRealFiles(t *testing.T) {
 	for name := range collection.SensitiveCollectorFields {
 		found := false
@@ -21,7 +20,7 @@ func TestSensitiveCollectorFieldsMatchRealFiles(t *testing.T) {
 			}
 		}
 		if !found {
-			t.Errorf("SensitiveCollectorFields names %q but no mode directory ships that file — redaction is silently off", name)
+			t.Errorf("SensitiveCollectorFields 命名了 %q，但没有任何模式目录随包提供该文件 —— 脱敏已悄悄关闭", name)
 		}
 	}
 }
@@ -31,20 +30,20 @@ func TestRedactResult(t *testing.T) {
 
 	out, note := redactResult("system.tables.sql", ".jsonl", line)
 	if strings.Contains(out, "pw123") {
-		t.Errorf("password survived: %s", out)
+		t.Errorf("密码仍然存在：%s", out)
 	}
-	if !strings.Contains(note, "2 credential(s)") {
-		t.Errorf("note = %q, want a 2-credential count", note)
+	if !strings.Contains(note, "2 个凭据") {
+		t.Errorf("note = %q，期望 2 个凭据的计数", note)
 	}
 
-	// A collector that carries no DDL is untouched, byte for byte.
+	// 不携带 DDL 的 collector 保持原样，逐字节不变。
 	other := `{"database":"d","name":"pw123 is a table name here"}` + "\n"
 	if out, note := redactResult("system.databases.sql", ".jsonl", other); out != other || note != "" {
-		t.Errorf("non-sensitive collector changed: %q / %q", out, note)
+		t.Errorf("非敏感 collector 被改动了：%q / %q", out, note)
 	}
 
-	// Non-JSONL cannot be redacted field by field: written as-is, but flagged.
-	if out, note := redactResult("system.tables.sql", ".native", "opaque"); out != "opaque" || !strings.Contains(note, "NOT redacted") {
-		t.Errorf("native: %q / %q", out, note)
+	// 非 JSONL 无法逐字段脱敏：原样写出，但会标记出来。
+	if out, note := redactResult("system.tables.sql", ".native", "opaque"); out != "opaque" || !strings.Contains(note, "未脱敏") {
+		t.Errorf("native：%q / %q", out, note)
 	}
 }

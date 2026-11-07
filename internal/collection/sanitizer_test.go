@@ -18,10 +18,10 @@ func TestSanitizeXMLContent_NamedTagsAndFragments(t *testing.T) {
 </clickhouse>`)
 	out, count, err := s.SanitizeXMLContent(in)
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("意外错误：%v", err)
 	}
 	if count == 0 {
-		t.Fatal("expected at least one redaction, got zero")
+		t.Fatal("期望至少一次脱敏，实际为零")
 	}
 	o := string(out)
 	for _, leaked := range []string{
@@ -31,31 +31,31 @@ func TestSanitizeXMLContent_NamedTagsAndFragments(t *testing.T) {
 		"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
 	} {
 		if strings.Contains(o, leaked) {
-			t.Errorf("leaked %q in sanitised output:\n%s", leaked, o)
+			t.Errorf("脱敏输出中泄漏了 %q：\n%s", leaked, o)
 		}
 	}
 	if !strings.Contains(o, "<quota>default</quota>") {
-		t.Errorf("non-sensitive content was wrongly redacted:\n%s", o)
+		t.Errorf("非敏感内容被错误脱敏：\n%s", o)
 	}
 }
 
 func TestSanitizeXMLContent_MultiLineTagValue(t *testing.T) {
-	// The previous regex-only implementation missed multi-line tag
-	// content because the patterns lacked the (?s) flag. The parser
-	// catches it regardless of how the value is wrapped.
+	// 此前仅正则的实现在多行标签内容上会漏掉，因为
+	// 模式缺少 (?s) flag。解析器无论值如何换行
+	// 都能捕获它。
 	s := NewSanitizer()
 	in := []byte("<password>line one\nline two\nline three</password>")
 	out, count, err := s.SanitizeXMLContent(in)
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("意外错误：%v", err)
 	}
 	if count == 0 {
-		t.Fatal("expected redaction, got zero")
+		t.Fatal("期望脱敏，实际为零")
 	}
 	o := string(out)
 	for _, leak := range []string{"line one", "line two", "line three"} {
 		if strings.Contains(o, leak) {
-			t.Errorf("multi-line value not fully redacted; found %q in:\n%s", leak, o)
+			t.Errorf("多行值未完全脱敏；在以下内容中发现 %q：\n%s", leak, o)
 		}
 	}
 }
@@ -68,22 +68,22 @@ func TestSanitizeXMLContent_AttributeValues(t *testing.T) {
 </root>`)
 	out, _, err := s.SanitizeXMLContent(in)
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("意外错误：%v", err)
 	}
 	o := string(out)
 	for _, leak := range []string{"hunter2", "AKIAIOSFODNN7EXAMPLE", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"} {
 		if strings.Contains(o, leak) {
-			t.Errorf("attribute value %q leaked:\n%s", leak, o)
+			t.Errorf("属性值 %q 泄漏：\n%s", leak, o)
 		}
 	}
 	if !strings.Contains(o, `name="alice"`) {
-		t.Errorf("non-sensitive attribute was wrongly redacted:\n%s", o)
+		t.Errorf("非敏感属性被错误脱敏：\n%s", o)
 	}
 }
 
 func TestSanitizeXMLContent_HeuristicsInComments(t *testing.T) {
-	// A credential pasted into an XML comment — no structural tag for
-	// the parser to grab onto. The heuristic pass catches it.
+	// 粘贴到 XML 注释中的凭据——没有结构化标签供
+	// 解析器抓取。启发式处理会捕获它。
 	s := NewSanitizer()
 	in := []byte(`<root>
   <!-- earlier we used AKIAIOSFODNN7EXAMPLE for this -->
@@ -91,14 +91,14 @@ func TestSanitizeXMLContent_HeuristicsInComments(t *testing.T) {
 </root>`)
 	out, _, err := s.SanitizeXMLContent(in)
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("意外错误：%v", err)
 	}
 	o := string(out)
 	if strings.Contains(o, "AKIAIOSFODNN7EXAMPLE") {
-		t.Errorf("AWS key in comment not redacted:\n%s", o)
+		t.Errorf("注释中的 AWS key 未脱敏：\n%s", o)
 	}
 	if strings.Contains(o, "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9") {
-		t.Errorf("JWT in comment not redacted:\n%s", o)
+		t.Errorf("注释中的 JWT 未脱敏：\n%s", o)
 	}
 }
 
@@ -107,7 +107,7 @@ func TestSanitizeXMLContent_FailsClosedOnParseError(t *testing.T) {
 	in := []byte(`<root><password>oops</mismatched></root>`)
 	_, _, err := s.SanitizeXMLContent(in)
 	if err == nil {
-		t.Fatal("expected parse error on mismatched tags, got nil")
+		t.Fatal("标签不匹配时期望解析错误，实际为 nil")
 	}
 }
 
@@ -118,14 +118,14 @@ func TestSanitizeXMLContent_URLBasicAuth(t *testing.T) {
 </root>`)
 	out, _, err := s.SanitizeXMLContent(in)
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("意外错误：%v", err)
 	}
 	o := string(out)
 	if strings.Contains(o, "supersecretpw") {
-		t.Errorf("URL basic-auth password not redacted:\n%s", o)
+		t.Errorf("URL basic-auth 密码未脱敏：\n%s", o)
 	}
 	if !strings.Contains(o, "db.internal") {
-		t.Errorf("hostname stripped along with password (should be preserved):\n%s", o)
+		t.Errorf("主机名随密码一起被剥离（应保留）：\n%s", o)
 	}
 }
 
@@ -143,19 +143,19 @@ storage:
 `)
 	out, count, err := s.SanitizeYAMLContent(in)
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("意外错误：%v", err)
 	}
 	if count == 0 {
-		t.Fatal("expected redactions, got zero")
+		t.Fatal("期望脱敏，实际为零")
 	}
 	o := string(out)
 	for _, leak := range []string{"hunter2", "tk_abcdef0123456789", "AKIAIOSFODNN7EXAMPLE", "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"} {
 		if strings.Contains(o, leak) {
-			t.Errorf("leaked %q:\n%s", leak, o)
+			t.Errorf("泄漏了 %q：\n%s", leak, o)
 		}
 	}
 	if !strings.Contains(o, "alice") || !strings.Contains(o, "us-east-1") {
-		t.Errorf("non-sensitive values were wrongly redacted:\n%s", o)
+		t.Errorf("非敏感值被错误脱敏：\n%s", o)
 	}
 }
 
@@ -164,7 +164,7 @@ func TestSanitizeYAMLContent_FailsClosedOnParseError(t *testing.T) {
 	in := []byte("password: [bad: ]: bracket")
 	_, _, err := s.SanitizeYAMLContent(in)
 	if err == nil {
-		t.Fatal("expected parse error, got nil")
+		t.Fatal("期望解析错误，实际为 nil")
 	}
 }
 
@@ -176,13 +176,13 @@ MIIBOgIBAAJBAKj34GkxFhD90vcNLYLInFEX6Ppy1tPf9Cnzj4p4WGeKLs1Pt8Qu
 after`
 	out, n := RedactCredentialsInText(in)
 	if n == 0 {
-		t.Fatal("PEM block not redacted")
+		t.Fatal("PEM 块未脱敏")
 	}
 	if strings.Contains(out, "MIIBOgIBAAJBAKj34") {
-		t.Errorf("PEM body leaked:\n%s", out)
+		t.Errorf("PEM 正文泄漏：\n%s", out)
 	}
 	if !strings.Contains(out, "before") || !strings.Contains(out, "after") {
-		t.Errorf("surrounding text mangled:\n%s", out)
+		t.Errorf("周边文本被破坏：\n%s", out)
 	}
 }
 
@@ -190,16 +190,16 @@ func TestRedactCredentialsInText_AWSAndJWT(t *testing.T) {
 	in := "key=AKIAIOSFODNN7EXAMPLE token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIn0.dummysig tail"
 	out, n := RedactCredentialsInText(in)
 	if n < 2 {
-		t.Fatalf("expected 2+ redactions, got %d", n)
+		t.Fatalf("期望 2 次以上脱敏，得到 %d", n)
 	}
 	if strings.Contains(out, "AKIAIOSFODNN7EXAMPLE") {
-		t.Errorf("AWS key leaked:\n%s", out)
+		t.Errorf("AWS key 泄漏：\n%s", out)
 	}
 	if strings.Contains(out, "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9") {
-		t.Errorf("JWT leaked:\n%s", out)
+		t.Errorf("JWT 泄漏：\n%s", out)
 	}
 	if !strings.Contains(out, "tail") {
-		t.Errorf("trailing text dropped:\n%s", out)
+		t.Errorf("末尾文本被丢弃：\n%s", out)
 	}
 }
 
@@ -229,7 +229,7 @@ func TestRedactCredentialsInText_KeywordValueDisclosure(t *testing.T) {
 			wantCount: 1,
 		},
 		{
-			// Prose — no quote, no `:`, no `=`. Must NOT match.
+			// 普通文字——没有引号、没有 `:`、没有 `=`。绝不能匹配。
 			in:        "password requirements: 8 characters minimum",
 			redact:    nil,
 			keep:      []string{"password requirements"},
@@ -245,16 +245,16 @@ func TestRedactCredentialsInText_KeywordValueDisclosure(t *testing.T) {
 	for _, tc := range cases {
 		out, n := RedactCredentialsInText(tc.in)
 		if n != tc.wantCount {
-			t.Errorf("input=%q: got %d redactions, want %d (out=%q)", tc.in, n, tc.wantCount, out)
+			t.Errorf("input=%q：得到 %d 次脱敏，期望 %d（out=%q）", tc.in, n, tc.wantCount, out)
 		}
 		for _, leak := range tc.redact {
 			if strings.Contains(out, leak) {
-				t.Errorf("input=%q: leaked %q in output %q", tc.in, leak, out)
+				t.Errorf("input=%q：输出 %q 中泄漏了 %q", tc.in, out, leak)
 			}
 		}
 		for _, keep := range tc.keep {
 			if !strings.Contains(out, keep) {
-				t.Errorf("input=%q: lost expected substring %q in output %q", tc.in, keep, out)
+				t.Errorf("input=%q：输出 %q 中丢失了期望子串 %q", tc.in, out, keep)
 			}
 		}
 	}
@@ -279,7 +279,7 @@ func TestIsSensitiveName(t *testing.T) {
 	}
 	for _, tc := range cases {
 		if got := isSensitiveName(tc.name); got != tc.want {
-			t.Errorf("isSensitiveName(%q) = %v, want %v", tc.name, got, tc.want)
+			t.Errorf("isSensitiveName(%q) = %v，期望 %v", tc.name, got, tc.want)
 		}
 	}
 }

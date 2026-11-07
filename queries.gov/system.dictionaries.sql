@@ -2,8 +2,8 @@ SELECT
   hex(SHA256(concat(database, '%salt%'))) AS database,
   hex(SHA256(concat(name, '%salt%'))) AS name,
   status,
-  -- origin is the XML config path (or the qualified DDL identifier) —
-  -- both reveal infrastructure/schema detail, so hash it like the names.
+  -- origin 是 XML 配置路径（或带限定的 DDL 标识符）——
+  -- 两者都会泄露基础设施/schema 细节，所以像名称一样哈希。
   hex(SHA256(concat(origin, '%salt%'))) AS origin,
   uuid,
   type,

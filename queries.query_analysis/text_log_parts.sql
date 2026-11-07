@@ -1,18 +1,18 @@
--- Targeted text_log slice: only the messages that describe data
--- selection — how many parts / marks / streams / rows the query
--- actually scanned. Answers "is the part-pruning effective?" and
--- "is this a full table scan?".
--- Run when --query-id is set.
+-- 定向的 text_log 切片：只保留描述数据
+-- 选择过程的消息——查询实际扫描了多少 parts / marks / streams / rows
+-- 的问题。回答 "part 剪枝是否有效？" 以及
+-- "这是否为全表扫描？"。
+-- 当设置了 --query-id 时运行。
 --
--- Root variant for the oldest supported servers (22.8+):
--- message_format_string was added in 23.1, so this filters on the
--- rendered message text instead — see 23.1.1.0/ for the exact
--- format-string match used on newer servers.
+-- 面向最旧受支持服务器（22.8+）的根变体：
+-- message_format_string 在 23.1 新增，因此这里改为按渲染后的
+-- 消息文本过滤——精确的格式字符串匹配用于较新服务器，
+-- 见 23.1.1.0/。
 --
--- Patterns are anchored on a stable prefix and left open-ended (trailing
--- %) so a ClickHouse version that appends extra fields to either log line
--- (it has extended the "Selected … parts" message before) still matches
--- rather than silently returning zero rows.
+-- 模式锚定在稳定前缀上，并保持开放结尾（末尾的
+-- %），这样即使某个 ClickHouse 版本在任一日志行后追加额外字段
+-- （它以前扩展过 "Selected … parts" 消息），仍然能够匹配，
+-- 而不是静默返回零行。
 SELECT
     event_time_microseconds                                AS ts,
     thread_id,

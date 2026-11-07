@@ -1,5 +1,5 @@
 -- tier: essential
--- Gov: database/table/part/partition/source host hashed; port dropped.
+-- Gov：database/table/part/partition/source host 均哈希；丢弃 port。
 SELECT
     hex(SHA256(concat(database, '%salt%')))                AS database,
     hex(SHA256(concat(table, '%salt%')))                   AS table,

@@ -7,12 +7,11 @@ import (
 	"testing"
 )
 
-// A plain `ARRAY JOIN tables` drops every query_log row whose `tables` array is
-// empty — which is precisely the failure class the archive exists for: a query
-// that threw before it resolved a table (UNKNOWN_TABLE 60, parse errors 6/27)
-// has no tables and vanishes. Observed against a real bundle: the archived
-// JSONL held exception codes 395 and 241 only, while the live dashboard query
-// (no array join) reported 395, 241, 6 and 60.
+// 裸的 `ARRAY JOIN tables` 会丢弃所有 `tables` 数组为空的 query_log 行 ——
+// 而这恰恰是归档要覆盖的那类失败：一个在解析出表之前就抛错的查询
+// （UNKNOWN_TABLE 60、解析错误 6/27）没有 tables，于是凭空消失。曾对着一个真实
+// bundle 观察到：归档的 JSONL 只包含异常码 395 和 241，而实时 dashboard 查询
+// （没有 array join）报告了 395、241、6 和 60。
 func TestQueryLogDetails_UsesLeftArrayJoin(t *testing.T) {
 	plainArrayJoin := regexp.MustCompile(`(?i)(^|[^T]\s)ARRAY\s+JOIN\s+tables`)
 
@@ -24,33 +23,32 @@ func TestQueryLogDetails_UsesLeftArrayJoin(t *testing.T) {
 		seen++
 		body := readFileForTest(t, path)
 		if !strings.Contains(strings.ToUpper(body), "LEFT ARRAY JOIN TABLES") {
-			t.Errorf("%s: must use LEFT ARRAY JOIN tables, or zero-table failures are dropped", path)
+			t.Errorf("%s: 必须使用 LEFT ARRAY JOIN tables，否则零表的失败会被丢弃", path)
 		}
 		for _, line := range strings.Split(body, "\n") {
 			if strings.HasPrefix(strings.TrimSpace(line), "--") {
 				continue
 			}
 			if plainArrayJoin.MatchString(line) {
-				t.Errorf("%s: bare ARRAY JOIN tables on line %q", path, strings.TrimSpace(line))
+				t.Errorf("%s: 第 %q 行出现了裸的 ARRAY JOIN tables", path, strings.TrimSpace(line))
 			}
 		}
 	}
 	if seen == 0 {
-		t.Fatal("no system.query_log_details*.sql files found — test is not guarding anything")
+		t.Fatal("未找到 system.query_log_details*.sql 文件 —— 该测试没有在守护任何东西")
 	}
 }
 
-// part_name is not collected by the part_log aggregates at all, and this
-// guards both of the ways it could come back.
+// part_log 的聚合完全不采集 part_name，而这个测试守护它可能重新出现的
+// 两种方式。
 //
-// As a GROUP BY key it is fatal: part_name is unique per part, so keying on it
-// makes the "aggregate" a row-for-row copy of the source table — 868 rows for
-// 868 events on a toy dataset, millions over 7 days of production traffic.
+// 作为 GROUP BY 键它是灾难性的：part_name 对每个 part 都是唯一的，因此以它为
+// 键会把“聚合”变成源表逐行的拷贝 —— 在一个玩具数据集上 868 个事件产生 868 行，
+// 在 7 天的生产流量上则是数百万行。
 //
-// Sampled with any(part_name) it is merely useless: one arbitrary part out of
-// however many the group covers, with nothing to say why that one was picked.
-// It is not a handle anyone can troubleshoot from, so it was dropped outright
-// rather than demoted to a sample.
+// 用 any(part_name) 采样则只是毫无用处：在分组覆盖的任意多个 part 中取一个
+// 任意的 part，而且无法说明为什么选中它。它不是任何人能据此排查问题的抓手，
+// 因此被直接去掉，而不是降级为采样。
 func TestPartLog_DoesNotCollectPartName(t *testing.T) {
 	var seen int
 	for _, path := range realRepoSQLFiles(t) {
@@ -59,9 +57,9 @@ func TestPartLog_DoesNotCollectPartName(t *testing.T) {
 		}
 		seen++
 
-		// Strip comment text before matching — whole-line AND trailing. Those
-		// files explain at length WHY part_name is absent, and that prose must
-		// not read as a projection. Same approach as gov_leak_test.go.
+		// 匹配前先去注释文本 —— 整行注释和行尾注释都去掉。这些文件会详细解释
+		// 为什么没有 part_name，那段说明文字不能被当作投影。做法与
+		// gov_leak_test.go 相同。
 		var code []string
 		for _, line := range strings.Split(readFileForTest(t, path), "\n") {
 			if i := strings.Index(line, "--"); i >= 0 {
@@ -73,45 +71,43 @@ func TestPartLog_DoesNotCollectPartName(t *testing.T) {
 		}
 
 		if strings.Contains(strings.Join(code, "\n"), "part_name") {
-			t.Errorf("%s: part_name must not be collected — as a group key it copies "+
-				"the source table row-for-row, and any(part_name) is an arbitrary "+
-				"sample nobody can act on", path)
+			t.Errorf("%s: 不得采集 part_name —— 作为分组键它会逐行拷贝"+
+				"源表，而 any(part_name) 是一个没人能据此行动的任意"+
+				"采样", path)
 		}
 	}
 	if seen == 0 {
-		t.Fatal("no system.part_log*.sql files found — test is not guarding anything")
+		t.Fatal("未找到 system.part_log*.sql 文件 —— 该测试没有在守护任何东西")
 	}
 }
 
-// Free-text columns must be truncated with leftUTF8, never with left.
+// 自由文本列必须用 leftUTF8 截断，绝不能用 left。
 //
-// left() counts BYTES. A cut that lands inside a multi-byte character emits a
-// lone continuation byte, and the collector writes ClickHouse's response to
-// disk verbatim (executor.go), so nothing downstream repairs it: the .jsonl
-// line stops being valid UTF-8. Strict readers reject it outright — Python's
-// json raises "invalid continuation byte" on the whole line — while jq is
-// lenient and silently substitutes U+FFFD, corrupting the text just as badly
-// but without saying so. Reachable with any non-ASCII literal in customer SQL
-// ('München', CJK identifiers), which is ordinary rather than exotic.
+// left() 按字节计数。截断点落在多字节字符内部时会输出一个孤立的续接字节，
+// 而 collector 会把 ClickHouse 的响应原样写到磁盘（executor.go），因此下游
+// 没有任何东西会修复它：这一 .jsonl 行不再是合法的 UTF-8。严格的读取器会直接
+// 拒绝它 —— Python 的 json 会对整行抛出 "invalid continuation byte" ——
+// 而 jq 比较宽容，会悄悄替换为 U+FFFD，同样严重地破坏了文本，却不作声。
+// 客户 SQL 中任何非 ASCII 字面量（'München'、CJK 标识符）都能触发，
+// 这很常见而非罕见。
 //
-// leftUTF8 counts code points and is registered next to left in 22.8, so it
-// works at the support floor and needs no version gate.
+// leftUTF8 按码点计数，并在 22.8 中与 left 一同注册，因此它在支持版本下限上
+// 可用，无需版本门控。
 func TestArchiveQueries_TruncateFreeTextWithLeftUTF8(t *testing.T) {
-	// Documented exemptions, keyed by repo-relative path. Both reasons are
-	// about the VALUE never reaching the output as raw truncated text, not
-	// about the truncation being safe in general.
+	// 有文档记录的豁免项，以仓库相对路径为键。两条理由都是关于
+	// 该值永远不会以原始截断文本的形式进入输出，而不是关于截断本身总体上安全。
 	exempt := map[string]string{
-		// last_error_trace is Array(UInt64) stringified to bracketed ASCII
-		// digits, so there is no multi-byte character to split.
+		// last_error_trace 是 Array(UInt64)，被字符串化为方括号包裹的 ASCII
+		// 数字，因此没有多字节字符会被截断。
 		"queries.onprem/system.errors.sql": "toString(Array(UInt64)) is ASCII",
 		"queries.cloud/system.errors.sql":  "toString(Array(UInt64)) is ASCII",
-		// gov feeds the truncated message into SHA256 and emits hex, so an
-		// invalid byte cannot survive into the archive.
+		// gov 会把截断后的 message 送入 SHA256 并以十六进制输出，
+		// 因此非法字节不可能存活进归档。
 		"queries.gov/system.text_log.sql": "truncated value is hashed to hex",
 	}
 
-	// Matches left( but not leftUTF8( — \b would not help, since "left" is a
-	// prefix of "leftUTF8".
+	// 匹配 left( 但不匹配 leftUTF8( —— \b 帮不上忙，因为 "left" 是
+	// "leftUTF8" 的前缀。
 	bareLeft := regexp.MustCompile(`(?i)\bleft\s*\(`)
 
 	var seen int
@@ -122,35 +118,33 @@ func TestArchiveQueries_TruncateFreeTextWithLeftUTF8(t *testing.T) {
 		}
 		seen++
 		for i, line := range strings.Split(readFileForTest(t, path), "\n") {
-			// Strip comments — whole-line AND trailing. These files discuss
-			// left() vs leftUTF8() at length and that prose must not match.
+			// 去掉注释 —— 整行注释和行尾注释都去掉。这些文件会详细讨论
+			// left() 与 leftUTF8()，那段说明文字不能被匹配。
 			if j := strings.Index(line, "--"); j >= 0 {
 				line = line[:j]
 			}
 			if strings.TrimSpace(line) == "" {
 				continue
 			}
-			// Remove every leftUTF8( first, so the remainder can only contain
-			// a byte-wise left(.
+			// 先移除所有 leftUTF8(，这样剩下的只可能包含按字节截断的 left(。
 			stripped := strings.ReplaceAll(strings.ReplaceAll(line, "leftUTF8(", ""), "leftUTF8 (", "")
 			if bareLeft.MatchString(stripped) {
-				t.Errorf("%s:%d: truncates with byte-wise left() — use leftUTF8() or the "+
-					"archived .jsonl can hold invalid UTF-8: %q",
+				t.Errorf("%s:%d: 使用了按字节截断的 left() —— 请改用 leftUTF8()，否则"+
+					"归档的 .jsonl 可能包含非法 UTF-8：%q",
 					rel, i+1, strings.TrimSpace(line))
 			}
 		}
 	}
 	if seen == 0 {
-		t.Fatal("no non-exempt .sql files found — test is not guarding anything")
+		t.Fatal("未找到非豁免的 .sql 文件 —— 该测试没有在守护任何东西")
 	}
 }
 
-// The archived text_log collectors describe themselves as "Warning and worse".
-// In the level Enum8, Critical sits between Fatal and Error, so a filter of
-// ('Warning','Error','Fatal') silently drops exactly the rows a support
-// engineer opens the bundle for. The dashboard's own text_log query already
-// includes Critical; the archive must match or the two disagree about what
-// happened on the server.
+// 归档的 text_log collector 自称“Warning and worse”。在 level 枚举 Enum8 中，
+// Critical 位于 Fatal 和 Error 之间，因此 ('Warning','Error','Fatal') 这样的
+// 过滤会悄悄丢掉支持工程师打开 bundle 要找的正是那些行。dashboard 自己的
+// text_log 查询已经包含 Critical；归档必须与之一致，否则两者对服务器上
+// 发生了什么会给出不同说法。
 func TestTextLog_IncludesCritical(t *testing.T) {
 	levelFilter := regexp.MustCompile(`(?i)level\s+IN\s*\(([^)]*)\)`)
 
@@ -159,11 +153,10 @@ func TestTextLog_IncludesCritical(t *testing.T) {
 		if !strings.HasPrefix(filepath.Base(path), "system.text_log") {
 			continue
 		}
-		// text_log_keeper_1_day deliberately reads EVERY level: the Keeper
-		// session markers it counts ("Connected to ZooKeeper", "Finalizing
-		// session") are Information/Debug lines, so a Warning-and-worse
-		// filter would return nothing. It is a marker histogram, not a
-		// severity slice, and the Critical guarantee does not apply.
+		// text_log_keeper_1_day 刻意读取所有级别：它统计的 Keeper 会话标记
+		//（"Connected to ZooKeeper"、"Finalizing session"）是 Information/Debug
+		// 行，因此 Warning-and-worse 过滤会返回空。它是一张标记直方图，
+		// 不是严重级别切片，Critical 保证不适用。
 		if strings.HasPrefix(filepath.Base(path), "system.text_log_keeper") {
 			continue
 		}
@@ -171,16 +164,16 @@ func TestTextLog_IncludesCritical(t *testing.T) {
 		body := readFileForTest(t, path)
 		m := levelFilter.FindStringSubmatch(body)
 		if m == nil {
-			t.Errorf("%s: no level IN (...) filter found", path)
+			t.Errorf("%s: 未找到 level IN (...) 过滤", path)
 			continue
 		}
 		for _, lvl := range []string{"Warning", "Error", "Critical", "Fatal"} {
 			if !strings.Contains(m[1], "'"+lvl+"'") {
-				t.Errorf("%s: level filter %q omits %s", path, strings.TrimSpace(m[0]), lvl)
+				t.Errorf("%s: level 过滤 %q 漏掉了 %s", path, strings.TrimSpace(m[0]), lvl)
 			}
 		}
 	}
 	if seen == 0 {
-		t.Fatal("no system.text_log*.sql files found — test is not guarding anything")
+		t.Fatal("未找到 system.text_log*.sql 文件 —— 该测试没有在守护任何东西")
 	}
 }

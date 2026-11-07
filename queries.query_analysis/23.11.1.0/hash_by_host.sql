@@ -1,7 +1,7 @@
--- 23.11+ variant: uses the hostname COLUMN (added to system log tables in 23.11); the root file uses hostName() instead.
--- Per-host distribution of the focus hash. Surfaces "one node is
--- slower than the rest" patterns in cloud clusters.
--- Run when --normalized-query-hash is set (auto-derived from --query-id).
+-- 23.11+ 变体：使用 hostname 列（23.11 新增到 system 日志表）；根文件改用 hostName()。
+-- 目标 hash 的按 host 分布。在云集群中揭示
+-- "某个节点比其余节点慢" 的模式。
+-- 当设置了 --normalized-query-hash 时运行（由 --query-id 自动推导）。
 SELECT
     hostname,
     count()                                                 AS executions,

@@ -1,7 +1,7 @@
--- Root variant for the oldest supported servers (22.8+):
--- database_shard_name, database_replica_name, is_active and name were
--- added to system.clusters in 23.5 — see 23.5.1.0/system.clusters.sql
--- for the variant that includes them.
+-- 面向最旧受支持服务器（22.8+）的根变体：
+-- database_shard_name、database_replica_name、is_active 和 name
+-- 在 23.5 才加入 system.clusters——包含这些列的变体见
+-- 23.5.1.0/system.clusters.sql。
 SELECT
   cluster,
   shard_num,

@@ -5,12 +5,12 @@ import (
 	"testing"
 )
 
-// ── helpers ───────────────────────────────────────────────────────────────────
+// ── 辅助函数 ──────────────────────────────────────────────────────────────────
 
 func mustPass(t *testing.T, name, sql string) {
 	t.Helper()
 	if err := ValidateQueryContent(sql); err != nil {
-		t.Errorf("[%s] expected PASS but got error: %v", name, err)
+		t.Errorf("[%s] 期望 PASS，却得到错误：%v", name, err)
 	}
 }
 
@@ -18,15 +18,15 @@ func mustFail(t *testing.T, name, sql, wantFragment string) {
 	t.Helper()
 	err := ValidateQueryContent(sql)
 	if err == nil {
-		t.Errorf("[%s] expected FAIL but query passed", name)
+		t.Errorf("[%s] 期望 FAIL，但查询通过了", name)
 		return
 	}
 	if wantFragment != "" && !strings.Contains(err.Error(), wantFragment) {
-		t.Errorf("[%s] error %q does not contain %q", name, err.Error(), wantFragment)
+		t.Errorf("[%s] 错误 %q 不包含 %q", name, err.Error(), wantFragment)
 	}
 }
 
-// ── valid queries ──────────────────────────────────────────────────────────────
+// ── 合法查询 ──────────────────────────────────────────────────────────────────
 
 func TestValidateQueryContent_ValidQueries(t *testing.T) {
 	cases := []struct{ name, sql string }{
@@ -72,7 +72,7 @@ func TestValidateQueryContent_ValidQueries(t *testing.T) {
 		},
 		{
 			"column names that look like keywords",
-			// create_time, delete_ttl_info_min, update_time are column names
+			// create_time、delete_ttl_info_min、update_time 是列名
 			`SELECT create_time, delete_ttl_info_min, last_successful_update_time
 			 FROM system.parts
 			 FORMAT Native`,
@@ -92,7 +92,7 @@ func TestValidateQueryContent_ValidQueries(t *testing.T) {
 	}
 }
 
-// ── forbidden queries ─────────────────────────────────────────────────────────
+// ── 被禁止的查询 ──────────────────────────────────────────────────────────────
 
 func TestValidateQueryContent_ForbiddenQueries(t *testing.T) {
 	cases := []struct {
@@ -100,7 +100,7 @@ func TestValidateQueryContent_ForbiddenQueries(t *testing.T) {
 		sql          string
 		wantFragment string
 	}{
-		// ── explicit DML/DDL at start ────────────────────────────────────────
+		// ── 开头的显式 DML/DDL ──────────────────────────────────────────────
 		{
 			"INSERT INTO",
 			"INSERT INTO t VALUES (1)",
@@ -147,7 +147,7 @@ func TestValidateQueryContent_ForbiddenQueries(t *testing.T) {
 			`"KILL"`,
 		},
 
-		// ── INSERT INTO … SELECT (the classic bypass) ────────────────────────
+		// ── INSERT INTO … SELECT（经典的绕过手法）───────────────────────────
 		{
 			"INSERT INTO … SELECT",
 			"INSERT INTO t SELECT * FROM system.tables",
@@ -159,7 +159,7 @@ func TestValidateQueryContent_ForbiddenQueries(t *testing.T) {
 			`"INSERT"`,
 		},
 
-		// ── hidden behind a comment ────────────────────────────────────────
+		// ── 藏在注释之后 ────────────────────────────────────────────────────
 		{
 			"INSERT hidden in block comment prefix",
 			"/* safe */ INSERT INTO t SELECT 1",
@@ -176,26 +176,26 @@ func TestValidateQueryContent_ForbiddenQueries(t *testing.T) {
 			`"DROP"`,
 		},
 
-		// ── WITH … INSERT (bypass via CTE) ───────────────────────────────────
+		// ── WITH … INSERT（通过 CTE 绕过）───────────────────────────────────
 		{
 			"WITH cte then INSERT",
 			"WITH x AS (SELECT 1 AS n) INSERT INTO t SELECT n FROM x",
 			`"INSERT"`,
 		},
 
-		// ── semicolon-chained statements ──────────────────────────────────────
+		// ── 用分号串联的语句 ─────────────────────────────────────────────────
 		{
 			"semicolon chained",
 			"SELECT 1; DROP TABLE t",
-			"semicolon",
+			"分号",
 		},
 		{
 			"semicolon with innocent second statement",
 			"SELECT version(); SELECT 1",
-			"semicolon",
+			"分号",
 		},
 
-		// ── mixed-case / whitespace tricks ───────────────────────────────────
+		// ── 大小写混合 / 空白字符花招 ────────────────────────────────────────
 		{
 			"mixed-case INSERT",
 			"InSeRt INTO t SELECT 1",
@@ -207,38 +207,38 @@ func TestValidateQueryContent_ForbiddenQueries(t *testing.T) {
 			`"INSERT"`,
 		},
 
-		// ── empty after stripping ─────────────────────────────────────────────
+		// ── 剥离后为空 ───────────────────────────────────────────────────────
 		{
 			"only a comment",
 			"-- just a comment\n/* another */",
-			"empty",
+			"为空",
 		},
 		{
 			"only whitespace",
 			"   \n\t  ",
-			"empty",
+			"为空",
 		},
 
-		// ── first keyword not SELECT or WITH ─────────────────────────────────
+		// ── 第一个关键字不是 SELECT 或 WITH ─────────────────────────────────
 		{
 			"DESCRIBE",
 			"DESCRIBE TABLE system.parts",
-			"only SELECT queries",
+			"仅允许 SELECT 查询",
 		},
 		{
 			"SHOW",
 			"SHOW TABLES",
-			"only SELECT queries",
+			"仅允许 SELECT 查询",
 		},
 		{
 			"EXPLAIN",
 			"EXPLAIN SELECT 1",
-			"only SELECT queries",
+			"仅允许 SELECT 查询",
 		},
 		{
 			"OPTIMIZE",
 			"OPTIMIZE TABLE t FINAL",
-			"only SELECT queries",
+			"仅允许 SELECT 查询",
 		},
 	}
 
@@ -247,10 +247,10 @@ func TestValidateQueryContent_ForbiddenQueries(t *testing.T) {
 	}
 }
 
-// ── confirm existing query files pass ────────────────────────────────────────
+// ── 确认现有查询文件能通过 ───────────────────────────────────────────────────
 
 func TestValidateQueryContent_ExistingQueryFiles(t *testing.T) {
-	// Spot-check a few real queries from the repo to make sure valid files pass.
+	// 抽查仓库中的几个真实查询，确保合法文件能通过。
 	realQueries := []struct{ name, sql string }{
 		{
 			"system.version",

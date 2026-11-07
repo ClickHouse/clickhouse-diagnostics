@@ -15,17 +15,15 @@ import (
 	"clickhouse-diagnostic/internal/bundle"
 )
 
-// Building the dashboard from the files the collectors already wrote: no
-// query is sent to the server after collection. Every panel keeps the key,
-// columns and order of its live query (see collect()), so the page template
-// is unchanged. A panel whose source collector was skipped or failed is
-// listed in the banner with the reason; one whose source does not exist on
-// this server (a version or a disabled log table) is simply empty, as it was
-// when the live query found no table.
+// 从采集器已经写好的文件构建dashboard：采集完成后不再向服务器
+// 发送任何查询。每个面板都保留其实时查询的key、列与顺序（见
+// collect()），因此页面模板保持不变。源采集器被跳过或失败的面板
+// 会在横幅中连同原因一起列出；源在当前服务器上不存在的面板
+// （版本不支持或日志表被禁用）则直接为空，与实时查询
+// 找不到表时一样。
 
-// WithBundle makes the generator read the run directory instead of querying
-// the server. Without it (-output-format native or tsv, unit tests) the
-// panels are built with live queries.
+// WithBundle让生成器改为读取运行目录，而不是查询服务器。不启用它时
+// （-output-format为native或tsv、单元测试），面板使用实时查询构建。
 func (g *Generator) WithBundle(b *bundle.Bundle) *Generator {
 	g.bundle = b
 	return g
@@ -33,9 +31,21 @@ func (g *Generator) WithBundle(b *bundle.Bundle) *Generator {
 
 type rows = []map[string]interface{}
 
-// filesRows returns a collector's rows. A collector that was skipped or
-// failed names the panel in the banner; one never collected (absent on this
-// version, table disabled) is just empty.
+// filesRows返回某个采集器的行。被跳过或失败的采集器会在横幅中
+// 点名相应面板；从未采集的采集器（当前版本没有、表被禁用）则直接为空。
+
+// stateLabel为横幅渲染采集器状态。存储的状态仍是bundle自己的枚举
+// （skipped/failed）；只有显示的词会改变。
+func stateLabel(state string) string {
+	switch state {
+	case "skipped":
+		return "跳过"
+	case "failed":
+		return "失败"
+	}
+	return state
+}
+
 func (g *Generator) filesRows(panel, collector string) ([]bundle.Row, bool) {
 	rs, err := g.bundle.Rows(collector)
 	if err == nil {
@@ -44,11 +54,11 @@ func (g *Generator) filesRows(panel, collector string) ([]bundle.Row, bool) {
 	var nc *bundle.NotCollected
 	if errors.As(err, &nc) {
 		if nc.State == "skipped" || nc.State == "failed" {
-			g.skippedPanels = append(g.skippedPanels, fmt.Sprintf("%s (%s %s)", panel, collector, nc.State))
+			g.skippedPanels = append(g.skippedPanels, fmt.Sprintf("%s（%s %s）", panel, collector, stateLabel(nc.State)))
 		}
 		return nil, false
 	}
-	fmt.Printf("  [dashboard] %s: %v\n", panel, err)
+	fmt.Printf("  [dashboard] %s：%v\n", panel, err)
 	return nil, false
 }
 
@@ -70,20 +80,20 @@ func (g *Generator) collectFromFiles() map[string]interface{} {
 		"total_size":      "N/A",
 	}
 	host, collectedAt := "", ""
-	if v, ok := g.filesRows("version", "system.version"); ok && len(v) > 0 {
+	if v, ok := g.filesRows("版本", "system.version"); ok && len(v) > 0 {
 		p["version"] = v[0].Str("version")
 		host = v[0].Str("hostname")
 		collectedAt = windowEnd(v[0].Str("collected_at"), v[0].Str("timezone"), g.bundle.WindowEnd())
 	}
 
-	tables, haveTables := g.filesRows("table and part counts", "system.tables")
+	tables, haveTables := g.filesRows("表与 part 计数", "system.tables")
 	var userTables []bundle.Row
 	for _, t := range tables {
 		if notSystemDB(t.Str("database")) {
 			userTables = append(userTables, t)
 		}
 	}
-	byTable, haveParts := g.filesRows("storage", "system.parts_by_table")
+	byTable, haveParts := g.filesRows("存储", "system.parts_by_table")
 
 	if haveTables {
 		dbs := map[string]bool{}
@@ -102,15 +112,15 @@ func (g *Generator) collectFromFiles() map[string]interface{} {
 		p["active_parts"], p["total_size"] = parts, readableSize(bytes)
 	}
 
-	// ── Storage ──
+	// ── 存储 ──
 	p["storage_by_db"] = storageByDB(byTable)
 	p["engines_dist"] = enginesDist(userTables)
 	p["tables_list"] = tablesList(userTables, byTable, haveTables, haveParts)
 	p["top_tables"] = topTables(byTable)
 
-	// ── Query log ──
-	byHour, _ := g.filesRows("query activity", "system.query_log_by_hour_7_days")
-	byPattern, _ := g.filesRows("query patterns", "system.query_log_by_pattern_7_days")
+	// ── 查询日志 ──
+	byHour, _ := g.filesRows("查询活动", "system.query_log_by_hour_7_days")
+	byPattern, _ := g.filesRows("查询模式", "system.query_log_by_pattern_7_days")
 	p["query_by_time"] = queryByTime(byHour)
 	p["query_by_kind"] = queryByKind(byHour)
 	p["query_slow"] = querySlow(byPattern)
@@ -122,108 +132,108 @@ func (g *Generator) collectFromFiles() map[string]interface{} {
 		g.addHostInfo(p)
 	}
 
-	// ── Logs ──
-	if tl, ok := g.filesRows("logs", "system.text_log"); ok {
+	// ── 日志 ──
+	if tl, ok := g.filesRows("日志", "system.text_log"); ok {
 		p["text_log"] = textLogPanel(tl, host)
 		p["text_log_row_cap"] = textLogRowCap
 	}
 
-	// ── Part log (3 days: the collector's window) ──
-	partLog, _ := g.filesRows("part log", "system.part_log_3_days")
+	// ── part日志（3天：采集器的窗口） ──
+	partLog, _ := g.filesRows("part 日志", "system.part_log_3_days")
 	p["part_log_by_time"], p["part_log_by_type"], p["ttl_activity"] = partLogPanels(partLog)
 
-	// ── Dictionaries ──
-	dicts, _ := g.filesRows("dictionaries", "system.dictionaries")
+	// ── 字典 ──
+	dicts, _ := g.filesRows("字典", "system.dictionaries")
 	p["dictionaries"] = dictionariesPanel(dicts, host)
 	redactDictionaryPanel(p["dictionaries"].([]map[string]interface{}))
 
-	// ── Crash log ──
-	crashes, _ := g.filesRows("crash log", "system.crash_log")
+	// ── 崩溃日志 ──
+	crashes, _ := g.filesRows("崩溃日志", "system.crash_log")
 	p["crash_log"] = crashLogPanel(crashes)
 
-	// ── Pending work ──
-	muts, _ := g.filesRows("mutations", "system.mutations")
+	// ── 待处理工作 ──
+	muts, _ := g.filesRows("mutation", "system.mutations")
 	p["mutations"] = mutationsPanel(muts)
-	detached, _ := g.filesRows("detached", "system.detached_parts")
+	detached, _ := g.filesRows("分离 part", "system.detached_parts")
 	p["detached"] = detachedPanel(detached, g.mode)
 	if g.mode == "cloud" {
-		cl, _ := g.filesRows("clusters", "system.clusters")
+		cl, _ := g.filesRows("集群", "system.clusters")
 		p["clusters"] = clustersPanel(cl)
 	} else {
 		p["clusters"] = rows{}
 	}
-	rq, _ := g.filesRows("replication queue", "system.replication_queue")
+	rq, _ := g.filesRows("复制队列", "system.replication_queue")
 	p["replication_queue"] = replicationQueuePanel(rq, g.mode, host)
-	reps, _ := g.filesRows("replicas", "system.replicas")
-	problem, _ := g.filesRows("replica counts", "system.replicas_problem_tables") // Keeper-backed active/total
+	reps, _ := g.filesRows("副本", "system.replicas")
+	problem, _ := g.filesRows("副本计数", "system.replicas_problem_tables") // 由Keeper支撑的active/total
 	p["replicas"] = replicasPanel(reps, problem, g.mode, host)
 
-	// ── Keeper health and pools ──
-	ml, haveML := g.filesRows("Keeper and pools", "system.metric_log_7_days")
+	// ── Keeper健康与池 ──
+	ml, haveML := g.filesRows("Keeper 与池", "system.metric_log_7_days")
 	p["keeper_metric_hourly"], p["keeper_wait_available"], p["keeper_session_available"] = keeperMetricPanel(ml, haveML)
 	p["pools_hourly"] = poolsPanel(ml)
 	p["pool_sizes"] = g.poolSizesFromFiles()
 	p["pools_now"] = collectedAt
 
-	if el, ok := g.filesRows("Keeper errors", "system.error_log_7_days"); ok {
+	if el, ok := g.filesRows("Keeper 错误", "system.error_log_7_days"); ok {
 		p["keeper_errors_hourly"] = keeperErrorsFromErrorLog(el)
-		p["keeper_errors_source"] = "system.error_log — every thread, background merges and fetches included"
+		p["keeper_errors_source"] = "system.error_log — 包含所有线程，包括后台 merge 和 fetch"
 	} else {
 		p["keeper_errors_hourly"] = keeperErrorsFromQueryLog(byHour)
-		p["keeper_errors_source"] = "system.query_log — queries only; background merges, fetches and DDL workers are not counted (system.error_log needs 24.8+)"
+		p["keeper_errors_source"] = "system.query_log — 仅查询；后台 merge、fetch 和 DDL worker 未计入（system.error_log 需要 24.8+）"
 	}
-	zk, _ := g.filesRows("Keeper connection", "system.zookeeper_connection")
+	zk, _ := g.filesRows("Keeper 连接", "system.zookeeper_connection")
 	p["keeper_connection"] = keeperConnectionPanel(zk, g.mode)
 
-	// ── Disks, errors, part counts, async inserts ──
-	disks, _ := g.filesRows("disks", "system.disks")
+	// ── 磁盘、错误、part计数、异步插入 ──
+	disks, _ := g.filesRows("磁盘", "system.disks")
 	p["disks"] = disksPanel(disks, host)
-	errs, _ := g.filesRows("server errors", "system.errors")
+	errs, _ := g.filesRows("服务器错误", "system.errors")
 	p["server_errors"] = serverErrorsPanel(errs)
-	pbp, _ := g.filesRows("high part count", "system.parts_by_partition")
+	pbp, _ := g.filesRows("part 数过多", "system.parts_by_partition")
 	p["high_part_count"] = highPartCount(pbp)
 	if g.mode != "gov" {
-		ai, _ := g.filesRows("async inserts", "system.asynchronous_insert_log_7_days")
+		ai, _ := g.filesRows("异步插入", "system.asynchronous_insert_log_7_days")
 		p["async_inserts"] = asyncInsertsPanel(ai, collectedAt)
 	} else {
 		p["async_inserts"] = rows{}
 	}
 
-	p["windows"] = map[string]string{"7d": g.windowLabel("last 7 days"), "3d": g.windowLabel("last 3 days")}
+	p["windows"] = map[string]string{"7d": g.windowLabel("最近 7 天"), "3d": g.windowLabel("最近 3 天")}
 
 	g.collectAnalysisFromFiles(p)
 	return p
 }
 
-// WithWindow records an explicit -from / -to, for the panel headings.
+// WithWindow记录显式的-from/-to，用于面板标题。
 func (g *Generator) WithWindow(from, to time.Time) *Generator {
 	g.windowFrom, g.windowTo = from, to
 	return g
 }
 
-// windowLabel is what a panel built from a collector with default look-back
-// def actually covers: the explicit -from/-to window, the 1 day an
-// essential run caps every window to, or the default.
+// windowLabel描述使用采集器默认回溯定义构建的面板实际
+// 覆盖的范围：显式的-from/-to窗口、essential运行把每个窗口
+// 截断到的1天，或默认值。
 func (g *Generator) windowLabel(def string) string {
 	const f = "2006-01-02 15:04 UTC"
 	switch {
 	case !g.windowFrom.IsZero() && !g.windowTo.IsZero():
 		return g.windowFrom.UTC().Format(f) + " – " + g.windowTo.UTC().Format(f)
 	case !g.windowFrom.IsZero():
-		return "since " + g.windowFrom.UTC().Format(f)
+		return "自 " + g.windowFrom.UTC().Format(f)
 	case !g.windowTo.IsZero():
-		return "until " + g.windowTo.UTC().Format(f)
+		return "截至 " + g.windowTo.UTC().Format(f)
 	case g.essential():
-		return "last day (essential run)"
+		return "最近一天（essential 运行）"
 	}
 	return def
 }
 
-// ── helpers ──────────────────────────────────────────────────────────────
+// ── 辅助函数 ──────────────────────────────────────────────────────────────
 
-// windowEnd is where the collected log windows end, as a server-timezone
-// DateTime: the server's now() at collection, or the explicit -to when that
-// is earlier — the files stop there, so "the last 24 hours" ends there too.
+// windowEnd是已采集日志窗口的终点，采用服务器时区的DateTime：
+// 采集时服务器的now()，或更早时显式的-to——文件在那里结束，
+// 因此“最近24小时”也在那里结束。
 func windowEnd(collectedAt, tz string, to time.Time) string {
 	if to.IsZero() {
 		return collectedAt
@@ -239,8 +249,7 @@ func windowEnd(collectedAt, tz string, to time.Time) string {
 	return to.In(loc).Format("2006-01-02 15:04:05")
 }
 
-// readableSize is ClickHouse formatReadableSize: powers of 1024, two
-// decimals ("1.50 GiB").
+// readableSize即ClickHouse的formatReadableSize：以1024为底、两位小数（“1.50 GiB”）。
 func readableSize(n float64) string {
 	units := []string{"B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB"}
 	i := 0
@@ -251,7 +260,7 @@ func readableSize(n float64) string {
 	return fmt.Sprintf("%.2f %s", n, units[i])
 }
 
-// readableQuantity is ClickHouse formatReadableQuantity ("1.99 million").
+// readableQuantity即ClickHouse的formatReadableQuantity（“1.99 million”）。
 func readableQuantity(n float64) string {
 	units := []string{"", " thousand", " million", " billion", " trillion", " quadrillion"}
 	i := 0
@@ -262,7 +271,7 @@ func readableQuantity(n float64) string {
 	return fmt.Sprintf("%.2f%s", n, units[i])
 }
 
-// round is ClickHouse round(x, d) on a Float64 (ties to even).
+// round即ClickHouse对Float64的round(x, d)（平局取偶）。
 func round(x float64, d int) float64 {
 	p := math.Pow(10, float64(d))
 	return math.RoundToEven(x*p) / p
@@ -275,7 +284,7 @@ func ratio(a, b float64) float64 {
 	return 0
 }
 
-// leftRunes is leftUTF8: at most n characters, never a split rune.
+// leftRunes即leftUTF8：至多n个字符，绝不拆开一个rune。
 func leftRunes(s string, n int) string {
 	if utf8.RuneCountInString(s) <= n {
 		return s
@@ -290,7 +299,7 @@ func limit(rs rows, n int) rows {
 	return rs
 }
 
-// byNum sorts descending by a numeric column, stable.
+// byNum按数值列降序排序，稳定排序。
 func byNum(rs rows, col string) {
 	sort.SliceStable(rs, func(i, j int) bool { return num(rs[i][col]) > num(rs[j][col]) })
 }
@@ -316,13 +325,13 @@ func strs(v interface{}) []string {
 	return out
 }
 
-// hourOf parses a collected DateTime ("YYYY-MM-DD hh:mm:ss").
+// hourOf解析采集到的DateTime（“YYYY-MM-DD hh:mm:ss”）。
 func hourOf(s string) (time.Time, bool) {
 	t, err := time.Parse("2006-01-02 15:04:05", s)
 	return t, err == nil
 }
 
-// ── storage ──
+// ── 存储 ──
 
 func storageByDB(byTable []bundle.Row) rows {
 	type agg struct{ parts, rows, bytes, comp, uncomp float64 }
@@ -363,8 +372,8 @@ func enginesDist(userTables []bundle.Row) rows {
 	return limit(out, 15)
 }
 
-// tablesList: every user table with its size. Without parts_by_table the
-// sizes are "n/a", never a 0 that reads as an empty table.
+// tablesList：每个用户表及其大小。没有parts_by_table时，
+// 大小为“n/a”，绝不用0来表示空表。
 func tablesList(userTables, byTable []bundle.Row, haveTables, haveParts bool) rows {
 	out := rows{}
 	if !haveTables {
@@ -405,7 +414,7 @@ func topTables(byTable []bundle.Row) rows {
 	return out
 }
 
-// ── query log ──
+// ── 查询日志 ──
 
 func isException(typ string) bool {
 	return typ == "ExceptionWhileProcessing" || typ == "ExceptionBeforeStart"
@@ -458,7 +467,7 @@ func queryByKind(byHour []bundle.Row) rows {
 	return out
 }
 
-// patternAgg folds query_log_by_pattern_7_days rows per (hash, kind, user).
+// patternAgg按（hash、kind、user）折叠query_log_by_pattern_7_days的行。
 type patternAgg struct {
 	hash, kind, user, sample         string
 	finish, timed, errors            float64
@@ -506,8 +515,8 @@ func patternKey(r bundle.Row) string {
 	return r.Str("hash") + "\x00" + r.Str("query_kind") + "\x00" + r.Str("user")
 }
 
-// querySlow: per pattern, QueryFinish rows with a measured duration and the
-// failures, slowest average first.
+// querySlow：按模式统计有实测耗时的QueryFinish行与失败，
+// 平均最慢的排在前面。
 func querySlow(byPattern []bundle.Row) rows {
 	m, order := foldPatterns(byPattern, patternKey)
 	out := rows{}
@@ -526,7 +535,7 @@ func querySlow(byPattern []bundle.Row) rows {
 	return limit(out, 20)
 }
 
-// queryHeavy: per pattern, QueryFinish only, most read per execution first.
+// queryHeavy：按模式统计，只包含QueryFinish，每次执行读取量最大的排在前面。
 func queryHeavy(byPattern []bundle.Row) rows {
 	m, order := foldPatterns(byPattern, patternKey)
 	out := rows{}
@@ -586,10 +595,10 @@ func exceptionsByCode(byHour []bundle.Row) rows {
 	return limit(out, 15)
 }
 
-// ── logs ──
+// ── 日志 ──
 
-// textLogPanel: Warning and worse, newest first. Onprem rows carry no
-// hostname (one server): it is the collected host, as the live panel showed.
+// textLogPanel：Warning及更严重级别，最新的在前。onprem行不带
+// hostname（单服务器）：使用采集到的主机名，与实时面板显示的一致。
 func textLogPanel(tl []bundle.Row, host string) rows {
 	keep := map[string]bool{"Warning": true, "Error": true, "Critical": true, "Fatal": true}
 	out := rows{}
@@ -610,7 +619,7 @@ func textLogPanel(tl []bundle.Row, host string) rows {
 	return limit(out, textLogRowCap)
 }
 
-// ── part log ──
+// ── part日志 ──
 
 func partLogPanels(pl []bundle.Row) (rows, rows, rows) {
 	type dk struct{ day, typ string }
@@ -679,7 +688,7 @@ func partLogPanels(pl []bundle.Row) (rows, rows, rows) {
 	return t1, t2, t3
 }
 
-// ── dictionaries, crashes, pending work ──
+// ── 字典、崩溃、待处理工作 ──
 
 func dictionariesPanel(ds []bundle.Row, host string) rows {
 	out := rows{}
@@ -724,9 +733,8 @@ func crashLogPanel(cs []bundle.Row) rows {
 	return limit(out, 100)
 }
 
-// mutationsPanel: unfinished mutations, not being killed. Cloud lists each
-// one once per replica, each with its own backlog: it is kept once, with
-// the largest parts_to_do.
+// mutationsPanel：未完成且未被终止的mutation。cloud会按副本各列一次，
+// 每个副本有自己的积压：这里只保留一次，取最大的parts_to_do。
 func mutationsPanel(ms []bundle.Row) rows {
 	out := rows{}
 	seen := map[string]map[string]interface{}{}
@@ -751,8 +759,8 @@ func mutationsPanel(ms []bundle.Row) rows {
 	return limit(out, 20)
 }
 
-// detachedPanel: per table, largest first; a size only when the server
-// reports bytes_on_disk (22.11+). Cloud lists a shared part once per replica.
+// detachedPanel：按表统计，最大的在前；仅当服务器报告bytes_on_disk
+// （22.11+）时才给出大小。cloud会按副本各列一次共享part。
 func detachedPanel(ds []bundle.Row, mode string) rows {
 	type agg struct {
 		db, tb  string
@@ -830,8 +838,8 @@ func clustersPanel(cs []bundle.Row) rows {
 	return out
 }
 
-// replicationQueuePanel: the serving replica's queue, as the live panel
-// read it (the cloud file holds every replica's).
+// replicationQueuePanel：服务中副本的队列，与实时面板读取的一致
+// （cloud文件包含每个副本的队列）。
 func replicationQueuePanel(rq []bundle.Row, mode, host string) rows {
 	out := rows{}
 	for _, r := range rq {
@@ -845,9 +853,9 @@ func replicationQueuePanel(rq []bundle.Row, mode, host string) rows {
 	return limit(out, 50)
 }
 
-// replicasPanel: the serving node's replicas (the live panel read the local
-// system.replicas; the cloud file holds every replica), with the
-// Keeper-backed replica counts where replicas_problem_tables has them.
+// replicasPanel：服务节点的副本（实时面板读取本地
+// system.replicas；cloud文件包含每个副本），并在
+// replicas_problem_tables有数据处附上由Keeper支撑的副本计数。
 func replicasPanel(rs, problem []bundle.Row, mode, host string) rows {
 	counts := map[string][2]string{}
 	for _, p := range problem {
@@ -878,7 +886,7 @@ func replicasPanel(rs, problem []bundle.Row, mode, host string) rows {
 	return out
 }
 
-// ── Keeper and pools ──
+// ── Keeper与池 ──
 
 func keeperMetricPanel(ml []bundle.Row, have bool) (rows, bool, bool) {
 	out := rows{}
@@ -906,24 +914,24 @@ func poolsPanel(ml []bundle.Row) rows {
 	return out
 }
 
-// poolSizesFromFiles: the configured sizes, from server_settings on 23.3+
-// and settings below (system.settings there still lists the names with the
-// old session defaults). In cloud the fetch and schedule sizes are the
-// smallest live size over the replicas (metric_log_by_host_3_days) when
-// collected — server_settings comes from one replica, and the chart's
-// series is the worst replica, so the smallest pool is its reference line.
+// poolSizesFromFiles：配置的大小，在23.3+取自server_settings，
+// 更低版本取自settings（那里的system.settings仍以旧的会话默认值
+// 列出这些名称）。在cloud中，若已采集，fetch和schedule大小取
+// 各副本中最小的实时大小（metric_log_by_host_3_days）——
+// server_settings来自一个副本，而图表序列是最差副本，
+// 因此最小的池就是它的参考线。
 func (g *Generator) poolSizesFromFiles() map[string]int64 {
 	out := map[string]int64{"fetch": 0, "schedule": 0, "merge": 0}
 	settings := map[string]string{"fetch": "background_fetches_pool_size", "schedule": "background_schedule_pool_size", "merge": "background_pool_size"}
 	if g.mode == "cloud" {
-		// Not the merge pool: its live size is background_pool_size times
-		// background_merges_mutations_concurrency_ratio, and the chart's
-		// reference line is the setting.
+		// 不是merge池：其实时大小是background_pool_size乘以
+		// background_merges_mutations_concurrency_ratio，而图表的
+		// 参考线是该设置。
 		cols := map[string]string{"fetch": "max(CurrentMetric_BackgroundFetchesPoolSize)", "schedule": "max(CurrentMetric_BackgroundSchedulePoolSize)"}
 		if hosts, err := g.bundle.Rows("system.metric_log_by_host_3_days"); err == nil {
 			for key, col := range cols {
-				// Each host's latest size, not its largest over the window:
-				// a pool cut from 32 to 16 is judged against 16.
+				// 取每台主机最新的值，而不是窗口内的最大值：
+				// 从32调小到16的池应按16评判。
 				perHost, latest := map[string]int64{}, map[string]string{}
 				for _, r := range hosts {
 					h, t := r.Str("hostname"), r.Str("time")
@@ -963,7 +971,7 @@ func (g *Generator) poolSizesFromFiles() map[string]int64 {
 var keeperErrorCodes = map[int64]string{999: "KEEPER_EXCEPTION", 242: "TABLE_IS_READ_ONLY", 319: "UNKNOWN_STATUS_OF_INSERT",
 	571: "DATABASE_REPLICATION_FAILED", 252: "TOO_MANY_PARTS"}
 
-// timeName is one hour of one error code name.
+// timeName是一个错误码名称的一个小时。
 type timeName struct{ t, name string }
 
 func keeperErrorsFromErrorLog(el []bundle.Row) rows {
@@ -1018,7 +1026,7 @@ func keeperConnectionPanel(zk []bundle.Row, mode string) rows {
 	return out
 }
 
-// ── disks, errors, parts, async inserts ──
+// ── 磁盘、错误、part、异步插入 ──
 
 func disksPanel(ds []bundle.Row, host string) rows {
 	out := rows{}
@@ -1033,8 +1041,8 @@ func disksPanel(ds []bundle.Row, host string) rows {
 			pct = round(free/total*100, 1)
 		}
 		out = append(out, map[string]interface{}{"hostname": h, "name": d.Str("name"), "path": d.Str("path"), "type": d.Str("type"),
-			// The raw capacities stay the exact UInt64 text: an object-storage
-			// disk reports 2^64-1 for "unlimited", past what int64 holds.
+			// 原始容量保持精确的UInt64文本：对象存储磁盘用2^64-1表示
+			// “无限”，超出int64能容纳的范围。
 			"free_space": d.Str("free_bytes"), "total_space": d.Str("total_bytes"), "free_space_human": readableSize(free),
 			"total_space_human": readableSize(total), "free_pct": pct})
 	}
@@ -1047,8 +1055,8 @@ func disksPanel(ds []bundle.Row, host string) rows {
 	return out
 }
 
-// serverErrorsPanel folds the per-replica counters (cloud) into one row per
-// error, the most frequent first.
+// serverErrorsPanel把各副本的计数器（cloud）折叠为每个错误一行，
+// 最频繁的在前。
 func serverErrorsPanel(es []bundle.Row) rows {
 	type agg struct {
 		name, code    string
@@ -1099,9 +1107,8 @@ func highPartCount(pbp []bundle.Row) rows {
 	return limit(out, 30)
 }
 
-// asyncInsertsPanel: the last 24 hours (to the collection's now) per hour
-// and status; the flush latency is the per-table averages weighted by
-// their flush counts.
+// asyncInsertsPanel：最近24小时（截至采集时的now）按小时和状态统计；
+// flush延迟是按各表flush次数加权的平均值。
 func asyncInsertsPanel(ai []bundle.Row, collectedAt string) rows {
 	now, ok := hourOf(collectedAt)
 	type key struct{ hour, status string }
@@ -1148,10 +1155,10 @@ func asyncInsertsPanel(ai []bundle.Row, collectedAt string) rows {
 	return out
 }
 
-// ── query analysis ──
+// ── 查询分析 ──
 
-// collectAnalysisFromFiles embeds the query_analysis/ files the analysis
-// collector wrote, under the same payload keys as the live panels.
+// collectAnalysisFromFiles把分析采集器写入的query_analysis/文件嵌入，
+// 使用与实时面板相同的payload键。
 func (g *Generator) collectAnalysisFromFiles(p map[string]interface{}) {
 	if !g.analysis.Enabled() {
 		return
@@ -1194,16 +1201,15 @@ func (g *Generator) collectAnalysisFromFiles(p map[string]interface{}) {
 	p["qa_mode"] = g.mode
 }
 
-// ── schema graph ──
+// ── 模式关系图 ──
 
-// schemaGraphFromFiles builds the schema page from the collected
-// system.tables / columns / data_skipping_indices / dictionaries /
-// view_refreshes, with the columns of the live queries. nil when
-// system.tables was not collected (nothing to draw). The DDL is the
-// server's original text: the live page pretty-printed it with
-// formatQueryOrNull, which only a query can do.
+// schemaGraphFromFiles用采集到的system.tables / columns /
+// data_skipping_indices / dictionaries / view_refreshes构建模式页面，
+// 列采用实时查询的列。system.tables未采集时返回nil（没有可绘制的内容）。
+// DDL是服务器的原始文本：实时页面用formatQueryOrNull
+// 对其做了美化，而只有查询才能做到这一点。
 func (g *Generator) schemaGraphFromFiles(version string) map[string]interface{} {
-	ts, ok := g.filesRows("schema graph", "system.tables")
+	ts, ok := g.filesRows("模式关系图", "system.tables")
 	if !ok {
 		return nil
 	}
@@ -1229,7 +1235,7 @@ func (g *Generator) schemaGraphFromFiles(version string) map[string]interface{} 
 	sortBy(tables, "database", "name")
 
 	columns := rows{}
-	if cs, ok := g.filesRows("schema graph", "system.columns"); ok {
+	if cs, ok := g.filesRows("模式关系图", "system.columns"); ok {
 		type pos struct {
 			r   map[string]interface{}
 			pos int64
@@ -1268,7 +1274,7 @@ func (g *Generator) schemaGraphFromFiles(version string) map[string]interface{} 
 	}
 
 	indices := rows{}
-	if is, ok := g.filesRows("schema graph indices", "system.data_skipping_indices"); ok {
+	if is, ok := g.filesRows("模式关系图索引", "system.data_skipping_indices"); ok {
 		for _, i := range is {
 			if notSystemDB(i.Str("database")) {
 				indices = append(indices, map[string]interface{}{"database": i.Str("database"), "table": i.Str("table"),
@@ -1278,8 +1284,8 @@ func (g *Generator) schemaGraphFromFiles(version string) map[string]interface{} 
 	}
 	sortBy(indices, "database", "table", "name")
 
-	// Dictionaries: the worst status over the replicas, with its exception
-	// (FAILED on any replica outranks LOADED elsewhere).
+	// 字典：取各副本中最差的状态及其异常
+	// （任一副本为FAILED都优先于其他副本的LOADED）。
 	dicts := rows{}
 	if ds, err := g.bundle.Rows("system.dictionaries"); err == nil {
 		rank := func(s string) int {
@@ -1319,10 +1325,9 @@ func (g *Generator) schemaGraphFromFiles(version string) map[string]interface{} 
 		return nil
 	}
 
-	// Refreshes: the replica that runs the refresh, not the ones reporting
-	// RunningOnAnotherReplica.
+	// 刷新：取执行刷新的副本，而不是报告RunningOnAnotherReplica的副本。
 	refreshes := rows{}
-	rf, hasRefresh := g.filesRows("schema graph refreshes", "system.view_refreshes")
+	rf, hasRefresh := g.filesRows("模式关系图刷新", "system.view_refreshes")
 	if hasRefresh {
 		m := map[string]map[string]interface{}{}
 		var order []string
@@ -1357,7 +1362,7 @@ func (g *Generator) schemaGraphFromFiles(version string) map[string]interface{} 
 	n := redactSchemaRecords(tables, "create_table_query", "engine_full")
 	n += redactSchemaRecords(dicts, "source", "last_exception")
 	if n > 0 {
-		fmt.Printf("  [dashboard] schema graph: %d credential(s) replaced with [HIDDEN]\n", n)
+		fmt.Printf("  [dashboard] 模式关系图：%d 处凭据已替换为 [HIDDEN]\n", n)
 	}
 	return map[string]interface{}{
 		"generated_at": time.Now().UTC().Format("2006-01-02 15:04:05 UTC"), "version": version, "mode": g.mode,
@@ -1366,7 +1371,7 @@ func (g *Generator) schemaGraphFromFiles(version string) map[string]interface{} 
 	}
 }
 
-// sortBy sorts ascending by string columns, in order.
+// sortBy按给定的字符串列依次升序排序。
 func sortBy(rs rows, cols ...string) {
 	sort.SliceStable(rs, func(i, j int) bool {
 		for _, c := range cols {

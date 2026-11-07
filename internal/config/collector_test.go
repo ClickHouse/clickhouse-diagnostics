@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// writeTree lays out a fake ClickHouse config directory.
+// writeTree 布置一个假的 ClickHouse 配置目录。
 func writeTree(t *testing.T, root string, files map[string]string) {
 	t.Helper()
 	for rel, content := range files {
@@ -21,11 +21,10 @@ func writeTree(t *testing.T, root string, files map[string]string) {
 	}
 }
 
-// TestCollectPreservesTree pins that files keep their position below
-// configDir. Flattening to the base name silently dropped one of any two
-// same-named files in different directories — config.d/storage.xml and
-// users.d/storage.xml are both ordinary names — and lost the directory
-// that determines ClickHouse's config merge order.
+// TestCollectPreservesTree 固定住一点：文件在 configDir 下保持原有位置。
+// 压平到基本文件名会静默丢弃不同目录中任意两个同名文件之一——
+// config.d/storage.xml 和 users.d/storage.xml 都是常见名称——
+// 并丢失决定 ClickHouse 配置合并顺序的目录信息。
 func TestCollectPreservesTree(t *testing.T) {
 	src, dst := t.TempDir(), filepath.Join(t.TempDir(), "configuration")
 	writeTree(t, src, map[string]string{
@@ -43,19 +42,19 @@ func TestCollectPreservesTree(t *testing.T) {
 	} {
 		got, err := os.ReadFile(filepath.Join(dst, rel))
 		if err != nil {
-			t.Errorf("%s: not collected: %v", rel, err)
+			t.Errorf("%s：未被采集：%v", rel, err)
 			continue
 		}
 		if !strings.Contains(string(got), want) {
-			t.Errorf("%s: want content containing %q, got %q", rel, want, got)
+			t.Errorf("%s：期望内容包含 %q，得到 %q", rel, want, got)
 		}
 	}
 }
 
-// TestCollectIsRunScoped pins that the destination is the caller's, so
-// two runs against different hosts cannot bleed into each other. The
-// destination used to be a fixed "./configuration" that nothing emptied,
-// so a second run archived whatever the first left behind.
+// TestCollectIsRunScoped 固定住一点：目标目录由调用方决定，因此
+// 针对不同主机的两次运行不会互相污染。目标目录过去是固定的
+// "./configuration" 且没有任何清空机制，
+// 于是第二次运行会归档第一次遗留的内容。
 func TestCollectIsRunScoped(t *testing.T) {
 	hostA, hostB := t.TempDir(), t.TempDir()
 	writeTree(t, hostA, map[string]string{
@@ -76,27 +75,27 @@ func TestCollectIsRunScoped(t *testing.T) {
 		t.Fatalf("Collect(hostB): %v", err)
 	}
 
-	// hostB never had macros.xml; it must not appear in hostB's output.
+	// hostB 从来没有 macros.xml；它绝不能出现在 hostB 的输出中。
 	if _, err := os.Stat(filepath.Join(runB, "config.d/macros.xml")); !os.IsNotExist(err) {
-		t.Error("host A's macros.xml leaked into host B's collection")
+		t.Error("host A 的 macros.xml 泄漏到了 host B 的采集中")
 	}
 	got, err := os.ReadFile(filepath.Join(runB, "config.d/logger.xml"))
 	if err != nil {
 		t.Fatalf("hostB logger.xml: %v", err)
 	}
 	if !strings.Contains(string(got), "HOST-B") {
-		t.Errorf("hostB logger.xml has wrong content: %q", got)
+		t.Errorf("hostB logger.xml 内容错误：%q", got)
 	}
 }
 
-// TestCollectReportsWalkFailure pins that an unreadable config directory
-// surfaces as an error rather than a silent no-op. Reading
-// /etc/clickhouse-server/config.d/ normally requires root or the
-// clickhouse group, so this is the common failure for an unprivileged
-// run — and the caller must be able to warn about it.
+// TestCollectReportsWalkFailure 固定住一点：不可读的配置目录
+// 会以错误形式暴露，而不是静默无操作。读取
+// /etc/clickhouse-server/config.d/ 通常需要 root 或
+// clickhouse 组权限，因此这是非特权运行的常见失败——
+// 调用方必须能够对此发出警告。
 func TestCollectReportsWalkFailure(t *testing.T) {
 	if os.Geteuid() == 0 {
-		t.Skip("running as root: permission bits do not apply")
+		t.Skip("以 root 运行：权限位不适用")
 	}
 	src, dst := t.TempDir(), filepath.Join(t.TempDir(), "configuration")
 	writeTree(t, src, map[string]string{
@@ -109,6 +108,6 @@ func TestCollectReportsWalkFailure(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chmod(locked, 0750) })
 
 	if err := NewCollector().Collect(src, dst, false); err == nil {
-		t.Error("want an error for an unreadable config directory, got nil")
+		t.Error("不可读的配置目录应当报错，实际得到 nil")
 	}
 }

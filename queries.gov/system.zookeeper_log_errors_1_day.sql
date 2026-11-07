@@ -1,13 +1,13 @@
--- Failed Keeper requests per hour, operation and error over the last day.
--- zookeeper_log is the largest system table on a busy cluster (one row per
--- request AND per response — tens of GiB a day), so this collector does NOT
--- aggregate the whole table: PREWHERE keeps only Response rows whose error is
--- not ZOK, reading just two 1-byte Enum columns for every row and the rest for
--- the failures. Volume and latency per hour come from metric_log instead
--- (ZooKeeperTransactions, ZooKeeperWaitMicroseconds / ZooKeeperTransactions);
--- session churn from text_log_keeper_1_day. Table exists only when
--- <zookeeper_log> is configured.
--- Root variant: duration_ms (< 24.3).
+-- 最近一天每小时、按操作和错误统计的失败 Keeper 请求。
+-- zookeeper_log 是繁忙集群上最大的系统表（每个请求和每个响应各一行 ——
+-- 每天数十 GiB），所以本采集器不会聚合整张表：PREWHERE 只保留
+-- error 不是 ZOK 的 Response 行，每行只读取两个 1 字节的 Enum 列，
+-- 其余列只对失败行读取。每小时的量和延迟来自 metric_log
+-- （ZooKeeperTransactions、ZooKeeperWaitMicroseconds /
+-- ZooKeeperTransactions）；会话抖动来自 text_log_keeper_1_day。
+-- 仅当配置了
+-- <zookeeper_log> 时该表才存在。
+-- 根目录变体：duration_ms（< 24.3）。
 SELECT
     toStartOfHour(event_time)   AS time,
     op_num,

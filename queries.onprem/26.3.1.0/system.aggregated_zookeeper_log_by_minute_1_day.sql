@@ -1,14 +1,14 @@
--- Keeper requests per minute over the last day: WHEN Keeper got slow, busy or
--- started failing for this server — the minute of a latency jump, a restart
--- burst, or traffic collapsing. Built from system.aggregated_zookeeper_log
--- (on by default since 25.9).
---   ops / in_multi      standalone requests / sub-requests inside Multi
---   avg_latency_us      weighted by count, standalone requests only
---   worst_group_latency_us  slowest (session, path, operation) group that minute
---   failed              non-ZOK responses; loss_failures the subset that means
---                       the session itself was in trouble (connection loss,
---                       session expired, operation timeout)
--- Version-only (26.3+, needs `is_subrequest`): older servers skip this file.
+-- 过去一天的 Keeper 请求，按分钟统计：Keeper 何时变慢、变忙，
+-- 或开始对本服务器失败——延迟跳升、重启爆发或流量骤降的那一分钟。
+-- 数据来自 system.aggregated_zookeeper_log
+-- （自 25.9 起默认开启）。
+--   ops / in_multi      独立请求 / Multi 内部的子请求
+--   avg_latency_us      按 count 加权，只统计独立请求
+--   worst_group_latency_us  该分钟最慢的 (session, path, operation) 组
+--   failed              非 ZOK 响应；loss_failures 是其中表示
+--                       会话本身出问题的子集（连接丢失、
+--                       会话过期、操作超时）
+-- 仅版本目录（26.3+，需要 `is_subrequest`）：更旧的服务器会跳过这个文件。
 SELECT
     toStartOfMinute(event_time)                                     AS time,
     sumIf(count, is_subrequest = 0)                                 AS ops,

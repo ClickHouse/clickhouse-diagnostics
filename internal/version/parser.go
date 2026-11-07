@@ -9,28 +9,28 @@ import (
 	"clickhouse-diagnostic/internal"
 )
 
-// Parser handles version parsing operations
+// Parser 处理版本解析操作
 type Parser struct{}
 
-// NewParser creates a new version parser
+// NewParser 创建一个新的版本解析器
 func NewParser() *Parser {
 	return &Parser{}
 }
 
-// ParseClickHouseVersion parses ClickHouse version from version string (e.g., "21.8.10.3")
+// ParseClickHouseVersion 从版本字符串（例如 "21.8.10.3"）中解析 ClickHouse 版本
 func (p *Parser) ParseClickHouseVersion(versionStr string) (internal.Version, error) {
-	// Clean the version string (remove any whitespace, quotes, etc.)
+	// 清理版本字符串（移除空白、引号等）
 	versionStr = strings.TrimSpace(versionStr)
 
-	// Define a regex to extract version components
+	// 定义用于提取版本各组件的正则表达式
 	re := regexp.MustCompile(`(\d+)\.(\d+)\.(\d+)\.(\d+)`)
 	matches := re.FindStringSubmatch(versionStr)
 
 	if len(matches) != 5 {
-		return internal.Version{}, fmt.Errorf("invalid version format: %s", versionStr)
+		return internal.Version{}, fmt.Errorf("版本格式无效：%s", versionStr)
 	}
 
-	// Parse each component
+	// 逐个解析各组件
 	major, _ := strconv.Atoi(matches[1])
 	minor, _ := strconv.Atoi(matches[2])
 	patch, _ := strconv.Atoi(matches[3])
@@ -44,31 +44,31 @@ func (p *Parser) ParseClickHouseVersion(versionStr string) (internal.Version, er
 	}, nil
 }
 
-// ParseVersionFromDirName parses version from directory name
+// ParseVersionFromDirName 从目录名解析版本
 func (p *Parser) ParseVersionFromDirName(dirName string) (internal.Version, error) {
 	parts := strings.Split(dirName, ".")
 	if len(parts) != 4 {
-		return internal.Version{}, fmt.Errorf("invalid directory version format: %s", dirName)
+		return internal.Version{}, fmt.Errorf("目录版本格式无效：%s", dirName)
 	}
 
 	major, err := strconv.Atoi(parts[0])
 	if err != nil {
-		return internal.Version{}, fmt.Errorf("invalid major version: %s", parts[0])
+		return internal.Version{}, fmt.Errorf("主版本号无效：%s", parts[0])
 	}
 
 	minor, err := strconv.Atoi(parts[1])
 	if err != nil {
-		return internal.Version{}, fmt.Errorf("invalid minor version: %s", parts[1])
+		return internal.Version{}, fmt.Errorf("次版本号无效：%s", parts[1])
 	}
 
 	patch, err := strconv.Atoi(parts[2])
 	if err != nil {
-		return internal.Version{}, fmt.Errorf("invalid patch version: %s", parts[2])
+		return internal.Version{}, fmt.Errorf("补丁版本号无效：%s", parts[2])
 	}
 
 	build, err := strconv.Atoi(parts[3])
 	if err != nil {
-		return internal.Version{}, fmt.Errorf("invalid build version: %s", parts[3])
+		return internal.Version{}, fmt.Errorf("构建版本号无效：%s", parts[3])
 	}
 
 	return internal.Version{

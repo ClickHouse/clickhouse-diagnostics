@@ -1,19 +1,17 @@
 name: replication_queue_errors
-title: "Replication queue entries with errors"
+title: "replication queue中存在错误的条目"
 severity: critical
 description: |
-  One or more entries in the replication queue have a non-empty last_exception.
-  This usually means a replica is unable to apply a replication log entry —
-  common causes include network issues, disk full, schema mismatches, or
-  corrupt data parts. Left unresolved, the replica will fall behind and may
-  require manual intervention to recover.
+  replication queue（复制队列）中一个或多个条目的last_exception非空。
+  这通常意味着replica无法应用某条replication log条目——常见原因包括
+  网络问题、磁盘写满、schema不匹配或数据part损坏。若未解决，
+  该replica会落后，可能需要人工干预才能恢复。
 tags:
   - replication
   - reliability
 
-# Evaluated by the Go check over the files already collected (no second
-# query to the server). query: below is the same test in SQL, for the
-# customer to run live; the check mirrors it.
+# 由Go check在已采集的文件上评估（不会再次查询服务器）。下方query:是同一
+# 测试的SQL版本，供客户在线执行；check镜像同一逻辑。
 check: go:replication_queue_errors
 source:
   - system.replication_queue
@@ -31,13 +29,13 @@ query: |
   ORDER BY create_time DESC
   LIMIT 50
 
-# Follow-ups the dashboard shows under a fired alert, for the customer to run
-# on their own cluster (never run by the tool; read-only, validated like query).
+# 在触发的告警下方，dashboard会展示这些后续查询，供客户在自己的集群上运行
+# （工具从不执行；只读，并按query的标准校验）。
 investigate:
-  - title: "Stuck entries grouped by table, type and error"
-    # The error key is the message's start with every number replaced by N:
-    # one cause stays one row although its text carries part names and
-    # counters, and two causes ("disk full", "connection refused") never share one.
+  - title: "按表、类型和错误分组的卡住条目"
+    # error键是message开头并把每个数字替换为N：
+    # 同一个原因仍是一行，尽管其文本带有part名和计数器；而两个原因
+    # （“disk full”、“connection refused”）绝不会共用一行。
     query: |
       SELECT database, table, type,
              replaceRegexpAll(substring(last_exception, 1, 200), '[0-9]+', 'N') AS error,
@@ -48,7 +46,7 @@ investigate:
       GROUP BY database, table, type, error
       ORDER BY entries DESC
       LIMIT 50
-  - title: "Replica health for the tables with a queue"
+  - title: "有队列的表的replica健康状况"
     query: |
       SELECT database, table, is_readonly, is_session_expired, queue_size, inserts_in_queue,
              merges_in_queue, absolute_delay, substring(last_queue_update_exception, 1, 300) AS last_queue_update_exception
@@ -57,4 +55,4 @@ investigate:
       ORDER BY absolute_delay DESC
       LIMIT 50
 
-message: "{database}.{table} (replica {replica_name}): {type} failed after {num_tries} tries — {last_exception}"
+message: "{database}.{table}（replica {replica_name}）：{type}在{num_tries}次尝试后失败——{last_exception}"

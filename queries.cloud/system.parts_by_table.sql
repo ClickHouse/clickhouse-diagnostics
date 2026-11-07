@@ -1,8 +1,8 @@
--- Active parts per user table: count, rows and sizes, one row per table,
--- no cap. system.parts keeps only the 50 000 largest parts, so its sums
--- understate every table with many small parts; the dashboard's summary,
--- storage-by-database, largest-tables and tables-explorer panels read this.
--- Cheap columns only: no part is read. Shared across replicas in cloud.
+-- 每张用户表的活动 part：数量、行数和大小，每张表一行，
+-- 不设上限。system.parts 只保留最大的 50 000 个 part，因此它的汇总
+-- 会低估每张拥有许多小 part 的表；dashboard 的 summary、
+-- storage-by-database、largest-tables 和 tables-explorer 面板会读取本文件。
+-- 只使用廉价列：不读取任何 part。在 cloud 中跨副本共享。
 SELECT
     database,
     table,

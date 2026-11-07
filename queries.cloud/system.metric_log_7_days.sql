@@ -9,11 +9,11 @@ SELECT
     max(h_max_schedule)  AS max_schedule_pool_tasks,
     avg(h_avg_common)    AS avg_common_pool_tasks,
     max(h_max_common)    AS max_common_pool_tasks,
-    -- Saturation is per replica: one node pinned at 16/16 among idle
-    -- siblings averages out below any threshold in avg_fetch_pool_tasks.
-    -- These are the max over replicas of each replica's hourly average —
-    -- the grain the fetch_/schedule_pool_saturated alerts and the pre-pass
-    -- use. On a single host they equal the avg_* columns.
+    -- 饱和度是按副本的：在空闲的同类节点中，一个节点持续处于 16/16，
+    -- 在 avg_fetch_pool_tasks 中会被平均到任何阈值以下。
+    -- 这些是各副本小时平均值在副本间的最大值——
+    -- 即 fetch_/schedule_pool_saturated alert rule 和预检查使用的
+    -- 粒度。单主机上它们等于 avg_* 列。
     max(h_avg_fetch)     AS max_replica_avg_fetch_pool_tasks,
     max(h_avg_schedule)  AS max_replica_avg_schedule_pool_tasks,
     max(h_avg_merge)     AS max_replica_avg_merge_pool_tasks,
@@ -27,10 +27,10 @@ SELECT
     avg(h_avg_mem)       AS avg_memory_tracking_bytes
 FROM
 (
-    -- One row per replica per hour, aggregated on the replica that owns the
-    -- rows; the outer query folds replicas. avg-of-avgs equals the flat
-    -- average when every replica has a full hour of samples (metric_log is
-    -- one row per second), and the max / sum columns are exact either way.
+    -- 每个副本每小时一行，在拥有这些行的副本上聚合；
+    -- 外层查询再折叠副本。当每个副本都有完整一小时样本时，
+    -- 平均值的平均值等于扁平平均值（metric_log 每秒
+    -- 一行），且无论哪种方式 max / sum 列都是精确的。
     SELECT
         hostName()                                              AS hostname,
         toStartOfHour(event_time)                               AS time,

@@ -1,10 +1,10 @@
 -- tier: essential
--- Point-in-time CurrentMetrics. The rows that matter in an incident:
--- ZooKeeperSession (0 = no Keeper session), ZooKeeperWatch/Request,
--- ReadonlyReplica, ReplicatedFetch/ReplicatedSend, S3Requests,
--- FilesystemCacheSize, MetadataFromKeeperCacheObjects (object storage with
--- metadata in Keeper), Background*PoolTask, DelayedInserts, MemoryTracking.
--- A snapshot: pair with metric_log_coordination_3_days for history.
+-- 时间点 CurrentMetrics。事件中重要的行：
+-- ZooKeeperSession（0 = 无 Keeper 会话）、ZooKeeperWatch/Request、
+-- ReadonlyReplica、ReplicatedFetch/ReplicatedSend、S3Requests、
+-- FilesystemCacheSize、MetadataFromKeeperCacheObjects（元数据在 Keeper
+-- 中的对象存储）、Background*PoolTask、DelayedInserts、MemoryTracking。
+-- 快照：结合 metric_log_coordination_3_days 查看历史。
 SELECT
     metric,
     value,

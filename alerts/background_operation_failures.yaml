@@ -1,32 +1,27 @@
 name: background_operation_failures
-title: "Background merges / fetches / mutations failing repeatedly"
+title: "后台merge/fetch/mutation反复失败"
 severity: warning
 description: |
-  More than 50 failed background operations of one kind and error code in
-  a single hour of the last 24 (one instance per hour, event type and
-  code). system.part_log records every merge, mutation, fetch (DownloadPart)
-  and part removal with its error code; repeated failures are the
-  background counterpart of query exceptions and never appear in
-  query_log.
+  最近24小时中的某一小时内，同一种类、同一错误码的后台操作失败超过50次
+  （每小时、每种事件类型和每个错误码各生成一个实例）。system.part_log
+  记录每次merge、mutation、fetch（DownloadPart）和part删除及其错误码；
+  反复失败是查询异常在后台的对应现象，且从不出现在query_log中。
 
-  Typical codes: 999 KEEPER_EXCEPTION (merges cannot commit — Keeper
-  session lost), 236 ABORTED (merges cancelled at shutdown or by a
-  vanished part), 241 MEMORY_LIMIT_EXCEEDED (merge too large for the
-  pool), 499 S3_ERROR / 107 FILE_DOESNT_EXIST (object storage or missing
-  files during fetch), 84 / 504 *_ALREADY_EXISTS (retries after a
-  half-committed operation).
+  常见错误码：999 KEEPER_EXCEPTION（merge无法提交——Keeper会话丢失）、
+  236 ABORTED（merge在关闭时或因part消失而被取消）、
+  241 MEMORY_LIMIT_EXCEEDED（merge对pool而言过大）、
+  499 S3_ERROR / 107 FILE_DOESNT_EXIST（fetch期间对象存储问题或文件缺失）、
+  84 / 504 *_ALREADY_EXISTS（半提交操作后的重试）。
 
-  Check: the example message, system.merges / system.mutations for the
-  same tables, system.errors for the same code, metric_log for Keeper
-  and memory in that hour.
+  排查：查看示例message、同一批表的system.merges / system.mutations、
+  同一错误码的system.errors，以及该小时metric_log中Keeper和内存相关指标。
 tags:
   - merges
   - replication
   - reliability
 
-# Evaluated by the Go check over the files already collected (no second
-# query to the server). query: below is the same test in SQL, for the
-# customer to run live; the check mirrors it.
+# 由Go check在已采集的文件上评估（不会再次查询服务器）。下方query:是同一
+# 测试的SQL版本，供客户在线执行；check镜像同一逻辑。
 check: go:background_operation_failures
 source:
   - system.part_log_3_days
@@ -46,4 +41,4 @@ query: |
   ORDER BY failures DESC
   LIMIT 24
 
-message: "{failures} {event_type} operations failed with code {error} in the hour starting {hour} — example: {example_message}"
+message: "{failures}个{event_type}操作在{hour}开始的一小时内以错误码{error}失败——示例：{example_message}"

@@ -1,14 +1,14 @@
--- Refreshable materialized views (REFRESH EVERY … / AFTER …) run on a schedule
--- instead of on insert, so query_views_log never sees them and system.tables
--- cannot tell them from an ordinary MV. This is the only table that says whether
--- a refresh is Scheduled / Running / Disabled and when it last succeeded.
+-- 可刷新物化视图（REFRESH EVERY … / AFTER …）按计划运行，而不是在插入时
+-- 运行，所以 query_views_log 永远看不到它们，system.tables 也无法
+-- 把它们与普通 MV 区分开。这是唯一能说明一次刷新是 Scheduled /
+-- Running / Disabled 以及上次成功时间的表。
 --
--- No root file: the table arrived with refreshable MVs in 23.12, so this rung is
--- simply skipped on older servers rather than failing there.
+-- 没有根目录文件：该表随 23.12 的可刷新 MV 一起出现，所以在旧服务器
+-- 上直接跳过这一级，而不是在那里失败。
 --
--- Redacted (gov) variant: database and view are hashed with the same salt as
--- system.tables, so the row joins to the hashed table list; the exception text
--- is not collected at all because it embeds identifiers.
+-- 脱敏（gov）变体：database 和 view 用与 system.tables 相同的盐
+-- 哈希，因此该行可与哈希后的表列表关联；异常文本完全
+-- 不采集，因为它会嵌入标识符。
 SELECT
     hex(SHA256(concat(database, '%salt%'))) AS database,
     hex(SHA256(concat(view, '%salt%')))     AS view,

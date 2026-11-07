@@ -1,22 +1,22 @@
--- Keeper requests per hour, ClickHouse component and operation over the last
--- two days, across every replica: WHO in the server is loading Keeper, with
--- what, and how slowly. system.aggregated_zookeeper_log (on by default since
--- 25.9) groups every Keeper request by session, parent path, operation and
--- component once a second; this reads it at hour × component × operation.
---   ops        standalone requests (a Multi counts once)
---   in_multi   sub-requests carried inside Multi / MultiRead — where batched
---              reads hide (millions of Gets can sit inside a few Multis)
---   avg_latency_us  weighted by count, standalone requests only: a
---              sub-request reports 0 because the enclosing Multi carries it
---   errors     every non-ZOK error code with its count
---   replicas / busiest_replica / busiest_replica_ops   rows are summed over
---              the replicas to keep the file small on a large service; the
---              replica that sent most of the row's requests is kept, so a
---              single misbehaving node still shows (per-replica minutes are
---              in aggregated_zookeeper_log_by_minute_1_day)
--- Version-only (26.3+): needs `component` (26.2) and `is_subrequest` (26.3);
--- before 26.3 sub-requests share buckets with standalone requests and the
--- latency is misleading, so older servers skip this file.
+-- 过去两天每小时、按 ClickHouse 组件和操作统计的 Keeper 请求，
+-- 覆盖每个副本：服务器中“谁”在给 Keeper 施加负载、用什么操作，
+-- 以及有多慢。system.aggregated_zookeeper_log（自
+-- 25.9 起默认开启）每秒按 session、parent path、operation 和
+-- component 对每个 Keeper 请求分组；这里按 hour × component × operation 读取。
+--   ops        独立请求（一个 Multi 只计一次）
+--   in_multi   承载在 Multi / MultiRead 内部的子请求——批量
+--              读取隐藏在其中（数百万次 Get 可以藏在少数几个 Multi 里）
+--   avg_latency_us  按 count 加权，仅统计独立请求：
+--              子请求报告 0，因为外层 Multi 承载了它
+--   errors     每个非 ZOK 错误码及其计数
+--   replicas / busiest_replica / busiest_replica_ops   行会在副本间求和，
+--              以在大型服务上保持文件较小；
+--              保留发送该行最多请求的副本，因此
+--              单个行为异常的节点仍会暴露（按副本的分钟数据见
+--              aggregated_zookeeper_log_by_minute_1_day）
+-- 仅限特定版本（26.3+）：需要 `component`（26.2）和 `is_subrequest`（26.3）；
+-- 在 26.3 之前，子请求与独立请求共享 bucket，
+-- 延迟会产生误导，因此更旧的服务器会跳过本文件。
 SELECT
     time,
     component,

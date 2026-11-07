@@ -1,11 +1,11 @@
--- Full query_log row for the focus query_id.
--- Run when --query-id is set.
+-- 目标 query_id 的完整 query_log 行。
+-- 当设置了 --query-id 时运行。
 --
--- Root variant for the oldest supported servers (22.8+). Columns that
--- arrived later are added by version overrides:
---   23.8.1.0/  → query_cache_usage      (added 23.8)
---   23.9.1.0/  → peak_threads_usage     (added 23.9)
---   23.11.1.0/ → hostname column        (added 23.11; root uses hostName())
+-- 面向最旧受支持服务器（22.8+）的根变体。后来加入的列
+-- 由版本覆盖提供：
+--   23.8.1.0/  → query_cache_usage      （23.8 新增）
+--   23.9.1.0/  → peak_threads_usage     （23.9 新增）
+--   23.11.1.0/ → hostname column        （23.11 新增；根文件使用 hostName()）
 SELECT
     event_time_microseconds                                AS ts,
     query_id,

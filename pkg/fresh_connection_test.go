@@ -9,11 +9,11 @@ import (
 	"time"
 )
 
-// A load balancer pins a kept-alive connection to one backend, so a probe
-// that wants to see the balancer must open a new connection every time.
-// The server below answers with the client's ephemeral port — the same on
-// a reused connection, different on a fresh one — which is exactly the
-// difference between the shared client and ExecuteQueryFreshConnection.
+// 负载均衡器会把 keep-alive 连接固定到一个后端，因此想要
+// 看到均衡器的探测必须每次都打开新连接。
+// 下面的服务器会以客户端的临时端口作答——复用连接时
+// 相同，新连接时不同——这正是共享客户端与
+// ExecuteQueryFreshConnection 的区别。
 func TestExecuteQueryFreshConnection_OpensANewConnectionPerCall(t *testing.T) {
 	var mu sync.Mutex
 	var remotes []string
@@ -28,9 +28,8 @@ func TestExecuteQueryFreshConnection_OpensANewConnectionPerCall(t *testing.T) {
 	host, port, _ := strings.Cut(hostPort, ":")
 	c := NewClickHouseClient("http", host, port, "", "")
 
-	// Shared client: keep-alive reuses the connection, so the server sees
-	// one remote address for three calls — the behaviour that hid the
-	// balancer.
+	// 共享客户端：keep-alive 会复用连接，因此服务器三次调用只看到
+	// 一个远程地址——这正是掩盖均衡器的行为。
 	seen := map[string]bool{}
 	for i := 0; i < 3; i++ {
 		out, err := c.ExecuteQuery("SELECT hostName()")
@@ -40,10 +39,10 @@ func TestExecuteQueryFreshConnection_OpensANewConnectionPerCall(t *testing.T) {
 		seen[strings.TrimSpace(out)] = true
 	}
 	if len(seen) != 1 {
-		t.Fatalf("shared client should reuse one connection, saw %d remote addrs: %v", len(seen), seen)
+		t.Fatalf("共享客户端应复用一条连接，却看到 %d 个远程地址：%v", len(seen), seen)
 	}
 
-	// Fresh connection per call: three different ephemeral ports.
+	// 每次调用使用新连接：三个不同的临时端口。
 	seen = map[string]bool{}
 	for i := 0; i < 3; i++ {
 		out, err := c.ExecuteQueryFreshConnection("SELECT hostName()")
@@ -53,37 +52,37 @@ func TestExecuteQueryFreshConnection_OpensANewConnectionPerCall(t *testing.T) {
 		seen[strings.TrimSpace(out)] = true
 	}
 	if len(seen) != 3 {
-		t.Fatalf("fresh-connection probes must not share a connection, saw %d remote addrs: %v", len(seen), seen)
+		t.Fatalf("新连接探测绝不能共享连接，却看到 %d 个远程地址：%v", len(seen), seen)
 	}
 }
 
-// The one-shot transport must keep the default transport's connection-level
-// bounds (a zero-value Transport has neither a dial nor a TLS-handshake
-// timeout), stay on HTTP/1.1 (h2 multiplexes — the reuse the probe avoids)
-// and never outlive the probe bound, even when the collectors' query
-// timeout is unbounded.
+// 一次性 transport 必须保留默认 transport 的连接级限制
+// （零值 Transport 既没有拨号超时也没有 TLS 握手超时），
+// 保持 HTTP/1.1（h2 会多路复用——正是探测要避免的复用），
+// 并且绝不超出探测上限，即使采集器的查询超时
+// 无上限。
 func TestFreshConnectionClient_KeepsTransportBounds(t *testing.T) {
 	c := freshConnectionClient(0)
 	tr, ok := c.Transport.(*http.Transport)
 	if !ok {
-		t.Fatal("transport is not *http.Transport")
+		t.Fatal("transport 不是 *http.Transport")
 	}
 	if !tr.DisableKeepAlives {
-		t.Error("keep-alives must be disabled")
+		t.Error("必须禁用 keep-alive")
 	}
 	if tr.DialContext == nil || tr.TLSHandshakeTimeout == 0 {
-		t.Error("dial and TLS-handshake bounds must come from the default transport")
+		t.Error("拨号和 TLS 握手限制必须来自默认 transport")
 	}
 	if tr.ForceAttemptHTTP2 || tr.TLSNextProto == nil || len(tr.TLSNextProto) != 0 {
-		t.Error("HTTP/2 must be disabled for one-shot probes")
+		t.Error("一次性探测必须禁用 HTTP/2")
 	}
 	if c.Timeout != probeTimeout {
-		t.Errorf("unbounded client timeout must fall back to probeTimeout, got %v", c.Timeout)
+		t.Errorf("无上限的客户端超时必须回退到 probeTimeout，得到 %v", c.Timeout)
 	}
 	if got := freshConnectionClient(5 * time.Second).Timeout; got != 5*time.Second {
-		t.Errorf("a shorter client timeout must win, got %v", got)
+		t.Errorf("更短的客户端超时必须优先，得到 %v", got)
 	}
 	if got := freshConnectionClient(10 * time.Minute).Timeout; got != probeTimeout {
-		t.Errorf("a longer client timeout must be capped at probeTimeout, got %v", got)
+		t.Errorf("更长的客户端超时必须被限制为 probeTimeout，得到 %v", got)
 	}
 }

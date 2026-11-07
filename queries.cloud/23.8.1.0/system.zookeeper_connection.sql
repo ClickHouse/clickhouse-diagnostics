@@ -1,7 +1,7 @@
 -- tier: essential
 -- needs: keeper
--- Keeper connection per replica: replicas pinned to one Keeper host, or with a
--- much younger session than their peers, are the ones that lost the session.
+-- 每个副本的 Keeper 连接：固定连接到单个 Keeper 主机的副本，或
+-- 会话比同类新得多的副本，就是丢失会话的副本。
 SELECT
     hostName() AS hostname,
     name,

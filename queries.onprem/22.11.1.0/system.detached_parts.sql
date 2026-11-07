@@ -1,11 +1,11 @@
--- The system databases are skipped: system.detached_parts lists the
--- detached/ directory of every table, one listing per table (a remote call
--- on object-storage disks whose metadata lives in Keeper), and the server
--- applies a database filter BEFORE listing. Materialized-view targets
--- (.inner*) are user data and stay in.
--- {detached_scope} is 1 (every table) except on a large SharedMergeTree
--- server in an auto/full run: every non-shared table plus the shared tables
--- named in broken-part log lines (internal/query/detached_scope.go).
+-- 会跳过 system 数据库：system.detached_parts 会列出
+-- 每张表的 detached/ 目录，每张表一次列表（在元数据存放在 Keeper 的
+-- 对象存储磁盘上，这是一次远程调用），而服务器会在
+-- 列出之前先应用 database 过滤。物化视图目标
+-- （.inner*）属于用户数据，会保留。
+-- {detached_scope} 为 1（所有表），但在大型 SharedMergeTree
+-- 服务器的 auto/full 运行中例外：所有非 shared 表，加上在
+-- broken-part 日志行中点名的 shared 表（internal/query/detached_scope.go）。
 SELECT
   database,
   table,

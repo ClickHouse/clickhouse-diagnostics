@@ -1,21 +1,21 @@
 -- tier: essential
 -- needs: keeper
--- The Keeper-backed columns of system.replicas, for the tables that need
--- them. Asking system.replicas for log_max_index, log_pointer,
--- total_replicas, active_replicas or zookeeper_exception makes the server
--- read EVERY table's status from Keeper — one round trip per replicated
--- table, minutes on a server with tens of thousands of tables (seen at
--- 18–97 s per run, plus the same again in alerts). system.replicas filters
--- on database/table BEFORE reading statuses, so this file asks for them only
--- for up to 200 tables chosen by the cheap columns: every table that is
--- read-only, session-expired, queued, delayed or checking parts first, then
--- a sample of healthy ones — enough to see a stale replica still registered
--- in Keeper (total_replicas above the servers that exist, P-43) and a
--- replica lagging the log (log_pointer far behind log_max_index).
--- The cheap columns for every table are in system.replicas.
--- Gov: names and the Keeper error are hashed in the OUTER query, so the
--- filter below compares real names (an alias named database would otherwise
--- shadow the column inside WHERE).
+-- system.replicas 中依赖 Keeper 的列，仅针对需要它们的表。
+-- 向 system.replicas 请求 log_max_index、log_pointer、
+-- total_replicas、active_replicas 或 zookeeper_exception 会让服务器
+-- 从 Keeper 读取每一张表的状态 —— 每张复制表一次往返，
+-- 在拥有数万张表的服务器上要几分钟（实测每次运行
+-- 18–97 秒，告警中还要再花同样时间）。system.replicas 会在读取
+-- 状态之前按 database/table 过滤，所以本文件只对由廉价列选出的
+-- 最多 200 张表请求它们：先选所有只读、会话过期、有队列、有延迟
+-- 或正在检查 part 的表，再取一部分健康表 —— 足以发现仍注册在
+-- Keeper 中的陈旧副本（total_replicas 高于实际存在的服务器数，
+-- P-43）以及落后于日志的副本（log_pointer 远落后于
+-- log_max_index）。
+-- 每张表的廉价列在 system.replicas 中。
+-- Gov：名称和 Keeper 错误在外层查询中哈希，所以下面的
+-- 过滤比较的是真实名称（否则名为 database 的别名会在 WHERE
+-- 中遮蔽该列）。
 SELECT
     hex(SHA256(concat(database, '%salt%'))) AS database,
     hex(SHA256(concat(table, '%salt%')))    AS table,
@@ -27,8 +27,8 @@ SELECT
     log_pointer,
     total_replicas,
     active_replicas,
-    -- Keeper error text names paths and tables, so it is hashed; empty stays
-    -- empty, or every healthy row would carry the same hash of the salt.
+    -- Keeper 错误文本指名路径和表，所以会哈希；空值保持
+    -- 为空，否则每个健康行都会携带同一个盐的哈希。
     if(zookeeper_exception = '', '', hex(SHA256(concat(zookeeper_exception, '%salt%')))) AS zookeeper_exception
 FROM
 (

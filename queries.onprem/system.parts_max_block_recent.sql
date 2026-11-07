@@ -1,19 +1,19 @@
--- Each replica's newest block number and last part time for its 200 most
--- recently written partitions — the raw numbers a parts-propagation lag is
--- computed from. On SharedMergeTree every replica keeps its own view of
--- system.parts; a replica that has not yet fetched the newest part of a
--- partition shows a lower max_block_number than its siblings, and the gap in
--- last_visible says for how long. Block numbers are allocated per partition,
--- so the grain is the partition; a per-table max would mix partitions.
+-- 每个 replica 最近写入的 200 个分区中，各自最新的 block 编号与最后的
+-- part 时间——计算 parts 传播延迟时所用的原始数字。
+-- 在 SharedMergeTree 上，每个 replica 保留自己对 system.parts 的视图；
+-- 尚未拉取到某分区最新 part 的 replica，其 max_block_number 会低于
+-- 同组兄弟，而 last_visible 的差距说明了落后多久。
+-- block 编号按分区分配，所以粒度就是分区；按表取 max 会混掉分区。
 --
--- Cost: one pass over system.parts (in-memory) with five narrow columns,
--- grouped per partition; 200 rows per host.
--- Onprem: this node's view only — one node has nothing to compare against,
--- so two bundles collected on two replicas minutes apart are lined up by the
--- skill's pre-pass on (database, table, partition_id). The full system.parts
--- dump keeps the 50 000 LARGEST parts; on a node with more parts than that
--- the small, freshly inserted ones that show lag are exactly what it drops,
--- which is why this grouped, recency-ordered file exists beside it.
+-- 成本：对 system.parts（内存表）做一次扫描，只取五个窄列，
+-- 按分区聚合；每台主机 200 行。
+-- Onprem：只反映本节点的视图——单个节点没有可比对的对象，
+-- 因此需要在相隔数分钟从两个 replica 采集的两个 bundle 上，
+-- 由 skill 的预检按 (database, table, partition_id) 对齐。完整的
+-- system.parts dump 保留 50 000 个 LARGEST parts；
+-- 在 part 数量超过这个数的节点上，
+-- 它丢掉的恰恰是那些能显示延迟的、新插入的小 part，
+-- 这正是旁边还要有这份按分区聚合、按新近排序的文件的原因。
 SELECT
     hostName()               AS hostname,
     database,

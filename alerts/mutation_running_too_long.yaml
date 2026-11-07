@@ -1,33 +1,29 @@
 name: mutation_running_too_long
-title: "Long-running mutation detected"
+title: "检测到长时间运行的mutation"
 severity: warning
 description: |
-  A mutation has been running for more than 3 hours.
-  Long-running mutations can block merges, consume extra disk space during
-  execution, and degrade write performance. Consider killing the mutation
-  if it is no longer needed or investigate the root cause.
+  某个mutation已运行超过3小时。长时间运行的mutation会阻塞merge、
+  在执行期间占用额外磁盘空间，并降低写入性能。如果不再需要，
+  考虑终止（kill）该mutation，或排查根本原因。
 tags:
   - mutations
   - performance
 
-# {sys.mutations} is replaced at runtime:
+# {sys.mutations}在运行时替换：
 #   onprem / gov  →  system.mutations
 #   cloud         →  clusterAllReplicas(default, system.mutations)
 #
-# Note: the toString(create_time) projection is aliased to *_str so
-# the alias does not shadow the DateTime source column in the WHERE
-# clause. In CH 25+ the analyzer resolves identifiers against SELECT
-# aliases, so `dateDiff('hour', create_time, now())` against an
-# aliased-as-String create_time would raise ILLEGAL_TYPE_OF_ARGUMENT.
+# 注意：toString(create_time)投影被别名到*_str，以免该别名在WHERE
+# 子句中遮蔽DateTime源列。在CH 25+中，analyzer会按SELECT别名解析标识符，
+# 因此在create_time被别名为String的情况下，
+# `dateDiff('hour', create_time, now())`会抛出ILLEGAL_TYPE_OF_ARGUMENT。
 #
-# Root variant for the oldest supported servers (22.8–23.11):
-# system.mutations.is_killed was added in 24.1, so this variant omits the
-# `is_killed = 0` filter (it would raise UNKNOWN_IDENTIFIER on older
-# servers). See 24.1.1.0/mutation_running_too_long.yaml for the variant
-# that excludes already-killed mutations.
-# Evaluated by the Go check over the files already collected (no second
-# query to the server). query: below is the same test in SQL, for the
-# customer to run live; the check mirrors it.
+# 根变体，适用于支持的最旧服务器（22.8–23.11）：
+# system.mutations.is_killed在24.1中加入，因此本变体省略
+# `is_killed = 0`过滤（在旧服务器上会抛出UNKNOWN_IDENTIFIER）。
+# 排除已kill mutation的变体见24.1.1.0/mutation_running_too_long.yaml。
+# 由Go check在已采集的文件上评估（不会再次查询服务器）。下方query:是同一
+# 测试的SQL版本，供客户在线执行；check镜像同一逻辑。
 check: go:mutation_running_too_long
 source:
   - system.mutations
@@ -46,5 +42,5 @@ query: |
     AND dateDiff('hour', create_time, now()) > 3
   ORDER BY hours_running DESC
 
-# {column_name} placeholders are filled from each result row.
-message: "Mutation {mutation_id} on {database}.{table} has been running for {hours_running}h with {parts_to_do} part(s) remaining — started {create_time_str}"
+# {column_name}占位符由每个结果行填充。
+message: "{database}.{table}上的mutation {mutation_id}已运行{hours_running}小时，还剩{parts_to_do}个part——开始于{create_time_str}"
