@@ -182,6 +182,7 @@ Details: [docs/modes.md](docs/modes.md).
 |---|---|
 | `-mode onprem\|cloud\|gov` | Which kind of server (see [Modes](#modes--mode-onprem--cloud--gov)) |
 | `-host`, `-port`, `-protocol`, `-user` | Where to connect; the password comes from `CLICKHOUSE_PASSWORD` or a prompt |
+| `-ca-cert <file>`, `-insecure` | An https server with a self-signed or internal-CA certificate: trust that CA, or skip verification ([details](docs/running.md#self-signed-certificates-https)) |
 | `-collect auto\|full\|essential` | How much to collect (see [What this is for](#what-this-is-for)) |
 | `-from`, `-to` | Collect this window instead of each table's default look-back |
 | `-time-budget`, `-query-timeout` | Cap the whole run and each query |
@@ -320,7 +321,7 @@ Go 1.23+. Details: [docs/building.md](docs/building.md).
 <details>
 <summary>Show</summary>
 
-The most common surprises: a bundle that looks complete but misses the customer's tables (a `SHOW` grant is missing), `Code: 497` in cloud mode (`REMOTE` / `CREATE TEMPORARY TABLE` missing), and a collector that failed — every failure is listed with the server's error in `execution_log.txt`.
+The most common surprises: a bundle that looks complete but misses the customer's tables (a `SHOW` grant is missing), `Code: 497` in cloud mode (`REMOTE` / `CREATE TEMPORARY TABLE` missing), `x509: certificate signed by unknown authority` over https (`-ca-cert` or `-insecure`), and a collector that failed — every failure is listed with the server's error in `execution_log.txt`.
 
 Details: [docs/troubleshooting.md](docs/troubleshooting.md).
 </details>

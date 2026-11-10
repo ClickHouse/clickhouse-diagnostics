@@ -63,7 +63,7 @@ func TestExecuteQueryFreshConnection_OpensANewConnectionPerCall(t *testing.T) {
 // and never outlive the probe bound, even when the collectors' query
 // timeout is unbounded.
 func TestFreshConnectionClient_KeepsTransportBounds(t *testing.T) {
-	c := freshConnectionClient(0)
+	c := freshConnectionClient(0, nil)
 	tr, ok := c.Transport.(*http.Transport)
 	if !ok {
 		t.Fatal("transport is not *http.Transport")
@@ -80,10 +80,10 @@ func TestFreshConnectionClient_KeepsTransportBounds(t *testing.T) {
 	if c.Timeout != probeTimeout {
 		t.Errorf("unbounded client timeout must fall back to probeTimeout, got %v", c.Timeout)
 	}
-	if got := freshConnectionClient(5 * time.Second).Timeout; got != 5*time.Second {
+	if got := freshConnectionClient(5*time.Second, nil).Timeout; got != 5*time.Second {
 		t.Errorf("a shorter client timeout must win, got %v", got)
 	}
-	if got := freshConnectionClient(10 * time.Minute).Timeout; got != probeTimeout {
+	if got := freshConnectionClient(10*time.Minute, nil).Timeout; got != probeTimeout {
 		t.Errorf("a longer client timeout must be capped at probeTimeout, got %v", got)
 	}
 }

@@ -41,6 +41,8 @@ func main() {
 	userFlag := flag.String("user", "", "Username")
 	passwordFlag := flag.String("password", "", "Password (not recommended for security reasons)")
 	protocolFlag := flag.String("protocol", "", "Protocol (http or https)")
+	caCertFlag := flag.String("ca-cert", "", "PEM file of the CA that signed the server's certificate (self-signed or internal CA), trusted in addition to the system roots; https only")
+	insecureFlag := flag.Bool("insecure", false, "Do not verify the server's TLS certificate (encrypted, but the server is not authenticated); https only — prefer -ca-cert")
 	modeFlag := flag.String("mode", "onprem", "Query mode (cloud, onprem, gov)")
 	outputDirFlag := flag.String("output-dir", "./clickhouse_results", "Directory for results output")
 	configDirFlag := flag.String("config-dir", "", "ClickHouse config directory to collect (default: /etc/clickhouse-server/config.d/)")
@@ -300,6 +302,12 @@ func main() {
 
 	// Create ClickHouse client
 	client := pkg.NewClickHouseClient(protocol, host, port, username, password)
+	tlsNote, err := applyTLS(client, protocol, pkg.TLSOptions{CAFile: *caCertFlag, Insecure: *insecureFlag})
+	if err != nil {
+		// No bundle: a script checking $? must see the failure.
+		fmt.Println("Error:", err)
+		os.Exit(1)
+	}
 	if *queryTimeoutFlag < 0 {
 		fmt.Println("Error: -query-timeout cannot be negative (use 0 to disable the limit).")
 		return
@@ -527,6 +535,9 @@ func main() {
 	}
 	rec.SetMeta("timeout", fmt.Sprintf("%v per query (-query-timeout; 0 = unbounded)", client.QueryTimeout()))
 	rec.SetMeta("format", outputFormat.Name)
+	if tlsNote != "" {
+		rec.SetMeta("tls", tlsNote)
+	}
 	if dryRun {
 		rec.SetMeta("dry-run", "yes — no query was sent to the server, durations are not meaningful")
 	}
@@ -1524,4 +1535,30 @@ func collectorStatus(rec *runlog.Recorder) map[string]bundle.Status {
 		out[strings.TrimSuffix(e.Name, ".sql")] = bundle.Status{State: e.Status, Reason: reason}
 	}
 	return out
+}
+
+// applyTLS sets -ca-cert / -insecure on the client and returns the
+// execution log's tls: note ("" when neither was given). Over plain http
+// they mean nothing and are ignored with a note; -insecure wins over
+// -ca-cert and is warned about, since the server is then not authenticated.
+func applyTLS(client *pkg.ClickHouseClient, protocol string, o pkg.TLSOptions) (string, error) {
+	if o == (pkg.TLSOptions{}) {
+		return "", nil
+	}
+	if protocol != "https" {
+		fmt.Println("Note: -ca-cert and -insecure apply to https only; ignored with -protocol " + protocol + ".")
+		return "", nil
+	}
+	if o.Insecure && o.CAFile != "" {
+		fmt.Println("Note: -insecure skips verification, so -ca-cert is not used.")
+	}
+	if err := client.SetTLS(o); err != nil {
+		return "", err
+	}
+	if o.Insecure {
+		fmt.Println("Warning: -insecure — the server's TLS certificate is NOT verified: the connection is " +
+			"encrypted but anyone in the path could impersonate the server. Prefer -ca-cert <file>.")
+		return "certificate verification disabled (-insecure)", nil
+	}
+	return "server certificate verified against the system roots and -ca-cert", nil
 }

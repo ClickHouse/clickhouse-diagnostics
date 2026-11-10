@@ -134,6 +134,11 @@ Run `./clickhouse-diagnostic -help` to see the full list. Current flags:
 -user string           Username
 -password string       Password (not recommended for security reasons)
 -protocol string       Protocol (http or https)
+-ca-cert string        PEM file of the CA that signed the server's certificate
+                       (self-signed or internal CA), trusted in addition to the
+                       system roots; https only. See "Self-signed certificates" below.
+-insecure              Do not verify the server's TLS certificate (encrypted,
+                       but the server is not authenticated); https only.
 -mode string           Query mode (cloud, onprem, gov) (default "onprem")
 -output-dir string     Directory for results output (default "./clickhouse_results")
 -config-dir string     ClickHouse config directory to collect
@@ -189,6 +194,24 @@ Run `./clickhouse-diagnostic -help` to see the full list. Current flags:
 ```
 
 Any flag left empty on the command line is prompted for interactively (except the `-skip-*` toggles and `-output-dir` / `-alerts-dir`, which use their defaults silently).
+
+### Self-signed certificates (https)
+
+Over `https` the server's certificate is verified against the system's trusted roots, so a server with a self-signed certificate or one from an internal CA is refused with `x509: certificate signed by unknown authority`. Two flags handle it:
+
+```bash
+# Trust the CA that signed the server's certificate (recommended): the server
+# is still authenticated, and its certificate must be issued for -host.
+./clickhouse-diagnostic -mode onprem -protocol https -port 8443 -host ch-01 -user diag -ca-cert /etc/clickhouse-server/ca.pem
+
+# Skip verification: the connection is encrypted, but the server is not
+# authenticated. Printed as a warning and recorded in execution_log.txt.
+./clickhouse-diagnostic -mode onprem -protocol https -port 8443 -host ch-01 -user diag -insecure
+```
+
+`-ca-cert` takes a PEM file with one or more CA certificates, trusted **in addition to** the system roots, and works the same on Linux, macOS and Windows. With both flags, `-insecure` wins. Over `http` they are ignored with a note. The choice is the `tls:` line of `execution_log.txt` (the file path is not recorded). The [`cluster`](../cluster-collect/README.md) subcommand takes the same two flags and passes them to every host's run.
+
+Running on the server over `-protocol http -host localhost -port 8123` avoids TLS altogether, and is the way to collect host facts, logs and configs anyway.
 
 ### Examples
 
