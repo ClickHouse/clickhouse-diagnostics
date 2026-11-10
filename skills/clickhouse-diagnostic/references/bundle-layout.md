@@ -226,7 +226,7 @@ A command that failed is written as `error: connection refused` / `error: timeou
 
 ## 7. `configuration/`
 
-Mirror of the config directory (`config.d/…`, `users.d/…`, sometimes `config.xml`). Credentials, keys, tokens, PEM blocks, long hex/base64 blobs are replaced; **hostnames, IPs, cluster topology, macros, paths, table names and every performance setting are kept**. Files that failed to parse were skipped (fail-closed), so a missing file is not proof a setting is unset.
+Mirror of the config directory (`config.xml`, `users.xml`, `config.d/…`, `users.d/…`; bundles before v0.10 have `config.d/` only). From v0.10 also `preprocessed/config.xml` and `preprocessed/users.xml` — the merged configuration the server runs (`<path>/preprocessed_configs/`; its header comment lists the source files) — and `merge_report.txt` (settings set differently in several files and the running value; files a failed reload did not pick up; restart-only settings changed since the start). Credentials, keys, tokens, PEM blocks, long hex/base64 blobs are replaced; **hostnames, IPs, cluster topology, macros, paths, table names and every performance setting are kept**. Files that failed to parse were skipped (fail-closed), so a missing file is not proof a setting is unset.
 
 ## 8. `dashboard.html`
 

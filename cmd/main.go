@@ -43,7 +43,7 @@ func main() {
 	protocolFlag := flag.String("protocol", "", "Protocol (http or https)")
 	modeFlag := flag.String("mode", "onprem", "Query mode (cloud, onprem, gov)")
 	outputDirFlag := flag.String("output-dir", "./clickhouse_results", "Directory for results output")
-	configDirFlag := flag.String("config-dir", "", "ClickHouse config directory to collect (default: /etc/clickhouse-server/config.d/)")
+	configDirFlag := flag.String("config-dir", "", "ClickHouse configuration directory to collect: config.xml, users.xml and their *.d/ overrides (default: /etc/clickhouse-server/). The merged configuration the server runs is collected from <path>/preprocessed_configs/ as well")
 	skipConfigFlag := flag.Bool("skip-config", false, "Skip collecting configuration files")
 	skipArchiveFlag := flag.Bool("skip-archive", false, "Skip creating archive of results and configuration")
 	skipDashboardFlag := flag.Bool("skip-dashboard", false, "Skip generating HTML dashboard")
@@ -672,6 +672,17 @@ func main() {
 		return
 	}
 
+	// Where the server wrote its merged configuration — <path>/
+	// preprocessed_configs/, path from the collected system.server_settings
+	// (23.3+; the source config otherwise) — and the restart metadata the
+	// merge report compares it with. Read here because Keeper and log
+	// discovery below read the merged config.xml too.
+	settingsRows := serverSettingsFromRun(finalOutputDir)
+	preprocessedDir := ""
+	if !govWithholdsConfig(mode) && !cloudSkipsConfig(mode, configDir) {
+		preprocessedDir = config.PreprocessedDir(serverPathFrom(settingsRows), config.SourceFiles(configDir))
+	}
+
 	// Time-bounded system.text_log slice (opt-in, --from/--to required).
 	// Runs before the dry-run summary so --dry-run previews the SQL.
 	if collectTextLog {
@@ -751,7 +762,7 @@ func main() {
 			qerr = fmt.Errorf("not read: %s", keeperDownReason)
 		}
 		connected := keeper.ParseTargets(raw)
-		configured := keeper.TargetsFromConfig(configDir)
+		configured := keeper.TargetsFromFiles(config.DiscoveryFiles(configDir, preprocessedDir))
 		targets := keeper.MergeTargets(connected, configured)
 		switch {
 		case qerr != nil && len(targets) == 0:
@@ -844,6 +855,7 @@ func main() {
 		res, err := logfiles.Collect(finalOutputDir, logfiles.Options{
 			Dir:             logsDir,
 			ConfigDir:       configDir,
+			ConfigFiles:     config.DiscoveryFiles(configDir, preprocessedDir),
 			IncludeArchives: logsArchives,
 			MaxBytesPerFile: int64(logsMaxMB) << 20,
 		})
@@ -861,13 +873,23 @@ func main() {
 	if !skipConfig {
 		configDest := filepath.Join(finalOutputDir, "configuration")
 		phaseStart = time.Now()
-		if err := config.NewCollector().Collect(configDir, configDest, false); err != nil {
-			// Reading /etc/clickhouse-server/config.d/ usually needs root or
-			// the clickhouse group, so an unprivileged run fails here. Warn
+		// An explicit *.d directory (the old default, config.d/) is one
+		// override layer: the files it overrides sit in its parent, and
+		// without them neither the bundle nor the merge report can say what
+		// the layer changed. Collect the whole configuration around it.
+		collectRoot := configDir
+		if clean := filepath.Clean(configDir); strings.HasSuffix(filepath.Base(clean), ".d") {
+			collectRoot = filepath.Dir(clean)
+			fmt.Printf("Collecting %s with the files around it (%s)\n", configDir, collectRoot)
+		}
+		if err := config.NewCollector().Collect(collectRoot, configDest, false); err != nil {
+			// Reading /etc/clickhouse-server/ usually needs root or the
+			// clickhouse group, so an unprivileged run fails here. Warn
 			// rather than fail the run — the query results are still worth
 			// having — but never leave it silent.
 			fmt.Printf("Warning: configuration collection failed: %v\n", err)
 		}
+		collectRunningConfig(configDest, collectRoot, preprocessedDir, settingsRows, identity.UptimeSeconds)
 		rec.Phase("configuration", time.Since(phaseStart), "")
 	}
 
@@ -1107,11 +1129,11 @@ func getUserInput(protocol, host, port, username, password, mode, configDir *str
 	// collection. Gov never collects configs and cloud has none on this
 	// machine, so neither mode asks.
 	if *configDir == "" && !skipConfig && !govWithholdsConfig(*mode) && !cloudSkipsConfig(*mode, *configDir) {
-		fmt.Print("Enter ClickHouse config directory to collect [default: /etc/clickhouse-server/config.d/]: ")
+		fmt.Print("Enter ClickHouse config directory to collect [default: " + config.DefaultConfigDir + "]: ")
 		input, _ := reader.ReadString('\n')
 		*configDir = strings.TrimSpace(input)
 		if *configDir == "" {
-			*configDir = "/etc/clickhouse-server/config.d/"
+			*configDir = config.DefaultConfigDir
 		}
 	}
 
@@ -1524,4 +1546,70 @@ func collectorStatus(rec *runlog.Recorder) map[string]bundle.Status {
 		out[strings.TrimSuffix(e.Name, ".sql")] = bundle.Status{State: e.Status, Reason: reason}
 	}
 	return out
+}
+
+// serverSettingsFromRun reads the collected system.server_settings (23.3+)
+// for the merge report; nil without it (older server, other output format).
+func serverSettingsFromRun(runDir string) []config.ServerSetting {
+	rows, err := bundle.Open(runDir, nil).Rows("system.server_settings")
+	if err != nil {
+		return nil
+	}
+	out := make([]config.ServerSetting, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, config.ServerSetting{Name: r.Str("name"), Value: r.Str("value"),
+			ChangeableWithoutRestart: r.Str("changeable_without_restart")})
+	}
+	return out
+}
+
+func serverPathFrom(settings []config.ServerSetting) string {
+	for _, s := range settings {
+		if s.Name == "path" {
+			return s.Value
+		}
+	}
+	return ""
+}
+
+// collectRunningConfig adds the configuration the server actually runs —
+// the merged config.xml and users.xml in preprocessed_configs/, sanitised
+// like every other file — and the merge report comparing it with the
+// sources collected beside it.
+func collectRunningConfig(configDest, sourceRoot, preprocessedDir string, settings []config.ServerSetting, uptimeSeconds int64) {
+	var written time.Time
+	switch fi, err := os.Stat(filepath.Join(preprocessedDir, "config.xml")); {
+	case preprocessedDir == "":
+		return
+	case err != nil:
+		fmt.Printf("Merged configuration not collected: %s is not readable (%v)\n", preprocessedDir, err)
+	default:
+		written = fi.ModTime()
+		if err := config.NewCollector().Collect(preprocessedDir, filepath.Join(configDest, "preprocessed"), false); err != nil {
+			fmt.Printf("Warning: merged configuration not collected: %v\n", err)
+		}
+	}
+	if _, err := os.Stat(configDest); err != nil {
+		return // nothing collected at all: no report
+	}
+	var started time.Time
+	if uptimeSeconds > 0 {
+		started = time.Now().Add(-time.Duration(uptimeSeconds) * time.Second)
+	}
+	// The copies are new files: the originals' times say what changed
+	// since the server started.
+	times := map[string]time.Time{}
+	for _, f := range config.SourceFiles(sourceRoot) {
+		if fi, err := os.Stat(f); err == nil {
+			if rel, err := filepath.Rel(sourceRoot, f); err == nil {
+				times[rel] = fi.ModTime()
+			}
+		}
+	}
+	report := config.MergeReport(configDest, settings, written, started, times)
+	if err := os.WriteFile(filepath.Join(configDest, "merge_report.txt"), []byte(report), 0600); err != nil {
+		fmt.Printf("Warning: merge report not written: %v\n", err)
+		return
+	}
+	fmt.Printf("Configuration merge report: %s\n", filepath.Join(configDest, "merge_report.txt"))
 }
