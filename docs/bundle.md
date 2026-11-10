@@ -146,7 +146,7 @@ When `-skip-config` is not set, the tool collects two things, both sanitised (in
 `configuration/merge_report.txt` compares the two:
 
 - every setting defined in more than one file with different values — each file's value, the running value and the file it came from (lists such as Keeper `<node>`s or cluster replicas are not conflicts);
-- the files changed since the server started: one not in the merged config means the last reload did not pick it up (a config error — see `logs/`); a restart-only server setting (`changeable_without_restart = No`) in a changed file is not live until the next restart, even though `system.server_settings` can already show the new value after a reload;
+- the files changed since the server started, each judged against its own merged file (`config.xml` and `users.xml` are rewritten on separate reloads): one the merged file predates was not picked up by the last reload (a config error — see `logs/`); a restart-only server setting (`changeable_without_restart = No`) whose **running** value comes from a changed file may not be live yet — a file's time cannot prove the value itself changed, and `system.server_settings` can already show a new value after a reload before it takes effect;
 - a merged config older than the server's start: the server did not rebuild it from the sources when it started.
 
 The report is built from the sanitised copies, so it never shows a credential. The skill's pre-pass turns it into HC-10.11–10.14.

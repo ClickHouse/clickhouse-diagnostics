@@ -476,7 +476,7 @@ def config_merge_checks(base: str, add) -> None:
         add("warning", "config",
             f"{n} setting(s) are set differently in more than one configuration file; the server runs the merged value — {shown}{' …' if n > 4 else ''}",
             src + " (each file's value and the one that won)", "HC-10.11")
-    stale = re.findall(r"^\s+(\S+)\s+changed (.+?) — NOT in the merged config", text, re.M)
+    stale = re.findall(r"^\s+(\S+)\s+changed (.+?) — NOT in the merged (?:config|users)\.xml", text, re.M)
     if stale:
         add("warning", "config",
             f"{len(stale)} configuration file(s) changed after the last successful load are not in the merged config — the reload failed or did not run: " +
@@ -487,10 +487,10 @@ def config_merge_checks(base: str, add) -> None:
             "the merged config the server runs is older than its last start: it was not rebuilt from the sources at startup",
             src + " — check logs/ startup for a configuration error", "HC-10.13")
     # the same setting in several changed files: the last one (merge order) wins
-    pending = list(dict(re.findall(r"^\s+(\S+)\s+= (.*?) — needs a restart to take effect", text, re.M)).items())
+    pending = list(dict(re.findall(r"^\s+(\S+)\s+= (.*?) — running value from a file changed since the start", text, re.M)).items())
     if pending:
         add("info", "config",
-            f"{len(pending)} restart-only setting(s) changed since the server started (not live until a restart): " +
+            f"{len(pending)} restart-only setting(s) run a value from a file changed since the server started — if the value is new, it is not live until a restart: " +
             ", ".join(f"{k} = {v}" for k, v in pending[:6]),
             src, "HC-10.14")
 

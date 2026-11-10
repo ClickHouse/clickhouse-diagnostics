@@ -154,9 +154,14 @@ func DiscoverDirs(opts Options, res *Result) []string {
 		dirs = append(dirs, d)
 	}
 
-	paths := LogPathsFromConfig(opts.ConfigDir)
+	// The merged config first; the source files when it names no log
+	// path (or was not readable).
+	var paths []string
 	if len(opts.ConfigFiles) > 0 {
 		paths = LogPathsFromFiles(opts.ConfigFiles)
+	}
+	if len(paths) == 0 {
+		paths = LogPathsFromConfig(opts.ConfigDir)
 	}
 	for _, p := range paths {
 		add(filepath.Dir(p))

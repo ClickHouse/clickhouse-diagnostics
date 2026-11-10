@@ -254,6 +254,18 @@ func TargetsFromFiles(files []string) []Target {
 	return out
 }
 
+// TargetsWithFallback reads the members from primary (the merged config) and,
+// when it names none, from fallback (the source files). The connected
+// member(s) from system.zookeeper_connection are added by the caller either
+// way, so with no readable configuration the Keeper checks still run
+// against them.
+func TargetsWithFallback(primary, fallback []string) []Target {
+	if t := TargetsFromFiles(primary); len(t) > 0 {
+		return t
+	}
+	return TargetsFromFiles(fallback)
+}
+
 // MergeTargets unions the connected member(s) with the configured ensemble,
 // connected first, without duplicates.
 func MergeTargets(connected, configured []Target) []Target {

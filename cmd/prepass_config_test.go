@@ -39,7 +39,7 @@ func TestInspectBundle_ConfigMergeReport(t *testing.T) {
 	start := time.Date(2026, 11, 10, 8, 0, 0, 0, time.UTC)
 	report := config.MergeReport(cfg,
 		[]config.ServerSetting{{Name: "max_thread_pool_size", Value: "15000", ChangeableWithoutRestart: "No"}},
-		start.Add(-time.Hour), start, // merged config older than the start: HC-10.13
+		map[string]time.Time{"config": start.Add(-time.Hour)}, start, // merged config older than the start: HC-10.13
 		map[string]time.Time{"config.xml": start.Add(-48 * time.Hour), "config.d/a.xml": start.Add(-2 * time.Hour),
 			"config.d/z_new.xml": start.Add(30 * time.Minute)}) // newer than the merged config: HC-10.12
 	if err := os.WriteFile(filepath.Join(cfg, "merge_report.txt"), []byte(report), 0o644); err != nil {
@@ -59,7 +59,7 @@ func TestInspectBundle_ConfigMergeReport(t *testing.T) {
 	// and included in the merged config.
 	report = config.MergeReport(cfg,
 		[]config.ServerSetting{{Name: "max_thread_pool_size", Value: "15000", ChangeableWithoutRestart: "No"}},
-		start.Add(2*time.Hour), start,
+		map[string]time.Time{"config": start.Add(2 * time.Hour)}, start,
 		map[string]time.Time{"config.xml": start.Add(-48 * time.Hour), "config.d/a.xml": start.Add(time.Hour),
 			"config.d/z_new.xml": start.Add(-time.Hour)})
 	_ = os.WriteFile(filepath.Join(cfg, "merge_report.txt"), []byte(report), 0o644)

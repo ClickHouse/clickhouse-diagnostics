@@ -148,11 +148,13 @@ type Conflict struct {
 
 // MergeReport compares the collected sources with the collected merged
 // files. collectedDir is the bundle's configuration/ folder; merged files
-// are in its preprocessed/ subfolder. sourceTimes are the originals'
-// modification times by path relative to that folder (the copies are new
-// files); with the server's start time they tell what changed since the
-// last restart, and whether the last reload picked it up.
-func MergeReport(collectedDir string, settings []ServerSetting, mergedWritten, serverStart time.Time, sourceTimes map[string]time.Time) string {
+// are in its preprocessed/ subfolder. mergedWritten holds each merged
+// file's modification time by group ("config", "users"): the server
+// rewrites config.xml and users.xml on separate reloads. sourceTimes are
+// the originals' modification times by path relative to collectedDir (the
+// copies are new files); with the server's start time they tell what
+// changed since the last restart, and whether the last reload picked it up.
+func MergeReport(collectedDir string, settings []ServerSetting, mergedWritten map[string]time.Time, serverStart time.Time, sourceTimes map[string]time.Time) string {
 	var b strings.Builder
 	b.WriteString("# ClickHouse configuration merge report\n")
 	b.WriteString("#\n# The server runs the merged files in preprocessed/ (its preprocessed_configs/).\n")
@@ -169,6 +171,13 @@ func MergeReport(collectedDir string, settings []ServerSetting, mergedWritten, s
 		b.WriteString("merged files: not collected (preprocessed_configs/ was not readable or absent) — conflicts below cannot say which value runs\n")
 	} else {
 		fmt.Fprintf(&b, "merged files: preprocessed/config.xml, preprocessed/users.xml\n")
+	}
+
+	// loaded: the merged file of its group is not older than the source, so
+	// the source can have contributed to it. Unknown times: assume it did.
+	loaded := func(g, rel string) bool {
+		mw, st := mergedWritten[g], sourceTimes[rel]
+		return mw.IsZero() || st.IsZero() || !st.After(mw)
 	}
 
 	type def struct{ file, value string }
@@ -199,11 +208,30 @@ func MergeReport(collectedDir string, settings []ServerSetting, mergedWritten, s
 			defs[g][p] = append(defs[g][p], def{rel, vs[0]})
 		}
 	}
+	// A path repeated in the merged file is a list too, even when every
+	// source file contributes one entry.
+	for g, m := range merged {
+		for p := range m.lists {
+			lists[g+"\x00"+p] = true
+		}
+	}
 
+	// effective: the loaded file whose definition of a path is the running
+	// one — the last loaded file in merge order that sets the merged value.
+	effective := map[string]map[string]string{}
 	var conflicts []Conflict
 	identical := 0
 	for _, g := range []string{"config", "users"} {
+		effective[g] = map[string]string{}
 		for p, ds := range defs[g] {
+			if m := merged[g]; m != nil && !lists[g+"\x00"+p] && len(m.values[p]) == 1 {
+				for i := len(ds) - 1; i >= 0; i-- {
+					if ds[i].value == m.values[p][0] && loaded(g, ds[i].file) {
+						effective[g][p] = ds[i].file
+						break
+					}
+				}
+			}
 			if len(ds) < 2 || lists[g+"\x00"+p] {
 				continue
 			}
@@ -220,14 +248,9 @@ func MergeReport(collectedDir string, settings []ServerSetting, mergedWritten, s
 				c.Files = append(c.Files, d.file)
 				c.Values = append(c.Values, d.value)
 			}
-			if m := merged[g]; m != nil && !m.lists[p] && len(m.values[p]) == 1 {
+			if m := merged[g]; m != nil && len(m.values[p]) == 1 {
 				c.Running = m.values[p][0]
-				for i := len(ds) - 1; i >= 0; i-- {
-					if ds[i].value == c.Running {
-						c.SetBy = ds[i].file
-						break
-					}
-				}
+				c.SetBy = effective[g][p]
 			}
 			conflicts = append(conflicts, c)
 		}
@@ -254,7 +277,7 @@ func MergeReport(collectedDir string, settings []ServerSetting, mergedWritten, s
 		case c.SetBy != "":
 			fmt.Fprintf(&b, "  %-44s = %s   ← from %s\n", "running (merged file)", c.Running, c.SetBy)
 		default:
-			fmt.Fprintf(&b, "  %-44s = %s   ← matches no source file\n", "running (merged file)", c.Running)
+			fmt.Fprintf(&b, "  %-44s = %s   ← matches no source file the merged config includes\n", "running (merged file)", c.Running)
 		}
 	}
 	if identical > 0 {
@@ -264,35 +287,40 @@ func MergeReport(collectedDir string, settings []ServerSetting, mergedWritten, s
 		fmt.Fprintf(&b, "\nNot compared (YAML): %s\n", strings.Join(skipped, ", "))
 	}
 
-	writeChanged(&b, collectedDir, merged["config"] != nil, settings, mergedWritten, serverStart, sourceTimes)
+	writeChanged(&b, merged, effective, settings, mergedWritten, serverStart, sourceTimes)
 	return b.String()
 }
 
-// writeChanged reports the source files changed since the server started:
-// a file newer than the merged config was not picked up by the last reload
-// (a failed reload leaves the old merged file in place), and the
-// restart-only server settings a changed file sets are not live until the
-// next restart. system.server_settings cannot say this: it shows a new
-// value after a reload even when the setting only takes effect on restart.
-func writeChanged(b *strings.Builder, collectedDir string, haveMerged bool, settings []ServerSetting, mergedWritten, serverStart time.Time, sourceTimes map[string]time.Time) {
+// writeChanged reports the source files changed since the server started.
+// A file newer than its group's merged file was not picked up by the last
+// reload (a failed reload leaves the old merged file in place). A
+// restart-only server setting whose running value comes from a changed file
+// may not be live yet: the file's time cannot prove the value itself
+// changed, so it is reported as possible, and only for running values —
+// never for a value another file overrides. system.server_settings cannot
+// settle it: it shows a new value after a reload even when the setting
+// only takes effect on restart.
+func writeChanged(b *strings.Builder, merged map[string]*leaves, effective map[string]map[string]string, settings []ServerSetting, mergedWritten map[string]time.Time, serverStart time.Time, sourceTimes map[string]time.Time) {
 	const f = "2006-01-02 15:04:05 UTC"
 	b.WriteString("\n## Changed since the server started\n")
 	if serverStart.IsZero() || len(sourceTimes) == 0 {
 		b.WriteString("not checked: the server's start time or the files' times are unknown\n")
 		return
 	}
+	fmt.Fprintf(b, "server started %s\n", serverStart.UTC().Format(f))
+	for _, g := range []string{"config", "users"} {
+		if mw := mergedWritten[g]; merged[g] != nil && !mw.IsZero() && mw.Before(serverStart.Add(-time.Minute)) {
+			fmt.Fprintf(b, "the merged %s.xml is older than the server's start (written %s): the server did not rewrite it when it started — the sources may have failed to load; check the server log for a configuration error\n",
+				g, mw.UTC().Format(f))
+		}
+	}
 	var changed []string
 	for rel, mt := range sourceTimes {
-		if mt.After(serverStart) {
+		if mt.After(serverStart) && group(rel) != "" {
 			changed = append(changed, rel)
 		}
 	}
 	sort.Strings(changed)
-	fmt.Fprintf(b, "server started %s\n", serverStart.UTC().Format(f))
-	if haveMerged && !mergedWritten.IsZero() && mergedWritten.Before(serverStart.Add(-time.Minute)) {
-		fmt.Fprintf(b, "the merged config is older than the server's start (written %s): the server did not rewrite it when it started — the sources may have failed to load; check the server log for a configuration error\n",
-			mergedWritten.UTC().Format(f))
-	}
 	if len(changed) == 0 {
 		b.WriteString("none: no configuration file changed since the server started\n")
 		return
@@ -304,34 +332,31 @@ func writeChanged(b *strings.Builder, collectedDir string, haveMerged bool, sett
 		}
 	}
 	for _, rel := range changed {
-		mt := sourceTimes[rel]
+		g, mt := group(rel), sourceTimes[rel]
+		mw := mergedWritten[g]
 		note := ""
 		switch {
-		case !haveMerged:
-		case mergedWritten.Before(mt):
-			note = fmt.Sprintf(" — NOT in the merged config (written %s): the last reload did not pick it up; check the server log for a config error", mergedWritten.UTC().Format(f))
+		case merged[g] == nil || mw.IsZero():
+		case mw.Before(mt):
+			note = fmt.Sprintf(" — NOT in the merged %s.xml (written %s): the last reload did not pick it up; check the server log for a config error", g, mw.UTC().Format(f))
 		default:
-			note = " — in the merged config"
+			note = fmt.Sprintf(" — in the merged %s.xml", g)
 		}
 		fmt.Fprintf(b, "  %-44s changed %s%s\n", rel, mt.UTC().Format(f), note)
-		// A file the merged config does not include is not running at all:
-		// "needs a restart" would understate it.
-		if len(restartOnly) == 0 || (haveMerged && mergedWritten.Before(mt)) {
-			continue
-		}
-		lv, err := readLeaves(filepath.Join(collectedDir, rel))
-		if err != nil {
+		// Restart-only settings are server settings: config group only,
+		// and only the running values this file provides.
+		if g != "config" || merged[g] == nil || len(restartOnly) == 0 {
 			continue
 		}
 		var names []string
-		for p := range lv.values {
-			if restartOnly[p] {
+		for p, file := range effective[g] {
+			if file == rel && restartOnly[p] {
 				names = append(names, p)
 			}
 		}
 		sort.Strings(names)
 		for _, n := range names {
-			fmt.Fprintf(b, "    %-42s = %s — needs a restart to take effect\n", n, lv.values[n][0])
+			fmt.Fprintf(b, "    %-42s = %s — running value from a file changed since the start: if it is new, it takes effect only after a restart\n", n, merged[g].values[n][0])
 		}
 	}
 	if len(settings) == 0 {

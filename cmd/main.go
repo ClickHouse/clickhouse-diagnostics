@@ -390,8 +390,14 @@ func main() {
 	// probe is three cheap round trips; a failure (no grant, dry run) leaves
 	// the header without a node line and the warnings silent.
 	var identity nodeIdentity
+	var serverStarted time.Time // when the server started (now − uptime at the probe)
 	if !dryRun {
 		identity = probeNodeIdentity(client)
+		if identity.Err == nil && identity.UptimeSeconds > 0 {
+			// Fixed now, while uptime is fresh: computed later, the
+			// collection's own duration would move the start forward.
+			serverStarted = time.Now().Add(-time.Duration(identity.UptimeSeconds) * time.Second)
+		}
 	}
 
 	// SharedMergeTree clusters keep per-replica system tables; a -mode onprem
@@ -762,7 +768,7 @@ func main() {
 			qerr = fmt.Errorf("not read: %s", keeperDownReason)
 		}
 		connected := keeper.ParseTargets(raw)
-		configured := keeper.TargetsFromFiles(config.DiscoveryFiles(configDir, preprocessedDir))
+		configured := keeper.TargetsWithFallback(config.DiscoveryFiles(configDir, preprocessedDir), config.SourceFiles(configDir))
 		targets := keeper.MergeTargets(connected, configured)
 		switch {
 		case qerr != nil && len(targets) == 0:
@@ -889,7 +895,7 @@ func main() {
 			// having — but never leave it silent.
 			fmt.Printf("Warning: configuration collection failed: %v\n", err)
 		}
-		collectRunningConfig(configDest, collectRoot, preprocessedDir, settingsRows, identity.UptimeSeconds)
+		collectRunningConfig(configDest, collectRoot, preprocessedDir, settingsRows, serverStarted)
 		rec.Phase("configuration", time.Since(phaseStart), "")
 	}
 
@@ -1576,25 +1582,25 @@ func serverPathFrom(settings []config.ServerSetting) string {
 // the merged config.xml and users.xml in preprocessed_configs/, sanitised
 // like every other file — and the merge report comparing it with the
 // sources collected beside it.
-func collectRunningConfig(configDest, sourceRoot, preprocessedDir string, settings []config.ServerSetting, uptimeSeconds int64) {
-	var written time.Time
-	switch fi, err := os.Stat(filepath.Join(preprocessedDir, "config.xml")); {
-	case preprocessedDir == "":
+func collectRunningConfig(configDest, sourceRoot, preprocessedDir string, settings []config.ServerSetting, started time.Time) {
+	if preprocessedDir == "" {
 		return
-	case err != nil:
-		fmt.Printf("Merged configuration not collected: %s is not readable (%v)\n", preprocessedDir, err)
-	default:
-		written = fi.ModTime()
-		if err := config.NewCollector().Collect(preprocessedDir, filepath.Join(configDest, "preprocessed"), false); err != nil {
-			fmt.Printf("Warning: merged configuration not collected: %v\n", err)
+	}
+	// config.xml and users.xml are rewritten on separate reloads: each
+	// group is judged against its own merged file.
+	written := map[string]time.Time{}
+	for _, g := range []string{"config", "users"} {
+		if fi, err := os.Stat(filepath.Join(preprocessedDir, g+".xml")); err == nil {
+			written[g] = fi.ModTime()
 		}
+	}
+	if len(written) == 0 {
+		fmt.Printf("Merged configuration not collected: %s has no readable config.xml / users.xml\n", preprocessedDir)
+	} else if err := config.NewCollector().Collect(preprocessedDir, filepath.Join(configDest, "preprocessed"), false); err != nil {
+		fmt.Printf("Warning: merged configuration not collected: %v\n", err)
 	}
 	if _, err := os.Stat(configDest); err != nil {
 		return // nothing collected at all: no report
-	}
-	var started time.Time
-	if uptimeSeconds > 0 {
-		started = time.Now().Add(-time.Duration(uptimeSeconds) * time.Second)
 	}
 	// The copies are new files: the originals' times say what changed
 	// since the server started.

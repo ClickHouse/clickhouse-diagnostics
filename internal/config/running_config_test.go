@@ -132,7 +132,7 @@ func mergeFixture(t *testing.T) string {
 
 func TestMergeReport_Conflicts(t *testing.T) {
 	dir := mergeFixture(t)
-	r := MergeReport(dir, nil, time.Time{}, time.Time{}, nil)
+	r := MergeReport(dir, nil, nil, time.Time{}, nil)
 	for _, want := range []string{
 		"different values: 4",
 		"config: max_concurrent_queries",
@@ -172,10 +172,10 @@ func TestMergeReport_ChangedSinceStart(t *testing.T) {
 	}
 	// Reloaded after the edit: in the merged config, but the restart-only
 	// setting it carries is not live until the next restart.
-	r := MergeReport(dir, settings, started.Add(2*time.Hour), started, times)
+	r := MergeReport(dir, settings, map[string]time.Time{"config": started.Add(2 * time.Hour)}, started, times)
 	i := strings.Index(r, "## Changed since the server started")
 	sec := r[i:]
-	for _, want := range []string{"config.d/b_tuning.xml", "— in the merged config", "max_thread_pool_size", "= 20000 — needs a restart to take effect"} {
+	for _, want := range []string{"config.d/b_tuning.xml", "— in the merged config.xml", "max_thread_pool_size", "= 20000 — running value from a file changed since the start"} {
 		if !strings.Contains(sec, want) {
 			t.Errorf("lacks %q:\n%s", want, sec)
 		}
@@ -184,20 +184,20 @@ func TestMergeReport_ChangedSinceStart(t *testing.T) {
 		t.Errorf("a reloadable setting or an unchanged file is listed:\n%s", sec)
 	}
 	// The merged config is older than the edit: the reload failed.
-	r = MergeReport(dir, settings, started.Add(30*time.Minute), started, times)
-	if !strings.Contains(r, "NOT in the merged config") || !strings.Contains(r, "did not pick it up") {
+	r = MergeReport(dir, settings, map[string]time.Time{"config": started.Add(30 * time.Minute)}, started, times)
+	if !strings.Contains(r, "NOT in the merged config.xml") || !strings.Contains(r, "did not pick it up") {
 		t.Errorf("a failed reload is not reported:\n%s", r)
 	}
-	if strings.Contains(r, "needs a restart") {
+	if strings.Contains(r, "takes effect only after a restart") {
 		t.Errorf("a file that is not running is not 'pending a restart':\n%s", r)
 	}
 	// Merged config older than the start: not rewritten at startup.
-	if r = MergeReport(dir, settings, started.Add(-48*time.Hour), started, times); !strings.Contains(r, "did not rewrite it when it started") {
+	if r = MergeReport(dir, settings, map[string]time.Time{"config": started.Add(-48 * time.Hour)}, started, times); !strings.Contains(r, "did not rewrite it when it started") {
 		t.Errorf("a merged config older than the start is not called out:\n%s", r)
 	}
 	// Nothing changed since the start.
 	times["config.d/b_tuning.xml"] = started.Add(-time.Minute)
-	if r = MergeReport(dir, settings, started, started, times); !strings.Contains(r, "no configuration file changed since the server started") {
+	if r = MergeReport(dir, settings, map[string]time.Time{"config": started}, started, times); !strings.Contains(r, "no configuration file changed since the server started") {
 		t.Errorf("unchanged:\n%s", r)
 	}
 }
@@ -213,7 +213,7 @@ func TestMergeReport_NeverShowsSecrets(t *testing.T) {
 	if err := NewCollector().Collect(src, dst, false); err != nil {
 		t.Fatal(err)
 	}
-	r := MergeReport(dst, nil, time.Time{}, time.Time{}, nil)
+	r := MergeReport(dst, nil, nil, time.Time{}, nil)
 	if strings.Contains(r, "Secret") {
 		t.Fatalf("a password reached the report:\n%s", r)
 	}
@@ -228,7 +228,77 @@ func TestMergeReport_SetByIsTheLastFile(t *testing.T) {
 		"config.d/b.xml":          "<clickhouse><max_concurrent_queries>300</max_concurrent_queries></clickhouse>",
 		"preprocessed/config.xml": "<clickhouse><max_concurrent_queries>300</max_concurrent_queries></clickhouse>",
 	})
-	if r := MergeReport(dir, nil, time.Time{}, time.Time{}, nil); !strings.Contains(r, "= 300   ← from config.d/b.xml") {
+	if r := MergeReport(dir, nil, nil, time.Time{}, nil); !strings.Contains(r, "= 300   ← from config.d/b.xml") {
 		t.Errorf("set by:\n%s", r)
+	}
+}
+
+// Review round: one regression per finding.
+func TestMergeReport_ReviewFixes(t *testing.T) {
+	started := time.Date(2026, 11, 1, 10, 0, 0, 0, time.UTC)
+
+	// A list whose entries come one per file is not a conflict.
+	dir := configTree(t, map[string]string{
+		"config.xml":              "<clickhouse><zookeeper><node><host>k1</host></node></zookeeper></clickhouse>",
+		"config.d/k.xml":          "<clickhouse><zookeeper><node><host>k2</host></node></zookeeper></clickhouse>",
+		"preprocessed/config.xml": "<clickhouse><zookeeper><node><host>k1</host></node><node><host>k2</host></node></zookeeper></clickhouse>",
+	})
+	if r := MergeReport(dir, nil, nil, time.Time{}, nil); !strings.Contains(r, "different values: 0") {
+		t.Errorf("a list built across files is reported as a conflict:\n%s", r)
+	}
+
+	// After a failed reload a newer file can match the old running value:
+	// it is not credited, since the merged config predates it.
+	dir = configTree(t, map[string]string{
+		"config.xml":              "<clickhouse><max_concurrent_queries>100</max_concurrent_queries></clickhouse>",
+		"config.d/a.xml":          "<clickhouse><max_concurrent_queries>200</max_concurrent_queries></clickhouse>",
+		"config.d/z_new.xml":      "<clickhouse><max_concurrent_queries>100</max_concurrent_queries></clickhouse>",
+		"preprocessed/config.xml": "<clickhouse><max_concurrent_queries>100</max_concurrent_queries></clickhouse>",
+	})
+	times := map[string]time.Time{"config.xml": started.Add(-time.Hour), "config.d/a.xml": started.Add(time.Hour),
+		"config.d/z_new.xml": started.Add(3 * time.Hour)}
+	r := MergeReport(dir, nil, map[string]time.Time{"config": started.Add(30 * time.Minute)}, started, times)
+	if strings.Contains(r, "← from config.d/z_new.xml") || !strings.Contains(r, "= 100   ← from config.xml") {
+		t.Errorf("a file the merged config predates is credited:\n%s", r)
+	}
+
+	// users.xml and config.xml are judged against their own merged file.
+	dir = configTree(t, map[string]string{
+		"config.xml": "<clickhouse/>", "users.xml": "<clickhouse/>",
+		"users.d/u.xml":           "<clickhouse><profiles><default><max_threads>4</max_threads></default></profiles></clickhouse>",
+		"preprocessed/config.xml": "<clickhouse/>", "preprocessed/users.xml": "<clickhouse/>",
+	})
+	times = map[string]time.Time{"config.xml": started.Add(-time.Hour), "users.xml": started.Add(-time.Hour), "users.d/u.xml": started.Add(time.Hour)}
+	r = MergeReport(dir, nil, map[string]time.Time{"config": started, "users": started.Add(2 * time.Hour)}, started, times)
+	if strings.Contains(r, "NOT in the merged") || !strings.Contains(r, "— in the merged users.xml") {
+		t.Errorf("a users.d change loaded into users.xml is judged against config.xml:\n%s", r)
+	}
+
+	// A changed file whose restart-only value is overridden later does not
+	// claim it; only the running value's file does.
+	dir = configTree(t, map[string]string{
+		"config.xml":              "<clickhouse><max_thread_pool_size>10000</max_thread_pool_size></clickhouse>",
+		"config.d/a.xml":          "<clickhouse><max_thread_pool_size>12000</max_thread_pool_size><logger><level>debug</level></logger></clickhouse>",
+		"config.d/b.xml":          "<clickhouse><max_thread_pool_size>15000</max_thread_pool_size></clickhouse>",
+		"preprocessed/config.xml": "<clickhouse><max_thread_pool_size>15000</max_thread_pool_size><logger><level>debug</level></logger></clickhouse>",
+	})
+	times = map[string]time.Time{"config.xml": started.Add(-time.Hour), "config.d/a.xml": started.Add(time.Hour), "config.d/b.xml": started.Add(-time.Hour)}
+	settings := []ServerSetting{{Name: "max_thread_pool_size", Value: "15000", ChangeableWithoutRestart: "No"}}
+	r = MergeReport(dir, settings, map[string]time.Time{"config": started.Add(2 * time.Hour)}, started, times)
+	if strings.Contains(r[strings.Index(r, "## Changed"):], "max_thread_pool_size") {
+		t.Errorf("an overridden restart-only value is claimed by the edited file:\n%s", r)
+	}
+}
+
+// Without system.server_settings, the merged directory comes from the
+// root-level <path> of the server config — not a disk's nested <path>.
+func TestPreprocessedDir_RootPathOnly(t *testing.T) {
+	src := configTree(t, map[string]string{
+		"config.xml":           "<clickhouse><path>/data/ch/</path></clickhouse>",
+		"config.d/storage.xml": "<clickhouse><storage_configuration><disks><cold><path>/mnt/cold/</path></cold></disks></storage_configuration></clickhouse>",
+		"users.xml":            "<clickhouse><path>/not/here/</path></clickhouse>",
+	})
+	if got := PreprocessedDir("", SourceFiles(src)); got != "/data/ch/preprocessed_configs" {
+		t.Errorf("got %s", got)
 	}
 }

@@ -185,9 +185,9 @@ Mirrors `hostChecks()` in `internal/dashboard/generator.go`; only the first thre
 | 10.9 | `configuration/` | `<text_log>`/`<query_log>`/`<trace_log>` without `<ttl>`/`<partition_by>`, or `text_log` at `trace` level in production | info | Ties to HC-4.4. |
 | 10.10 | `configuration/` | `<listen_host>::</listen_host>` or `0.0.0.0` with `users.d` `<networks>` unrestricted; default user without password | warning | Security exposure — report neutrally. |
 | 10.11 | `configuration/merge_report.txt` | a setting set differently in more than one source file | warning | Duplicate tags across `config.d/` / `users.d/` files: the running value is the merged one (`preprocessed/`), named with the file it came from. Recommend keeping each setting in one file. |
-| 10.12 | `configuration/merge_report.txt` | a source file changed after the merged config was written (`NOT in the merged config`) | warning | The last reload failed or never ran: the server runs the older merged config. The cause is in `logs/` (`Failed to merge config`, `CANNOT_LOAD_CONFIG`). |
+| 10.12 | `configuration/merge_report.txt` | a source file changed after its merged file was written (`NOT in the merged config.xml` / `users.xml`) | warning | The last reload failed or never ran: the server runs the older merged config. The cause is in `logs/` (`Failed to merge config`, `CANNOT_LOAD_CONFIG`). |
 | 10.13 | `configuration/merge_report.txt` | the merged config is older than the server's start | warning | The server did not rebuild it from the sources when it started — a source failed to load. Same evidence as 10.12. |
-| 10.14 | `configuration/merge_report.txt` | a restart-only server setting (`changeable_without_restart = No`) in a file changed since the start | info | Not live until the next restart, even though `system.server_settings` may already show the new value after a reload. |
+| 10.14 | `configuration/merge_report.txt` | a restart-only server setting (`changeable_without_restart = No`) whose running value comes from a file changed since the start | info | *Possibly* not live yet: if the value is new it takes effect only after a restart, and `system.server_settings` may already show it after a reload. The file's time cannot prove the value changed — ask what was edited, or compare with an earlier bundle. |
 
 ## HC-11 Logs
 

@@ -617,3 +617,29 @@ func TestCollect_ZooKeeperNotServing(t *testing.T) {
 		t.Errorf("status = %s, want not serving for ZooKeeper's wording", out[0].Status)
 	}
 }
+
+// The merged config first, the source files when it names no member, and
+// nothing at all when neither is readable: the caller then has the
+// connected member(s) only, and the Keeper checks still run against them.
+func TestTargetsWithFallback(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) string {
+		p := filepath.Join(dir, name)
+		_ = os.WriteFile(p, []byte(body), 0o644)
+		return p
+	}
+	merged := write("merged.xml", "<clickhouse><zookeeper><node><host>k-merged</host></node></zookeeper></clickhouse>")
+	empty := write("empty.xml", "<clickhouse><logger/></clickhouse>")
+	source := write("source.xml", "<clickhouse><zookeeper><node><host>k-source</host></node></zookeeper></clickhouse>")
+	if got := TargetsWithFallback([]string{merged}, []string{source}); len(got) != 1 || got[0].Host != "k-merged" {
+		t.Errorf("merged first: %v", got)
+	}
+	if got := TargetsWithFallback([]string{empty}, []string{source}); len(got) != 1 || got[0].Host != "k-source" {
+		t.Errorf("sources when the merged config names no member: %v", got)
+	}
+	none := TargetsWithFallback([]string{filepath.Join(dir, "missing.xml")}, nil)
+	connected := []Target{{Host: "k-connected", Port: "9181", Ensemble: "default"}}
+	if got := MergeTargets(connected, none); len(none) != 0 || len(got) != 1 || got[0].Host != "k-connected" {
+		t.Errorf("no configuration: the connected member alone, got %v / %v", none, got)
+	}
+}
