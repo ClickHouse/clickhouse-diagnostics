@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
 // DefaultConfigDir is the server's configuration directory: config.xml and
@@ -33,14 +35,16 @@ func IsConfigFile(name string) bool {
 // SourceFiles are the configuration files of configDir in ClickHouse's merge
 // order: the files at its top level (config.xml, users.xml), then each *.d
 // directory's files alphabetically. A configDir that is itself a *.d
-// directory (the old default, config.d/) brings the main files beside it.
+// directory (the old default, config.d/, or users.d/) stands for the whole
+// configuration around it — its parent with every *.d beside it — as the
+// collection does.
 func SourceFiles(configDir string) []string {
 	if configDir == "" {
 		return nil
 	}
 	dir := filepath.Clean(configDir)
 	if strings.HasSuffix(filepath.Base(dir), ".d") {
-		return append(filesIn(filepath.Dir(dir)), filesIn(dir)...)
+		dir = filepath.Dir(dir)
 	}
 	out := filesIn(dir)
 	entries, _ := os.ReadDir(dir)
@@ -91,21 +95,43 @@ func PreprocessedDir(serverPath string, sources []string) string {
 	return filepath.Join(p, "preprocessed_configs")
 }
 
-// isServerConfig is config.xml or a file of a server-config override
-// directory (config.d/, conf.d/), not users.xml / users.d/.
+// isServerConfig is the main server configuration (config.xml / .yaml /
+// .yml) or a file of its override directories (config.d/, conf.d/) — the
+// files ClickHouse merges into it. Not users.xml / users.d/, and not an
+// unrelated file beside them (an old copy, a stray include).
 func isServerConfig(f string) bool {
-	base, dir := filepath.Base(f), filepath.Base(filepath.Dir(f))
-	if strings.HasPrefix(strings.ToLower(base), "users.") || dir == "users.d" {
-		return false
+	switch filepath.Base(filepath.Dir(f)) {
+	case "config.d", "conf.d":
+		return true
 	}
-	return true
+	switch strings.ToLower(filepath.Base(f)) {
+	case "config.xml", "config.yaml", "config.yml":
+		return true
+	}
+	return false
 }
 
 // rootPath is the text of a <path> element directly under the file's root
-// element, "" when there is none.
+// element — for a YAML file its top-level path: key — "" when there is none.
 func rootPath(f string) string {
 	raw, err := os.ReadFile(f)
 	if err != nil {
+		return ""
+	}
+	if n := strings.ToLower(f); strings.HasSuffix(n, ".yaml") || strings.HasSuffix(n, ".yml") {
+		var doc map[string]interface{}
+		if yaml.Unmarshal(raw, &doc) != nil {
+			return ""
+		}
+		// A root element written out (clickhouse: / yandex:) is accepted too.
+		for _, root := range []string{"clickhouse", "yandex"} {
+			if inner, ok := doc[root].(map[string]interface{}); ok && len(doc) == 1 {
+				doc = inner
+			}
+		}
+		if s, ok := doc["path"].(string); ok {
+			return strings.TrimSpace(s)
+		}
 		return ""
 	}
 	dec := xml.NewDecoder(bytes.NewReader(StripComments(raw)))

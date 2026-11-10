@@ -161,7 +161,9 @@ func DiscoverDirs(opts Options, res *Result) []string {
 		paths = LogPathsFromFiles(opts.ConfigFiles)
 	}
 	if len(paths) == 0 {
-		paths = LogPathsFromConfig(opts.ConfigDir)
+		// Every source file: config.xml and the config.d/ overrides, where
+		// a <logger> override usually lives.
+		paths = LogPathsFromFiles(config.SourceFiles(opts.ConfigDir))
 	}
 	for _, p := range paths {
 		add(filepath.Dir(p))

@@ -73,8 +73,8 @@ func TestSourceFiles_MergeOrder(t *testing.T) {
 	for _, f := range SourceFiles(filepath.Join(src, "config.d")) {
 		got = append(got, filepath.Base(f))
 	}
-	if strings.Join(got, " ") != "config.xml users.xml a.xml b.xml" {
-		t.Errorf("from config.d/: %v", got)
+	if strings.Join(got, " ") != "config.xml users.xml a.xml b.xml u.xml" {
+		t.Errorf("from config.d/: the whole configuration around it, got %v", got)
 	}
 }
 
@@ -300,5 +300,44 @@ func TestPreprocessedDir_RootPathOnly(t *testing.T) {
 	})
 	if got := PreprocessedDir("", SourceFiles(src)); got != "/data/ch/preprocessed_configs" {
 		t.Errorf("got %s", got)
+	}
+}
+
+// Second review round.
+func TestReviewRound2(t *testing.T) {
+	started := time.Date(2026, 11, 1, 10, 0, 0, 0, time.UTC)
+
+	// A from_env override is credited with the resolved running value and
+	// takes part in the restart check.
+	dir := configTree(t, map[string]string{
+		"config.xml":              "<clickhouse><max_thread_pool_size>10000</max_thread_pool_size></clickhouse>",
+		"config.d/env.xml":        `<clickhouse><max_thread_pool_size from_env="POOL"/></clickhouse>`,
+		"preprocessed/config.xml": "<clickhouse><max_thread_pool_size>16000</max_thread_pool_size></clickhouse>",
+	})
+	times := map[string]time.Time{"config.xml": started.Add(-time.Hour), "config.d/env.xml": started.Add(time.Hour)}
+	settings := []ServerSetting{{Name: "max_thread_pool_size", Value: "16000", ChangeableWithoutRestart: "No"}}
+	r := MergeReport(dir, settings, map[string]time.Time{"config": started.Add(2 * time.Hour)}, started, times)
+	if !strings.Contains(r, "← from config.d/env.xml") || !strings.Contains(r, "max_thread_pool_size                       = 16000 — running value") {
+		t.Errorf("a from_env override is not attributed:\n%s", r)
+	}
+
+	// An explicit users.d/ still finds config.d/'s data path; an unrelated
+	// top-level file does not supply one; a YAML override does.
+	src := configTree(t, map[string]string{
+		"config.xml":        "<clickhouse><path>/data/a/</path></clickhouse>",
+		"z_old.xml":         "<clickhouse><path>/data/old/</path></clickhouse>",
+		"config.d/path.xml": "<clickhouse><path>/data/b/</path></clickhouse>",
+		"users.d/u.xml":     "<clickhouse/>",
+	})
+	if got := PreprocessedDir("", SourceFiles(filepath.Join(src, "users.d"))); got != "/data/b/preprocessed_configs" {
+		t.Errorf("explicit users.d/: %s", got)
+	}
+	src = configTree(t, map[string]string{
+		"config.xml":         "<clickhouse><path>/data/a/</path></clickhouse>",
+		"z_old.xml":          "<clickhouse><path>/data/old/</path></clickhouse>",
+		"config.d/path.yaml": "path: /data/yaml/\n",
+	})
+	if got := PreprocessedDir("", SourceFiles(src)); got != "/data/yaml/preprocessed_configs" {
+		t.Errorf("YAML override, unrelated file ignored: %s", got)
 	}
 }

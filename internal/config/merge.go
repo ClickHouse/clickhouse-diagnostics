@@ -218,6 +218,8 @@ func MergeReport(collectedDir string, settings []ServerSetting, mergedWritten ma
 
 	// effective: the loaded file whose definition of a path is the running
 	// one — the last loaded file in merge order that sets the merged value.
+	// A definition through a substitution (from_env, from_zk, incl) cannot be
+	// compared with the resolved merged value, so it counts as setting it.
 	effective := map[string]map[string]string{}
 	var conflicts []Conflict
 	identical := 0
@@ -226,7 +228,7 @@ func MergeReport(collectedDir string, settings []ServerSetting, mergedWritten ma
 		for p, ds := range defs[g] {
 			if m := merged[g]; m != nil && !lists[g+"\x00"+p] && len(m.values[p]) == 1 {
 				for i := len(ds) - 1; i >= 0; i-- {
-					if ds[i].value == m.values[p][0] && loaded(g, ds[i].file) {
+					if (ds[i].value == m.values[p][0] || substituted(ds[i].value)) && loaded(g, ds[i].file) {
 						effective[g][p] = ds[i].file
 						break
 					}
@@ -362,4 +364,10 @@ func writeChanged(b *strings.Builder, merged map[string]*leaves, effective map[s
 	if len(settings) == 0 {
 		b.WriteString("(system.server_settings was not collected: restart-only settings are not named)\n")
 	}
+}
+
+// substituted reports whether a definition takes its value from a
+// substitution (from_env, from_zk, incl) the merged file has resolved.
+func substituted(v string) bool {
+	return strings.Contains(v, "[from_env=") || strings.Contains(v, "[from_zk=") || strings.Contains(v, "[incl=")
 }
