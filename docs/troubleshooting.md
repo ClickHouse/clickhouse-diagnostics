@@ -13,6 +13,9 @@ Use `-skip-config` or pass the correct path with `-config-dir`. Cloud users shou
 **"Connection refused" / timeouts**
 Verify the server is reachable on the chosen `-protocol` + `-host` + `-port`. The default port differs by protocol (8123 vs 8443).
 
+**"x509: certificate signed by unknown authority" over https**
+The server's certificate is self-signed or issued by an internal CA. Pass that CA with `-ca-cert <file.pem>`, or `-insecure` to skip verification — see [Self-signed certificates](running.md#self-signed-certificates-https). A `certificate is valid for …, not …` error means `-host` does not match a name on the certificate: connect by that name.
+
 **"security: query must be SELECT or WITH" (alert blocked)**
 An alert YAML has a non-read-only statement. Alert queries are restricted to `SELECT` / `WITH`; rewrite the query or remove the rule.
 

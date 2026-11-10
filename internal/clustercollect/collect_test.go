@@ -649,3 +649,31 @@ func TestMain_AcceptsBothBundleNames(t *testing.T) {
 		t.Errorf("exit = %d with clickhouse_diagnostic_ archives\n%s", code, out.String())
 	}
 }
+
+// -ca-cert / -insecure given to the cluster command reach every host's run,
+// both the ones it executes and the ones it prints for each node, and are
+// refused after -- like every flag the command sets itself.
+func TestTLSFlagsReachEveryRun(t *testing.T) {
+	o := opts()
+	o.Protocol, o.CACert, o.Insecure = "https", "/etc/ssl/ch-ca.pem", false
+	n := Node{Host: "ch-s1r2"}
+	for name, args := range map[string][]string{"here": HereArgs(n, o), "each-node": EachNodeArgs(n, o)} {
+		s := strings.Join(args, " ")
+		if !strings.Contains(s, "-ca-cert /etc/ssl/ch-ca.pem") || strings.Contains(s, "-insecure") {
+			t.Errorf("%s: %s", name, s)
+		}
+	}
+	o.CACert, o.Insecure = "", true
+	if s := strings.Join(HereArgs(n, o), " "); !strings.Contains(s, "-insecure") || strings.Contains(s, "-ca-cert") {
+		t.Errorf("insecure: %s", s)
+	}
+	o.Insecure = false
+	if s := strings.Join(HereArgs(n, o), " "); strings.Contains(s, "-insecure") || strings.Contains(s, "-ca-cert") {
+		t.Errorf("no TLS options: %s", s)
+	}
+	for _, a := range []string{"-insecure", "--ca-cert=/x.pem"} {
+		if err := validateExtra([]string{a}); err == nil {
+			t.Errorf("-- %s must be refused: the cluster command sets it for every host", a)
+		}
+	}
+}

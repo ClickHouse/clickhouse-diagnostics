@@ -54,11 +54,13 @@ var (
 // -output-dir keep the bundles apart, -single-node stops a SharedMergeTree
 // fan-out on every run, -host-info/-logs/-skip-config keep this machine's
 // files out of remote bundles), the password travels only in the
-// environment, and -skip-archive / -dry-run would leave no archive to find.
+// environment, -skip-archive / -dry-run would leave no archive to find, and
+// -ca-cert / -insecure are given once to the cluster command, which uses them
+// for its own discovery query and passes them to every host's run.
 var ownedFlags = map[string]bool{
 	"password": true, "host": true, "port": true, "protocol": true, "user": true, "mode": true,
 	"single-node": true, "output-dir": true, "host-info": true, "logs": true, "skip-config": true,
-	"skip-archive": true, "dry-run": true,
+	"skip-archive": true, "dry-run": true, "ca-cert": true, "insecure": true,
 }
 
 // validateExtra refuses pass-through arguments naming a flag the command
@@ -244,6 +246,20 @@ type Options struct {
 	OutputDir                        string
 	Extra                            []string // passed to every run
 	LocalFiles                       bool     // this machine is the discovery node
+	CACert                           string   // -ca-cert, for every run
+	Insecure                         bool     // -insecure, for every run
+}
+
+// tlsArgs are -ca-cert / -insecure for a per-host run.
+func (o Options) tlsArgs() []string {
+	var a []string
+	if o.CACert != "" {
+		a = append(a, "-ca-cert", o.CACert)
+	}
+	if o.Insecure {
+		a = append(a, "-insecure")
+	}
+	return a
 }
 
 // HereArgs is the clickhouse-diagnostic run, from this machine, for one node.
@@ -260,6 +276,7 @@ func HereArgs(n Node, o Options) []string {
 		// machine under that node's name.
 		args = append(args, "-host-info", "off", "-logs", "off", "-skip-config")
 	}
+	args = append(args, o.tlsArgs()...)
 	return append(args, o.Extra...)
 }
 
@@ -279,6 +296,9 @@ func EachNodeArgs(n Node, o Options) []string {
 	}
 	args := []string{"-mode", o.Mode, "-protocol", o.Protocol, "-host", host, "-port", o.Port,
 		"-user", o.User, "-single-node", "-output-dir", "./clickhouse_results/" + Label(n)}
+	// The -ca-cert path is this machine's: the host the command is run on
+	// needs the CA file at the same path.
+	args = append(args, o.tlsArgs()...)
 	return append(args, withoutSalt(o.Extra)...)
 }
 
@@ -514,6 +534,8 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	outputDir := fs.String("output-dir", "", "where the bundles go (default ./cluster_bundles_<timestamp>)")
 	timeout := fs.Duration("timeout", 30*time.Minute, "time allowed per host")
 	yes := fs.Bool("yes", false, "run without asking for confirmation")
+	caCert := fs.String("ca-cert", "", "PEM file of the CA that signed the servers' certificates (https); passed to every run")
+	insecure := fs.Bool("insecure", false, "do not verify the servers' TLS certificates (https); passed to every run — prefer -ca-cert")
 	if err := fs.Parse(argv); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -550,6 +572,12 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 
 	client := pkg.NewClickHouseClient(*protocol, *host, *port, *user, password)
+	if *protocol == "https" {
+		if err := client.SetTLS(pkg.TLSOptions{CAFile: *caCert, Insecure: *insecure}); err != nil {
+			fmt.Fprintln(stderr, err)
+			return 2
+		}
+	}
 	body, err := client.ExecuteQueryReal(DiscoveryQuery)
 	if err != nil {
 		fmt.Fprintf(stderr, "Cannot read system.clusters from %s:%s — %v\n", *host, *port, err)
@@ -593,6 +621,12 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fmt.Fprintln(stdout)
 
 	o := Options{Mode: *mode, Protocol: *protocol, Host: *host, Port: *port, User: *user, Extra: fs.Args()}
+	if *protocol == "https" {
+		o.CACert, o.Insecure = *caCert, *insecure
+		if abs, err := filepath.Abs(o.CACert); err == nil && o.CACert != "" {
+			o.CACert = abs // the same file whatever directory a run starts in
+		}
+	}
 	if *collectFrom == "each-node" {
 		fmt.Fprintf(stdout, "Run this ON each host (with %s set, or it asks for the password),\n"+
 			"then send back the .tar.gz archive from ./clickhouse_results/<folder>/:\n\n", PasswordEnvVar)
