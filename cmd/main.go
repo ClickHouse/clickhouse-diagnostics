@@ -304,8 +304,9 @@ func main() {
 	client := pkg.NewClickHouseClient(protocol, host, port, username, password)
 	tlsNote, err := applyTLS(client, protocol, pkg.TLSOptions{CAFile: *caCertFlag, Insecure: *insecureFlag})
 	if err != nil {
+		// No bundle: a script checking $? must see the failure.
 		fmt.Println("Error:", err)
-		return
+		os.Exit(1)
 	}
 	if *queryTimeoutFlag < 0 {
 		fmt.Println("Error: -query-timeout cannot be negative (use 0 to disable the limit).")

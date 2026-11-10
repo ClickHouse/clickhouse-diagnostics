@@ -677,3 +677,27 @@ func TestTLSFlagsReachEveryRun(t *testing.T) {
 		}
 	}
 }
+
+// -insecure is warned about on the cluster command's own stderr, before the
+// discovery request carries the password: the per-host runs' warnings go to
+// their logs, not this terminal. Over http the flags are noted as ignored.
+func TestMain_InsecureIsWarnedBeforeDiscovery(t *testing.T) {
+	t.Setenv(PasswordEnvVar, "pw")
+	var out, errOut strings.Builder
+	// Port 1 on localhost: discovery fails right after the warning.
+	Main([]string{"-protocol", "https", "-host", "127.0.0.1", "-port", "1", "-user", "diag", "-insecure", "-ca-cert", "/x.pem"},
+		strings.NewReader(""), &out, &errOut)
+	e := errOut.String()
+	if !strings.Contains(e, "Warning: -insecure") || !strings.Contains(e, "-ca-cert is not used") {
+		t.Errorf("stderr: %s", e)
+	}
+	if i, j := strings.Index(e, "Warning: -insecure"), strings.Index(e, "Cannot read system.clusters"); j >= 0 && i > j {
+		t.Errorf("the warning comes after the discovery request:\n%s", e)
+	}
+	errOut.Reset()
+	Main([]string{"-protocol", "http", "-host", "127.0.0.1", "-port", "1", "-user", "diag", "-insecure"},
+		strings.NewReader(""), &out, &errOut)
+	if !strings.Contains(errOut.String(), "apply to https only") || strings.Contains(errOut.String(), "Warning: -insecure") {
+		t.Errorf("http: %s", errOut.String())
+	}
+}

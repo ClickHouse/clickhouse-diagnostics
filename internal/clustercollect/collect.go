@@ -572,7 +572,20 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 
 	client := pkg.NewClickHouseClient(*protocol, *host, *port, *user, password)
-	if *protocol == "https" {
+	switch {
+	case *protocol != "https" && (*caCert != "" || *insecure):
+		fmt.Fprintf(stderr, "Note: -ca-cert and -insecure apply to https only; ignored with -protocol %s.\n", *protocol)
+	case *protocol == "https":
+		// Said here, before the discovery request carries the password: the
+		// per-host runs print their own warning, but their output goes to
+		// each host's log, not this terminal.
+		if *insecure {
+			if *caCert != "" {
+				fmt.Fprintln(stderr, "Note: -insecure skips verification, so -ca-cert is not used.")
+			}
+			fmt.Fprintln(stderr, "Warning: -insecure — the servers' TLS certificates are NOT verified: the connections are "+
+				"encrypted but anyone in the path could impersonate a server, including the one asked for the host list. Prefer -ca-cert <file>.")
+		}
 		if err := client.SetTLS(pkg.TLSOptions{CAFile: *caCert, Insecure: *insecure}); err != nil {
 			fmt.Fprintln(stderr, err)
 			return 2
