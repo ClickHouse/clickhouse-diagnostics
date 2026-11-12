@@ -138,7 +138,18 @@ Written as `text_log_<timestamp>.<ext>`, in the [configured output format](#outp
 
 ## Configuration Collection
 
-When `-skip-config` is not set, the tool reads files from `-config-dir` (default `/etc/clickhouse-server/config.d/`; in `cloud` mode collection is skipped unless `-config-dir` is given explicitly, and `gov` mode never collects) and writes sanitised copies into the run's `configuration/` directory (inside `clickhouse_diagnostic_<timestamp>/`), mirroring the source tree — `config.d/storage.xml` and `users.d/storage.xml` stay distinct, and the directory a file came from (which determines ClickHouse's merge order) is preserved.
+When `-skip-config` is not set, the tool collects two things, both sanitised (in `cloud` mode only with an explicit `-config-dir`; `gov` mode never collects):
+
+- **The source files**: `-config-dir` (default `/etc/clickhouse-server/`), copied into the run's `configuration/` directory with the tree preserved — `config.xml`, `users.xml`, and every `*.d/` override directory (`config.d/`, `users.d/`, `conf.d/`). Only configuration files (`.xml`, `.yaml`, `.yml`, `.conf`) are copied: the server's TLS key and certificate, `dhparam.pem` and backups beside them are left out. An explicit `*.d` directory (the old default, `config.d/`) collects the whole configuration around it.
+- **The configuration the server actually runs**: ClickHouse merges the overrides over the base files, resolves includes and `from_env` substitutions, and writes the result to `<path>/preprocessed_configs/` (`path` from `system.server_settings`, else from the sources, else `/var/lib/clickhouse/`). Its `config.xml` and `users.xml` land in `configuration/preprocessed/`. When two files set the same element, this is the value the server took. Keeper-member and log-directory discovery read the merged `config.xml` first.
+
+`configuration/merge_report.txt` compares the two:
+
+- every setting defined in more than one file with different values — each file's value, the running value and the file it came from (lists such as Keeper `<node>`s or cluster replicas are not conflicts);
+- the files changed since the server started, each judged against its own merged file (`config.xml` and `users.xml` are rewritten on separate reloads): one the merged file predates was not picked up by the last reload (a config error — see `logs/`); a restart-only server setting (`changeable_without_restart = No`) whose **running** value comes from a changed file may not be live yet — a file's time cannot prove the value itself changed, and `system.server_settings` can already show a new value after a reload before it takes effect;
+- a merged config older than the server's start: the server did not rebuild it from the sources when it started.
+
+The report is built from the sanitised copies, so it never shows a credential. The skill's pre-pass turns it into HC-10.11–10.14.
 
 Sanitisation runs in two layers — proper XML / YAML parsing first, then a heuristic byte-pattern pass over the result. If a file cannot be parsed, the tool **fails closed**: a warning is logged and the file is skipped rather than shipped un-sanitised.
 
@@ -182,7 +193,7 @@ clickhouse_results/
 │   ├── system.parts_YYYYMMDD_HHMMSS.jsonl                   #   one file per query
 │   ├── system.mutations_YYYYMMDD_HHMMSS.jsonl
 │   ├── ...
-│   ├── configuration/                                       #   sanitised configs, tree preserved (unless -skip-config; never in gov)
+│   ├── configuration/                                       #   sanitised configs, tree preserved; preprocessed/ = the merged config the server runs; merge_report.txt (unless -skip-config; never in gov)
 │   │   ├── config.xml
 │   │   ├── config.d/…
 │   │   └── users.d/…

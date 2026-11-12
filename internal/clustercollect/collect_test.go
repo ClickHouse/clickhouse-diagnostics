@@ -649,3 +649,55 @@ func TestMain_AcceptsBothBundleNames(t *testing.T) {
 		t.Errorf("exit = %d with clickhouse_diagnostic_ archives\n%s", code, out.String())
 	}
 }
+
+// -ca-cert / -insecure given to the cluster command reach every host's run,
+// both the ones it executes and the ones it prints for each node, and are
+// refused after -- like every flag the command sets itself.
+func TestTLSFlagsReachEveryRun(t *testing.T) {
+	o := opts()
+	o.Protocol, o.CACert, o.Insecure = "https", "/etc/ssl/ch-ca.pem", false
+	n := Node{Host: "ch-s1r2"}
+	for name, args := range map[string][]string{"here": HereArgs(n, o), "each-node": EachNodeArgs(n, o)} {
+		s := strings.Join(args, " ")
+		if !strings.Contains(s, "-ca-cert /etc/ssl/ch-ca.pem") || strings.Contains(s, "-insecure") {
+			t.Errorf("%s: %s", name, s)
+		}
+	}
+	o.CACert, o.Insecure = "", true
+	if s := strings.Join(HereArgs(n, o), " "); !strings.Contains(s, "-insecure") || strings.Contains(s, "-ca-cert") {
+		t.Errorf("insecure: %s", s)
+	}
+	o.Insecure = false
+	if s := strings.Join(HereArgs(n, o), " "); strings.Contains(s, "-insecure") || strings.Contains(s, "-ca-cert") {
+		t.Errorf("no TLS options: %s", s)
+	}
+	for _, a := range []string{"-insecure", "--ca-cert=/x.pem"} {
+		if err := validateExtra([]string{a}); err == nil {
+			t.Errorf("-- %s must be refused: the cluster command sets it for every host", a)
+		}
+	}
+}
+
+// -insecure is warned about on the cluster command's own stderr, before the
+// discovery request carries the password: the per-host runs' warnings go to
+// their logs, not this terminal. Over http the flags are noted as ignored.
+func TestMain_InsecureIsWarnedBeforeDiscovery(t *testing.T) {
+	t.Setenv(PasswordEnvVar, "pw")
+	var out, errOut strings.Builder
+	// Port 1 on localhost: discovery fails right after the warning.
+	Main([]string{"-protocol", "https", "-host", "127.0.0.1", "-port", "1", "-user", "diag", "-insecure", "-ca-cert", "/x.pem"},
+		strings.NewReader(""), &out, &errOut)
+	e := errOut.String()
+	if !strings.Contains(e, "Warning: -insecure") || !strings.Contains(e, "-ca-cert is not used") {
+		t.Errorf("stderr: %s", e)
+	}
+	if i, j := strings.Index(e, "Warning: -insecure"), strings.Index(e, "Cannot read system.clusters"); j >= 0 && i > j {
+		t.Errorf("the warning comes after the discovery request:\n%s", e)
+	}
+	errOut.Reset()
+	Main([]string{"-protocol", "http", "-host", "127.0.0.1", "-port", "1", "-user", "diag", "-insecure"},
+		strings.NewReader(""), &out, &errOut)
+	if !strings.Contains(errOut.String(), "apply to https only") || strings.Contains(errOut.String(), "Warning: -insecure") {
+		t.Errorf("http: %s", errOut.String())
+	}
+}

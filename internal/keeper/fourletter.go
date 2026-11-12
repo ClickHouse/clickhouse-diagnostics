@@ -196,8 +196,7 @@ func TargetsFromConfig(configDir string) []Target {
 			roots = append(roots, parent)
 		}
 	}
-	seen := map[Target]bool{}
-	var out []Target
+	var files []string
 	for _, root := range roots {
 		entries, err := os.ReadDir(root)
 		if err != nil {
@@ -208,38 +207,63 @@ func TargetsFromConfig(configDir string) []Target {
 			if e.IsDir() || (!strings.HasSuffix(name, ".xml") && !strings.HasSuffix(name, ".conf")) {
 				continue
 			}
-			blob, err := os.ReadFile(filepath.Join(root, e.Name()))
-			if err != nil {
-				continue
-			}
-			// Comments first: ClickHouse's stock config.xml carries a whole
-			// <zookeeper> example inside one (example1 / example2 / example3),
-			// and reading it as configuration made the tool report four
-			// members on a one-member cluster and try to reach three hosts
-			// the operator never named. ClickHouse's own parser ignores
-			// comments; so must this.
-			cfg := reAuxZK.ReplaceAllString(string(config.StripComments(blob)), "")
-			for _, block := range reZKBlock.FindAllStringSubmatch(cfg, -1) {
-				for _, node := range reZKNode.FindAllStringSubmatch(block[1], -1) {
-					h := reZKHost.FindStringSubmatch(node[1])
-					if h == nil || h[1] == "" || strings.Contains(h[1], "{") {
-						continue
-					}
-					port := DefaultPort
-					if pm := reZKPort.FindStringSubmatch(node[1]); pm != nil && pm[1] != "" && !strings.Contains(pm[1], "{") {
-						port = pm[1]
-					}
-					// Only the <zookeeper> block is read here: the default ensemble.
-					t := Target{Host: h[1], Port: port, Ensemble: "default"}
-					if !seen[t] {
-						seen[t] = true
-						out = append(out, t)
-					}
+			files = append(files, filepath.Join(root, e.Name()))
+		}
+	}
+	return TargetsFromFiles(files)
+}
+
+// TargetsFromFiles reads every <zookeeper><node> from the given
+// configuration files — the server's merged config.xml when it was
+// readable (config.DiscoveryFiles), which has every override applied and
+// the substitutions resolved.
+func TargetsFromFiles(files []string) []Target {
+	seen := map[Target]bool{}
+	var out []Target
+	for _, f := range files {
+		blob, err := os.ReadFile(f)
+		if err != nil {
+			continue
+		}
+		// Comments first: ClickHouse's stock config.xml carries a whole
+		// <zookeeper> example inside one (example1 / example2 / example3),
+		// and reading it as configuration made the tool report four
+		// members on a one-member cluster and try to reach three hosts
+		// the operator never named. ClickHouse's own parser ignores
+		// comments; so must this.
+		cfg := reAuxZK.ReplaceAllString(string(config.StripComments(blob)), "")
+		for _, block := range reZKBlock.FindAllStringSubmatch(cfg, -1) {
+			for _, node := range reZKNode.FindAllStringSubmatch(block[1], -1) {
+				h := reZKHost.FindStringSubmatch(node[1])
+				if h == nil || h[1] == "" || strings.Contains(h[1], "{") {
+					continue
+				}
+				port := DefaultPort
+				if pm := reZKPort.FindStringSubmatch(node[1]); pm != nil && pm[1] != "" && !strings.Contains(pm[1], "{") {
+					port = pm[1]
+				}
+				// Only the <zookeeper> block is read here: the default ensemble.
+				t := Target{Host: h[1], Port: port, Ensemble: "default"}
+				if !seen[t] {
+					seen[t] = true
+					out = append(out, t)
 				}
 			}
 		}
 	}
 	return out
+}
+
+// TargetsWithFallback reads the members from primary (the merged config) and,
+// when it names none, from fallback (the source files). The connected
+// member(s) from system.zookeeper_connection are added by the caller either
+// way, so with no readable configuration the Keeper checks still run
+// against them.
+func TargetsWithFallback(primary, fallback []string) []Target {
+	if t := TargetsFromFiles(primary); len(t) > 0 {
+		return t
+	}
+	return TargetsFromFiles(fallback)
 }
 
 // MergeTargets unions the connected member(s) with the configured ensemble,

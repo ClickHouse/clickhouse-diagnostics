@@ -53,6 +53,7 @@ To get log files and configs from every host, print the per-host commands and ru
 | `-host` | Node to discover the cluster from. Default `localhost`. |
 | `-cluster NAME` | Only the hosts of this cluster. Default: every host `system.clusters` lists, each machine once. |
 | `-port`, `-protocol https` | HTTP port and protocol, the same on every host. |
+| `-ca-cert FILE`, `-insecure` | For https with a self-signed or internal-CA certificate: used for the discovery query and passed to every run. The `each-node` commands carry the CA path as an absolute path on this machine, so copy the file to the same place on each host. |
 | `-mode gov` | Hashed identifiers. Pass the salt after `--`: `-- -salt <YourPrivateSalt>`. It is never printed, and the `each-node` commands ask for it on each host. |
 | `-- <flags>` | Passed to every run, for example `-- -from 2026-10-01 -to 2026-10-02`. Flags the command sets itself (`-host`, `-password`, `-output-dir`, `-single-node`, …) are refused. |
 | `-yes`, `-timeout`, `-output-dir` | Skip the confirmation; time allowed per host (default 30m); where the bundles go. |

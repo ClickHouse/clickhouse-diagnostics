@@ -43,6 +43,9 @@ type Options struct {
 	Dir string
 	// ConfigDir is searched for <log>/<errorlog> paths when Dir is empty.
 	ConfigDir string
+	// ConfigFiles, when set, are read for <log>/<errorlog> instead of
+	// ConfigDir — the server's merged config.xml (config.DiscoveryFiles).
+	ConfigFiles []string
 	// IncludeArchives also copies rotated *.gz logs (off by default: they
 	// are frequently larger than everything else in the bundle combined).
 	IncludeArchives bool
@@ -151,7 +154,18 @@ func DiscoverDirs(opts Options, res *Result) []string {
 		dirs = append(dirs, d)
 	}
 
-	for _, p := range LogPathsFromConfig(opts.ConfigDir) {
+	// The merged config first; the source files when it names no log
+	// path (or was not readable).
+	var paths []string
+	if len(opts.ConfigFiles) > 0 {
+		paths = LogPathsFromFiles(opts.ConfigFiles)
+	}
+	if len(paths) == 0 {
+		// Every source file: config.xml and the config.d/ overrides, where
+		// a <logger> override usually lives.
+		paths = LogPathsFromFiles(config.SourceFiles(opts.ConfigDir))
+	}
+	for _, p := range paths {
 		add(filepath.Dir(p))
 	}
 	add(DefaultLogDir)
@@ -176,8 +190,7 @@ func LogPathsFromConfig(configDir string) []string {
 		}
 	}
 
-	seen := map[string]bool{}
-	var paths []string
+	var files []string
 	for _, root := range candidates {
 		entries, err := os.ReadDir(root)
 		if err != nil {
@@ -191,29 +204,36 @@ func LogPathsFromConfig(configDir string) []string {
 			if !strings.HasSuffix(name, ".xml") && !strings.HasSuffix(name, ".conf") {
 				continue
 			}
-			blob, err := os.ReadFile(filepath.Join(root, e.Name()))
-			if err != nil {
-				continue
-			}
-			// Commented-out examples are not configuration: a <log> path
-			// inside a comment would otherwise put a directory the operator
-			// never configured on the list of places to copy files from.
-			// Not observably wrong on today's stock config.xml, whose real
-			// <log>/<errorlog> are live, but the same class as the
-			// <zookeeper> example that was.
-			for _, m := range reLogPath.FindAllStringSubmatch(string(config.StripComments(blob)), -1) {
-				p := strings.TrimSpace(m[2])
-				// Skip unresolved substitutions like <log from_env="..."/>
-				// and relative paths we can't anchor reliably.
-				if p == "" || strings.Contains(p, "{") || !filepath.IsAbs(p) || seen[p] {
-					continue
-				}
-				seen[p] = true
-				paths = append(paths, p)
-			}
+			files = append(files, filepath.Join(root, e.Name()))
 		}
 	}
-	sort.Strings(paths)
+	return LogPathsFromFiles(files)
+}
+
+// LogPathsFromFiles reads <log>/<errorlog> from the given configuration
+// files.
+func LogPathsFromFiles(files []string) []string {
+	seen := map[string]bool{}
+	var paths []string
+	for _, f := range files {
+		blob, err := os.ReadFile(f)
+		if err != nil {
+			continue
+		}
+		// Commented-out examples are not configuration: a <log> path
+		// inside a comment would otherwise put a directory the operator
+		// never configured on the list of places to copy files from.
+		for _, m := range reLogPath.FindAllStringSubmatch(string(config.StripComments(blob)), -1) {
+			p := strings.TrimSpace(m[2])
+			// Skip unresolved substitutions like <log from_env="..."/>
+			// and relative paths we can't anchor reliably.
+			if p == "" || strings.Contains(p, "{") || !filepath.IsAbs(p) || seen[p] {
+				continue
+			}
+			seen[p] = true
+			paths = append(paths, p)
+		}
+	}
 	return paths
 }
 

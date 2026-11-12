@@ -182,6 +182,7 @@ Details: [docs/modes.md](docs/modes.md).
 |---|---|
 | `-mode onprem\|cloud\|gov` | Which kind of server (see [Modes](#modes--mode-onprem--cloud--gov)) |
 | `-host`, `-port`, `-protocol`, `-user` | Where to connect; the password comes from `CLICKHOUSE_PASSWORD` or a prompt |
+| `-ca-cert <file>`, `-insecure` | An https server with a self-signed or internal-CA certificate: trust that CA, or skip verification ([details](docs/running.md#self-signed-certificates-https)) |
 | `-collect auto\|full\|essential` | How much to collect (see [What this is for](#what-this-is-for)) |
 | `-from`, `-to` | Collect this window instead of each table's default look-back |
 | `-time-budget`, `-query-timeout` | Cap the whole run and each query |
@@ -276,7 +277,7 @@ Details: [docs/bundle.md](docs/bundle.md#host-facts-and-server-logs).
 <details>
 <summary>Show</summary>
 
-On-prem, `/etc/clickhouse-server/` is copied with passwords, keys, tokens and certificates replaced — hostnames, IPs and topology stay, so review it before sharing. Cloud and gov runs do not collect it.
+On-prem, the configuration the server actually runs — the merged `config.xml` and `users.xml` from `preprocessed_configs/` — is collected along with the source files in `/etc/clickhouse-server/`, all with passwords, keys and tokens replaced (hostnames, IPs and topology stay, so review it before sharing). `merge_report.txt` lists the settings set differently in more than one file and which value runs, files a failed reload did not pick up, and restart-only settings changed since the last start. Cloud and gov runs do not collect it.
 
 Details: [docs/bundle.md](docs/bundle.md#configuration-collection).
 </details>
@@ -320,7 +321,7 @@ Go 1.23+. Details: [docs/building.md](docs/building.md).
 <details>
 <summary>Show</summary>
 
-The most common surprises: a bundle that looks complete but misses the customer's tables (a `SHOW` grant is missing), `Code: 497` in cloud mode (`REMOTE` / `CREATE TEMPORARY TABLE` missing), and a collector that failed — every failure is listed with the server's error in `execution_log.txt`.
+The most common surprises: a bundle that looks complete but misses the customer's tables (a `SHOW` grant is missing), `Code: 497` in cloud mode (`REMOTE` / `CREATE TEMPORARY TABLE` missing), `x509: certificate signed by unknown authority` over https (`-ca-cert` or `-insecure`), and a collector that failed — every failure is listed with the server's error in `execution_log.txt`.
 
 Details: [docs/troubleshooting.md](docs/troubleshooting.md).
 </details>

@@ -284,3 +284,42 @@ func TestConfigParentScanOnlyForDotD(t *testing.T) {
 		t.Errorf("config.d must scan its parent too, got %v", got)
 	}
 }
+
+// Log directories from the merged config first; from the configuration
+// directory when the merged config names none.
+func TestLogDirsFallBackToSources(t *testing.T) {
+	root := t.TempDir()
+	confD := filepath.Join(root, "config.d")
+	_ = os.MkdirAll(confD, 0o755)
+	logDir := filepath.Join(root, "chlogs")
+	_ = os.MkdirAll(logDir, 0o755)
+	_ = os.WriteFile(filepath.Join(confD, "logger.xml"), []byte("<clickhouse><logger><log>"+filepath.Join(logDir, "server.log")+"</log></logger></clickhouse>"), 0o644)
+	merged := filepath.Join(root, "merged.xml")
+	_ = os.WriteFile(merged, []byte("<clickhouse/>"), 0o644)
+	dirs := DiscoverDirs(Options{ConfigDir: confD, ConfigFiles: []string{merged}}, &Result{})
+	found := false
+	for _, d := range dirs {
+		found = found || d == logDir
+	}
+	if !found {
+		t.Errorf("the configured log directory is lost when the merged config names none: %v", dirs)
+	}
+}
+
+// With the whole configuration directory (the default), the fallback reads
+// config.d/ overrides too.
+func TestLogDirsFallbackReadsOverrides(t *testing.T) {
+	root := t.TempDir()
+	logDir := filepath.Join(root, "chlogs")
+	_ = os.MkdirAll(filepath.Join(root, "config.d"), 0o755)
+	_ = os.MkdirAll(logDir, 0o755)
+	_ = os.WriteFile(filepath.Join(root, "config.xml"), []byte("<clickhouse/>"), 0o644)
+	_ = os.WriteFile(filepath.Join(root, "config.d", "logger.xml"), []byte("<clickhouse><logger><log>"+filepath.Join(logDir, "server.log")+"</log></logger></clickhouse>"), 0o644)
+	found := false
+	for _, d := range DiscoverDirs(Options{ConfigDir: root}, &Result{}) {
+		found = found || d == logDir
+	}
+	if !found {
+		t.Error("a log path in config.d/ is missed when -config-dir is the whole directory")
+	}
+}

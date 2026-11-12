@@ -12,6 +12,8 @@ SELECT
     value,
     `default`,
     changed,
-    type
+    type,
+    -- Yes / No / IncreaseOnly / DecreaseOnly — see the onprem collector.
+    COLUMNS('^changeable_without_restart$')
 FROM system.server_settings
 ORDER BY name

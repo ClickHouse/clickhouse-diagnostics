@@ -41,9 +41,11 @@ func main() {
 	userFlag := flag.String("user", "", "Username")
 	passwordFlag := flag.String("password", "", "Password (not recommended for security reasons)")
 	protocolFlag := flag.String("protocol", "", "Protocol (http or https)")
+	caCertFlag := flag.String("ca-cert", "", "PEM file of the CA that signed the server's certificate (self-signed or internal CA), trusted in addition to the system roots; https only")
+	insecureFlag := flag.Bool("insecure", false, "Do not verify the server's TLS certificate (encrypted, but the server is not authenticated); https only — prefer -ca-cert")
 	modeFlag := flag.String("mode", "onprem", "Query mode (cloud, onprem, gov)")
 	outputDirFlag := flag.String("output-dir", "./clickhouse_results", "Directory for results output")
-	configDirFlag := flag.String("config-dir", "", "ClickHouse config directory to collect (default: /etc/clickhouse-server/config.d/)")
+	configDirFlag := flag.String("config-dir", "", "ClickHouse configuration directory to collect: config.xml, users.xml and their *.d/ overrides (default: /etc/clickhouse-server/). The merged configuration the server runs is collected from <path>/preprocessed_configs/ as well")
 	skipConfigFlag := flag.Bool("skip-config", false, "Skip collecting configuration files")
 	skipArchiveFlag := flag.Bool("skip-archive", false, "Skip creating archive of results and configuration")
 	skipDashboardFlag := flag.Bool("skip-dashboard", false, "Skip generating HTML dashboard")
@@ -300,6 +302,12 @@ func main() {
 
 	// Create ClickHouse client
 	client := pkg.NewClickHouseClient(protocol, host, port, username, password)
+	tlsNote, err := applyTLS(client, protocol, pkg.TLSOptions{CAFile: *caCertFlag, Insecure: *insecureFlag})
+	if err != nil {
+		// No bundle: a script checking $? must see the failure.
+		fmt.Println("Error:", err)
+		os.Exit(1)
+	}
 	if *queryTimeoutFlag < 0 {
 		fmt.Println("Error: -query-timeout cannot be negative (use 0 to disable the limit).")
 		return
@@ -390,8 +398,14 @@ func main() {
 	// probe is three cheap round trips; a failure (no grant, dry run) leaves
 	// the header without a node line and the warnings silent.
 	var identity nodeIdentity
+	var serverStarted time.Time // when the server started (now − uptime at the probe)
 	if !dryRun {
 		identity = probeNodeIdentity(client)
+		if identity.Err == nil && identity.UptimeSeconds > 0 {
+			// Fixed now, while uptime is fresh: computed later, the
+			// collection's own duration would move the start forward.
+			serverStarted = time.Now().Add(-time.Duration(identity.UptimeSeconds) * time.Second)
+		}
 	}
 
 	// SharedMergeTree clusters keep per-replica system tables; a -mode onprem
@@ -527,6 +541,9 @@ func main() {
 	}
 	rec.SetMeta("timeout", fmt.Sprintf("%v per query (-query-timeout; 0 = unbounded)", client.QueryTimeout()))
 	rec.SetMeta("format", outputFormat.Name)
+	if tlsNote != "" {
+		rec.SetMeta("tls", tlsNote)
+	}
 	if dryRun {
 		rec.SetMeta("dry-run", "yes — no query was sent to the server, durations are not meaningful")
 	}
@@ -672,6 +689,17 @@ func main() {
 		return
 	}
 
+	// Where the server wrote its merged configuration — <path>/
+	// preprocessed_configs/, path from the collected system.server_settings
+	// (23.3+; the source config otherwise) — and the restart metadata the
+	// merge report compares it with. Read here because Keeper and log
+	// discovery below read the merged config.xml too.
+	settingsRows := serverSettingsFromRun(finalOutputDir)
+	preprocessedDir := ""
+	if !govWithholdsConfig(mode) && !cloudSkipsConfig(mode, configDir) {
+		preprocessedDir = config.PreprocessedDir(serverPathFrom(settingsRows), config.SourceFiles(configDir))
+	}
+
 	// Time-bounded system.text_log slice (opt-in, --from/--to required).
 	// Runs before the dry-run summary so --dry-run previews the SQL.
 	if collectTextLog {
@@ -751,7 +779,7 @@ func main() {
 			qerr = fmt.Errorf("not read: %s", keeperDownReason)
 		}
 		connected := keeper.ParseTargets(raw)
-		configured := keeper.TargetsFromConfig(configDir)
+		configured := keeper.TargetsWithFallback(config.DiscoveryFiles(configDir, preprocessedDir), config.SourceFiles(configDir))
 		targets := keeper.MergeTargets(connected, configured)
 		switch {
 		case qerr != nil && len(targets) == 0:
@@ -844,6 +872,7 @@ func main() {
 		res, err := logfiles.Collect(finalOutputDir, logfiles.Options{
 			Dir:             logsDir,
 			ConfigDir:       configDir,
+			ConfigFiles:     config.DiscoveryFiles(configDir, preprocessedDir),
 			IncludeArchives: logsArchives,
 			MaxBytesPerFile: int64(logsMaxMB) << 20,
 		})
@@ -861,13 +890,23 @@ func main() {
 	if !skipConfig {
 		configDest := filepath.Join(finalOutputDir, "configuration")
 		phaseStart = time.Now()
-		if err := config.NewCollector().Collect(configDir, configDest, false); err != nil {
-			// Reading /etc/clickhouse-server/config.d/ usually needs root or
-			// the clickhouse group, so an unprivileged run fails here. Warn
+		// An explicit *.d directory (the old default, config.d/) is one
+		// override layer: the files it overrides sit in its parent, and
+		// without them neither the bundle nor the merge report can say what
+		// the layer changed. Collect the whole configuration around it.
+		collectRoot := configDir
+		if clean := filepath.Clean(configDir); strings.HasSuffix(filepath.Base(clean), ".d") {
+			collectRoot = filepath.Dir(clean)
+			fmt.Printf("Collecting %s with the files around it (%s)\n", configDir, collectRoot)
+		}
+		if err := config.NewCollector().Collect(collectRoot, configDest, false); err != nil {
+			// Reading /etc/clickhouse-server/ usually needs root or the
+			// clickhouse group, so an unprivileged run fails here. Warn
 			// rather than fail the run — the query results are still worth
 			// having — but never leave it silent.
 			fmt.Printf("Warning: configuration collection failed: %v\n", err)
 		}
+		collectRunningConfig(configDest, collectRoot, preprocessedDir, settingsRows, serverStarted)
 		rec.Phase("configuration", time.Since(phaseStart), "")
 	}
 
@@ -1107,11 +1146,11 @@ func getUserInput(protocol, host, port, username, password, mode, configDir *str
 	// collection. Gov never collects configs and cloud has none on this
 	// machine, so neither mode asks.
 	if *configDir == "" && !skipConfig && !govWithholdsConfig(*mode) && !cloudSkipsConfig(*mode, *configDir) {
-		fmt.Print("Enter ClickHouse config directory to collect [default: /etc/clickhouse-server/config.d/]: ")
+		fmt.Print("Enter ClickHouse config directory to collect [default: " + config.DefaultConfigDir + "]: ")
 		input, _ := reader.ReadString('\n')
 		*configDir = strings.TrimSpace(input)
 		if *configDir == "" {
-			*configDir = "/etc/clickhouse-server/config.d/"
+			*configDir = config.DefaultConfigDir
 		}
 	}
 
@@ -1524,4 +1563,96 @@ func collectorStatus(rec *runlog.Recorder) map[string]bundle.Status {
 		out[strings.TrimSuffix(e.Name, ".sql")] = bundle.Status{State: e.Status, Reason: reason}
 	}
 	return out
+}
+
+// serverSettingsFromRun reads the collected system.server_settings (23.3+)
+// for the merge report; nil without it (older server, other output format).
+func serverSettingsFromRun(runDir string) []config.ServerSetting {
+	rows, err := bundle.Open(runDir, nil).Rows("system.server_settings")
+	if err != nil {
+		return nil
+	}
+	out := make([]config.ServerSetting, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, config.ServerSetting{Name: r.Str("name"), Value: r.Str("value"),
+			ChangeableWithoutRestart: r.Str("changeable_without_restart")})
+	}
+	return out
+}
+
+func serverPathFrom(settings []config.ServerSetting) string {
+	for _, s := range settings {
+		if s.Name == "path" {
+			return s.Value
+		}
+	}
+	return ""
+}
+
+// collectRunningConfig adds the configuration the server actually runs —
+// the merged config.xml and users.xml in preprocessed_configs/, sanitised
+// like every other file — and the merge report comparing it with the
+// sources collected beside it.
+func collectRunningConfig(configDest, sourceRoot, preprocessedDir string, settings []config.ServerSetting, started time.Time) {
+	if preprocessedDir == "" {
+		return
+	}
+	// config.xml and users.xml are rewritten on separate reloads: each
+	// group is judged against its own merged file.
+	written := map[string]time.Time{}
+	for _, g := range []string{"config", "users"} {
+		if fi, err := os.Stat(filepath.Join(preprocessedDir, g+".xml")); err == nil {
+			written[g] = fi.ModTime()
+		}
+	}
+	if len(written) == 0 {
+		fmt.Printf("Merged configuration not collected: %s has no readable config.xml / users.xml\n", preprocessedDir)
+	} else if err := config.NewCollector().Collect(preprocessedDir, filepath.Join(configDest, "preprocessed"), false); err != nil {
+		fmt.Printf("Warning: merged configuration not collected: %v\n", err)
+	}
+	if _, err := os.Stat(configDest); err != nil {
+		return // nothing collected at all: no report
+	}
+	// The copies are new files: the originals' times say what changed
+	// since the server started.
+	times := map[string]time.Time{}
+	for _, f := range config.SourceFiles(sourceRoot) {
+		if fi, err := os.Stat(f); err == nil {
+			if rel, err := filepath.Rel(sourceRoot, f); err == nil {
+				times[rel] = fi.ModTime()
+			}
+		}
+	}
+	report := config.MergeReport(configDest, settings, written, started, times)
+	if err := os.WriteFile(filepath.Join(configDest, "merge_report.txt"), []byte(report), 0600); err != nil {
+		fmt.Printf("Warning: merge report not written: %v\n", err)
+		return
+	}
+	fmt.Printf("Configuration merge report: %s\n", filepath.Join(configDest, "merge_report.txt"))
+}
+
+// applyTLS sets -ca-cert / -insecure on the client and returns the
+// execution log's tls: note ("" when neither was given). Over plain http
+// they mean nothing and are ignored with a note; -insecure wins over
+// -ca-cert and is warned about, since the server is then not authenticated.
+func applyTLS(client *pkg.ClickHouseClient, protocol string, o pkg.TLSOptions) (string, error) {
+	if o == (pkg.TLSOptions{}) {
+		return "", nil
+	}
+	if protocol != "https" {
+		fmt.Println("Note: -ca-cert and -insecure apply to https only; ignored with -protocol " + protocol + ".")
+		return "", nil
+	}
+	if o.Insecure && o.CAFile != "" {
+		fmt.Println("Note: -insecure skips verification, so -ca-cert is not used.")
+	}
+	if err := client.SetTLS(o); err != nil {
+		return "", err
+	}
+	if o.Insecure {
+		fmt.Println("Warning: -insecure — the server's TLS certificate is NOT verified: the connection is " +
+			"encrypted but anyone in the path could impersonate the server. Prefer -ca-cert <file>.")
+		return "certificate verification disabled (-insecure)", nil
+	}
+	return "server certificate verified against the system roots and -ca-cert", nil
 }
