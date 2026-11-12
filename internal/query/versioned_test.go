@@ -222,6 +222,11 @@ func TestFindVersionedFiles_RealRepoDirs(t *testing.T) {
 		// system.aggregated_zookeeper_log arrived in 25.9, `component` in 26.2
 		// and `is_subrequest` in 26.3. Before 26.3 sub-requests share buckets
 		// with standalone requests and carry the whole Multi's latency, so the
+		// system.background_schedule_pool_log arrived in 25.12 (with
+		// system.background_schedule_pool); older servers skip the collector.
+		"queries.onprem/system.background_schedule_pool_log_by_type_1_day.sql": true,
+		"queries.gov/system.background_schedule_pool_log_by_type_1_day.sql":    true,
+		"queries.cloud/system.background_schedule_pool_log_by_type_1_day.sql":  true,
 		// three collectors exist from 26.3 only and older servers skip them.
 		"queries.onprem/system.aggregated_zookeeper_log_by_hour_2_days.sql":  true,
 		"queries.gov/system.aggregated_zookeeper_log_by_hour_2_days.sql":     true,

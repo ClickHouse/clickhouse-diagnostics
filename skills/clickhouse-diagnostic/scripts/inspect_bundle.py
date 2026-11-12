@@ -457,6 +457,71 @@ def znode_counts(base: str) -> list:
     return out
 
 
+def lag_and_schedule_pool_checks(base: str, add) -> None:
+    """HC-3.24 (replication delay per host per hour) and HC-3.25 (schedule
+    pool task types)."""
+    rep = read_jsonl(first("system.asynchronous_metric_log_replication_3_days_*.jsonl", base))
+    if rep:
+        src = "system.asynchronous_metric_log_replication_3_days max_absolute_delay_s"
+        worst = {}
+        for r in rep:
+            h, d = r.get("hostname") or "", num(r.get("max_absolute_delay_s")) or 0
+            # every host counts, a host that never lagged included: it is
+            # the evidence that a lag elsewhere was host-local
+            if h not in worst or d > worst[h][0]:
+                worst[h] = (d, r.get("time"))
+        for h, (d, when) in sorted(worst.items(), key=lambda x: -x[1][0]):
+            if d >= 300:
+                hours = sum(1 for r in rep if (r.get("hostname") or "") == h and (num(r.get("max_absolute_delay_s")) or 0) >= 300)
+                add("critical" if d >= 3600 else "warning", "replication",
+                    f"replication delay reached {int(d)} s{' on ' + h if h else ''} at {when}; {hours} hour(s) at ≥ 5 min in the window",
+                    src + " (hourly max; read max_inserts_in_queue / max_queue_size in the same hours)", "HC-3.24")
+        if len(worst) >= 3:
+            lagging = [h for h, (d, _) in worst.items() if d >= 300]
+            if len(lagging) == 1:
+                # Host-local only if every peer was OBSERVED in the lagging
+                # hours and stayed under 60 s there: a peer with no rows in
+                # those hours proves nothing.
+                lh = lagging[0]
+                hours = {r.get("time") for r in rep if (r.get("hostname") or "") == lh and (num(r.get("max_absolute_delay_s")) or 0) >= 300}
+                peers = [h for h in worst if h != lh]
+                covered = all(
+                    any(r.get("time") in hours for r in rep if (r.get("hostname") or "") == p) and
+                    all((num(r.get("max_absolute_delay_s")) or 0) < 60 for r in rep if (r.get("hostname") or "") == p and r.get("time") in hours)
+                    for p in peers)
+                if covered:
+                    add("warning", "replication",
+                        f"only {lh} lagged; every other host, observed in the same hours, stayed under 60 s — a host-local cause (its pools, its Keeper session)",
+                        src, "HC-3.24/P-65")
+    sp = read_jsonl(first("system.background_schedule_pool_log_by_type_1_day_*.jsonl", base))
+    if sp:
+        src = "system.background_schedule_pool_log_by_type_1_day"
+        per_host = {}
+        for r in sp:
+            types = per_host.setdefault(r.get("hostname") or "", {})
+            t = r.get("task_type") or ""
+            types[t] = types.get(t, 0) + (num(r.get("total_ms")) or 0)
+        # the leading task types of EACH host, busiest hosts first: one busy
+        # replica must not hide what holds a quieter one's pool
+        hosts = sorted(per_host.items(), key=lambda x: -sum(x[1].values()))
+        shown = hosts[:12]
+        if shown:
+            parts = []
+            for h, types in shown:
+                top = sorted(types.items(), key=lambda x: -x[1])[:3]
+                parts.append((f"{h}: " if h else "") + ", ".join(f"{t} {round(ms / 1000)} s" for t, ms in top))
+            more = f" (+{len(hosts) - len(shown)} more host(s))" if len(hosts) > len(shown) else ""
+            add("info", "replication", "schedule pool, most time by task type — " + "; ".join(parts) + more,
+                src + " total_ms (logged slower runs only)", "HC-3.25")
+        failing = {}
+        for r in sp:
+            if (num(r.get("errors")) or 0) > 0:
+                k = r.get("task_type") or ""
+                f = failing.setdefault(k, [0, r.get("example_exception") or ""])
+                f[0] += num(r.get("errors")) or 0
+        for k, (n, ex) in sorted(failing.items(), key=lambda x: -x[1][0])[:3]:
+            add("warning", "replication", f"schedule pool task {k} failed {int(n)} time(s) in the last day" + (f": {ex[:160]}" if ex else ""),
+                src + " errors / example_exception", "HC-3.25")
 def config_merge_checks(base: str, add) -> None:
     """HC-10.11-10.14 from configuration/merge_report.txt (written by the
     tool from the sanitised source files and the merged preprocessed_configs/
@@ -1545,6 +1610,7 @@ def analyse(base: str):
             add("warning", "keeper", "zookeeper_log: failed Keeper requests with loss errors — " + ", ".join(f"{e}={n}" for e, n in bad.items()),
                 "hours: " + ", ".join(sorted(loss_hours)[:8]), "HC-3.10")
     aggregated_zk_checks(base, add)
+    lag_and_schedule_pool_checks(base, add)
     config_merge_checks(base, add)
     th = read_jsonl(first("system.text_log_histogram_1_day_*.jsonl", base))
     if th:

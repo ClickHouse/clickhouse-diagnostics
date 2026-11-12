@@ -295,6 +295,8 @@ Most collection queries look back over a fixed period. Each declares its **own**
 | `system.part_log_3_days` | 3 days |
 | `system.query_views_log_3_days` | 3 days |
 | `system.metric_log_7_days` | 7 days |
+| `system.asynchronous_metric_log_replication_3_days` | 3 days |
+| `system.background_schedule_pool_log_by_type_1_day` | 1 day |
 | `system.asynchronous_insert_log_7_days` | 7 days |
 | `system.metric_log_coordination_3_days` | 3 days |
 | `system.metric_log_by_host_3_days` | 3 days |

@@ -397,6 +397,24 @@ Windows: `*_7_days` files cover the last 7 days (or `-from/-to`); `system.text_l
 **Traps:** absent file = `<zookeeper_log>` not configured, not health; successful volume and latency are deliberately **not** here — use `metric_log_coordination` (`ZooKeeperTransactions`, `ZooKeeperWaitMicroseconds / ZooKeeperTransactions` per hour) and `text_log_keeper_1_day` for session churn; even errors-only, the collector scans two 1-byte columns of the whole day, so on a huge cluster it can hit the collector timeout (159); durations are in ms on every version (converted from microseconds on ≥ 24.3).
 **Pairs with:** `metric_log_coordination` (same hours from ProfileEvents), `text_log_keeper_1_day`, `zookeeper_connection`, `configuration/zookeeper.xml`.
 
+### system.asynchronous_metric_log_replication_3_days (v0.10, every mode)
+**Why we run it:** the history of replication delay per host. `system.replicas` is a snapshot at collection: a lag that cleared before the bundle was taken — the usual case — is invisible there, and `metric_log` does not carry `absolute_delay`.
+**Question:** which host was behind, by how much, in which hours, and was its queue full of inserts (fetches) or merges?
+**Read first:** per host, the hours with `max_absolute_delay_s` > 0; the worst hour; `max_inserts_in_queue` / `max_queue_size` in the same hours; in cloud, whether one host lags while the others do not.
+**Healthy looks like:** `max_absolute_delay_s` 0 or a few seconds; queues near 0.
+**Red flags:** minutes or hours of delay on one host (HC-3.24) — read with `metric_log_by_host_3_days` (pool occupancy, Keeper wait) and `part_log` `DownloadPart` per host (P-59, P-65); delay on every host at once = Keeper or the network (P-57).
+**Traps:** hourly **max** of gauges the server updates every second or so — one bad moment fills the hour; `max_relative_delay_s` is relative to the most up-to-date replica of the same table; `samples` counts the gauge rows behind the hour. An hour with **no row** is missing telemetry, not proof of an outage — `asynchronous_metric_log` may be disabled, or its TTL may have dropped the hour; check uptime (`system.asynchronous_metrics` `Uptime`, `logs/`) and the table's retention before calling it downtime.
+**Pairs with:** `system.replicas` (the state at collection), `metric_log_by_host_3_days`, `part_log_3_days`, `replication_queue`.
+
+### system.background_schedule_pool_log_by_type_1_day (≥ 25.12, v0.10)
+**Why we run it:** the schedule pool runs every table's periodic work; when it saturates (HC-2.14) replication and merges stall without an error. `metric_log` says the pool was full; this says which task type held it.
+**Question:** per host and hour, which task types ran, how many times, how long in total and at worst, on how many tables, and did they fail?
+**Read first:** per host, task types by `total_ms`; `max_ms` / `p99_ms` of the top ones; `errors` with `example_exception`; `slowest_table`.
+**Healthy looks like:** cleanup and queue-update tasks with short runs; no errors.
+**Red flags:** `ReplicatedMergeTreeRestartingThread` / `…AttachThread` dominating after a Keeper session loss (P-57); SharedMergeTree leader-election or assignee tasks running long on one host (P-59); a task type failing every run.
+**Traps:** the server logs the **slower** runs, not every run, so `runs` is not the pool's throughput; `task_type` is `log_name` with its `<db>.<table> (…)` prefix removed; gov has no `slowest_table` or exception text; absent below 25.12.
+**Pairs with:** `metric_log_by_host_3_days` (`CurrentMetric_BackgroundSchedulePoolTask` / `…PoolSize`), `asynchronous_metric_log_replication_3_days`, `text_log` (`Temporarily pause scheduling`).
+
 ### system.aggregated_zookeeper_log_by_hour_2_days (≥ 26.3)
 **Why we run it:** every other Keeper file says *that* Keeper was busy, slow or failing; this one says **who in the server** sent the requests. `system.aggregated_zookeeper_log` (on by default since 25.9, kept 30 days — unlike `zookeeper_log`, which is usually off) groups every request this server sends by session, parent path, operation and `component`, the ClickHouse code location that issued it. Read hourly per component × operation over two days.
 **Question:** which component sends which Keeper operations, how many, how slowly, and with which errors; in cloud, from which replica most of it comes?
