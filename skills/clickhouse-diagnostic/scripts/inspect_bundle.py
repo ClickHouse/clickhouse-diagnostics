@@ -457,6 +457,44 @@ def znode_counts(base: str) -> list:
     return out
 
 
+def config_merge_checks(base: str, add) -> None:
+    """HC-10.11-10.14 from configuration/merge_report.txt (written by the
+    tool from the sanitised source files and the merged preprocessed_configs/
+    the server runs)."""
+    path = os.path.join(base, "configuration", "merge_report.txt")
+    if not os.path.isfile(path):
+        return
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        text = fh.read()
+    src = "configuration/merge_report.txt"
+    m = re.search(r"different values: (\d+)", text)
+    n = int(m.group(1)) if m else 0
+    if n:
+        settings = re.findall(r"^(config|users): (\S+)$", text, re.M)
+        wins = re.findall(r"running \(merged file\)\s+= (.*)$", text, re.M)
+        shown = ", ".join(f"{p} = {w}" for (_, p), w in list(zip(settings, wins))[:4])
+        add("warning", "config",
+            f"{n} setting(s) are set differently in more than one configuration file; the server runs the merged value — {shown}{' …' if n > 4 else ''}",
+            src + " (each file's value and the one that won)", "HC-10.11")
+    stale = re.findall(r"^\s+(\S+)\s+changed (.+?) — NOT in the merged (?:config|users)\.xml", text, re.M)
+    if stale:
+        add("warning", "config",
+            f"{len(stale)} configuration file(s) changed after the last successful load are not in the merged config — the reload failed or did not run: " +
+            ", ".join(f"{f} ({when})" for f, when in stale[:4]),
+            src + " — check logs/ for the config error", "HC-10.12")
+    if "did not rewrite it when it started" in text:
+        add("warning", "config",
+            "the merged config the server runs is older than its last start: it was not rebuilt from the sources at startup",
+            src + " — check logs/ startup for a configuration error", "HC-10.13")
+    # the same setting in several changed files: the last one (merge order) wins
+    pending = list(dict(re.findall(r"^\s+(\S+)\s+= (.*?) — running value from a file changed since the start", text, re.M)).items())
+    if pending:
+        add("info", "config",
+            f"{len(pending)} restart-only setting(s) run a value from a file changed since the server started — if the value is new, it is not live until a restart: " +
+            ", ".join(f"{k} = {v}" for k, v in pending[:6]),
+            src, "HC-10.14")
+
+
 def aggregated_zk_checks(base: str, add) -> None:
     mins = read_jsonl(first(AZL_MIN + "_*.jsonl", base))
     if mins:
@@ -1507,6 +1545,7 @@ def analyse(base: str):
             add("warning", "keeper", "zookeeper_log: failed Keeper requests with loss errors — " + ", ".join(f"{e}={n}" for e, n in bad.items()),
                 "hours: " + ", ".join(sorted(loss_hours)[:8]), "HC-3.10")
     aggregated_zk_checks(base, add)
+    config_merge_checks(base, add)
     th = read_jsonl(first("system.text_log_histogram_1_day_*.jsonl", base))
     if th:
         per_hour = Counter()

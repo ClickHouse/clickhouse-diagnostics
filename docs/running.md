@@ -96,7 +96,7 @@ You will be prompted for any value not supplied on the command line:
 | Username | _empty_ |
 | Password (hidden) | _empty_ |
 | Mode (cloud/onprem/gov) | `onprem` — only when `-mode` is absent entirely; see below |
-| Config directory | `/etc/clickhouse-server/config.d/` — `onprem` only; `cloud` and `gov` do not ask (see below) |
+| Config directory | `/etc/clickhouse-server/` — `onprem` only; `cloud` and `gov` do not ask (see below) |
 | Gov-mode salt (hidden, `gov` mode only) | _empty_ |
 
 #### How `-mode` is resolved
@@ -141,8 +141,10 @@ Run `./clickhouse-diagnostic -help` to see the full list. Current flags:
                        but the server is not authenticated); https only.
 -mode string           Query mode (cloud, onprem, gov) (default "onprem")
 -output-dir string     Directory for results output (default "./clickhouse_results")
--config-dir string     ClickHouse config directory to collect
-                       (default: /etc/clickhouse-server/config.d/)
+-config-dir string     ClickHouse configuration directory to collect: config.xml,
+                       users.xml and their *.d/ overrides (default:
+                       /etc/clickhouse-server/). The merged configuration the
+                       server runs is collected from <path>/preprocessed_configs/.
 -alerts-dir string     Directory containing alert YAML rule files (default "./alerts")
 -salt string           Gov-mode hashing salt (8–64 alphanumeric chars;
                        prompts interactively if empty; gov mode only)

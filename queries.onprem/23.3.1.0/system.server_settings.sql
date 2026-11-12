@@ -15,6 +15,11 @@ SELECT
     value,
     `default`,
     changed,
-    type
+    type,
+    -- Yes / No / IncreaseOnly / DecreaseOnly: whether a new value in the
+    -- config is live after a reload or needs a restart. The configuration
+    -- merge report names restart-only settings edited since the server
+    -- started. COLUMNS() yields nothing on a server without the column.
+    COLUMNS('^changeable_without_restart$')
 FROM system.server_settings
 ORDER BY name

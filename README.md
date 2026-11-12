@@ -277,7 +277,7 @@ Details: [docs/bundle.md](docs/bundle.md#host-facts-and-server-logs).
 <details>
 <summary>Show</summary>
 
-On-prem, `/etc/clickhouse-server/` is copied with passwords, keys, tokens and certificates replaced — hostnames, IPs and topology stay, so review it before sharing. Cloud and gov runs do not collect it.
+On-prem, the configuration the server actually runs — the merged `config.xml` and `users.xml` from `preprocessed_configs/` — is collected along with the source files in `/etc/clickhouse-server/`, all with passwords, keys and tokens replaced (hostnames, IPs and topology stay, so review it before sharing). `merge_report.txt` lists the settings set differently in more than one file and which value runs, files a failed reload did not pick up, and restart-only settings changed since the last start. Cloud and gov runs do not collect it.
 
 Details: [docs/bundle.md](docs/bundle.md#configuration-collection).
 </details>

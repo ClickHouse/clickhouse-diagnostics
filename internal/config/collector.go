@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"clickhouse-diagnostic/internal/collection"
 )
@@ -46,14 +47,27 @@ func (c *Collector) Collect(configDir, destDir string, keepPasswords bool) error
 	// Walk through the config directory
 	fileCount := 0
 	passwordCount := 0
+	leftOut := 0
+	root := filepath.Clean(configDir)
 
 	err = filepath.Walk(configDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
 
-		// Skip directories
+		// Only configuration: the top level and the *.d override
+		// directories (config.d/, users.d/, conf.d/). The server's own
+		// directory also holds its TLS key and certificate, dhparam.pem and
+		// whatever else an operator put there; none of it is configuration,
+		// and a private key must never reach a support bundle.
 		if info.IsDir() {
+			if filepath.Clean(path) != root && !strings.HasSuffix(info.Name(), ".d") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !IsConfigFile(info.Name()) {
+			leftOut++
 			return nil
 		}
 
@@ -122,6 +136,9 @@ func (c *Collector) Collect(configDir, destDir string, keepPasswords bool) error
 	}
 
 	fmt.Printf("Collected %d configuration files to '%s'\n", fileCount, destDir)
+	if leftOut > 0 {
+		fmt.Printf("Left out %d file(s) that are not configuration (keys, certificates, backups)\n", leftOut)
+	}
 	if passwordCount > 0 {
 		fmt.Printf("Removed %d passwords from configuration files\n", passwordCount)
 	}
