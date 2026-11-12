@@ -23,6 +23,6 @@ FROM clusterAllReplicas(default, merge(system, '^asynchronous_metric_log$'))
 WHERE metric IN ('ReplicasMaxAbsoluteDelay', 'ReplicasMaxRelativeDelay', 'ReplicasMaxQueueSize',
                  'ReplicasMaxInsertsInQueue', 'ReplicasMaxMergesInQueue', 'ReplicasSumQueueSize',
                  'ReplicasSumInsertsInQueue', 'ReplicasSumMergesInQueue')
-  AND event_date >= toDate({from:3d}) AND event_time > {from:3d} AND event_time <= {to:now}
+  AND event_date >= toDate({from:3d}, timezone()) AND event_time > {from:3d} AND event_time <= {to:now}
 GROUP BY hostname, time
 ORDER BY hostname, time

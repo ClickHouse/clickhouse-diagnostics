@@ -478,11 +478,21 @@ def lag_and_schedule_pool_checks(base: str, add) -> None:
                     src + " (hourly max; read max_inserts_in_queue / max_queue_size in the same hours)", "HC-3.24")
         if len(worst) >= 3:
             lagging = [h for h, (d, _) in worst.items() if d >= 300]
-            calm = [h for h, (d, _) in worst.items() if d < 60]
-            if len(lagging) == 1 and len(calm) == len(worst) - 1:
-                add("warning", "replication",
-                    f"only {lagging[0]} lagged; every other host stayed under 60 s — a host-local cause (its pools, its Keeper session)",
-                    src, "HC-3.24/P-65")
+            if len(lagging) == 1:
+                # Host-local only if every peer was OBSERVED in the lagging
+                # hours and stayed under 60 s there: a peer with no rows in
+                # those hours proves nothing.
+                lh = lagging[0]
+                hours = {r.get("time") for r in rep if (r.get("hostname") or "") == lh and (num(r.get("max_absolute_delay_s")) or 0) >= 300}
+                peers = [h for h in worst if h != lh]
+                covered = all(
+                    any(r.get("time") in hours for r in rep if (r.get("hostname") or "") == p) and
+                    all((num(r.get("max_absolute_delay_s")) or 0) < 60 for r in rep if (r.get("hostname") or "") == p and r.get("time") in hours)
+                    for p in peers)
+                if covered:
+                    add("warning", "replication",
+                        f"only {lh} lagged; every other host, observed in the same hours, stayed under 60 s — a host-local cause (its pools, its Keeper session)",
+                        src, "HC-3.24/P-65")
     sp = read_jsonl(first("system.background_schedule_pool_log_by_type_1_day_*.jsonl", base))
     if sp:
         src = "system.background_schedule_pool_log_by_type_1_day"

@@ -72,3 +72,20 @@ func TestInspectBundle_LagReviewFixes(t *testing.T) {
 		}
 	}
 }
+
+// A peer with no rows in the lagging hours proves nothing: no host-local
+// warning then, while the individual delay warning stays.
+func TestInspectBundle_HostLocalNeedsPeerCoverage(t *testing.T) {
+	rep := []map[string]any{
+		{"hostname": "ch-02", "time": "2026-11-10 10:00:00", "max_absolute_delay_s": 900},
+		{"hostname": "ch-01", "time": "2026-11-10 11:00:00", "max_absolute_delay_s": 0},
+		{"hostname": "ch-03", "time": "2026-11-10 11:00:00", "max_absolute_delay_s": 0},
+	}
+	out := runPrepassAZL(t, map[string][]map[string]any{"system.asynchronous_metric_log_replication_3_days": rep})
+	if strings.Contains(out, "only ch-02 lagged") {
+		t.Errorf("host-local claimed without peer telemetry in the lagging hour:\n%s", out)
+	}
+	if !strings.Contains(out, "replication delay reached 900 s on ch-02") {
+		t.Errorf("the individual delay warning is lost:\n%s", out)
+	}
+}

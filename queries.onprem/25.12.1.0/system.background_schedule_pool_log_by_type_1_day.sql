@@ -20,6 +20,6 @@ SELECT
     countIf(error != 0)                          AS errors,
     leftUTF8(anyIf(exception, error != 0), 300)  AS example_exception
 FROM system.background_schedule_pool_log
-WHERE event_date >= toDate({from:1d}) AND event_time > {from:1d} AND event_time <= {to:now}
+WHERE event_date >= toDate({from:1d}, timezone()) AND event_time > {from:1d} AND event_time <= {to:now}
 GROUP BY hostname, time, task_type
 ORDER BY hostname, time, total_ms DESC
