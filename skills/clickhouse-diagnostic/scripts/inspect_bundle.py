@@ -457,6 +457,54 @@ def znode_counts(base: str) -> list:
     return out
 
 
+def lag_and_schedule_pool_checks(base: str, add) -> None:
+    """HC-3.24 (replication delay per host per hour) and HC-3.25 (schedule
+    pool task types)."""
+    rep = read_jsonl(first("system.asynchronous_metric_log_replication_3_days_*.jsonl", base))
+    if rep:
+        src = "system.asynchronous_metric_log_replication_3_days max_absolute_delay_s"
+        worst = {}
+        for r in rep:
+            h, d = r.get("hostname") or "", num(r.get("max_absolute_delay_s")) or 0
+            if d > (worst.get(h) or (0, None))[0]:
+                worst[h] = (d, r.get("time"))
+        for h, (d, when) in sorted(worst.items(), key=lambda x: -x[1][0]):
+            if d >= 300:
+                hours = sum(1 for r in rep if (r.get("hostname") or "") == h and (num(r.get("max_absolute_delay_s")) or 0) >= 300)
+                add("critical" if d >= 3600 else "warning", "replication",
+                    f"replication delay reached {int(d)} s{' on ' + h if h else ''} at {when}; {hours} hour(s) at ≥ 5 min in the window",
+                    src + " (hourly max; read max_inserts_in_queue / max_queue_size in the same hours)", "HC-3.24")
+        if len(worst) >= 3:
+            lagging = [h for h, (d, _) in worst.items() if d >= 300]
+            calm = [h for h, (d, _) in worst.items() if d < 60]
+            if len(lagging) == 1 and len(calm) == len(worst) - 1:
+                add("warning", "replication",
+                    f"only {lagging[0]} lagged; every other host stayed under 60 s — a host-local cause (its pools, its Keeper session)",
+                    src, "HC-3.24/P-65")
+    sp = read_jsonl(first("system.background_schedule_pool_log_by_type_1_day_*.jsonl", base))
+    if sp:
+        src = "system.background_schedule_pool_log_by_type_1_day"
+        tot = {}
+        for r in sp:
+            k = (r.get("hostname") or "", r.get("task_type") or "")
+            tot[k] = tot.get(k, 0) + (num(r.get("total_ms")) or 0)
+        top = sorted(tot.items(), key=lambda x: -x[1])[:4]
+        if top:
+            add("info", "replication",
+                "schedule pool, most time by task type: " + ", ".join(
+                    f"{t}{' on ' + h if h else ''} {round(ms / 1000)} s" for (h, t), ms in top),
+                src + " total_ms (logged slower runs only)", "HC-3.25")
+        failing = {}
+        for r in sp:
+            if (num(r.get("errors")) or 0) > 0:
+                k = r.get("task_type") or ""
+                f = failing.setdefault(k, [0, r.get("example_exception") or ""])
+                f[0] += num(r.get("errors")) or 0
+        for k, (n, ex) in sorted(failing.items(), key=lambda x: -x[1][0])[:3]:
+            add("warning", "replication", f"schedule pool task {k} failed {int(n)} time(s) in the last day" + (f": {ex[:160]}" if ex else ""),
+                src + " errors / example_exception", "HC-3.25")
+
+
 def aggregated_zk_checks(base: str, add) -> None:
     mins = read_jsonl(first(AZL_MIN + "_*.jsonl", base))
     if mins:
@@ -1507,6 +1555,7 @@ def analyse(base: str):
             add("warning", "keeper", "zookeeper_log: failed Keeper requests with loss errors — " + ", ".join(f"{e}={n}" for e, n in bad.items()),
                 "hours: " + ", ".join(sorted(loss_hours)[:8]), "HC-3.10")
     aggregated_zk_checks(base, add)
+    lag_and_schedule_pool_checks(base, add)
     th = read_jsonl(first("system.text_log_histogram_1_day_*.jsonl", base))
     if th:
         per_hour = Counter()
