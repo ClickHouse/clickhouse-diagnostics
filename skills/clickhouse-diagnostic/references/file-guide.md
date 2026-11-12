@@ -403,7 +403,7 @@ Windows: `*_7_days` files cover the last 7 days (or `-from/-to`); `system.text_l
 **Read first:** per host, the hours with `max_absolute_delay_s` > 0; the worst hour; `max_inserts_in_queue` / `max_queue_size` in the same hours; in cloud, whether one host lags while the others do not.
 **Healthy looks like:** `max_absolute_delay_s` 0 or a few seconds; queues near 0.
 **Red flags:** minutes or hours of delay on one host (HC-3.24) — read with `metric_log_by_host_3_days` (pool occupancy, Keeper wait) and `part_log` `DownloadPart` per host (P-59, P-65); delay on every host at once = Keeper or the network (P-57).
-**Traps:** hourly **max** of gauges the server updates every second or so — one bad moment fills the hour; `max_relative_delay_s` is relative to the most up-to-date replica of the same table; `samples` counts the gauge rows behind the hour (0 rows = the server was down).
+**Traps:** hourly **max** of gauges the server updates every second or so — one bad moment fills the hour; `max_relative_delay_s` is relative to the most up-to-date replica of the same table; `samples` counts the gauge rows behind the hour. An hour with **no row** is missing telemetry, not proof of an outage — `asynchronous_metric_log` may be disabled, or its TTL may have dropped the hour; check uptime (`system.asynchronous_metrics` `Uptime`, `logs/`) and the table's retention before calling it downtime.
 **Pairs with:** `system.replicas` (the state at collection), `metric_log_by_host_3_days`, `part_log_3_days`, `replication_queue`.
 
 ### system.background_schedule_pool_log_by_type_1_day (≥ 25.12, v0.10)

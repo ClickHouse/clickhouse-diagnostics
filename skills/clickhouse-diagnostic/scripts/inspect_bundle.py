@@ -466,7 +466,9 @@ def lag_and_schedule_pool_checks(base: str, add) -> None:
         worst = {}
         for r in rep:
             h, d = r.get("hostname") or "", num(r.get("max_absolute_delay_s")) or 0
-            if d > (worst.get(h) or (0, None))[0]:
+            # every host counts, a host that never lagged included: it is
+            # the evidence that a lag elsewhere was host-local
+            if h not in worst or d > worst[h][0]:
                 worst[h] = (d, r.get("time"))
         for h, (d, when) in sorted(worst.items(), key=lambda x: -x[1][0]):
             if d >= 300:
@@ -484,15 +486,22 @@ def lag_and_schedule_pool_checks(base: str, add) -> None:
     sp = read_jsonl(first("system.background_schedule_pool_log_by_type_1_day_*.jsonl", base))
     if sp:
         src = "system.background_schedule_pool_log_by_type_1_day"
-        tot = {}
+        per_host = {}
         for r in sp:
-            k = (r.get("hostname") or "", r.get("task_type") or "")
-            tot[k] = tot.get(k, 0) + (num(r.get("total_ms")) or 0)
-        top = sorted(tot.items(), key=lambda x: -x[1])[:4]
-        if top:
-            add("info", "replication",
-                "schedule pool, most time by task type: " + ", ".join(
-                    f"{t}{' on ' + h if h else ''} {round(ms / 1000)} s" for (h, t), ms in top),
+            types = per_host.setdefault(r.get("hostname") or "", {})
+            t = r.get("task_type") or ""
+            types[t] = types.get(t, 0) + (num(r.get("total_ms")) or 0)
+        # the leading task types of EACH host, busiest hosts first: one busy
+        # replica must not hide what holds a quieter one's pool
+        hosts = sorted(per_host.items(), key=lambda x: -sum(x[1].values()))
+        shown = hosts[:12]
+        if shown:
+            parts = []
+            for h, types in shown:
+                top = sorted(types.items(), key=lambda x: -x[1])[:3]
+                parts.append((f"{h}: " if h else "") + ", ".join(f"{t} {round(ms / 1000)} s" for t, ms in top))
+            more = f" (+{len(hosts) - len(shown)} more host(s))" if len(hosts) > len(shown) else ""
+            add("info", "replication", "schedule pool, most time by task type — " + "; ".join(parts) + more,
                 src + " total_ms (logged slower runs only)", "HC-3.25")
         failing = {}
         for r in sp:
