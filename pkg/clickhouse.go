@@ -57,6 +57,10 @@ type ClickHouseClient struct {
 	// settings are extra query settings sent on every request after the
 	// pinned ones (SetSetting), in the order they were first set.
 	settings []setting
+
+	// tlsConfig is set by SetTLS (-ca-cert / -insecure) and carried into
+	// the one-connection probe clients; nil means the system defaults.
+	tlsConfig *tls.Config
 }
 
 type setting struct{ name, value string }
@@ -199,7 +203,7 @@ func (c *ClickHouseClient) ExecuteQueryFreshConnection(query string) (string, er
 	if c.dryRun {
 		return c.dryRunIntercept(query)
 	}
-	return c.executeWith(freshConnectionClient(c.httpClient.Timeout), query)
+	return c.executeWith(freshConnectionClient(c.httpClient.Timeout, c.tlsConfig), query)
 }
 
 // probeTimeout bounds one fresh-connection probe. The probes are trivial
@@ -214,9 +218,13 @@ const probeTimeout = 30 * time.Second
 // transport so the connection-level bounds every other request has — the
 // 30 s dial timeout and the 10 s TLS-handshake timeout — stay in force; a
 // zero-value Transport would have dropped both. HTTP/2 is left off: a
-// multiplexed h2 connection is exactly the reuse the probe must avoid.
-func freshConnectionClient(clientTimeout time.Duration) *http.Client {
+// multiplexed h2 connection is exactly the reuse the probe must avoid. tlsCfg
+// (from SetTLS, nil for the defaults) keeps -ca-cert / -insecure in force.
+func freshConnectionClient(clientTimeout time.Duration, tlsCfg *tls.Config) *http.Client {
 	tr := http.DefaultTransport.(*http.Transport).Clone()
+	if tlsCfg != nil {
+		tr.TLSClientConfig = tlsCfg.Clone()
+	}
 	tr.DisableKeepAlives = true
 	tr.ForceAttemptHTTP2 = false
 	tr.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{}
