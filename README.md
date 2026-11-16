@@ -151,7 +151,7 @@ The skill works offline and never modifies or uploads the bundle; it applies a p
 About 60 collectors, all `system` tables or host facts:
 
 - **Parts, merges and mutations** — part counts per partition and table, merge and mutation backlogs, three days of part events.
-- **Replication and Keeper** — replica health, the replication queue, Keeper sessions and request counters, what each Keeper member reports about itself, and (26.3+) who sends Keeper which requests, when and on which paths.
+- **Replication and Keeper** — replica health and each host's replication delay hour by hour, the replication queue, which schedule-pool tasks held the pool (25.12+), Keeper sessions and request counters, what each Keeper member reports about itself, and (26.3+) who sends Keeper which requests, when and on which paths.
 - **Queries** — seven days of activity per hour and per query pattern, failures by error code, the slowest and heaviest patterns.
 - **Errors and logs** — error counters and their history, a severity-first slice of `text_log`, the server log files (on-prem).
 - **Resources** — background pools, memory and CPU per hour; disks, detached parts, object storage.
