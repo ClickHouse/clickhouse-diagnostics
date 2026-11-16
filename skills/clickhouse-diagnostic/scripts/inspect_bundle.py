@@ -524,7 +524,7 @@ def lag_and_schedule_pool_checks(base: str, add) -> None:
                 parts.append((f"{h}: " if h else "") + ", ".join(f"{t} {round(ms / 1000)} s" for t, ms in top))
             more = f" (+{len(hosts) - len(shown)} more host(s))" if len(hosts) > len(shown) else ""
             add("info", "replication", f"schedule pool ({main}), most time by task type — " + "; ".join(parts) + more,
-                src + f" total_ms where pool = {main} (logged slower runs only)", "HC-3.25")
+                src + f" total_ms where pool = {main} (runs ≥ 30 ms only)", "HC-3.25")
         if other:
             parts = []
             for pool, types in sorted(other.items(), key=lambda x: -sum(x[1].values())):

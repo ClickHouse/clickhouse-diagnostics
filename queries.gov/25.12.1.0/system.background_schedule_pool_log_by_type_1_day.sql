@@ -1,6 +1,6 @@
 -- Background schedule pool runs per host, hour, pool and task type over the
--- last day (system.background_schedule_pool_log, 25.12+; the server logs the
--- slower runs). The pool runs every table's periodic work — replica
+-- last day (system.background_schedule_pool_log, 25.12+; runs of 30 ms or
+-- more). The pool runs every table's periodic work — replica
 -- restarting threads, queue updates, cleanup, SharedMergeTree leader
 -- elections and assignees — and when it saturates, replication and merges
 -- stall without an error. metric_log shows that the pool was full; this says
@@ -16,8 +16,14 @@
 -- FileLog, Buffer) keeps "Storage<Engine>[suffix]";
 -- "<db>.<table>.DistributedInsertQueue.<disk>/Bg" becomes
 -- "DistributedInsertQueue/Bg"; "<db>.<table> (<Task>)" keeps "<Task>".
--- Same cost as the single regex it replaced (30M rows, 2 threads: ~15 s
--- either way); one Kafka or Buffer table no longer adds a row per hour.
+-- duration_ms >= 30: the server's default threshold from 25.12.2 on.
+-- 25.12.1 logs every run (threshold 0; upstream CI logged 54M rows in one
+-- job), and so does a server configured to: the filter gives runs,
+-- total_ms and p99_ms the same meaning on every version.
+-- ln: the regexes read a plain String copy of log_name, after the filter
+-- (in the subquery). On the LowCardinality column they run over each
+-- block's whole dictionary even when the filter keeps a few of its rows:
+-- 13 s instead of 2 s on 30M rows logged at threshold 0 (2 threads).
 -- Gov: the task type only — no table names, no exception text. Two task
 -- names carry a configured name of their own: "<disk>::Blob{Copier,Killer}Thread"
 -- is masked to "*::…" and "FileCache(<cache>)" to "FileCache(*)"; class
@@ -33,22 +39,25 @@ SELECT
     sum(duration_ms)                             AS total_ms,
     max(duration_ms)                             AS max_ms,
     quantile(0.99)(duration_ms)                  AS p99_ms,     -- sampled: bounded memory whatever the row count
-    uniqExact(database, table)                   AS tables,
+    uniqExact(table_key)                         AS tables,
     countIf(error != 0)                          AS errors
 FROM
 (
     SELECT
-        *,
+        event_time, query_id, duration_ms, error,
+        sipHash64(database, table) AS table_key,   -- counted only, never written
+        toString(log_name) AS ln,
         replaceRegexpOne(replaceRegexpOne(
             multiIf(
-                match(log_name, '^Storage\\w+ \\('), replaceRegexpOne(log_name, '^(Storage\\w+) \\((?:[^()]|\\([^()]*\\))*\\)', '\\1'),
-                match(log_name, '\\.DistributedInsertQueue\\.[^/]*/Bg$'), 'DistributedInsertQueue/Bg',
-                match(log_name, '^.+ \\([^()]+\\)$'), extract(log_name, '^.+ \\(([^()]+)\\)$'),
-                log_name),
+                match(ln, '^Storage\\w+ \\('), replaceRegexpOne(ln, '^(Storage\\w+) \\((?:[^()]|\\([^()]*\\))*\\)', '\\1'),
+                match(ln, '\\.DistributedInsertQueue\\.[^/]*/Bg$'), 'DistributedInsertQueue/Bg',
+                match(ln, '^.+ \\([^()]+\\)$'), extract(ln, '^.+ \\(([^()]+)\\)$'),
+                ln),
             '^[^:\\s]+::(Blob\\w+Thread)$', '*::\\1'),
             '^FileCache\\(.*\\)$', 'FileCache(*)') AS masked
     FROM system.background_schedule_pool_log
+    WHERE event_date >= toDate({from:1d}, timezone()) AND event_time > {from:1d} AND event_time <= {to:now}
+      AND duration_ms >= 30
 )
-WHERE event_date >= toDate({from:1d}, timezone()) AND event_time > {from:1d} AND event_time <= {to:now}
 GROUP BY hostname, time, pool, task_type
 ORDER BY hostname, time, pool, total_ms DESC
