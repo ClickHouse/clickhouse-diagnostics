@@ -29,7 +29,7 @@ func TestInspectBundle_ReplicationDelayAndSchedulePool(t *testing.T) {
 	})
 	for _, want := range []string{
 		"replication delay reached 1800 s on ch-02", "2 hour(s) at ≥ 5 min", "HC-3.24",
-		"only ch-02 lagged", "schedule pool, most time by task type — ch-02: ReplicatedMergeTreeRestartingThread 900 s",
+		"only ch-02 lagged", "schedule pool (BgSchPool), most time by task type — ch-02: ReplicatedMergeTreeRestartingThread 900 s",
 		"failed 12 time(s)", "Session expired", "HC-3.25",
 	} {
 		if !strings.Contains(out, want) {
@@ -87,5 +87,31 @@ func TestInspectBundle_HostLocalNeedsPeerCoverage(t *testing.T) {
 	}
 	if !strings.Contains(out, "replication delay reached 900 s on ch-02") {
 		t.Errorf("the individual delay warning is lost:\n%s", out)
+	}
+}
+
+// Kafka consumers, Buffer flushes and Distributed sends run in schedule pools
+// of their own: they are reported apart and never lead the BgSchPool ranking
+// that HC-2.14 is read with.
+func TestInspectBundle_SchedulePoolOtherPoolsApart(t *testing.T) {
+	sp := []map[string]any{
+		{"hostname": "ch-01", "time": "2026-11-10 01:00:00", "pool": "BgMBSchPool", "task_type": "StorageKafka", "total_ms": 3_500_000, "errors": 0},
+		{"hostname": "ch-01", "time": "2026-11-10 01:00:00", "pool": "BgBufSchPool", "task_type": "StorageBuffer/Bg", "total_ms": 900_000, "errors": 0},
+		{"hostname": "ch-01", "time": "2026-11-10 01:00:00", "pool": "BgDistSchPool", "task_type": "DistributedInsertQueue/Bg", "total_ms": 600_000, "errors": 4},
+		{"hostname": "ch-01", "time": "2026-11-10 01:00:00", "pool": "BgSchPool", "task_type": "ReplicatedMergeTreeRestartingThread", "total_ms": 200_000, "errors": 0},
+		{"hostname": "ch-01", "time": "2026-11-10 01:00:00", "pool": "BgSchPool", "task_type": "CleanupThread", "total_ms": 50_000, "errors": 0},
+	}
+	out := runPrepassAZL(t, map[string][]map[string]any{"system.background_schedule_pool_log_by_type_1_day": sp})
+	for _, want := range []string{
+		"schedule pool (BgSchPool), most time by task type — ch-01: ReplicatedMergeTreeRestartingThread 200 s, CleanupThread 50 s",
+		"other schedule pools, not sized by background_schedule_pool_size (not HC-2.14) — BgMBSchPool (Kafka/RabbitMQ/NATS): StorageKafka 3500 s; BgBufSchPool (Buffer flushes): StorageBuffer/Bg 900 s; BgDistSchPool (Distributed sends): DistributedInsertQueue/Bg 600 s",
+		"schedule pool task DistributedInsertQueue/Bg (BgDistSchPool) failed 4 time(s)",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("pre-pass lacks %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "most time by task type — ch-01: StorageKafka") {
+		t.Errorf("a Kafka consumer leads the BgSchPool ranking:\n%s", out)
 	}
 }

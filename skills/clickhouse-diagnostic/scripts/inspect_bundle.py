@@ -496,11 +496,23 @@ def lag_and_schedule_pool_checks(base: str, add) -> None:
     sp = read_jsonl(first("system.background_schedule_pool_log_by_type_1_day_*.jsonl", base))
     if sp:
         src = "system.background_schedule_pool_log_by_type_1_day"
-        per_host = {}
+        # Five pools write this log. Only BgSchPool is the pool that
+        # background_schedule_pool_size sizes and HC-2.14 watches; Kafka
+        # consumers (BgMBSchPool), Buffer flushes and Distributed sends run
+        # for seconds in pools of their own and would otherwise top it.
+        main = "BgSchPool"
+        other_pools = {"BgMBSchPool": "Kafka/RabbitMQ/NATS", "BgBufSchPool": "Buffer flushes",
+                       "BgDistSchPool": "Distributed sends", "IcebergSchPool": "Iceberg"}
+        per_host, other = {}, {}
         for r in sp:
-            types = per_host.setdefault(r.get("hostname") or "", {})
+            pool = r.get("pool") or main
             t = r.get("task_type") or ""
-            types[t] = types.get(t, 0) + (num(r.get("total_ms")) or 0)
+            ms = num(r.get("total_ms")) or 0
+            if pool == main:
+                types = per_host.setdefault(r.get("hostname") or "", {})
+            else:
+                types = other.setdefault(pool, {})
+            types[t] = types.get(t, 0) + ms
         # the leading task types of EACH host, busiest hosts first: one busy
         # replica must not hide what holds a quieter one's pool
         hosts = sorted(per_host.items(), key=lambda x: -sum(x[1].values()))
@@ -511,17 +523,29 @@ def lag_and_schedule_pool_checks(base: str, add) -> None:
                 top = sorted(types.items(), key=lambda x: -x[1])[:3]
                 parts.append((f"{h}: " if h else "") + ", ".join(f"{t} {round(ms / 1000)} s" for t, ms in top))
             more = f" (+{len(hosts) - len(shown)} more host(s))" if len(hosts) > len(shown) else ""
-            add("info", "replication", "schedule pool, most time by task type — " + "; ".join(parts) + more,
-                src + " total_ms (logged slower runs only)", "HC-3.25")
+            add("info", "replication", f"schedule pool ({main}), most time by task type — " + "; ".join(parts) + more,
+                src + f" total_ms where pool = {main} (logged slower runs only)", "HC-3.25")
+        if other:
+            parts = []
+            for pool, types in sorted(other.items(), key=lambda x: -sum(x[1].values())):
+                top = sorted(types.items(), key=lambda x: -x[1])[:2]
+                label = f"{pool} ({other_pools[pool]})" if pool in other_pools else pool
+                parts.append(f"{label}: " + ", ".join(f"{t} {round(ms / 1000)} s" for t, ms in top))
+            add("info", "replication",
+                "other schedule pools, not sized by background_schedule_pool_size (not HC-2.14) — " + "; ".join(parts),
+                src + " total_ms by pool, all hosts", "HC-3.25")
         failing = {}
         for r in sp:
             if (num(r.get("errors")) or 0) > 0:
-                k = r.get("task_type") or ""
+                k = (r.get("pool") or main, r.get("task_type") or "")
                 f = failing.setdefault(k, [0, r.get("example_exception") or ""])
                 f[0] += num(r.get("errors")) or 0
-        for k, (n, ex) in sorted(failing.items(), key=lambda x: -x[1][0])[:3]:
-            add("warning", "replication", f"schedule pool task {k} failed {int(n)} time(s) in the last day" + (f": {ex[:160]}" if ex else ""),
+        for (pool, k), (n, ex) in sorted(failing.items(), key=lambda x: -x[1][0])[:3]:
+            where = "" if pool == main else f" ({pool})"
+            add("warning", "replication", f"schedule pool task {k}{where} failed {int(n)} time(s) in the last day" + (f": {ex[:160]}" if ex else ""),
                 src + " errors / example_exception", "HC-3.25")
+
+
 def config_merge_checks(base: str, add) -> None:
     """HC-10.11-10.14 from configuration/merge_report.txt (written by the
     tool from the sanitised source files and the merged preprocessed_configs/

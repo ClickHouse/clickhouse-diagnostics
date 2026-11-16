@@ -408,11 +408,11 @@ Windows: `*_7_days` files cover the last 7 days (or `-from/-to`); `system.text_l
 
 ### system.background_schedule_pool_log_by_type_1_day (≥ 25.12, v0.10)
 **Why we run it:** the schedule pool runs every table's periodic work; when it saturates (HC-2.14) replication and merges stall without an error. `metric_log` says the pool was full; this says which task type held it.
-**Question:** per host and hour, which task types ran, how many times, how long in total and at worst, on how many tables, and did they fail?
-**Read first:** per host, task types by `total_ms`; `max_ms` / `p99_ms` of the top ones; `errors` with `example_exception`; `slowest_table`.
+**Question:** per host, hour and pool, which task types ran, how many times, how long in total and at worst, on how many tables, and did they fail?
+**Read first:** filter `pool = 'BgSchPool'` — the pool `background_schedule_pool_size` sizes and HC-2.14 watches; then per host, task types by `total_ms`; `max_ms` / `p99_ms` of the top ones; `errors` with `example_exception`; `slowest_table`.
 **Healthy looks like:** cleanup and queue-update tasks with short runs; no errors.
 **Red flags:** `ReplicatedMergeTreeRestartingThread` / `…AttachThread` dominating after a Keeper session loss (P-57); SharedMergeTree leader-election or assignee tasks running long on one host (P-59); a task type failing every run.
-**Traps:** the server logs the **slower** runs, not every run, so `runs` is not the pool's throughput; `task_type` is `log_name` with its `<db>.<table> (…)` prefix removed; gov has no `slowest_table` or exception text; absent below 25.12.
+**Traps:** the server logs the **slower** runs, not every run, so `runs` is not the pool's throughput; five pools share the log (`pool`, from the `query_id` prefix): `BgSchPool`, `BgMBSchPool` (Kafka / RabbitMQ / NATS consumers, whose runs last seconds by design), `BgBufSchPool` (Buffer flushes), `BgDistSchPool` (Distributed sends), `IcebergSchPool` — time in the last four says nothing about HC-2.14; `task_type` is `log_name` without its table: `<db>.<table> (Task)` → `Task`, `StorageKafka (<db>.<table>)` → `StorageKafka`, `StorageBuffer (<db>.<table>)/Bg` → `StorageBuffer/Bg`, `<db>.<table>.DistributedInsertQueue.<disk>/Bg` → `DistributedInsertQueue/Bg` (`slowest_table` and `tables` keep the table side); a window view names its tasks after the table, so its `task_type` is the table name (hashed in gov); gov has no `slowest_table` or exception text and masks disk and cache names (`*::BlobCopierThread`, `FileCache(*)`); absent below 25.12.
 **Pairs with:** `metric_log_by_host_3_days` (`CurrentMetric_BackgroundSchedulePoolTask` / `…PoolSize`), `asynchronous_metric_log_replication_3_days`, `text_log` (`Temporarily pause scheduling`).
 
 ### system.aggregated_zookeeper_log_by_hour_2_days (≥ 26.3)

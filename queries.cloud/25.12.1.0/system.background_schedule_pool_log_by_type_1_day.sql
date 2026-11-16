@@ -1,17 +1,33 @@
--- Background schedule pool runs per host, hour and task type over the last
--- day (system.background_schedule_pool_log, 25.12+; the server logs the
+-- Background schedule pool runs per host, hour, pool and task type over the
+-- last day (system.background_schedule_pool_log, 25.12+; the server logs the
 -- slower runs). The pool runs every table's periodic work — replica
 -- restarting threads, queue updates, cleanup, SharedMergeTree leader
 -- elections and assignees — and when it saturates, replication and merges
 -- stall without an error. metric_log shows that the pool was full; this says
 -- which task type held it, how long its runs took and how many failed.
--- task_type is log_name with its "<db>.<table> (...)" prefix removed, so one
--- row per type and hour even on a server with tens of thousands of tables.
--- Every replica: each runs its own pool.
+-- pool: five schedule pools write this log, told apart only by the
+-- "<thread name>::<uuid>" query_id — BgSchPool (the one
+-- background_schedule_pool_size sizes), BgBufSchPool (Buffer flushes),
+-- BgDistSchPool (Distributed sends), BgMBSchPool (Kafka, RabbitMQ, NATS),
+-- IcebergSchPool.
+-- task_type: log_name without its table, so one row per type and hour even
+-- on a server with tens of thousands of tables. Three shapes carry one:
+-- "Storage<Engine> (<db>.<table>[ (<uuid>)])[suffix]" (Kafka, Kafka2,
+-- FileLog, Buffer) keeps "Storage<Engine>[suffix]";
+-- "<db>.<table>.DistributedInsertQueue.<disk>/Bg" becomes
+-- "DistributedInsertQueue/Bg"; "<db>.<table> (<Task>)" keeps "<Task>".
+-- Same cost as the single regex it replaced (30M rows, 2 threads: ~15 s
+-- either way); one Kafka or Buffer table no longer adds a row per hour.
+-- Every replica: each runs its own pools.
 SELECT
     hostName()                                   AS hostname,
     toStartOfHour(event_time)                    AS time,
-    if(match(log_name, '^.+ \\((.+)\\)$'), extract(log_name, '^.+ \\((.+)\\)$'), log_name) AS task_type,
+    substring(query_id, 1, position(query_id, '::') - 1) AS pool,
+    multiIf(
+        match(log_name, '^Storage\\w+ \\('), replaceRegexpOne(log_name, '^(Storage\\w+) \\((?:[^()]|\\([^()]*\\))*\\)', '\\1'),
+        match(log_name, '\\.DistributedInsertQueue\\.[^/]*/Bg$'), 'DistributedInsertQueue/Bg',
+        match(log_name, '^.+ \\([^()]+\\)$'), extract(log_name, '^.+ \\(([^()]+)\\)$'),
+        log_name)                                AS task_type,
     count()                                      AS runs,
     sum(duration_ms)                             AS total_ms,
     max(duration_ms)                             AS max_ms,
@@ -22,5 +38,5 @@ SELECT
     leftUTF8(anyIf(exception, error != 0), 300)  AS example_exception
 FROM clusterAllReplicas(default, merge(system, '^background_schedule_pool_log$'))
 WHERE event_date >= toDate({from:1d}, timezone()) AND event_time > {from:1d} AND event_time <= {to:now}
-GROUP BY hostname, time, task_type
-ORDER BY hostname, time, total_ms DESC
+GROUP BY hostname, time, pool, task_type
+ORDER BY hostname, time, pool, total_ms DESC
