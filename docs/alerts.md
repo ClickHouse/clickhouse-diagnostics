@@ -88,7 +88,7 @@ Use `{sys.<table>}` in the query — the evaluator rewrites it based on the run 
 | `onprem`, `gov` | `system.query_log` |
 | `cloud` | `clusterAllReplicas(default, system.query_log)` |
 
-This is what lets the same alert work across single-node and Cloud deployments. Tables whose rows are shared across replicas (`parts`, `tables`, `mutations`, `replicas`, `replication_queue`, `detached_parts`, `columns`, `databases`) are **not** wrapped even in cloud mode — `clusterAllReplicas` would duplicate their rows (see `internal/query/template.go`).
+This is what lets the same alert work across single-node and Cloud deployments. Tables whose rows are shared across replicas (`parts`, `tables`, `mutations`, `replicas`, `replication_queue`, `detached_parts`, `columns`, `databases`) are **not** wrapped even in cloud mode — `clusterAllReplicas` would duplicate their rows (see `internal/query/template.go`). `distribution_queue` is not in that list: each node stores its own shard directories on local disk, so cloud mode wraps it.
 
 ### Message templating
 
@@ -104,13 +104,14 @@ In `message:`, `{column_name}` is replaced with the value from each result row. 
 
 ### Bundled alert rules
 
-The repo ships with 18 alert rules in `alerts/` (plus version-gated overrides in `alerts/<version>/`, and one rule that exists only there — `keeper_xid_renewal_due`, 24.3+). They are intended as a starting point — adjust thresholds to match your workload.
+The repo ships with 19 alert rules in `alerts/` (plus version-gated overrides in `alerts/<version>/`, and one rule that exists only there — `keeper_xid_renewal_due`, 24.3+). They are intended as a starting point — adjust thresholds to match your workload.
 
 | Rule | Severity | Fires when |
 |---|---|---|
 | `crash_log_entries` | critical | `system.crash_log` is non-empty (server crashed at least once) |
 | `replica_readonly` | critical | A replicated table is in read-only mode (lost Keeper session, disk full, network partition) |
 | `replication_queue_errors` | critical | Replication queue entries have a non-empty `last_exception` |
+| `distribution_queue_backlog` | warning | A Distributed shard directory is blocked (`is_blocked = 1`), holds broken files (`broken_data_files > 0`), or has failed sends (`error_count > 0`). One row is one directory. `data_files > 0` alone does not fire — that is the normal flush buffer |
 | `disk_space_low` | critical | A disk that **holds user data** has less than 15% free space — **on any replica** in cloud mode, with the reporting host named in the message. A disk is counted when some user table's storage policy names it (`system.storage_policies` × `system.tables.storage_policy`); one that none does is not data capacity — on a managed service it is the local filesystem cache, sized to be filled, which otherwise fired this rule on a healthy service at 14.7% free. The filter is evidence, not a mode check, so a self-managed cluster collected in cloud mode still raises a critical for a hot local data disk. No user table with a policy = every disk judged |
 | `keeper_health` | critical | The two-signal Keeper health test per hour over 7 days: more than 1000 `ZooKeeperHardwareExceptions` **and** `ZooKeeperTransactions` below 50 % of the 7-day median — Keeper effectively unavailable (low traffic alone never fires: an idle hour is not an outage); catches outages that never reached `query_log` |
 | `keeper_connection_blips` | warning | More than 1000 `ZooKeeperHardwareExceptions` in an hour while Keeper traffic stayed at or above 50 % of usual (a positive 7-day median) — a session lost and re-established |

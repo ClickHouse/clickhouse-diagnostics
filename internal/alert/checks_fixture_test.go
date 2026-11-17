@@ -139,6 +139,62 @@ func TestCheck_CrashLog(t *testing.T) {
 	}
 }
 
+func TestCheck_DistributionQueueBacklog(t *testing.T) {
+	// Input order is not the severity order. data_files alone must not fire,
+	// including a directory that is only waiting for the next flush.
+	b := fixture(t, map[string][]row{"system.distribution_queue": {
+		{"database": "db", "table": "errors", "data_path": "/data/errors/shard1/", "is_blocked": 0, "error_count": "4", "broken_data_files": "0", "data_files": "1", "last_exception": "Code: 279"},
+		{"database": "db", "table": "blocked", "data_path": "/data/blocked/shard1/", "is_blocked": 1, "error_count": "0", "broken_data_files": "0", "data_files": "3", "last_exception": ""},
+		{"database": "db", "table": "broken", "data_path": "/data/broken/shard2/", "is_blocked": 0, "error_count": "0", "broken_data_files": "2", "data_files": "2", "last_exception": "Code: 209"},
+		{"database": "db", "table": "flushing", "data_path": "/data/flushing/shard1/", "is_blocked": 0, "error_count": "0", "broken_data_files": "0", "data_files": "9", "last_exception": ""},
+	}})
+	rows := runCheck(t, "distribution_queue_backlog", "onprem", b)
+	if len(rows) != 3 {
+		t.Fatalf("rows: %v", rows)
+	}
+	if rows[0]["table"] != "blocked" || rows[0]["is_blocked"] != int64(1) || rows[0]["error_count"] != int64(0) || rows[0]["last_exception"] != "" || rows[0]["data_files"] != int64(3) || rows[0]["hostname"] != "h1" {
+		t.Fatalf("blocked with empty exception: %v", rows[0])
+	}
+	if rows[1]["table"] != "broken" || rows[1]["broken_data_files"] != int64(2) || rows[1]["data_path"] != "/data/broken/shard2/" {
+		t.Fatalf("broken files: %v", rows[1])
+	}
+	if rows[2]["table"] != "errors" || rows[2]["error_count"] != int64(4) {
+		t.Fatalf("error_count: %v", rows[2])
+	}
+	onlyFiles := fixture(t, map[string][]row{"system.distribution_queue": {
+		{"database": "db", "table": "flushing", "is_blocked": 0, "error_count": "0", "broken_data_files": "0", "data_files": "40"},
+	}})
+	if rows := runCheck(t, "distribution_queue_backlog", "onprem", onlyFiles); len(rows) != 0 {
+		t.Fatalf("data_files alone is not a backlog: %v", rows)
+	}
+	// Cloud: the row's hostname, not the serving replica in system.version.
+	cloud := fixture(t, map[string][]row{"system.distribution_queue": {
+		{"hostname": "r9", "database": "db", "table": "t", "data_path": "/data/t/s1/", "is_blocked": 0, "error_count": "1", "broken_data_files": "0", "data_files": "1", "last_exception": "timeout"},
+	}})
+	if rows := runCheck(t, "distribution_queue_backlog", "cloud", cloud); len(rows) != 1 || rows[0]["hostname"] != "r9" {
+		t.Fatalf("cloud hostname: %v", rows)
+	}
+	// The worst 50, by the same order as the SQL.
+	var many []row
+	for i := 0; i < 51; i++ {
+		many = append(many, row{"database": "db", "table": fmt.Sprint(i), "is_blocked": 1, "error_count": fmt.Sprint(i), "broken_data_files": "0", "data_files": "1"})
+	}
+	rows = runCheck(t, "distribution_queue_backlog", "onprem", fixture(t, map[string][]row{"system.distribution_queue": many}))
+	if len(rows) != 50 || rows[0]["error_count"] != int64(50) || rows[49]["error_count"] != int64(1) {
+		t.Fatalf("limit 50, highest error_count first: %d rows", len(rows))
+	}
+	if rows := runCheck(t, "distribution_queue_backlog", "onprem", fixture(t, map[string][]row{"system.distribution_queue": {}})); len(rows) != 0 {
+		t.Fatalf("empty file: %v", rows)
+	}
+	c, err := lookupCheck("go:distribution_queue_backlog")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c(fixture(t, map[string][]row{}), "onprem"); !isNotCollected(err) {
+		t.Fatalf("missing file: want NotCollected, got %v", err)
+	}
+}
+
 func TestCheck_ReplicationQueueErrors(t *testing.T) {
 	b := fixture(t, map[string][]row{"system.replication_queue": {
 		{"database": "db", "table": "a", "last_exception": "Code: 999", "create_time": "2026-10-29 10:00:00"},

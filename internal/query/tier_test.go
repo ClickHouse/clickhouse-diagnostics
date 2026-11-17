@@ -32,7 +32,7 @@ func TestParseTier(t *testing.T) {
 // in every mode that has them.
 func TestShippedQueryFiles_TiersAreConsistent(t *testing.T) {
 	mustBeEssential := []string{"system.version", "system.metrics", "system.asynchronous_metrics", "system.processes",
-		"system.errors", "system.replicas", "system.replication_queue", "system.merges", "system.mutations", "system.disks",
+		"system.errors", "system.replicas", "system.replication_queue", "system.distribution_queue", "system.merges", "system.mutations", "system.disks",
 		"system.zookeeper_connection", "system.text_log", "system.error_log_7_days", "system.part_log_3_days",
 		"system.metric_log_7_days", "system.query_log_details_7_days"}
 	mustBeFull := []string{"system.tables", "system.columns", "system.parts", "system.detached_parts", "system.clusters", "system.stack_trace"}

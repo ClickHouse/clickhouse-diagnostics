@@ -11,6 +11,7 @@
 | `system.part_log_3_days` (3 days, hourly aggregation of `system.part_log`) | Are merges keeping up with inserts; did any merge or mutation fail? | Shows insert size, merge throughput and failing background operations with their error codes. |
 | `system.merges`, `system.mutations` | What is merging or mutating right now; what is stuck? | A stuck merge or a mutation backlog is the usual reason parts pile up while the pool looks idle. |
 | `system.replicas`, `system.replication_queue` | Is every replica writable and caught up; if not, why? | Read-only state, Keeper session loss and the shape of the queue locate replication problems. |
+| `system.distribution_queue` | Are async Distributed inserts stuck in a local shard directory? | One row per shard directory: blocked, broken files, or send errors. Pending files alone (`data_files`) are the flush buffer, not a backlog. Not the replication queue and not the DDL queue. |
 | `system.replicas_problem_tables`, `system.database_replicas` (≥ 25.9), `system.replicas_answered` (cloud) | For the tables and Replicated databases in trouble: are all replicas alive, how far behind the log, what Keeper refused; which replicas answered | The Keeper-backed columns are read only where they matter (up to 200 tables, problem tables first): asking `system.replicas` or `system.clusters` for them reads every table's or database's status from Keeper, which took minutes on servers with tens of thousands of tables. |
 | `system.query_log_details_7_days` (hourly aggregation of `system.query_log`) | What ran, how slow, how much memory, what failed, by whom? | Most incidents start with the workload; this is the aggregated view, with a 500-character sample per query pattern and no customer rows. |
 | `system.query_log_by_hour_7_days` / `system.query_log_by_pattern_7_days` (onprem, cloud) | How many queries ran each hour, of which kind, how slow; which patterns are slowest, heaviest, and whose? | Counted once per query — `query_log_details_7_days` repeats a query per table — and what the dashboard's query panels read. The pattern file keeps the hash as text and one 600-character SQL sample. |
@@ -43,7 +44,7 @@
 | `logs/` (onprem) | Restarts, startup warnings, fatal stacks, the first error of an incident | System tables lose this on restart; the log files keep it. |
 | `keeper/<host>_<port>.txt` (onprem, gov with the host hashed) | What each Keeper member says about itself: leader or follower, Raft log position, snapshot size and transfer settings, outstanding requests, its own latency, znode count, version | A Keeper-latency or session-loss finding is settled on the Keeper side; no `system.*` table carries these. |
 | `configuration/` | Which settings deviate from defaults | Memory limits, pools, Keeper, storage policies, log-table TTLs — with credentials removed. |
-| Alert results + `dashboard.html` | What is already over a threshold | 19 read-only rules give the headline before anyone reads a file. |
+| Alert results + `dashboard.html` | What is already over a threshold | 20 read-only rules give the headline before anyone reads a file. |
 
 Details per file (columns, windows, gov differences) are in [Modes and Query Layout](modes.md#modes-and-query-layout) and, for readers of the bundle, in `skills/clickhouse-diagnostic/references/file-guide.md`.
 
