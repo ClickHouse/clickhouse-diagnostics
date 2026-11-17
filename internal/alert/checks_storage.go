@@ -20,6 +20,7 @@ func init() {
 	RegisterCheck("detached_parts_exist", checkDetachedParts)
 	RegisterCheck("crash_log_entries", checkCrashLog)
 	RegisterCheck("replication_queue_errors", checkReplicationQueueErrors)
+	RegisterCheck("distribution_queue_backlog", checkDistributionQueueBacklog)
 	RegisterCheck("mutation_running_too_long", checkMutationsTooLong)
 	RegisterCheck("replica_readonly", checkReplicaReadonly)
 }
@@ -314,6 +315,59 @@ func checkReplicaReadonly(b *bundle.Bundle, mode string) ([]row, error) {
 			res["hostname"] = h
 		}
 		out = append(out, res)
+	}
+	return out, nil
+}
+
+// distribution_queue_backlog: one shard directory of an async Distributed
+// table that is blocked, holds broken files, or has failed to send.
+// data_files is reported and is not a trigger — files waiting for the next
+// flush are normal. The worst 50 directories, not grouped by table.
+// A missing file is NotCollected (the caller skips the rule). An empty
+// file is a clean result.
+func checkDistributionQueueBacklog(b *bundle.Bundle, mode string) ([]row, error) {
+	rows, err := b.Rows("system.distribution_queue")
+	if err != nil {
+		return nil, err
+	}
+	var hits []bundle.Row
+	for _, r := range rows {
+		if r.Int("is_blocked") == 1 || r.Int("broken_data_files") > 0 || r.Int("error_count") > 0 {
+			hits = append(hits, r)
+		}
+	}
+	sort.SliceStable(hits, func(i, j int) bool {
+		if a, bv := hits[i].Int("is_blocked"), hits[j].Int("is_blocked"); a != bv {
+			return a > bv
+		}
+		if a, bv := hits[i].Int("broken_data_files"), hits[j].Int("broken_data_files"); a != bv {
+			return a > bv
+		}
+		return hits[i].Int("error_count") > hits[j].Int("error_count")
+	})
+	// Cloud rows already carry hostName(). Onprem files do not; the node
+	// in system.version is that host. Gov hashes hostName() into the row.
+	host := serverHost(b)
+	var out []row
+	for i, r := range hits {
+		if i == 50 {
+			break
+		}
+		h := r.Str("hostname")
+		if h == "" {
+			h = host
+		}
+		out = append(out, row{
+			"hostname":          h,
+			"database":          r.Str("database"),
+			"table":             r.Str("table"),
+			"data_path":         r.Str("data_path"),
+			"is_blocked":        r.Int("is_blocked"),
+			"broken_data_files": r.Int("broken_data_files"),
+			"error_count":       r.Int("error_count"),
+			"data_files":        r.Int("data_files"),
+			"last_exception":    r.Str("last_exception"),
+		})
 	}
 	return out, nil
 }

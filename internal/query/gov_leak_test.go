@@ -61,6 +61,8 @@ func TestGovQueries_NoRawIdentifiersOrDDL(t *testing.T) {
 	mustBeHashed := []string{
 		"database", "table", "name", "user", "path", "host_name", "host_address",
 		"last_exception", "postpone_reason", "last_error_message",
+		// Shard directory of an async Distributed table (system.distribution_queue).
+		"data_path",
 		"partition", "origin", "replica_name", "comment", "source",
 		// Schema-graph edges and the MV write target (system.tables), and the
 		// view column of system.view_refreshes — all `db` / `table` names.

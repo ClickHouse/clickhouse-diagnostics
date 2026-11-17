@@ -1529,6 +1529,22 @@ def analyse(base: str):
         codes = Counter(num(r.get("exception_code")) for r in ddl if num(r.get("exception_code")))
         if codes:
             add("info", "ddl", "DDL queue exceptions", ", ".join(f"{ERROR_NAMES.get(c, c)}={n}" for c, n in codes.most_common(5)), "HC-3.11")
+    # Async Distributed insert directories. Same predicate as
+    # alerts/distribution_queue_backlog.yaml: data_files > 0 alone is the
+    # flush buffer of a healthy table, not a backlog. One row, one directory.
+    dq = read_jsonl(first("system.distribution_queue_*.jsonl", base))
+    if dq:
+        stuck = [r for r in dq if num(r.get("is_blocked")) == 1
+                 or (num(r.get("broken_data_files")) or 0) > 0
+                 or (num(r.get("error_count")) or 0) > 0]
+        if stuck:
+            hosts = Counter((r.get("hostname") or "this node") for r in stuck)
+            noun = "directory" if len(stuck) == 1 else "directories"
+            add("warning", "distributed",
+                f"{len(stuck)} distributed-queue {noun} blocked, broken, or failing to send",
+                "hosts: " + ", ".join(f"{h}×{n}" for h, n in hosts.most_common(4))
+                + "; data_files alone is not a backlog",
+                "HC-3.26")
     bsl = read_jsonl(first("system.blob_storage_log_7_days_*.jsonl", base))
     if bsl:
         failed = sum(num(r.get("count")) or 0 for r in bsl if num(r.get("failed")))
