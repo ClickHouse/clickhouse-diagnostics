@@ -4,8 +4,8 @@ severity: warning
 description: |
   An async Distributed table writes each insert into a local directory, one
   per shard, and a background thread sends those files on. This rule fires
-  when a directory has stopped sending, holds files the server could not
-  parse, or has already failed to send.
+  when sends from a directory are paused, it holds files the server could
+  not parse, or it has already failed to send.
 
   One row is one shard directory. Two directories of the same table are two
   findings — they are not summed.
@@ -16,10 +16,19 @@ description: |
   error_count > 0. last_exception is the text of the last send failure
   (often empty when the directory is merely blocked).
 
+  is_blocked = 1 is not a failure: it is set by SYSTEM STOP DISTRIBUTED
+  SENDS (the table's sends are paused by an operator). It still fires,
+  because nothing leaves the directory until SYSTEM START DISTRIBUTED SENDS.
+
   Left alone, the directory grows until inserts fail with code 574
   (DISTRIBUTED_TOO_MANY_PENDING_BYTES, bytes_to_throw_insert). This is not
   the replication queue and not the distributed DDL queue: the files are
-  per-node local state, so a cloud run reads every replica.
+  per-node local state.
+
+  Collected on-prem and gov only. A Cloud service is one shard, so
+  Distributed tables are rare there and a per-replica read in the
+  essential tier would cost more than it finds; a cloud run reports the
+  rule as not applicable.
 tags:
   - distributed
   - reliability
@@ -71,4 +80,4 @@ investigate:
       ORDER BY is_blocked DESC, broken_data_files DESC, error_count DESC
       LIMIT 50
 
-message: "{hostname} {database}.{table} ({data_path}): is_blocked={is_blocked}, broken_data_files={broken_data_files}, error_count={error_count}, data_files={data_files} — {last_exception}"
+message: "{hostname} {database}.{table} ({data_path}): is_blocked={is_blocked} (1 = SYSTEM STOP DISTRIBUTED SENDS), broken_data_files={broken_data_files}, error_count={error_count}, data_files={data_files} — {last_exception}"

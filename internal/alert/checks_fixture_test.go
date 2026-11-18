@@ -167,12 +167,12 @@ func TestCheck_DistributionQueueBacklog(t *testing.T) {
 	if rows := runCheck(t, "distribution_queue_backlog", "onprem", onlyFiles); len(rows) != 0 {
 		t.Fatalf("data_files alone is not a backlog: %v", rows)
 	}
-	// Cloud: the row's hostname, not the serving replica in system.version.
-	cloud := fixture(t, map[string][]row{"system.distribution_queue": {
+	// Gov: the row's (hashed) hostname, not the node in system.version.
+	gov := fixture(t, map[string][]row{"system.distribution_queue": {
 		{"hostname": "r9", "database": "db", "table": "t", "data_path": "/data/t/s1/", "is_blocked": 0, "error_count": "1", "broken_data_files": "0", "data_files": "1", "last_exception": "timeout"},
 	}})
-	if rows := runCheck(t, "distribution_queue_backlog", "cloud", cloud); len(rows) != 1 || rows[0]["hostname"] != "r9" {
-		t.Fatalf("cloud hostname: %v", rows)
+	if rows := runCheck(t, "distribution_queue_backlog", "gov", gov); len(rows) != 1 || rows[0]["hostname"] != "r9" {
+		t.Fatalf("gov hostname: %v", rows)
 	}
 	// The worst 50, by the same order as the SQL.
 	var many []row

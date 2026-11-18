@@ -36,7 +36,7 @@ The tool targets **ClickHouse 22.8 and newer** for on-prem servers. Root-level q
 
 | Feature | Added in | Gated at |
 |---|---|---|
-| `system.distribution_queue` columns in the root collector (`database`, `table`, `data_path`, `is_blocked`, `error_count`, `data_files`, `data_compressed_bytes`, `broken_data_files`, `broken_data_compressed_bytes`, `last_exception`) | 22.8 (the floor; the table is older) | root files in every mode — no version subdirectory. `last_exception_time` was added in 23.3 and is **not** selected by the root query |
+| `system.distribution_queue` columns in the root collector (`database`, `table`, `data_path`, `is_blocked`, `error_count`, `data_files`, `data_compressed_bytes`, `broken_data_files`, `broken_data_compressed_bytes`, `last_exception`) | 22.8 (the floor; the table is older) | root files in onprem and gov (not collected in cloud) — no version subdirectory. `last_exception_time` was added in 23.3 and is **not** selected by the root query |
 | `ARRAY JOIN` over a `Map` (`ProfileEvents`) | after 22.8 | roots use `mapKeys()`/`mapValues()` (all versions) |
 | `system.asynchronous_insert_log` table | 22.10 | `queries.{onprem,gov}/22.10.1.0/` |
 | `system.disks.unreserved_space` | 22.10 | `queries.{onprem,gov}/22.10.1.0/` |

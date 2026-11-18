@@ -345,8 +345,8 @@ func checkDistributionQueueBacklog(b *bundle.Bundle, mode string) ([]row, error)
 		}
 		return hits[i].Int("error_count") > hits[j].Int("error_count")
 	})
-	// Cloud rows already carry hostName(). Onprem files do not; the node
-	// in system.version is that host. Gov hashes hostName() into the row.
+	// Gov rows carry a hashed hostName(). Onprem files do not; the node in
+	// system.version is that host. Not collected in cloud.
 	host := serverHost(b)
 	var out []row
 	for i, r := range hits {
