@@ -18,6 +18,12 @@ import (
 // dashboard generator, and the new query-analysis collector. If you
 // add a system table to one of those code paths, update this map.
 //
+// system.distribution_queue is not in this list either: each node stores
+// its own shard directories on local disk. It is collected on-prem and gov
+// only (a Cloud service is one shard). A cloud collector, if ever added,
+// must fan out with clusterAllReplicas and keep hostName() — wrapping it
+// as shared would hide every replica except the one that answered.
+//
 // Notable exception: system.dictionaries is NOT in this list even
 // though the dictionary DEFINITIONS are shared via Keeper in CH Cloud.
 // The reason is the runtime state columns (status, bytes_allocated,

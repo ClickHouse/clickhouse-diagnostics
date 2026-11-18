@@ -188,6 +188,15 @@ Windows: `*_7_days` files cover the last 7 days (or `-from/-to`); `system.text_l
 **Traps:** `database`, `table`, `replica_name`, `postpone_reason` and `last_exception` are hashed in gov (empty stays empty, so "has an exception" is still visible); `num_tries` is not hashed.
 **Pairs with:** `system.replicas`, `configuration/` (`background_fetches_pool_size`, `<interserver_http_host>`), `system.clusters.errors_count`.
 
+### system.distribution_queue
+**Why we run it:** an async Distributed table writes each insert into a local directory, one per shard, and sends those files in the background. A directory that is blocked, holds broken files, or keeps failing to send is invisible in the replication queue and in the DDL queue, and it is what turns into code 574 once it grows past `bytes_to_throw_insert`.
+**Question:** is any shard directory blocked, broken, or failing to send — and which table and directory?
+**Read first:** rows with `is_blocked = 1`, `broken_data_files > 0` or `error_count > 0`; `last_exception` on those rows; `data_files` and `data_compressed_bytes` as how much is waiting. One row is one shard directory — do not add a table's directories into one backlog.
+**Healthy looks like:** empty, or directories with `is_blocked = 0`, `broken_data_files = 0` and `error_count = 0`. Files waiting for the next flush (`data_files > 0` with those three at zero) are normal.
+**Red flags:** `is_blocked = 1`, `broken_data_files > 0` or `error_count > 0` (warning, HC-3.26, alert `distribution_queue_backlog`). Read `last_exception` (209/210/279/519, P-44). `data_files > 0` alone is not a backlog. Many such directories, or `data_compressed_bytes` near `bytes_to_throw_insert`, precede 574 `DISTRIBUTED_TOO_MANY_PENDING_BYTES`.
+**Traps:** a snapshot, no time window; `last_exception_time` (added in 23.3) is not collected; not `system.replication_queue` and not `system.distributed_ddl_queue`; the files are per-node; not collected in cloud (a service is one shard); `is_blocked = 1` is an operator's `SYSTEM STOP DISTRIBUTED SENDS`, not a send failure; gov hashes `database`, `table`, `hostname`, `data_path` and `last_exception`, and an empty `last_exception` stays empty.
+**Pairs with:** `system.clusters.errors_count`, `system.errors` 574/279/209/210, `configuration/` `<remote_servers>`.
+
 ### system.processes
 **Why we run it:** what was running at collection time — a stuck `BACKUP`, `OPTIMIZE FINAL` or runaway query is otherwise invisible in aggregated logs.
 **Question:** what was running at the moment of collection?
