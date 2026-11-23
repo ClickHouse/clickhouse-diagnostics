@@ -20,6 +20,7 @@ func init() {
 	RegisterCheck("detached_parts_exist", checkDetachedParts)
 	RegisterCheck("crash_log_entries", checkCrashLog)
 	RegisterCheck("replication_queue_errors", checkReplicationQueueErrors)
+	RegisterCheck("distribution_queue_backlog", checkDistributionQueueBacklog)
 	RegisterCheck("mutation_running_too_long", checkMutationsTooLong)
 	RegisterCheck("replica_readonly", checkReplicaReadonly)
 }
@@ -316,4 +317,91 @@ func checkReplicaReadonly(b *bundle.Bundle, mode string) ([]row, error) {
 		out = append(out, res)
 	}
 	return out, nil
+}
+
+// distribution_queue_backlog: an async Distributed insert queue (one table,
+// one remote shard) that is failing to send now, holds files whose rows
+// never reached the shard, or was stopped by hand with files waiting.
+//
+// error_count is not a trigger: the server never resets it — it is halved
+// every 5 minutes, and only while files are being sent — so a queue that
+// recovered keeps it, and an idle one keeps it forever. last_exception is
+// cleared by the next successful send, so it (has_exception in gov) is the
+// "failing now" signal. data_files alone is the flush buffer.
+//
+// The worst 50: failing first, then broken, then stopped, each by bytes
+// waiting. A missing file is NotCollected (below 23.3 there is no
+// collector); an empty one is clean.
+func checkDistributionQueueBacklog(b *bundle.Bundle, mode string) ([]row, error) {
+	rows, err := b.Rows("system.distribution_queue")
+	if err != nil {
+		return nil, err
+	}
+	state := func(r bundle.Row) (string, int) {
+		switch {
+		case r.Str("last_exception") != "" || r.Int("has_exception") == 1:
+			return "failing", 0
+		case r.Uint("broken_data_files") > 0:
+			return "broken", 1
+		case r.Int("is_blocked") == 1 && r.Uint("data_files") > 0:
+			return "stopped", 2
+		}
+		return "", 3
+	}
+	var hits []bundle.Row
+	for _, r := range rows {
+		if s, _ := state(r); s != "" {
+			hits = append(hits, r)
+		}
+	}
+	sort.SliceStable(hits, func(i, j int) bool {
+		_, a := state(hits[i])
+		_, c := state(hits[j])
+		if a != c {
+			return a < c
+		}
+		return hits[i].Uint("data_compressed_bytes") > hits[j].Uint("data_compressed_bytes")
+	})
+	host := serverHost(b)
+	var out []row
+	for i, r := range hits {
+		if i == 50 {
+			break
+		}
+		s, _ := state(r)
+		out = append(out, row{
+			"hostname":            host,
+			"database":            r.Str("database"),
+			"table":               r.Str("table"),
+			"data_path":           r.Str("data_path"),
+			"state":               s,
+			"is_blocked":          r.Int("is_blocked"),
+			"error_count":         r.Int("error_count"),
+			"data_files":          counter(r.Uint("data_files")),
+			"pending":             pendingSize(r.Uint("data_compressed_bytes")),
+			"broken_data_files":   counter(r.Uint("broken_data_files")),
+			"last_exception_code": r.Int("last_exception_code"),
+			"last_exception_time": r.Str("last_exception_time"),
+			"last_exception":      r.Str("last_exception"),
+		})
+	}
+	return out, nil
+}
+
+// underflowed is a queue counter the server decremented below zero: values
+// near 2^64 were seen after an upgrade, and are a counter bug, not a backlog.
+func underflowed(n uint64) bool { return n >= 1<<62 }
+
+func counter(n uint64) int64 {
+	if underflowed(n) {
+		return -1
+	}
+	return int64(n)
+}
+
+func pendingSize(n uint64) string {
+	if underflowed(n) {
+		return "counter underflow"
+	}
+	return formatReadableSize(float64(n))
 }

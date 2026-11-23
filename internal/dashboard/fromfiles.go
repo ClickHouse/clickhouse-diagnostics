@@ -189,6 +189,11 @@ func (g *Generator) collectFromFiles() map[string]interface{} {
 		p["async_inserts"] = rows{}
 	}
 
+	// ── Distributed inserts: the hours from metric_log (24.1+), the queues now ──
+	p["distributed_hourly"] = distributedHourly(ml)
+	dq, _ := g.filesRows("distributed queues", "system.distribution_queue")
+	p["distribution_queue"] = distributionQueuePanel(dq)
+
 	p["windows"] = map[string]string{"7d": g.windowLabel("last 7 days"), "3d": g.windowLabel("last 3 days")}
 
 	g.collectAnalysisFromFiles(p)
@@ -1378,4 +1383,97 @@ func sortBy(rs rows, cols ...string) {
 		}
 		return false
 	})
+}
+
+// distributedHourly is async Distributed inserts per hour from
+// metric_log_7_days (the 24.1+ rung names the columns): the most files and
+// bytes waiting, broken files, and failed sends / delayed / refused inserts.
+// Empty when the file has no such columns (an older server) or they were
+// never non-zero — a server without async Distributed inserts shows nothing.
+func distributedHourly(ml []bundle.Row) rows {
+	out := rows{}
+	active := false
+	for _, r := range ml {
+		if _, ok := r["max_distributed_files"]; !ok {
+			return rows{}
+		}
+		h := map[string]interface{}{"time": r.Str("time"),
+			"files": r.Int("max_distributed_files"), "bytes": r.Int("max_distributed_bytes"),
+			"broken_files": r.Int("max_broken_distributed_files"), "send_failures": r.Int("distributed_send_failures"),
+			"delayed": r.Int("distributed_delayed_inserts"), "rejected": r.Int("distributed_rejected_inserts")}
+		for k, v := range h {
+			if k != "time" && v.(int64) != 0 {
+				active = true
+			}
+		}
+		out = append(out, h)
+	}
+	if !active {
+		return rows{}
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i]["time"].(string) < out[j]["time"].(string) })
+	return out
+}
+
+// distributionQueuePanel lists the queues of system.distribution_queue that
+// are not idle, worst first. failing / broken / stopped are the alert's
+// states (distribution_queue_backlog); the table adds the ones it does not
+// fire on: counters near 2^64 (a decrement below zero — a server bug seen
+// after an upgrade, not a backlog), files waiting (the flush buffer), and
+// recovered (failed sends counted, none failing now — error_count is never
+// reset). At most 200 rows.
+func distributionQueuePanel(dq []bundle.Row) rows {
+	rank := map[string]int{"failing": 0, "broken": 1, "stopped": 2, "counter underflow": 3, "waiting": 4, "recovered": 5}
+	const underflow = uint64(1) << 62
+	type q struct {
+		r     bundle.Row
+		state string
+	}
+	var qs []q
+	for _, r := range dq {
+		files, bytes := r.Uint("data_files"), r.Uint("data_compressed_bytes")
+		var s string
+		switch {
+		case r.Str("last_exception") != "" || r.Int("has_exception") == 1:
+			s = "failing"
+		case r.Uint("broken_data_files") > 0:
+			s = "broken"
+		case r.Int("is_blocked") == 1 && files > 0:
+			s = "stopped"
+		case files >= underflow || bytes >= underflow:
+			s = "counter underflow"
+		case files > 0:
+			s = "waiting"
+		case r.Int("error_count") > 0:
+			s = "recovered"
+		default:
+			continue
+		}
+		qs = append(qs, q{r, s})
+	}
+	sort.SliceStable(qs, func(i, j int) bool {
+		if rank[qs[i].state] != rank[qs[j].state] {
+			return rank[qs[i].state] < rank[qs[j].state]
+		}
+		return qs[i].r.Uint("data_compressed_bytes") > qs[j].r.Uint("data_compressed_bytes")
+	})
+	out := rows{}
+	for i, x := range qs {
+		if i == 200 {
+			break
+		}
+		r := x.r
+		pending := readableSize(float64(r.Uint("data_compressed_bytes")))
+		if x.state == "counter underflow" {
+			pending = "—"
+		}
+		out = append(out, map[string]interface{}{
+			"database": r.Str("database"), "table": r.Str("table"), "state": x.state,
+			"is_blocked": r.Int("is_blocked"), "data_files": r.Str("data_files"), "pending": pending,
+			"broken_data_files": r.Int("broken_data_files"), "error_count": r.Int("error_count"),
+			"last_exception_code": r.Int("last_exception_code"), "last_exception_time": r.Str("last_exception_time"),
+			"last_exception": r.Str("last_exception"),
+		})
+	}
+	return out
 }

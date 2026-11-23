@@ -213,6 +213,11 @@ func TestFindVersionedFiles_RealRepoDirs(t *testing.T) {
 		"queries.onprem/system.view_refreshes.sql": true,
 		"queries.gov/system.view_refreshes.sql":    true,
 		"queries.cloud/system.view_refreshes.sql":  true,
+		// system.distribution_queue is collected from 23.3, where
+		// last_exception_time arrived; older servers skip it. Not on cloud:
+		// inserts there are synchronous, so there is no async queue to read.
+		"queries.onprem/system.distribution_queue.sql": true,
+		"queries.gov/system.distribution_queue.sql":    true,
 		// system.database_replicas arrived in 25.9; it replaces
 		// system.clusters.is_active, which made the server ask every
 		// Replicated-database replica for its status.
@@ -241,6 +246,8 @@ func TestFindVersionedFiles_RealRepoDirs(t *testing.T) {
 		// and has no root twin on purpose — on an older server the check is
 		// not applicable, not failed.
 		"alerts/keeper_xid_renewal_due.yaml": true,
+		// Its source, system.distribution_queue, is collected from 23.3 only.
+		"alerts/distribution_queue_backlog.yaml": true,
 	}
 	dirs := map[string]string{
 		"../../queries.onprem":         ".sql",

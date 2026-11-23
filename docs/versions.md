@@ -36,6 +36,8 @@ The tool targets **ClickHouse 22.8 and newer** for on-prem servers. Root-level q
 
 | Feature | Added in | Gated at |
 |---|---|---|
+| `system.distribution_queue.last_exception_time` | 23.3 | `queries.{onprem,gov}/23.3.1.0/system.distribution_queue.sql`; `alerts/23.3.1.0/distribution_queue_backlog.yaml` (no root files — not collected and not applicable below 23.3; not on cloud) |
+| `CurrentMetric_DistributedBytesToInsert`, `BrokenDistributedBytesToInsert` (23.5), `ProfileEvent_DistributedAsyncInsertionFailures` (24.1) | 23.5 / 24.1 | `queries.{onprem,gov}/24.1.1.0/system.metric_log_7_days.sql`: the root query plus the Distributed columns, named (no pattern) — older servers keep the root file, without them |
 | `ARRAY JOIN` over a `Map` (`ProfileEvents`) | after 22.8 | roots use `mapKeys()`/`mapValues()` (all versions) |
 | `system.asynchronous_insert_log` table | 22.10 | `queries.{onprem,gov}/22.10.1.0/` |
 | `system.disks.unreserved_space` | 22.10 | `queries.{onprem,gov}/22.10.1.0/` |

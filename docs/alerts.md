@@ -104,13 +104,14 @@ In `message:`, `{column_name}` is replaced with the value from each result row. 
 
 ### Bundled alert rules
 
-The repo ships with 18 alert rules in `alerts/` (plus version-gated overrides in `alerts/<version>/`, and one rule that exists only there — `keeper_xid_renewal_due`, 24.3+). They are intended as a starting point — adjust thresholds to match your workload.
+The repo ships with 18 alert rules in `alerts/` (plus version-gated overrides in `alerts/<version>/`, and two rules that exist only there — `distribution_queue_backlog`, 23.3+, and `keeper_xid_renewal_due`, 24.3+). They are intended as a starting point — adjust thresholds to match your workload.
 
 | Rule | Severity | Fires when |
 |---|---|---|
 | `crash_log_entries` | critical | `system.crash_log` is non-empty (server crashed at least once) |
 | `replica_readonly` | critical | A replicated table is in read-only mode (lost Keeper session, disk full, network partition) |
 | `replication_queue_errors` | critical | Replication queue entries have a non-empty `last_exception` |
+| `distribution_queue_backlog` | warning | *(23.3+, onprem/gov)* An async Distributed insert queue (one table, one remote shard) is **failing** — `last_exception` set, cleared by the next successful send — holds **broken** files (rows that never reached the shard), or was **stopped** with `SYSTEM STOP DISTRIBUTED SENDS` while files wait. `error_count` is not a trigger: the server never resets it, so a queue that recovered keeps its count. Files waiting alone are the flush buffer. The message carries the error code, which names the fix |
 | `disk_space_low` | critical | A disk that **holds user data** has less than 15% free space — **on any replica** in cloud mode, with the reporting host named in the message. A disk is counted when some user table's storage policy names it (`system.storage_policies` × `system.tables.storage_policy`); one that none does is not data capacity — on a managed service it is the local filesystem cache, sized to be filled, which otherwise fired this rule on a healthy service at 14.7% free. The filter is evidence, not a mode check, so a self-managed cluster collected in cloud mode still raises a critical for a hot local data disk. No user table with a policy = every disk judged |
 | `keeper_health` | critical | The two-signal Keeper health test per hour over 7 days: more than 1000 `ZooKeeperHardwareExceptions` **and** `ZooKeeperTransactions` below 50 % of the 7-day median — Keeper effectively unavailable (low traffic alone never fires: an idle hour is not an outage); catches outages that never reached `query_log` |
 | `keeper_connection_blips` | warning | More than 1000 `ZooKeeperHardwareExceptions` in an hour while Keeper traffic stayed at or above 50 % of usual (a positive 7-day median) — a session lost and re-established |

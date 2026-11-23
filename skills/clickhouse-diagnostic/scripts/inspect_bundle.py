@@ -457,6 +457,75 @@ def znode_counts(base: str) -> list:
     return out
 
 
+def distribution_queue_checks(base: str, add) -> None:
+    """HC-3.26: the send queues of async Distributed inserts.
+
+    system.distribution_queue (23.3+, onprem/gov) is a snapshot: one row per
+    Distributed table and remote shard. A queue is failing when last_exception
+    is set (cleared by the next successful send; gov: has_exception) — every
+    later file waits behind the failing one. error_count is never reset (only
+    halved every 5 min while files are sent), so it is context; data_files
+    alone is the flush buffer. metric_log_7_days (24.1+ rung) adds the hours.
+    """
+    dq = read_jsonl(first("system.distribution_queue_*.jsonl", base))
+    src = "system.distribution_queue"
+    if dq:
+        big = 1 << 62
+
+        def name(r):
+            return f"{r.get('database')}.{r.get('table')}"
+
+        def failing(r):
+            return bool(r.get("last_exception")) or num(r.get("has_exception")) == 1
+
+        fail = [r for r in dq if failing(r)]
+        fail.sort(key=lambda r: -(num(r.get("data_compressed_bytes")) or 0))
+        if fail:
+            codes = Counter(num(r.get("last_exception_code")) or 0 for r in fail)
+            worst = fail[0]
+            files, size = num(worst.get("data_files")) or 0, num(worst.get("data_compressed_bytes")) or 0
+            add("warning", "distributed",
+                f"{len(fail)} Distributed insert queue(s) failing — every file waits behind the one that fails",
+                f"worst {name(worst)}: {files} file(s) waiting ({human(size)}), {worst.get('error_count')} failed sends, "
+                f"last at {worst.get('last_exception_time') or '?'}; codes: "
+                + ", ".join(f"{ERROR_NAMES.get(c, c)}×{n}" for c, n in codes.most_common(4))
+                + f" — {src} last_exception; the fix depends on the code (P-69)", "HC-3.26")
+        broken = [r for r in dq if (num(r.get("broken_data_files")) or 0) > 0]
+        if broken:
+            add("warning", "distributed", f"{len(broken)} queue(s) with broken files — their rows never reached the shard",
+                ", ".join(f"{name(r)} {r.get('broken_data_files')} file(s)" for r in broken[:4])
+                + f" — {src} broken_data_files; files in <data_path>/broken/ stay until removed (P-69)", "HC-3.26")
+        stopped = [r for r in dq if not failing(r) and num(r.get("is_blocked")) == 1 and (num(r.get("data_files")) or 0) > 0]
+        if stopped:
+            add("warning", "distributed", f"{len(stopped)} queue(s) stopped by hand with files waiting (SYSTEM STOP DISTRIBUTED SENDS)",
+                ", ".join(f"{name(r)} {r.get('data_files')} file(s)" for r in stopped[:4]) + f" — {src} is_blocked", "HC-3.26")
+        under = [r for r in dq if (num(r.get("data_files")) or 0) >= big or (num(r.get("data_compressed_bytes")) or 0) >= big]
+        if under:
+            add("info", "distributed", f"{len(under)} queue(s) with a counter near 2^64 — a counter decremented below zero (a server bug seen after upgrades), not a backlog",
+                ", ".join(name(r) for r in under[:4]) + f" — {src} data_files / data_compressed_bytes", "HC-3.26")
+        recovered = [r for r in dq if not failing(r) and (num(r.get("error_count")) or 0) > 0
+                     and (num(r.get("data_files")) or 0) == 0 and not (num(r.get("broken_data_files")) or 0)]
+        if recovered:
+            add("info", "distributed", f"{len(recovered)} queue(s) recovered — failed sends counted, none failing now (error_count is never reset, so it is not a symptom)",
+                ", ".join(f"{name(r)}: {r.get('error_count')}, last {r.get('last_exception_time') or '?'}" for r in recovered[:4]), "HC-3.26")
+        pending = sum(num(r.get("data_compressed_bytes")) or 0 for r in dq if (num(r.get("data_compressed_bytes")) or 0) < big)
+        disks = read_jsonl(first("system.disks_*.jsonl", base))
+        local = [num(d.get("free_bytes")) for d in disks if str(d.get("type", "")).lower() == "local" and num(d.get("free_bytes")) is not None]
+        if pending and local and pending >= 0.1 * min(local):
+            add("warning", "distributed", f"Distributed queues waiting to be sent: {human(pending)} — free on the fullest disk: {human(min(local))}",
+                f"{src} data_compressed_bytes against system.disks free_bytes; the .bin files live on the table's disk", "HC-3.26")
+    ml = read_jsonl(first("system.metric_log_7_days_*.jsonl", base))
+    if ml and "max_distributed_files" in ml[0]:
+        rejected = sum(num(r.get("distributed_rejected_inserts")) or 0 for r in ml)
+        delayed = sum(num(r.get("distributed_delayed_inserts")) or 0 for r in ml)
+        if rejected:
+            add("warning", "distributed", f"{rejected} insert(s) refused with 574 DISTRIBUTED_TOO_MANY_PENDING_BYTES",
+                "system.metric_log_7_days distributed_rejected_inserts — a queue passed the table's bytes_to_throw_insert", "HC-3.26")
+        if delayed:
+            add("info", "distributed", f"{delayed} insert(s) delayed by bytes_to_delay_insert",
+                "system.metric_log_7_days distributed_delayed_inserts", "HC-3.26")
+
+
 def lag_and_schedule_pool_checks(base: str, add) -> None:
     """HC-3.24 (replication delay per host per hour) and HC-3.25 (schedule
     pool task types)."""
@@ -1635,6 +1704,7 @@ def analyse(base: str):
                 "hours: " + ", ".join(sorted(loss_hours)[:8]), "HC-3.10")
     aggregated_zk_checks(base, add)
     lag_and_schedule_pool_checks(base, add)
+    distribution_queue_checks(base, add)
     config_merge_checks(base, add)
     th = read_jsonl(first("system.text_log_histogram_1_day_*.jsonl", base))
     if th:

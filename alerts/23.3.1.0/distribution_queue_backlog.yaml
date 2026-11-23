@@ -1,0 +1,102 @@
+# 23.3 rung only: the collector it reads (system.distribution_queue with
+# last_exception_time) exists from 23.3. No root rule — on older servers the
+# rule is not applicable, not failed. Not on cloud: inserts there are
+# synchronous, so there is no async queue.
+name: distribution_queue_backlog
+title: "Distributed insert queue failing, broken or stopped"
+severity: warning
+description: |
+  An INSERT into a Distributed table without distributed_foreground_insert
+  writes the rows for each remote shard into a file in a local directory, one
+  directory per shard, and a background task sends the files on in order.
+  This rule reports a directory (one row = one table and one shard) that:
+
+    * failing: its last send failed and nothing has succeeded since
+      (last_exception is cleared by the next successful send). The files
+      after the failing one wait behind it, so the directory grows until the
+      cause is fixed. The error code names the cause — 107 FILE_DOESNT_EXIST
+      (a queued file vanished; the queue never moves past it), 16
+      NO_SUCH_COLUMN_IN_TABLE (the destination changed while files were
+      queued), 285 TOO_FEW_LIVE_REPLICAS (insert_quorum is saved in each
+      file, so every retry fails), 279 / 210 (the shard is unreachable).
+    * broken: files the server could not read were moved to broken/. Their
+      rows never reached the shard, and they stay counted until removed.
+    * stopped: sends were stopped with SYSTEM STOP DISTRIBUTED SENDS and
+      files are waiting.
+
+  error_count is context, not a trigger: the server never resets it (it is
+  halved every 5 minutes, and only while files are being sent), so a queue
+  that recovered keeps its count. Files waiting with none of the above are
+  the normal flush buffer.
+
+  Left alone a failing queue fills the disk with .bin files, and inserts fail
+  with 574 DISTRIBUTED_TOO_MANY_PENDING_BYTES once the table sets
+  bytes_to_throw_insert.
+tags:
+  - distributed
+  - reliability
+
+modes: [onprem, gov]
+
+# Evaluated by the Go check over the files already collected (no second
+# query to the server). query: below is the same test in SQL, for the
+# customer to run live; the check mirrors it.
+check: go:distribution_queue_backlog
+source:
+  - system.distribution_queue
+query: |
+  SELECT
+    hostName() AS hostname,
+    database,
+    table,
+    data_path,
+    multiIf(last_exception != '', 'failing', broken_data_files > 0, 'broken', 'stopped') AS state,
+    is_blocked,
+    error_count,
+    data_files,
+    formatReadableSize(data_compressed_bytes) AS pending,
+    broken_data_files,
+    if(position(last_exception, 'Code: ') > 0,
+       toUInt32OrZero(splitByNonAlpha(substring(last_exception, position(last_exception, 'Code: ') + 6))[1]),
+       0) AS last_exception_code,
+    if(last_exception_time > toDateTime(0), toString(last_exception_time), '') AS last_exception_time,
+    substring(last_exception, 1, 300) AS last_exception
+  FROM {sys.distribution_queue}
+  WHERE last_exception != ''
+     OR broken_data_files > 0
+     OR (is_blocked AND data_files > 0)
+  ORDER BY last_exception = '', broken_data_files = 0, data_compressed_bytes DESC
+  LIMIT 50
+
+# Follow-ups the dashboard shows under a fired alert, for the customer to run
+# on their own cluster (never run by the tool; read-only, validated like query).
+investigate:
+  - title: "Every queue on this node, the largest backlog first"
+    query: |
+      SELECT database, table, data_path, is_blocked, error_count, data_files,
+             formatReadableSize(data_compressed_bytes) AS pending,
+             broken_data_files, formatReadableSize(broken_data_compressed_bytes) AS broken,
+             last_exception_time, substring(last_exception, 1, 300) AS last_exception
+      FROM system.distribution_queue
+      ORDER BY data_compressed_bytes DESC
+      LIMIT 50
+  - title: "How long each queue has been failing (server log)"
+    # The queue logs as <database>.<table>.DistributedInsertQueue.<disk>; the
+    # first error says when the failure began, which last_exception_time
+    # (the latest one) cannot.
+    query: |
+      SELECT logger_name, min(event_time) AS first_error, max(event_time) AS last_error,
+             count() AS errors, any(substring(message, 1, 300)) AS example
+      FROM system.text_log
+      WHERE logger_name LIKE '%.DistributedInsertQueue.%' AND level IN ('Error', 'Warning')
+        AND event_date >= today() - 7
+      GROUP BY logger_name
+      ORDER BY first_error
+      LIMIT 50
+  - title: "Bytes waiting against free disk space"
+    query: |
+      SELECT formatReadableSize(sum(data_compressed_bytes)) AS pending,
+             (SELECT formatReadableSize(min(free_space)) FROM system.disks) AS least_free_disk
+      FROM system.distribution_queue
+
+message: "{database}.{table} ({data_path}): {state} — {data_files} file(s) waiting ({pending}), {broken_data_files} broken, {error_count} failed sends, last failure {last_exception_time} code {last_exception_code} — {last_exception}"

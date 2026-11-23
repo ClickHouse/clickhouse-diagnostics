@@ -96,7 +96,7 @@ Where codes appear in the bundle: `system.errors` (`code`, cumulative `value` si
 | 507 | UNABLE_TO_SKIP_UNUSED_SHARDS | `force_optimize_skip_unused_shards` set and the query cannot prune shards. | | |
 | 519 | NO_REMOTE_SHARD_AVAILABLE | Distributed query found no live replica for a shard. | `system.clusters.errors_count` | P-44 |
 | 279 | ALL_CONNECTION_TRIES_FAILED | Distributed/remote query could not reach any replica of a shard. | `system.clusters` | P-44 |
-| 574 | DISTRIBUTED_TOO_MANY_PENDING_BYTES | Async `Distributed` insert backlog exceeded `bytes_to_throw_insert`. | | P-44 |
+| 574 | DISTRIBUTED_TOO_MANY_PENDING_BYTES | Async `Distributed` insert backlog exceeded `bytes_to_throw_insert`. | `system.distribution_queue` (`last_exception`, `data_files`, HC-3.26); `metric_log_7_days` `distributed_rejected_inserts` (24.1+) | P-69, P-44 |
 | 156 / 36 | DICTIONARIES_WAS_NOT_LOADED (+ source errors) | Dictionary failed to load: source unreachable, bad credentials, schema mismatch. | `system.dictionaries.status/last_exception` | HC-Dict |
 
 ## Network, files, OS

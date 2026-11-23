@@ -56,6 +56,7 @@ Language rule when you match a pattern: "the evidence is **consistent with** P-n
 | P-66 | Early 25.10 Keeper-client defects: slow Multi, CreateIfNotExists hangs, minutes to reconnect | aggregated_zookeeper_log_by_hour_2_days latency, text_log_keeper_1_day, version, server_settings |
 | P-67 | Slow Remove/Check/Create while partition operations sync very many small parts | aggregated_zookeeper_log_by_hour_2_days latency, part_log, query_log_details, columns |
 | P-68 | One background task looping on Keeper (retrying a fetch or merge step) | aggregated_zookeeper_log_by_hour_2_days (component), _paths_1_day, replication_queue, replicas |
+| P-69 | An async Distributed insert queue stops at one file (107 missing file, 16 changed destination, 285 quorum in the file) and everything behind it waits | distribution_queue (last_exception, data_files), metric_log_7_days Distributed columns, disks, logs |
 
 ---
 
@@ -425,6 +426,22 @@ Language rule when you match a pattern: "the evidence is **consistent with** P-n
 **Fix / mitigation:** remove the reason the task cannot progress — `SYSTEM START FETCHES` / `START MERGES` if they were stopped, fix the failing fetch (P-41 / P-44), or drop the broken queue entry's cause; the Keeper load falls with it.
 **Not to be confused with:** P-62 (also one component, but removes on dedup paths); P-59 (pools saturated — the tasks are busy, not looping).
 **Public references:** docs → `system.replication_queue`, `SYSTEM STOP/START FETCHES`, `system.aggregated_zookeeper_log`.
+
+### P-69 An async Distributed insert queue stops at one file, and everything behind it waits
+**You see:** `system.distribution_queue` → a row with `last_exception` set (gov `has_exception = 1`), a high `error_count`, `data_files` / `data_compressed_bytes` growing — thousands to millions of files, up to terabytes — while other queues of the same table drain; `metric_log_7_days` (24.1+) → `max_distributed_files` climbing hour after hour with `distributed_send_failures` every hour; disk filling with no matching growth in `system.parts`; later `distributed_rejected_inserts` (574) if `bytes_to_throw_insert` is set (HC-3.26).
+**Usually means:** the queue sends files in order and retries the first one forever. By `last_exception_code`:
+- **107 `FILE_DOESNT_EXIST`** — a queued `.bin` file vanished (a restart or volume replacement lost it, or a filesystem error during the send). The error is not one the server treats as a broken file, so it is never moved aside: the queue retries it every ~30 s, indefinitely, and rows for that shard are silently missing.
+- **16 `NO_SUCH_COLUMN_IN_TABLE`** — the destination table changed (a column renamed or dropped) while files written with the old structure were queued; a restart does not help.
+- **285 `TOO_FEW_LIVE_REPLICAS`** — the insert used `insert_quorum` larger than the live replicas; the setting is stored inside each file, so every retry and `SYSTEM FLUSH DISTRIBUTED` fail the same way.
+- **279 / 210 / 198 / 209** — the shard is unreachable or slow (P-44); the queue drains on its own once it answers.
+**Verify:** the server log of that queue (`<database>.<table>.DistributedInsertQueue.<disk>`) — the first error says how long it has been failing; `ls` of the shard directory (`data_path`) for the file named in the error; `DESC file('<data_path>/<n>.bin')` shows the structure a queued file was written with; `system.disks` free space against the pending bytes.
+**Fix / mitigation:**
+- 107: `ALTER TABLE <dist> MODIFY SETTING flush_on_detach = 0`, stop the inserts (or `SYSTEM STOP DISTRIBUTED SENDS <dist>`), `DETACH TABLE <dist>` / `ATTACH TABLE <dist>`, then set `flush_on_detach` back — the queue restarts from the files that exist. The missing file's rows are lost; re-insert them from the source if possible. It can recur on another table under the same I/O pressure.
+- 16: lossless — create a table with the old structure and a Distributed table over it, move the stuck files into its directory with the server stopped, `SYSTEM FLUSH DISTRIBUTED`, then `INSERT … SELECT` into the real table; lossy — `TRUNCATE TABLE <dist>` drops only the queue.
+- 285: `TRUNCATE TABLE <dist>` (drops only the queued files) and re-insert with a quorum the cluster can meet; `SYSTEM FLUSH DISTRIBUTED` will not help.
+- Prevent: insert synchronously where latency allows (`distributed_foreground_insert = 1`), alert on `DistributedFilesToInsert` and on a non-empty `last_exception`, never change a destination table's structure while its Distributed queue holds files.
+**Not to be confused with:** a queue that recovered (`error_count > 0`, `last_exception` empty — the count is never reset); files waiting between flushes; `data_files` near 2^64 (a counter bug after an upgrade, not a backlog); P-41 (the replication queue) and P-57 (the DDL queue).
+**Public references:** docs → `system.distribution_queue`, Distributed table engine settings (`flush_on_detach`, `bytes_to_throw_insert`, `bytes_to_delay_insert`), `distributed_foreground_insert`, `SYSTEM FLUSH DISTRIBUTED`, `SYSTEM STOP/START DISTRIBUTED SENDS`.
 
 ---
 

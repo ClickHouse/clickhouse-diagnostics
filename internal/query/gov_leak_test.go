@@ -62,6 +62,9 @@ func TestGovQueries_NoRawIdentifiersOrDDL(t *testing.T) {
 		"database", "table", "name", "user", "path", "host_name", "host_address",
 		"last_exception", "postpone_reason", "last_error_message",
 		"partition", "origin", "replica_name", "comment", "source",
+		// The directory of a Distributed table's queue (system.distribution_queue):
+		// it embeds the table and, for old-style directories, the shard's host and user.
+		"data_path",
 		// Schema-graph edges and the MV write target (system.tables), and the
 		// view column of system.view_refreshes — all `db` / `table` names.
 		"dependencies_database", "dependencies_table",

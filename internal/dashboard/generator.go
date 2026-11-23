@@ -1447,6 +1447,39 @@ func (g *Generator) collect() map[string]interface{} {
 		p["async_inserts"] = []map[string]interface{}{}
 	}
 
+	// ── Distributed inserts (not cloud: inserts there are synchronous) ──────
+	//
+	// The same panels as from the collected files: the hours from metric_log
+	// (its Distributed columns are complete from 24.1) and the queues from
+	// system.distribution_queue (collected from 23.3, with last_exception_time).
+	p["distributed_hourly"], p["distribution_queue"] = rows{}, rows{}
+	if g.mode != "cloud" {
+		if g.hasColumn("metric_log", "ProfileEvent_DistributedAsyncInsertionFailures") {
+			p["distributed_hourly"] = distributedHourly(asRows(g.safeQuery("distributed_hourly",
+				`SELECT toString(toStartOfHour(event_time)) AS time,
+					max(CurrentMetric_DistributedFilesToInsert)         AS max_distributed_files,
+					max(CurrentMetric_DistributedBytesToInsert)         AS max_distributed_bytes,
+					max(CurrentMetric_BrokenDistributedFilesToInsert)   AS max_broken_distributed_files,
+					sum(ProfileEvent_DistributedAsyncInsertionFailures) AS distributed_send_failures,
+					sum(ProfileEvent_DistributedDelayedInserts)         AS distributed_delayed_inserts,
+					sum(ProfileEvent_DistributedRejectedInserts)        AS distributed_rejected_inserts
+				 FROM system.metric_log
+				 WHERE event_time > now() - INTERVAL 7 DAY
+				 GROUP BY time ORDER BY time`)))
+		}
+		if g.hasColumn("distribution_queue", "last_exception_time") {
+			p["distribution_queue"] = distributionQueuePanel(asRows(g.safeQuery("distribution_queue",
+				`SELECT database, table, is_blocked, error_count, data_files, data_compressed_bytes, broken_data_files,
+					if(position(last_exception, 'Code: ') > 0,
+					   toUInt32OrZero(splitByNonAlpha(substring(last_exception, position(last_exception, 'Code: ') + 6))[1]),
+					   0) AS last_exception_code,
+					substring(last_exception, 1, 500) AS last_exception,
+					if(last_exception_time > toDateTime(0), toString(last_exception_time), '') AS last_exception_time
+				 FROM system.distribution_queue
+				 LIMIT 1000`)))
+		}
+	}
+
 	// ── Query analysis (optional) ──────────────────────────────────────────
 	g.collectAnalysis(p)
 
@@ -2011,6 +2044,7 @@ footer{text-align:center;color:var(--ink-muted);font-size:var(--click-font-size-
   <a href="#sec-files" id="nav-files" style="display:none">Collected Files</a>
   <a href="#sec-server-errors">Server Errors</a>
   <a href="#sec-async-inserts" id="nav-async-inserts" style="display:none">Async Inserts</a>
+  <a href="#sec-distributed" id="nav-distributed" style="display:none">Distributed Inserts</a>
 </nav>
 
 <main>
@@ -2432,6 +2466,25 @@ footer{text-align:center;color:var(--ink-muted);font-size:var(--click-font-size-
   <div class="tbl-wrap"><div id="tbl-high-parts"></div></div>
   <div class="sub-title" style="margin-top:18px">TTL Activity (<span data-win="3d">last 7 days</span>)</div>
   <div class="tbl-wrap"><div id="tbl-ttl-activity"></div></div>
+</section>
+
+<!-- ── DISTRIBUTED INSERTS ── -->
+<section id="sec-distributed" style="display:none">
+  <h2>📮 Distributed Inserts (<span data-win="7d">last 7 days</span>)</h2>
+  <p class="host-note">An INSERT into a Distributed table without <code>distributed_foreground_insert</code> writes each remote shard's rows into a file in a local directory; a background task sends the files on, in order. A queue is <b>failing</b> when its last send failed and none has succeeded since — the files behind it wait, and the directory grows until the cause (the error code) is fixed; <b>broken</b> files were unreadable and their rows never reached the shard; <b>stopped</b> is <code>SYSTEM STOP DISTRIBUTED SENDS</code>. <b>Recovered</b> queues still count their old failures: <code>error_count</code> is never reset. Files waiting with none of these are the flush buffer.</p>
+  <div class="charts-grid">
+    <div class="chart-card">
+      <h3>Files waiting to be sent (max per hour)</h3>
+      <div class="chart-wrap h260"><canvas id="chart-distributed-files"></canvas></div>
+    </div>
+    <div class="chart-card">
+      <h3>Failed sends, delayed and refused inserts per hour</h3>
+      <div class="chart-wrap h260"><canvas id="chart-distributed-events"></canvas></div>
+    </div>
+  </div>
+  <p class="no-data" id="distributed-no-hours" style="display:none">No hourly history: the Distributed columns of metric_log are collected from 24.1.</p>
+  <h3>Queues now (system.distribution_queue)</h3>
+  <div class="tbl-wrap"><div id="tbl-distribution-queue"></div></div>
 </section>
 
 <!-- ── ASYNC INSERTS ── -->
@@ -4523,6 +4576,43 @@ document.addEventListener('DOMContentLoaded',function(){
     render();
   })();
 
+  // ── Distributed inserts (onprem; hidden when there is nothing to show) ─
+  (function(){
+    const hrs=DATA.distributed_hourly||[], qs=DATA.distribution_queue||[];
+    if(!hrs.length&&!qs.length)return;
+    document.getElementById('sec-distributed').style.display='';
+    document.getElementById('nav-distributed').style.display='';
+    if(hrs.length){
+      const N=v=>Number(v||0), labels=hrs.map(r=>r.time);
+      const warn=themeVar('--status-warning')||C[2];
+      mkChart(document.getElementById('chart-distributed-files'),{type:'line',
+        data:{labels,datasets:[
+          {label:'files waiting',data:hrs.map(r=>N(r.files)),borderColor:C[0],backgroundColor:C[0],tension:0.2,pointRadius:0,borderWidth:2},
+          {label:'broken files',data:hrs.map(r=>N(r.broken_files)),borderColor:warn,backgroundColor:warn,tension:0.2,pointRadius:0,borderWidth:2}]},
+        options:{responsive:true,maintainAspectRatio:false,interaction:{mode:'index',intersect:false},
+          plugins:{legend:{position:'top'},tooltip:{callbacks:{afterBody:it=>{const r=hrs[it[0].dataIndex];let n=N(r.bytes),u=['B','KiB','MiB','GiB','TiB'],i=0;while(n>=1024&&i<u.length-1){n/=1024;i++;}return 'bytes waiting: '+(i?n.toFixed(2):String(n))+' '+u[i];}}}},
+          scales:{x:{ticks:{maxTicksLimit:10,maxRotation:45}},y:{beginAtZero:true}}}});
+      mkChart(document.getElementById('chart-distributed-events'),{type:'bar',
+        data:{labels,datasets:[
+          {label:'failed sends',data:hrs.map(r=>N(r.send_failures)),backgroundColor:warn},
+          {label:'inserts delayed (bytes_to_delay_insert)',data:hrs.map(r=>N(r.delayed)),backgroundColor:C[1]},
+          {label:'inserts refused, 574 (bytes_to_throw_insert)',data:hrs.map(r=>N(r.rejected)),backgroundColor:C[3]}]},
+        options:{responsive:true,maintainAspectRatio:false,interaction:{mode:'index',intersect:false},
+          plugins:{legend:{position:'top'}},
+          scales:{x:{stacked:true,ticks:{maxTicksLimit:10,maxRotation:45}},y:{stacked:true,beginAtZero:true}}}});
+    }else{
+      document.querySelectorAll('#sec-distributed .charts-grid').forEach(e=>e.style.display='none');
+      document.getElementById('distributed-no-hours').style.display='';
+    }
+    if(qs.length){
+      renderTable('tbl-distribution-queue',qs,
+        ['state','database','table','data_files','pending','broken_data_files','error_count','last_exception_code','last_exception_time','last_exception'],
+        r=>(r.state==='failing'||r.state==='broken'||r.state==='stopped')?'alert-row':'');
+    }else{
+      document.getElementById('tbl-distribution-queue').innerHTML='<p class="no-data">No queue holds files or failures now (or system.distribution_queue was not collected: it is, from 23.3).</p>';
+    }
+  })();
+
   // ── Async inserts (non-gov only) ──────────────────────────────────────────
   (function(){
     const rows=DATA.async_inserts||[];
@@ -4552,4 +4642,13 @@ func nonNil(xs []string) []string {
 		return []string{}
 	}
 	return xs
+}
+
+// asRows reads live query results with the accessors the file panels use.
+func asRows(ms []map[string]interface{}) []bundle.Row {
+	out := make([]bundle.Row, len(ms))
+	for i, m := range ms {
+		out[i] = bundle.Row(m)
+	}
+	return out
 }
