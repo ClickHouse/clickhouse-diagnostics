@@ -1476,6 +1476,8 @@ func (g *Generator) collect() map[string]interface{} {
 					substring(last_exception, 1, 500) AS last_exception,
 					if(last_exception_time > toDateTime(0), toString(last_exception_time), '') AS last_exception_time
 				 FROM system.distribution_queue
+				 ORDER BY last_exception != '' DESC, broken_data_files > 0 DESC, (is_blocked AND data_files > 0) DESC,
+					data_files > 0 DESC, error_count > 0 DESC, data_compressed_bytes DESC
 				 LIMIT 1000`)))
 		}
 	}

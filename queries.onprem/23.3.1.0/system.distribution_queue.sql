@@ -38,5 +38,9 @@ SELECT
     substring(last_exception, 1, 500) AS last_exception,
     if(last_exception_time > toDateTime(0), toString(last_exception_time), '') AS last_exception_time
 FROM system.distribution_queue
-ORDER BY last_exception != '' DESC, broken_data_files DESC, data_compressed_bytes DESC
+-- Every state the alert reports sorts ahead of everything else, so the LIMIT
+-- drops none of them before a healthy queue: failing, then broken, then stopped with files waiting;
+-- then queues with files waiting or past failures, then idle ones.
+ORDER BY last_exception != '' DESC, broken_data_files > 0 DESC, (is_blocked AND data_files > 0) DESC,
+         data_files > 0 DESC, error_count > 0 DESC, data_compressed_bytes DESC
 LIMIT 1000

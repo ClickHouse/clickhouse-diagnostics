@@ -508,12 +508,36 @@ def distribution_queue_checks(base: str, add) -> None:
         if recovered:
             add("info", "distributed", f"{len(recovered)} queue(s) recovered — failed sends counted, none failing now (error_count is never reset, so it is not a symptom)",
                 ", ".join(f"{name(r)}: {r.get('error_count')}, last {r.get('last_exception_time') or '?'}" for r in recovered[:4]), "HC-3.26")
-        pending = sum(num(r.get("data_compressed_bytes")) or 0 for r in dq if (num(r.get("data_compressed_bytes")) or 0) < big)
+        # Disk pressure, per disk: each queue's bytes go to the disk whose
+        # path is the longest prefix of its data_path, and are compared with
+        # that disk's free space only. Without the mapping (gov hashes both
+        # paths) the comparison is information — another disk's free space
+        # says nothing about where these files are.
         disks = read_jsonl(first("system.disks_*.jsonl", base))
+        mounts = sorted(((str(d.get("path") or ""), d) for d in disks if str(d.get("path") or "").startswith("/")),
+                        key=lambda m: -len(m[0]))
+        per_disk, unmapped = {}, 0
+        for r in dq:
+            b = num(r.get("data_compressed_bytes")) or 0
+            if not b or b >= big:
+                continue
+            dp = str(r.get("data_path") or "")
+            disk = next((d for path, d in mounts if dp.startswith(path)), None)
+            if disk is None:
+                unmapped += b
+            else:
+                key = disk.get("name")
+                per_disk[key] = (per_disk.get(key, (0, disk))[0] + b, disk)
+        for dname, (b, disk) in sorted(per_disk.items(), key=lambda kv: -kv[1][0]):
+            free = num(disk.get("free_bytes"))
+            if free is not None and b >= 0.1 * free:
+                add("warning", "distributed", f"Distributed queues waiting to be sent on disk `{dname}`: {human(b)} — {human(free)} free",
+                    f"{src} data_compressed_bytes of the queues under {disk.get('path')}, against system.disks free_bytes", "HC-3.26")
         local = [num(d.get("free_bytes")) for d in disks if str(d.get("type", "")).lower() == "local" and num(d.get("free_bytes")) is not None]
-        if pending and local and pending >= 0.1 * min(local):
-            add("warning", "distributed", f"Distributed queues waiting to be sent: {human(pending)} — free on the fullest disk: {human(min(local))}",
-                f"{src} data_compressed_bytes against system.disks free_bytes; the .bin files live on the table's disk", "HC-3.26")
+        if unmapped and local and unmapped >= 0.1 * min(local):
+            add("info", "distributed", f"Distributed queues waiting to be sent: {human(unmapped)} — the disk that holds them is not known "
+                f"(paths not comparable, e.g. hashed in gov); the fullest local disk has {human(min(local))} free",
+                f"{src} data_compressed_bytes, system.disks free_bytes — check the table's disk before calling it disk pressure", "HC-3.26")
     ml = read_jsonl(first("system.metric_log_7_days_*.jsonl", base))
     if ml and "max_distributed_files" in ml[0]:
         rejected = sum(num(r.get("distributed_rejected_inserts")) or 0 for r in ml)
