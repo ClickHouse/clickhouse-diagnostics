@@ -82,6 +82,16 @@ func TestInspectBundle_DistributionQueue(t *testing.T) {
 		t.Errorf("gov disk comparison should be info:\n%s", out)
 	}
 
+	// Review: the worst failing queue is the one with a real backlog, and a
+	// failing queue with underflowed counters is not reported as 16 EiB.
+	out = runPrepassAZL(t, map[string][]map[string]any{"system.distribution_queue": {
+		q("bad_dist", "data_files", "18446744073709551615", "data_compressed_bytes", "18446744073709551615", "last_exception", "Code: 107.", "last_exception_code", 107),
+		q("real_dist", "data_files", "3", "data_compressed_bytes", "13062", "last_exception", "Code: 279.", "last_exception_code", 279),
+	}})
+	if !strings.Contains(out, "worst db.real_dist") || strings.Contains(out, "EiB") || strings.Contains(out, "PiB") {
+		t.Errorf("underflowed counters drive the failing report:\n%s", out)
+	}
+
 	// No file (below 23.3, or cloud): nothing is said.
 	if out := runPrepassAZL(t, map[string][]map[string]any{"system.errors": {}}); strings.Contains(out, "HC-3.26") {
 		t.Errorf("HC-3.26 without the file:\n%s", out)

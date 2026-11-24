@@ -181,6 +181,16 @@ func TestCheck_DistributionQueueBacklog(t *testing.T) {
 		t.Fatalf("broken row: %v", r)
 	}
 
+	// Review: a failing queue whose counters underflowed keeps its state but
+	// neither sorts first nor reports a 16 EiB backlog.
+	uf := runCheck(t, "distribution_queue_backlog", "onprem", fixture(t, map[string][]row{"system.distribution_queue": {
+		q("bad", "data_files", "18446744073709551615", "data_compressed_bytes", "18446744073709551615", "last_exception", "Code: 107.", "last_exception_code", "107"),
+		q("real", "data_files", "3", "data_compressed_bytes", "13062", "last_exception", "Code: 279.", "last_exception_code", "279"),
+	}}))
+	if len(uf) != 2 || uf[0]["table"] != "real" || uf[1]["pending"] != "counter underflow" || uf[1]["data_files"] != int64(-1) {
+		t.Fatalf("underflowed failing queue: %v", uf)
+	}
+
 	// Gov: no exception text, has_exception and the code instead.
 	gov := fixture(t, map[string][]row{"system.distribution_queue": {
 		{"database": "H1", "table": "H2", "data_path": "H3", "is_blocked": 0, "error_count": "4", "data_files": "2",

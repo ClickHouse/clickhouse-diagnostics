@@ -360,7 +360,7 @@ func checkDistributionQueueBacklog(b *bundle.Bundle, mode string) ([]row, error)
 		if a != c {
 			return a < c
 		}
-		return hits[i].Uint("data_compressed_bytes") > hits[j].Uint("data_compressed_bytes")
+		return backlog(hits[i]) > backlog(hits[j])
 	})
 	host := serverHost(b)
 	var out []row
@@ -391,6 +391,15 @@ func checkDistributionQueueBacklog(b *bundle.Bundle, mode string) ([]row, error)
 // underflowed is a queue counter the server decremented below zero: values
 // near 2^64 were seen after an upgrade, and are a counter bug, not a backlog.
 func underflowed(n uint64) bool { return n >= 1<<62 }
+
+// backlog is the bytes waiting, for ordering: an underflowed counter is not
+// a backlog, so it never sorts a queue ahead of a real one.
+func backlog(r bundle.Row) uint64 {
+	if n := r.Uint("data_compressed_bytes"); !underflowed(n) {
+		return n
+	}
+	return 0
+}
 
 func counter(n uint64) int64 {
 	if underflowed(n) {

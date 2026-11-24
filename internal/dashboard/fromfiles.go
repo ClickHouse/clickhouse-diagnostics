@@ -1455,25 +1455,40 @@ func distributionQueuePanel(dq []bundle.Row) rows {
 		if rank[qs[i].state] != rank[qs[j].state] {
 			return rank[qs[i].state] < rank[qs[j].state]
 		}
-		return qs[i].r.Uint("data_compressed_bytes") > qs[j].r.Uint("data_compressed_bytes")
+		return sortBytes(qs[i].r) > sortBytes(qs[j].r)
 	})
+	// The counters are checked on their own, whatever the state: a failing
+	// queue whose counter underflowed stays failing, without a 16 EiB backlog.
+	show := func(n uint64, s string) string {
+		if n >= underflow {
+			return "counter underflow"
+		}
+		return s
+	}
 	out := rows{}
 	for i, x := range qs {
 		if i == 200 {
 			break
 		}
 		r := x.r
-		pending := readableSize(float64(r.Uint("data_compressed_bytes")))
-		if x.state == "counter underflow" {
-			pending = "—"
-		}
+		bytes := r.Uint("data_compressed_bytes")
+		pending := show(bytes, readableSize(float64(bytes)))
 		out = append(out, map[string]interface{}{
 			"database": r.Str("database"), "table": r.Str("table"), "state": x.state,
-			"is_blocked": r.Int("is_blocked"), "data_files": r.Str("data_files"), "pending": pending,
+			"is_blocked": r.Int("is_blocked"), "data_files": show(r.Uint("data_files"), r.Str("data_files")), "pending": pending,
 			"broken_data_files": r.Int("broken_data_files"), "error_count": r.Int("error_count"),
 			"last_exception_code": r.Int("last_exception_code"), "last_exception_time": r.Str("last_exception_time"),
 			"last_exception": r.Str("last_exception"),
 		})
 	}
 	return out
+}
+
+// sortBytes is the bytes waiting, for ordering the queue table: an
+// underflowed counter (near 2^64) is not a backlog and sorts as none.
+func sortBytes(r bundle.Row) uint64 {
+	if n := r.Uint("data_compressed_bytes"); n < uint64(1)<<62 {
+		return n
+	}
+	return 0
 }

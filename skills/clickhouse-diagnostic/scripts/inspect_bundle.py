@@ -478,15 +478,23 @@ def distribution_queue_checks(base: str, add) -> None:
         def failing(r):
             return bool(r.get("last_exception")) or num(r.get("has_exception")) == 1
 
+        def real(v):
+            """A queue counter, or None when it underflowed (near 2^64)."""
+            n = num(v) or 0
+            return None if n >= big else n
+
+        def shown(v, fmt=str):
+            n = real(v)
+            return "counter underflow" if n is None else fmt(n)
+
         fail = [r for r in dq if failing(r)]
-        fail.sort(key=lambda r: -(num(r.get("data_compressed_bytes")) or 0))
+        fail.sort(key=lambda r: -(real(r.get("data_compressed_bytes")) or 0))
         if fail:
             codes = Counter(num(r.get("last_exception_code")) or 0 for r in fail)
             worst = fail[0]
-            files, size = num(worst.get("data_files")) or 0, num(worst.get("data_compressed_bytes")) or 0
             add("warning", "distributed",
                 f"{len(fail)} Distributed insert queue(s) failing — every file waits behind the one that fails",
-                f"worst {name(worst)}: {files} file(s) waiting ({human(size)}), {worst.get('error_count')} failed sends, "
+                f"worst {name(worst)}: {shown(worst.get('data_files'))} file(s) waiting ({shown(worst.get('data_compressed_bytes'), human)}), {worst.get('error_count')} failed sends, "
                 f"last at {worst.get('last_exception_time') or '?'}; codes: "
                 + ", ".join(f"{ERROR_NAMES.get(c, c)}×{n}" for c, n in codes.most_common(4))
                 + f" — {src} last_exception; the fix depends on the code (P-69)", "HC-3.26")

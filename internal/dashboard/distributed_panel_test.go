@@ -54,6 +54,17 @@ func TestDistributionQueuePanel(t *testing.T) {
 	if got[0]["pending"] != "12.76 KiB" || got[0]["last_exception_code"] != int64(279) {
 		t.Fatalf("failing row: %v", got[0])
 	}
+
+	// Review: a failing queue whose counters underflowed stays failing, and
+	// shows no invented 16 EiB backlog — the counter check is independent of
+	// the state — and it does not sort ahead of a real backlog.
+	got = distributionQueuePanel([]bundle.Row{
+		{"database": "db", "table": "real", "data_files": "3", "data_compressed_bytes": "13062", "last_exception": "Code: 279."},
+		{"database": "db", "table": "bad", "data_files": "18446744073709551615", "data_compressed_bytes": "18446744073709551615", "last_exception": "Code: 107."},
+	})
+	if len(got) != 2 || got[0]["table"] != "real" || got[1]["state"] != "failing" || got[1]["pending"] != "counter underflow" || got[1]["data_files"] != "counter underflow" {
+		t.Fatalf("underflowed failing queue: %v", got)
+	}
 }
 
 func join(xs []string) string {
