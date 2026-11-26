@@ -237,7 +237,7 @@ Every `onprem` and `cloud` run also writes **`schema_graph.html`**: an interacti
 <details>
 <summary>Show</summary>
 
-19 read-only rules in `alerts/` give the headline before anyone reads a file — too many parts, replicas read-only, Keeper unavailable or flapping, saturated background pools, failing merges, low disk, crashes, long-running mutations, exception spikes and more. Each rule is evaluated over the collected files; its SQL is shown in the dashboard for the customer to run on their own cluster. A rule whose data was not collected says *not applicable*, never clean.
+20 read-only rules in `alerts/` give the headline before anyone reads a file — too many parts, replicas read-only, Keeper unavailable or flapping, saturated background pools, failing merges, low disk, crashes, long-running mutations, a failing Distributed insert queue, exception spikes and more. Each rule is evaluated over the collected files; its SQL is shown in the dashboard for the customer to run on their own cluster. A rule whose data was not collected says *not applicable*, never clean.
 
 Rules, outcomes and how to add one: [docs/alerts.md](docs/alerts.md).
 </details>

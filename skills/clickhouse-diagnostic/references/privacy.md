@@ -7,9 +7,9 @@ A diagnostic bundle is **evidence about someone's production system**. The colle
 | Identifier class | Where it appears |
 |---|---|
 | Hostnames, IPs, ports, cluster topology, replica/shard macros | `system.clusters`, `system.replication_queue.replica_name`, `configuration/` (`<remote_servers>`, `<zookeeper>`, `<macros>`, `<interserver_http_host>`), `host_info.os.hostname`, `logs/` |
-| Database, table, column, dictionary, disk and storage-policy names | almost every file; `system.tables.create_table_query` carries the full DDL including comments and defaults |
+| Database, table, column, dictionary, disk and storage-policy names | almost every file; `system.tables.create_table_query` carries the full DDL including comments and defaults; `system.distribution_queue.data_path` is a table's directory and, for old-style directories, names the shard's host and user |
 | SQL text (500 chars per query pattern) and full SQL in `query_analysis/` | `system.query_log_details_7_days.query`, `query_details`, `failed_queries.sample_query`, `executions_timeline` |
-| Exception messages — often embed literal values, paths, hostnames | `query_log_details.exception`, `system.errors.last_error_message`, `replication_queue.last_exception`, `dictionaries.last_exception`, `part_log.exception` |
+| Exception messages — often embed literal values, paths, hostnames | `query_log_details.exception`, `system.errors.last_error_message`, `replication_queue.last_exception`, `distribution_queue.last_exception`, `dictionaries.last_exception`, `part_log.exception` |
 | Server log lines (raw queries, table names, paths, client addresses) | `system.text_log`, `text_log_<ts>`, `logs/*.log` |
 | Process command lines, mount points, kernel banner | `host_info.top_processes_by_rss`, `host_info.disks`, `host_info.os` |
 | User names and client addresses | `system.processes`, `query_log_details.user`, `system.clusters.user` |

@@ -139,6 +139,90 @@ func TestCheck_CrashLog(t *testing.T) {
 	}
 }
 
+// The lab reproduced every state below on 26.7 (shard down, sends stopped,
+// a corrupted file); the rows are those states. The recovered queue is the
+// trap: error_count is never reset, so it must not fire on its own.
+func TestCheck_DistributionQueueBacklog(t *testing.T) {
+	q := func(table string, kv ...interface{}) row {
+		r := row{"database": "db", "table": table, "data_path": "/store/" + table + "/shard2_all_replicas/",
+			"is_blocked": 0, "error_count": "0", "data_files": "0", "data_compressed_bytes": "0",
+			"broken_data_files": "0", "last_exception_code": "0", "last_exception": "", "last_exception_time": ""}
+		for i := 0; i+1 < len(kv); i += 2 {
+			r[kv[i].(string)] = kv[i+1]
+		}
+		return r
+	}
+	b := fixture(t, map[string][]row{"system.distribution_queue": {
+		q("recovered", "error_count", "8", "last_exception_time", "2026-10-29 11:00:00"),
+		q("flushing", "data_files", "3", "data_compressed_bytes", "13062"),
+		q("stopped_empty", "is_blocked", 1),
+		q("stopped", "is_blocked", 1, "data_files", "3", "data_compressed_bytes", "9000"),
+		q("broken", "broken_data_files", "1", "broken_data_compressed_bytes", "26"),
+		q("failing_small", "error_count", "7", "data_files", "3", "data_compressed_bytes", "13062", "last_exception_code", "279",
+			"last_exception", "Code: 279. DB::NetException: All connection tries failed", "last_exception_time", "2026-10-29 11:59:00"),
+		q("failing_big", "error_count", "99000", "data_files", "4700000", "data_compressed_bytes", "3000000000000", "last_exception_code", "107",
+			"last_exception", "Code: 107. DB::Exception: File not found", "last_exception_time", "2026-10-29 11:59:30"),
+	}})
+	rows := runCheck(t, "distribution_queue_backlog", "onprem", b)
+	var got []string
+	for _, r := range rows {
+		got = append(got, r["table"].(string)+":"+r["state"].(string))
+	}
+	// Failing now first (largest backlog first), then rows lost, then stopped by hand.
+	want := "failing_big:failing failing_small:failing broken:broken stopped:stopped"
+	if strings.Join(got, " ") != want {
+		t.Fatalf("got %q, want %q", strings.Join(got, " "), want)
+	}
+	if r := rows[0]; r["hostname"] != "h1" || r["last_exception_code"] != int64(107) || r["error_count"] != int64(99000) ||
+		r["data_files"] != int64(4700000) || r["last_exception_time"] != "2026-10-29 11:59:30" || r["pending"] != "2.73 TiB" {
+		t.Fatalf("failing row: %v", r)
+	}
+	if r := rows[2]; r["broken_data_files"] != int64(1) || r["data_path"] != "/store/broken/shard2_all_replicas/" {
+		t.Fatalf("broken row: %v", r)
+	}
+
+	// Review: a failing queue whose counters underflowed keeps its state but
+	// neither sorts first nor reports a 16 EiB backlog.
+	uf := runCheck(t, "distribution_queue_backlog", "onprem", fixture(t, map[string][]row{"system.distribution_queue": {
+		q("bad", "data_files", "18446744073709551615", "data_compressed_bytes", "18446744073709551615", "last_exception", "Code: 107.", "last_exception_code", "107"),
+		q("real", "data_files", "3", "data_compressed_bytes", "13062", "last_exception", "Code: 279.", "last_exception_code", "279"),
+	}}))
+	if len(uf) != 2 || uf[0]["table"] != "real" || uf[1]["pending"] != "counter underflow" || uf[1]["data_files"] != int64(-1) {
+		t.Fatalf("underflowed failing queue: %v", uf)
+	}
+
+	// Gov: no exception text, has_exception and the code instead.
+	gov := fixture(t, map[string][]row{"system.distribution_queue": {
+		{"database": "H1", "table": "H2", "data_path": "H3", "is_blocked": 0, "error_count": "4", "data_files": "2",
+			"data_compressed_bytes": "100", "broken_data_files": "0", "last_exception_code": "16", "has_exception": 1, "last_exception_time": "2026-10-29 11:00:00"},
+		{"database": "H1", "table": "H4", "data_path": "H5", "is_blocked": 0, "error_count": "4", "data_files": "0",
+			"data_compressed_bytes": "0", "broken_data_files": "0", "last_exception_code": "0", "has_exception": 0, "last_exception_time": "2026-10-29 10:00:00"},
+	}})
+	if rows := runCheck(t, "distribution_queue_backlog", "gov", gov); len(rows) != 1 || rows[0]["table"] != "H2" || rows[0]["last_exception_code"] != int64(16) {
+		t.Fatalf("gov: %v", rows)
+	}
+
+	// The worst 50.
+	var many []row
+	for i := 0; i < 51; i++ {
+		many = append(many, q(fmt.Sprint(i), "data_compressed_bytes", fmt.Sprint(i), "last_exception", "Code: 210.", "last_exception_code", "210"))
+	}
+	rows = runCheck(t, "distribution_queue_backlog", "onprem", fixture(t, map[string][]row{"system.distribution_queue": many}))
+	if len(rows) != 50 || rows[0]["table"] != "50" || rows[49]["table"] != "1" {
+		t.Fatalf("limit 50, largest backlog first: %d rows, first %v", len(rows), rows[0]["table"])
+	}
+	if rows := runCheck(t, "distribution_queue_backlog", "onprem", fixture(t, map[string][]row{"system.distribution_queue": {}})); len(rows) != 0 {
+		t.Fatalf("empty file: %v", rows)
+	}
+	c, err := lookupCheck("go:distribution_queue_backlog")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c(fixture(t, map[string][]row{}), "onprem"); !isNotCollected(err) {
+		t.Fatalf("missing file (a server below 23.3): want NotCollected, got %v", err)
+	}
+}
+
 func TestCheck_ReplicationQueueErrors(t *testing.T) {
 	b := fixture(t, map[string][]row{"system.replication_queue": {
 		{"database": "db", "table": "a", "last_exception": "Code: 999", "create_time": "2026-10-29 10:00:00"},

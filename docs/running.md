@@ -269,7 +269,7 @@ A server in trouble is exactly when a diagnostic is needed, and exactly when a f
 | `essential` | Always essential. |
 | `full` | Always full — no switch, whatever the probe says. |
 
-An **essential** collection runs only the collectors marked `-- tier: essential` (version, metrics, processes, errors, replicas and replication queue, merges, mutations, Keeper session, disks, the last day of `query_log` / `part_log` / `metric_log` / `error_log` / `text_log`), with:
+An **essential** collection runs only the collectors marked `-- tier: essential` (version, metrics, processes, errors, replicas and replication queue, Distributed insert queues, merges, mutations, Keeper session, disks, the last day of `query_log` / `part_log` / `metric_log` / `error_log` / `text_log`), with:
 
 - every 3- and 7-day window reduced to **1 day** (an explicit `-from` / `-to` still wins);
 - a **30 s** per-query timeout (unless `-query-timeout` was given) and a **3 min** budget for the whole run (`-time-budget` to change it) — what has not run by then is skipped and listed;
