@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -90,6 +91,18 @@ func TestInspectBundle_DistributionQueue(t *testing.T) {
 	}})
 	if !strings.Contains(out, "worst db.real_dist") || strings.Contains(out, "EiB") || strings.Contains(out, "PiB") {
 		t.Errorf("underflowed counters drive the failing report:\n%s", out)
+	}
+
+	// Review: every code P-69 picks a fix by is printed by name, not as a bare
+	// number (16 was missing from ERROR_NAMES and printed as "16×1").
+	for code, name := range map[int]string{16: "NO_SUCH_COLUMN_IN_TABLE", 107: "FILE_DOESNT_EXIST", 285: "TOO_FEW_LIVE_REPLICAS",
+		279: "ALL_CONNECTION_TRIES_FAILED", 210: "NETWORK_ERROR", 198: "DNS_ERROR", 209: "SOCKET_TIMEOUT"} {
+		out := runPrepassAZL(t, map[string][]map[string]any{"system.distribution_queue": {
+			q("dist", "data_files", "3", "data_compressed_bytes", "900", "last_exception", fmt.Sprintf("Code: %d.", code), "last_exception_code", code),
+		}})
+		if !strings.Contains(out, name+"×1") {
+			t.Errorf("code %d is not named %s in the failing report:\n%s", code, name, out)
+		}
 	}
 
 	// No file (below 23.3, or cloud): nothing is said.
