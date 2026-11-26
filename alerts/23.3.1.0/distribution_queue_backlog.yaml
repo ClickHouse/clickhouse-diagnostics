@@ -81,14 +81,16 @@ investigate:
       ORDER BY data_compressed_bytes DESC
       LIMIT 50
   - title: "How long each queue has been failing (server log)"
-    # The queue logs as <database>.<table>.DistributedInsertQueue.<disk>; the
-    # first error says when the failure began, which last_exception_time
-    # (the latest one) cannot.
+    # The queue logs as <database>.<table>.DistributedInsertQueue.<disk> from
+    # 23.10, and as <database>.<table>.DirectoryMonitor.<disk> before (23.3 to
+    # 23.9, 23.8 LTS included), so both names are matched. The first error says
+    # when the failure began, which last_exception_time (the latest one) cannot.
     query: |
       SELECT logger_name, min(event_time) AS first_error, max(event_time) AS last_error,
              count() AS errors, any(substring(message, 1, 300)) AS example
       FROM system.text_log
-      WHERE logger_name LIKE '%.DistributedInsertQueue.%' AND level IN ('Error', 'Warning')
+      WHERE (logger_name LIKE '%.DistributedInsertQueue.%' OR logger_name LIKE '%.DirectoryMonitor.%')
+        AND level IN ('Error', 'Warning')
         AND event_date >= today() - 7
       GROUP BY logger_name
       ORDER BY first_error
