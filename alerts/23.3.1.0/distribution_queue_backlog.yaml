@@ -96,9 +96,21 @@ investigate:
       ORDER BY first_error
       LIMIT 50
   - title: "Bytes waiting against free disk space"
+    # Per disk: each queue counts against the disk whose path is the longest
+    # prefix of its data_path (one disk's path can sit inside another's), never
+    # against an unrelated disk. Same mapping as the pre-pass (HC-3.26).
     query: |
-      SELECT formatReadableSize(sum(data_compressed_bytes)) AS pending,
-             (SELECT formatReadableSize(min(free_space)) FROM system.disks) AS least_free_disk
-      FROM system.distribution_queue
+      SELECT disk, formatReadableSize(sum(queue_bytes)) AS pending, formatReadableSize(any(disk_free)) AS free,
+             round(100 * sum(queue_bytes) / any(disk_free), 1) AS pct_of_free, count() AS queues
+      FROM
+      (
+          SELECT q.data_path, any(q.data_compressed_bytes) AS queue_bytes,
+                 argMax(d.name, length(d.path)) AS disk, argMax(d.free_space, length(d.path)) AS disk_free
+          FROM system.distribution_queue AS q, system.disks AS d
+          WHERE startsWith(q.data_path, d.path)
+          GROUP BY q.data_path
+      )
+      GROUP BY disk
+      ORDER BY sum(queue_bytes) DESC
 
 message: "{database}.{table} ({data_path}): {state} — {data_files} file(s) waiting ({pending}), {broken_data_files} broken, {error_count} failed sends, last failure {last_exception_time} code {last_exception_code} — {last_exception}"
